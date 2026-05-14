@@ -426,8 +426,8 @@
         "uv run pytest -m \"not integration\" passes"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Also created src/padrino/llm/adapter.py (LlmAdapter Protocol + AdapterResult) ahead of US-025 since tick.py depends on these types. US-025 will add the DeterministicMockAdapter and may extend the Protocol signature with agent_build."
     },
     {
       "id": "US-025",
