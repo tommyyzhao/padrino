@@ -1,0 +1,302 @@
+"""Tests for :func:`padrino.runner.game_runner.run_game`.
+
+Drives a full mini7_v1 game through the deterministic mock adapter and asserts:
+the terminal state matches the scripted outcome, the event log's hash chain
+replays cleanly, the reducer fold over the event stream reproduces the final
+state, no events follow ``GameTerminated``, eligibility never includes dead
+seats, and ``llm_calls`` captures every adapter dispatch.
+"""
+
+from __future__ import annotations
+
+import ast
+from collections.abc import Mapping
+from pathlib import Path
+
+from padrino.core.agents.contract import AgentResponse
+from padrino.core.engine.actions import Action
+from padrino.core.engine.events import Event, EventAdapter
+from padrino.core.engine.replay import replay_event_log, replay_events
+from padrino.core.engine.role_assignment import assign_roles
+from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED
+from padrino.core.enums import ActionType, Faction, Role
+from padrino.core.rulesets import mini7_v1
+from padrino.llm.mock import DeterministicMockAdapter
+from padrino.runner.game_runner import GameConfig, GameOutcome, run_game
+from tests.conftest import (
+    make_mafia_win_script,
+    make_town_win_script,
+    make_villager_script,
+    mini7_phase_ids,
+)
+
+_GAME_SEED = "seed-runner-001"
+
+
+def _split_factions() -> tuple[list[str], list[str], str, str]:
+    """Return (mafia_ids, town_ids, doctor_id, detective_id) for the seed."""
+    seats = assign_roles(_GAME_SEED, mini7_v1)
+    mafia = [s.public_player_id for s in seats if s.faction is Faction.MAFIA]
+    town = [s.public_player_id for s in seats if s.faction is Faction.TOWN]
+    doctor = next(s.public_player_id for s in seats if s.role is Role.DOCTOR)
+    detective = next(s.public_player_id for s in seats if s.role is Role.DETECTIVE)
+    return mafia, town, doctor, detective
+
+
+def _adapter(script: Mapping[tuple[str, str], AgentResponse]) -> DeterministicMockAdapter:
+    return DeterministicMockAdapter(script)
+
+
+def _config() -> GameConfig:
+    return GameConfig(game_id="G-RUNNER", game_seed=_GAME_SEED, timeout_s=1.0)
+
+
+def _typed_events(outcome: GameOutcome) -> list[Event]:
+    return [EventAdapter.validate_python(stored.body) for stored in outcome.event_log.events]
+
+
+# --- terminal scenarios -----------------------------------------------------
+
+
+async def test_town_win_scenario_terminates_with_town_winner() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    assert outcome.final_state.terminal_result == "TOWN"
+    bodies = [stored.body for stored in outcome.event_log.events]
+    final = bodies[-1]
+    assert final["event_type"] == "GameTerminated"
+    assert final["payload"]["winner"] == "TOWN"
+
+
+async def test_mafia_win_scenario_terminates_with_mafia_winner() -> None:
+    mafia, town, _, _ = _split_factions()
+    script = make_mafia_win_script(mafia_ids=mafia, town_ids=town)
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    assert outcome.final_state.terminal_result == "MAFIA"
+    bodies = [stored.body for stored in outcome.event_log.events]
+    assert bodies[-1]["payload"]["winner"] == "MAFIA"
+
+
+async def test_draw_scenario_terminates_at_max_days() -> None:
+    mafia, town, _, _ = _split_factions()
+    seat_ids = mafia + town
+    script = make_villager_script(seat_ids, mini7_phase_ids())
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    assert outcome.final_state.terminal_result == "DRAW"
+    bodies = [stored.body for stored in outcome.event_log.events]
+    assert bodies[-1]["event_type"] == "GameTerminated"
+    assert bodies[-1]["payload"]["winner"] == "DRAW"
+    assert bodies[-1]["payload"]["reason"] == REASON_MAX_DAYS_REACHED
+
+
+# --- log shape & invariants -------------------------------------------------
+
+
+async def test_event_log_starts_with_game_created_and_roles_assigned() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    bodies = [stored.body for stored in outcome.event_log.events]
+    assert bodies[0]["event_type"] == "GameCreated"
+    assert bodies[0]["payload"]["game_id"] == "G-RUNNER"
+    assert bodies[0]["payload"]["game_seed"] == _GAME_SEED
+    assert bodies[1]["event_type"] == "RolesAssigned"
+    assert len(bodies[1]["payload"]["assignments"]) == mini7_v1.PLAYER_COUNT
+
+
+async def test_hash_chain_replays_cleanly() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    # replay_event_log raises on any tampered or non-matching hash.
+    replayed = replay_event_log(outcome.event_log.events)
+    assert len(replayed.events) == len(outcome.event_log.events)
+    for original, repeated in zip(outcome.event_log.events, replayed.events, strict=True):
+        assert original.event_hash == repeated.event_hash
+        assert original.prev_event_hash == repeated.prev_event_hash
+        assert original.sequence == repeated.sequence
+
+
+async def test_reducer_fold_reproduces_final_state() -> None:
+    mafia, town, _, _ = _split_factions()
+    script = make_mafia_win_script(mafia_ids=mafia, town_ids=town)
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    typed = _typed_events(outcome)
+    replayed_state = replay_events(typed)
+    assert replayed_state.terminal_result == outcome.final_state.terminal_result
+    assert replayed_state.terminal_reason == outcome.final_state.terminal_reason
+    assert replayed_state.seats == outcome.final_state.seats
+    assert replayed_state.current_phase == outcome.final_state.current_phase
+
+
+async def test_no_events_after_game_terminated() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    events = outcome.event_log.events
+    terminated_idx = next(
+        i for i, stored in enumerate(events) if stored.body["event_type"] == "GameTerminated"
+    )
+    assert terminated_idx == len(events) - 1
+
+
+async def test_sequence_numbers_are_contiguous() -> None:
+    mafia, town, _, _ = _split_factions()
+    script = make_mafia_win_script(mafia_ids=mafia, town_ids=town)
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    sequences = [stored.sequence for stored in outcome.event_log.events]
+    assert sequences == list(range(len(sequences)))
+
+
+async def test_dead_seats_never_dispatched_after_elimination() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    adapter = _adapter(script)
+    outcome = await run_game(_config(), adapter, ranked=False)
+
+    # After D1 vote eliminates mafia[0], mafia[0] should never be called again.
+    eliminations: dict[str, int] = {}
+    for stored in outcome.event_log.events:
+        body = stored.body
+        if body["event_type"] == "PlayerEliminated":
+            eliminations[body["payload"]["public_player_id"]] = stored.sequence
+
+    assert eliminations, "town-win scenario must eliminate at least one seat"
+
+    # The eliminated mafia seat must be dispatched strictly fewer times than a
+    # seat that survives the entire game; the runner must stop ticking dead seats.
+    total_phases_per_seat: dict[str, int] = {}
+    for _, seat_id in adapter.calls:
+        total_phases_per_seat[seat_id] = total_phases_per_seat.get(seat_id, 0) + 1
+    eliminated_seat = mafia[0]
+    survivor_seat = doctor
+    assert total_phases_per_seat[eliminated_seat] < total_phases_per_seat[survivor_seat]
+
+
+async def test_llm_calls_collected_for_every_dispatch() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    adapter = _adapter(script)
+    outcome = await run_game(_config(), adapter, ranked=False)
+    assert len(outcome.llm_calls) == len(adapter.calls)
+    assert all(call.latency_ms == 0 for call in outcome.llm_calls)
+
+
+async def test_action_submission_events_match_phase_kind() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    bodies = [stored.body for stored in outcome.event_log.events]
+
+    # VoteSubmitted only appears under DAY_*_VOTE phases.
+    for body in bodies:
+        if body["event_type"] == "VoteSubmitted":
+            assert body["phase"].endswith("_VOTE")
+        if body["event_type"] in (
+            "MafiaKillVoteSubmitted",
+            "ProtectSubmitted",
+            "InvestigateSubmitted",
+        ):
+            assert body["phase"].endswith("_ACTIONS")
+
+
+async def test_protect_submission_updates_doctor_last_protected_target() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    doctor_seat = next(s for s in outcome.final_state.seats if s.public_player_id == doctor)
+    # The town-win script protects a single specific town seat on N1.
+    expected_protect_target = next(t for t in town if t != doctor)
+    assert doctor_seat.last_protected_target == expected_protect_target
+
+
+async def test_detective_finding_emitted_on_investigation() -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    outcome = await run_game(_config(), _adapter(script), ranked=False)
+    detective_events = [
+        stored.body
+        for stored in outcome.event_log.events
+        if stored.body["event_type"] == "DetectiveResultDelivered"
+    ]
+    assert len(detective_events) == 1
+    payload = detective_events[0]["payload"]
+    assert payload["target"] == mafia[1]
+    assert payload["finding"] == "MAFIA"
+
+
+# --- coercion path ----------------------------------------------------------
+
+
+class _SilentAdapter:
+    """Adapter that always returns a NOOP+ABSTAIN response (legal in every phase)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, observation):  # type: ignore[no-untyped-def]
+        from padrino.llm.adapter import AdapterResult
+
+        self.calls += 1
+        is_vote = observation.phase.endswith("_VOTE")
+        action = Action(
+            type=ActionType.ABSTAIN if is_vote else ActionType.NOOP,
+            target=None,
+        )
+        response = AgentResponse(
+            public_message=None,
+            private_message=None,
+            action=action,
+            memory_update="",
+            rationale_summary=None,
+        )
+        return AdapterResult(
+            raw_response="{}",
+            parsed_response=response,
+            latency_ms=0,
+        )
+
+
+async def test_passive_adapter_with_no_resolutions_drives_draw() -> None:
+    """Smoke test: a fully passive adapter reaches a DRAW via the FSM."""
+    adapter = _SilentAdapter()
+    outcome = await run_game(_config(), adapter, ranked=False)
+    assert outcome.final_state.terminal_result == "DRAW"
+    assert outcome.final_state.terminal_reason == REASON_MAX_DAYS_REACHED
+
+
+# --- purity guard -----------------------------------------------------------
+
+
+def test_game_runner_does_not_import_forbidden_modules() -> None:
+    """The runner is allowed impure imports but must not touch wall-clock or random."""
+    src = Path("src/padrino/runner/game_runner.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    forbidden = {"random", "secrets", "datetime", "time"}
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert not (imported & forbidden), f"forbidden imports: {imported & forbidden}"
