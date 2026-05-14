@@ -39,6 +39,45 @@ uv run mypy src tests
 uv run pytest -m "not integration"
 ```
 
+### Run the demo gauntlet
+
+A self-contained gauntlet using the deterministic mock adapter — no API keys
+needed. Writes a SQLite database to `./padrino-demo.db` and prints the
+resulting leaderboard JSON on stdout:
+
+```bash
+uv run padrino demo-gauntlet --seed demo-seed-001 --clones 5
+```
+
+Pass `--real` to switch to the LiteLLM adapter with Cerebras + DeepInfra
+routing (requires `CEREBRAS_API_KEY` and optionally `DEEPINFRA_API_KEY`):
+
+```bash
+uv run padrino demo-gauntlet --seed demo-seed-001 --clones 5 --real
+```
+
+Expected mock output (truncated):
+
+```json
+{
+  "entries": [
+    {
+      "agent_build_id": "…",
+      "display_name": "demo-build",
+      "games": 35,
+      "draws": 35,
+      "wins": 0,
+      "losses": 0,
+      "provisional": true,
+      …
+    }
+  ],
+  "ruleset_id": "mini7_v1",
+  "rating_model": "openskill_plackett_luce_v1",
+  …
+}
+```
+
 ## Architecture (v1)
 
 ```

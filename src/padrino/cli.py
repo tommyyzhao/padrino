@@ -4,11 +4,14 @@ Subcommands:
 
 - ``padrino version`` — print the installed Padrino version.
 - ``padrino serve`` — launch the FastAPI app via uvicorn.
-
-Further subcommands (demo-gauntlet, replay, metrics) land in later stories.
+- ``padrino demo-gauntlet`` — bootstrap a SQLite-backed demo league, run a
+  gauntlet, and print the resulting leaderboard JSON.
 """
 
 from __future__ import annotations
+
+import asyncio
+import json
 
 import typer
 import uvicorn
@@ -40,6 +43,26 @@ def serve(
 
     application = create_app()
     uvicorn.run(application, host=host, port=port, reload=reload, log_level=log_level)
+
+
+@app.command("demo-gauntlet")
+def demo_gauntlet(
+    seed: str = typer.Option("demo-seed-001", "--seed", help="Gauntlet seed."),
+    real: bool = typer.Option(
+        False, "--real", help="Use the real LiteLLM adapter instead of the mock."
+    ),
+    clones: int = typer.Option(5, "--clones", help="Number of child games to schedule."),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino-demo.db",
+        "--db-url",
+        help="SQLAlchemy async URL for the demo database.",
+    ),
+) -> None:
+    """Run a self-contained demo gauntlet and print the leaderboard JSON."""
+    from padrino.demo_gauntlet import run_demo_gauntlet
+
+    response = asyncio.run(run_demo_gauntlet(seed=seed, clones=clones, db_url=db_url, real=real))
+    typer.echo(json.dumps(response, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
