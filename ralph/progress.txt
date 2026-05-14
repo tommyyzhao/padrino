@@ -14,6 +14,9 @@ Each iteration MUST append a dated section. Never replace existing content.
 - Ranked observations never include model identity, ratings, gauntlet clone index, or other games' transcripts.
 - Use `from __future__ import annotations` at the top of every module. Pydantic v2 models with `model_config = ConfigDict(frozen=True)` for state/event types.
 
+- pydantic-settings: use `Settings(_env_file=None)` in tests so monkeypatch controls env vars without the on-disk .env interfering.
+- structlog configure_logging uses a module-level `_configured` flag for idempotency.
+
 ---
 
 ## Iteration log
@@ -27,3 +30,13 @@ Thread: <url>
 ---
 ```
 )
+
+## 2026-05-14T00:00 - US-001
+- Implemented `src/padrino/settings.py`: pydantic-settings `Settings` class loading 9 env vars (API keys, DB URL, log level, LLM params, model routing) with sensible defaults, plus `get_settings()` lru_cache accessor.
+- Implemented `src/padrino/logging.py`: `configure_logging(level)` using structlog JSON renderer, idempotent via `_configured` flag.
+- `tests/test_settings.py`: 12 tests covering defaults, env-var overrides, lru_cache identity, and optional API keys.
+- Files changed: `src/padrino/settings.py`, `src/padrino/logging.py`, `tests/test_settings.py`
+- **Learnings for future iterations:**
+  - pydantic-settings reads `.env` by default; tests that monkeypatch env vars must construct `Settings(_env_file=None)` so disk keys do not override patches.
+  - `importlib.reload` of a module with lru_cache does not clear the cache of the already-imported reference; constructing a fresh instance with `Settings(_env_file=None)` is cleaner.
+---
