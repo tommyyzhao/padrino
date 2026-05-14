@@ -149,3 +149,14 @@ Thread: <url>
   - The `Role.DOCTOR` lookup is a linear scan in `_find_doctor`; mini7_v1 has exactly one doctor so this is O(1) effective. If a future ruleset has multiple doctors, the lookup pattern will need to take a `seat_id` arg instead.
   - PRD acceptance criterion explicitly spells the reason string `'REPEAT_VIOLATION'` in uppercase — keep that exact value, even though other reason constants in this file use lowercase. Downstream observation builders may surface this string verbatim.
 ---
+
+## 2026-05-14T02:45 - US-012
+- Added `src/padrino/core/engine/resolvers/detective.py`: frozen Pydantic `DetectiveResult(target, finding, reason)` plus pure `resolve_detective_investigation(state, detective_submission)`. Locates the detective by `Role.DETECTIVE`. Short-circuits for no-detective / dead detective / no submission / non-INVESTIGATE action / invalid target / self-target. `finding` is `'MAFIA'` (constant `FINDING_MAFIA`) when target's faction is MAFIA, else `'TOWN'` (`FINDING_TOWN`). Reason strings exposed as module constants (`REASON_RESOLVED`, `REASON_SELF_TARGET`, `REASON_INVALID_TARGET`, `REASON_NO_SUBMISSION`, `REASON_DEAD_DETECTIVE`, `REASON_NO_DETECTIVE`).
+- `tests/core/test_detective.py`: 13 tests covering town target → TOWN, mafia target → MAFIA, self-target, dead target (town and mafia variants), no submission, dead detective, nonexistent target, INVESTIGATE with target=None, non-INVESTIGATE action, no-detective-in-state, chat-field absence on Action, result immutability.
+- Files changed: `src/padrino/core/engine/resolvers/detective.py`, `tests/core/test_detective.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Detective resolver follows the singular `(state, Action | None)` signature shared with doctor-protect (US-011), distinct from the multi-voter mapping signature used by mafia kill (US-010) and day vote (US-009). The night-resolution composer (US-013) will dispatch each branch with its appropriate input shape.
+  - Self-investigation has its own dedicated reason (`REASON_SELF_TARGET`) rather than collapsing into `REASON_INVALID_TARGET`. The PRD calls it out as a distinct rule ("Self-investigation is illegal — coerce to NOOP"), and surfacing it separately makes downstream observation rendering and audit logs unambiguous.
+  - The "queuing for next-day delivery" rule (suppressing the finding if the detective dies the same night) is *not* in this resolver — it lives in US-013's `resolve_night` composer. Keep the pure resolver agnostic about same-night death; it only knows whether the detective is alive *entering* the night.
+  - Finding strings are exported as `FINDING_MAFIA` / `FINDING_TOWN` constants. Downstream observation builders should import these instead of re-typing the literals — avoids drift if a future ruleset ever extends the alignment vocabulary.
+---
