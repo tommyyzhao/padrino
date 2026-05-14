@@ -62,3 +62,13 @@ Thread: <url>
   - Ruff's UP017 wants `datetime.UTC` over `datetime.timezone.utc` on Python 3.11+; use the new alias in tests.
   - `bool` is a subclass of `int`, so the `isinstance(key, bool)` check must come *after* / alongside `isinstance(key, str)` to avoid accepting `True`/`False` as keys.
 ---
+
+## 2026-05-14T00:45 - US-004
+- Implemented `src/padrino/core/engine/rng.py`: `SeededRng(seed: str | bytes)` with stateful counter-based expansion via `sha256(seed_bytes + counter.to_bytes(8, "big"))`. Methods: `next_bytes`, `randbelow` (mask-and-reject for unbiased uniform), `shuffle` (Fisher-Yates returning a new list), `choice`.
+- `tests/core/test_rng.py`: 23 tests covering determinism across instances, range bounds, statefulness, deterministic shuffle/choice, immutable inputs, and an AST assertion that `rng.py` does not import `random` or `secrets`.
+- Files changed: `src/padrino/core/engine/rng.py`, `tests/core/test_rng.py`
+- **Learnings for future iterations:**
+  - Ruff `RUF023` requires `__slots__` tuple entries to be sorted (natural order). Easy to miss when slots are listed in declaration order.
+  - For unbiased `randbelow(n)`, use `bit_length = (n - 1).bit_length()`, draw `ceil(bit_length / 8)` bytes, mask high bits to `(1 << bit_length) - 1`, then reject values `>= n`. Rejection probability is bounded at 50% per draw.
+  - `SeededRng` is stateful: each `next_bytes`/`randbelow`/`shuffle`/`choice` advances the internal counter. Downstream callers should construct a fresh `SeededRng` per logical purpose (e.g., `SeededRng(sha256(b"roles" + game_seed))` for role assignment) to avoid coupling unrelated draws.
+---
