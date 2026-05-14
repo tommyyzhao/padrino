@@ -681,7 +681,7 @@
         "uv run pytest -m \"not integration\" passes"
       ],
       "priority": 38,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
