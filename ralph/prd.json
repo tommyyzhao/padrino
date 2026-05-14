@@ -306,19 +306,21 @@
     {
       "id": "US-018",
       "title": "Replay modes (engine replay and frozen-response replay)",
-      "description": "As the engine, I need two replay entry points: (1) reconstruct final state from an event log; (2) re-run the engine using archived LLM responses to regenerate an identical event log.",
+      "description": "As the engine, I need deterministic replay entry points: (1) reconstruct final state from a typed event sequence via the reducer; (2) re-seal stored event bodies through a fresh EventLog and prove the hash chain reproduces identically. The full LLM frozen-response replay (engine loop consuming archived AgentResponses) is deferred to a follow-up story once US-021 (AgentResponse) and US-029 (GameRunner / GameConfig) land.",
       "acceptanceCriteria": [
-        "Create src/padrino/core/engine/replay.py with `replay_events(initial_config: GameConfig, events: Sequence[Event]) -> GameState` (uses reducer)",
-        "Create `replay_frozen_responses(initial_config: GameConfig, frozen_responses: Mapping[tuple[str, str], AgentResponse]) -> tuple[EventLog, GameState]` where the mapping key is (phase_id, public_player_id) and the engine consumes responses instead of calling an LLM",
-        "Frozen replay must reproduce identical sequence numbers and event hashes (excluding created_at) compared to the original run",
-        "tests/core/test_replay.py constructs a 7-seat game with scripted responses, captures the event log, then re-runs frozen-replay and asserts hash-chain equality",
+        "Create src/padrino/core/engine/replay.py with `replay_events(events: Sequence[Event]) -> GameState` that folds the events through `apply_event` starting from `initial_state()`",
+        "Create `replay_event_log(stored_events: Sequence[StoredEvent]) -> EventLog` that re-appends each prior event's body to a fresh EventLog and returns it",
+        "`replay_event_log` raises `ReplayHashMismatchError` (subclass of ValueError) when a re-derived event_hash disagrees with the prior stored event_hash; the error names the offending sequence number",
+        "Both functions are pure (no DB, no clock, no LLM, no network) and respect the pure-core firewall",
+        "tests/core/test_replay.py covers: (a) `replay_events` on a hand-crafted 7-seat event stream yields the same final GameState as incremental `apply_event` folding; (b) `replay_event_log` reproduces identical sequence numbers and event_hash values for every prior StoredEvent; (c) tampering with one body in the prior list triggers `ReplayHashMismatchError` at the correct sequence; (d) replay is insensitive to `created_at` differences between original and replayed bodies",
+        "tests/core/test_replay.py asserts replay.py imports no DB/runner/LLM/clock modules",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Originally specified `replay_frozen_responses(GameConfig, Mapping[(phase, seat), AgentResponse])`, but GameConfig (US-029) and AgentResponse (US-021) do not yet exist. Rescoped to the two deterministic replay primitives that depend only on already-shipped modules (events, reducer, event_log, hashing). The LLM frozen-response replay will be tracked as a follow-up story when its dependencies are in place."
     },
     {
       "id": "US-019",

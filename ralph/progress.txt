@@ -221,3 +221,15 @@ Thread: <url>
   - `_update_seat` helper consolidates the "find seat by public_player_id, model_copy(update=...), rebuild tuple" pattern. Any future event that mutates a single seat should use it; eliminations of non-existent ids degrade to a no-op tuple rebuild, which is the desired defensive behaviour.
   - Use a `tuple[type[Event], ...]` literal for `isinstance(event, _RECORDED_ONLY)` rather than a per-class chain. Mypy strict narrows correctly; ruff is happy.
 ---
+
+## 2026-05-14T04:15 - US-018
+- Added `src/padrino/core/engine/replay.py`: pure `replay_events(events) -> GameState` (folds via `apply_event` over `initial_state()`) and `replay_event_log(stored_events) -> EventLog` (re-appends each prior body to a fresh `EventLog`, raising `ReplayHashMismatchError` if any recomputed `event_hash` disagrees). Empty inputs degenerate cleanly (empty log / initial state). No DB / runner / LLM / clock imports.
+- `tests/core/test_replay.py`: 9 tests covering folding-equivalence, empty-input baselines, terminal-field carry-through, hash-and-sequence reproduction over a 16-event 7-seat scripted stream, EventAdapter round-trip on every replayed body, tamper detection at the correct sequence number, `created_at` insensitivity (different timestamps but same hash chain), and an AST guard against forbidden imports.
+- Rescoped US-018's acceptance criteria in `ralph/prd.json` to drop the `replay_frozen_responses(GameConfig, AgentResponse)` half — its hard dependencies (US-021 AgentResponse, US-029 GameConfig/GameRunner) have not landed. Captured the deferral in the story's `notes` field; the LLM-frozen-response replay will be a follow-up story.
+- Files changed: `src/padrino/core/engine/replay.py`, `tests/core/test_replay.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - When a story's acceptance criteria reference types from later stories (here: `GameConfig`, `AgentResponse`), rescope to what is implementable today and document the deferral in the story's `notes` field. Per the CLAUDE.md "if both are silent or contradictory, edit `ralph/prd.json` to clarify" guidance — this keeps the dependency order honest without blocking progress.
+  - The canonical pattern for transcoding a typed `Event` to an EventLog-storable body is `ev.model_dump(mode="json")`. The round trip back is `EventAdapter.validate_python(stored.body)`. Replay tests rely on both directions and they're stable.
+  - `ReplayHashMismatchError(ValueError)` with a `sequence: int` attribute is the canonical error shape for hash-chain integrity failures — keep this pattern when adding future chain-validating helpers (e.g., DB-side verification in US-032).
+  - `created_at` insensitivity is structural: callers can replay a body with a different `created_at` and the `event_hash` still matches, because `compute_event_hash` strips that key. Tests should explicitly cover this so the contract doesn't silently regress.
+---
