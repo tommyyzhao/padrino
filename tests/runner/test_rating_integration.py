@@ -1,0 +1,263 @@
+"""US-039: rating updates wired to ``run_game``'s ``GameTerminated``.
+
+Runs a scripted Town-win game with a ``GamePersistence`` carrying a
+ranked-league ``league_id`` + per-seat ``agent_builds``, then asserts:
+
+* Every Town seat's ``GLOBAL`` rating ``mu`` is above the initial mu.
+* Every Mafia seat's ``GLOBAL`` rating ``mu`` is below the initial mu.
+* Every Mafia + Town seat's ``FACTION`` rating row exists with the right
+  scope_value and matching mu direction.
+* A ``RatingEvent`` audit row was appended for every updated scope-row.
+* When ``ranked=False`` (or ``league_id`` missing) the rating tables remain
+  empty even though the rest of persistence still runs.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncIterator
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from padrino.core.engine.role_assignment import assign_roles
+from padrino.core.enums import Faction, Role
+from padrino.core.rulesets import mini7_v1
+from padrino.db.base import Base, create_engine, create_session_factory
+from padrino.db.models import Rating, RatingEvent
+from padrino.db.repositories import (
+    agent_builds as agent_builds_repo,
+)
+from padrino.db.repositories import (
+    games as games_repo,
+)
+from padrino.db.repositories import (
+    leagues as leagues_repo,
+)
+from padrino.db.repositories import (
+    model_configs as model_configs_repo,
+)
+from padrino.db.repositories import (
+    prompt_versions as prompt_versions_repo,
+)
+from padrino.db.repositories import (
+    providers as providers_repo,
+)
+from padrino.llm.mock import DeterministicMockAdapter
+from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA
+from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
+from tests.conftest import make_town_win_script
+
+_GAME_SEED = "seed-rating-001"
+
+
+@pytest.fixture
+async def engine() -> AsyncIterator[AsyncEngine]:
+    eng = create_engine("sqlite+aiosqlite:///:memory:")
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield eng
+    finally:
+        await eng.dispose()
+
+
+@pytest.fixture
+async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return create_session_factory(engine)
+
+
+def _split_factions() -> tuple[list[str], list[str], str, str]:
+    seats = assign_roles(_GAME_SEED, mini7_v1)
+    mafia = [s.public_player_id for s in seats if s.faction is Faction.MAFIA]
+    town = [s.public_player_id for s in seats if s.faction is Faction.TOWN]
+    doctor = next(s.public_player_id for s in seats if s.role is Role.DOCTOR)
+    detective = next(s.public_player_id for s in seats if s.role is Role.DETECTIVE)
+    return mafia, town, doctor, detective
+
+
+async def _seed_ranked_setup(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    ranked: bool,
+    hash_prefix: str,
+) -> tuple[uuid.UUID, uuid.UUID, dict[str, uuid.UUID]]:
+    """Insert a league, 7 agent builds, and one game row.
+
+    Returns ``(league_id, game_id, agent_builds_by_seat)``.
+    """
+    async with session_factory() as session, session.begin():
+        provider = await providers_repo.create(
+            session, name="cerebras", auth_secret_ref="CEREBRAS_API_KEY"
+        )
+        mc = await model_configs_repo.create(
+            session,
+            provider_id=provider.id,
+            model_name="glm-4.7",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        builds: list[uuid.UUID] = []
+        for i in range(mini7_v1.PLAYER_COUNT):
+            pv = await prompt_versions_repo.create(
+                session,
+                ruleset_id=mini7_v1.RULESET_ID,
+                version=f"v{i + 1}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"{hash_prefix}-{i}",
+            )
+            ab = await agent_builds_repo.create(
+                session,
+                display_name=f"build-{i}",
+                model_config_id=mc.id,
+                prompt_version_id=pv.id,
+                adapter_version="2026.05",
+                inference_params={"temperature": 0.7},
+                active=True,
+            )
+            builds.append(ab.id)
+        league = await leagues_repo.create(
+            session, name="ranked", ruleset_id=mini7_v1.RULESET_ID, ranked=ranked
+        )
+        game = await games_repo.create(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed=_GAME_SEED,
+            status="RUNNING",
+        )
+        league_id = league.id
+        game_id = game.id
+    agent_builds_by_seat = {f"P{i + 1:02d}": builds[i] for i in range(mini7_v1.PLAYER_COUNT)}
+    return league_id, game_id, agent_builds_by_seat
+
+
+async def test_town_win_updates_town_up_mafia_down(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    league_id, game_id, abs_by_seat = await _seed_ranked_setup(
+        session_factory, ranked=True, hash_prefix="us039-town"
+    )
+
+    persistence = GamePersistence(
+        session_factory=session_factory,
+        game_id=game_id,
+        agent_builds=abs_by_seat,
+        league_id=league_id,
+    )
+    outcome = await run_game(
+        GameConfig(game_id="G-RATING", game_seed=_GAME_SEED, timeout_s=1.0),
+        DeterministicMockAdapter(script),
+        ranked=True,
+        persistence=persistence,
+    )
+    assert outcome.final_state.terminal_result == "TOWN"
+
+    async with session_factory() as session:
+        rows = (
+            (await session.execute(select(Rating).where(Rating.league_id == league_id)))
+            .scalars()
+            .all()
+        )
+    by_key = {(r.agent_build_id, r.scope_type, r.scope_value): r for r in rows}
+
+    # Every seat has BOTH a GLOBAL and a FACTION rating row.
+    for sid, ab_id in abs_by_seat.items():
+        is_mafia = sid in mafia
+        global_row = by_key[(ab_id, "GLOBAL", "global")]
+        scope_value = "MAFIA" if is_mafia else "TOWN"
+        faction_row = by_key[(ab_id, "FACTION", scope_value)]
+
+        if is_mafia:
+            assert global_row.mu < INITIAL_MU
+            assert faction_row.mu < INITIAL_MU
+        else:
+            assert global_row.mu > INITIAL_MU
+            assert faction_row.mu > INITIAL_MU
+
+        assert global_row.sigma < INITIAL_SIGMA
+        assert faction_row.sigma < INITIAL_SIGMA
+        assert global_row.games == 1
+        assert faction_row.games == 1
+
+    # 7 seats * 2 scopes = 14 rating audit events.
+    async with session_factory() as session:
+        events = (
+            (await session.execute(select(RatingEvent).where(RatingEvent.game_id == game_id)))
+            .scalars()
+            .all()
+        )
+    assert len(events) == 14
+    for evt in events:
+        assert evt.before_mu == pytest.approx(INITIAL_MU)
+        assert evt.before_sigma == pytest.approx(INITIAL_SIGMA)
+        assert evt.league_id == league_id
+        assert evt.scope_type in {"GLOBAL", "FACTION"}
+
+
+async def test_unranked_game_skips_rating_updates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    league_id, game_id, abs_by_seat = await _seed_ranked_setup(
+        session_factory, ranked=False, hash_prefix="us039-unranked"
+    )
+
+    persistence = GamePersistence(
+        session_factory=session_factory,
+        game_id=game_id,
+        agent_builds=abs_by_seat,
+        league_id=league_id,
+    )
+    await run_game(
+        GameConfig(game_id="G-RATING-U", game_seed=_GAME_SEED, timeout_s=1.0),
+        DeterministicMockAdapter(script),
+        ranked=False,
+        persistence=persistence,
+    )
+
+    async with session_factory() as session:
+        ratings = (await session.execute(select(Rating))).scalars().all()
+        events = (await session.execute(select(RatingEvent))).scalars().all()
+    assert ratings == []
+    assert events == []
+
+
+async def test_persistence_without_league_id_skips_rating_updates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    _, game_id, abs_by_seat = await _seed_ranked_setup(
+        session_factory, ranked=True, hash_prefix="us039-noleague"
+    )
+
+    persistence = GamePersistence(
+        session_factory=session_factory,
+        game_id=game_id,
+        agent_builds=abs_by_seat,
+        league_id=None,
+    )
+    await run_game(
+        GameConfig(game_id="G-RATING-NL", game_seed=_GAME_SEED, timeout_s=1.0),
+        DeterministicMockAdapter(script),
+        ranked=True,
+        persistence=persistence,
+    )
+
+    async with session_factory() as session:
+        ratings = (await session.execute(select(Rating))).scalars().all()
+    assert ratings == []

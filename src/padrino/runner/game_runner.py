@@ -30,7 +30,7 @@ import hashlib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Any, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -52,6 +52,7 @@ from padrino.core.rulesets import mini7_v1
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.llm.adapter import AdapterResult, LlmAdapter
+from padrino.ratings.openskill_service import GameResult, update_ratings_for_game
 from padrino.runner.tick import run_tick
 
 MAFIA_CHANNEL_ID: Final[str] = "mafia"
@@ -70,11 +71,17 @@ class GamePersistence:
     ``llm_calls`` table. ``agent_builds`` maps ``public_player_id`` → build
     UUID for llm_call attribution; unmapped seats persist with
     ``agent_build_id = NULL``.
+
+    When ``league_id`` is set, ``ranked=True``, and ``agent_builds`` covers
+    every seat in the final state, the runner additionally invokes the
+    OpenSkill rating service in the SAME transaction as the
+    ``GameTerminated`` event row so partial failures roll back together.
     """
 
     session_factory: async_sessionmaker[AsyncSession]
     game_id: uuid.UUID
     agent_builds: Mapping[str, uuid.UUID] = field(default_factory=dict)
+    league_id: uuid.UUID | None = None
 
 
 class GameConfig(BaseModel):
@@ -142,24 +149,78 @@ def _emit(
     return apply_event(state, event)
 
 
-async def _persist_stored_event(
+async def _append_event_row(
+    session: AsyncSession,
     persistence: GamePersistence,
     stored: StoredEvent,
 ) -> None:
     body = stored.body
+    await events_repo.append_event(
+        session,
+        game_id=persistence.game_id,
+        sequence=stored.sequence,
+        event_type=body["event_type"],
+        phase=body["phase"],
+        visibility=body["visibility"],
+        actor_player_id=body.get("actor_player_id"),
+        payload=dict(body.get("payload", {})),
+        prev_event_hash=stored.prev_event_hash,
+        event_hash=stored.event_hash,
+    )
+
+
+async def _persist_stored_event(
+    persistence: GamePersistence,
+    stored: StoredEvent,
+) -> None:
     async with persistence.session_factory() as session, session.begin():
-        await events_repo.append_event(
-            session,
-            game_id=persistence.game_id,
-            sequence=stored.sequence,
-            event_type=body["event_type"],
-            phase=body["phase"],
-            visibility=body["visibility"],
-            actor_player_id=body.get("actor_player_id"),
-            payload=dict(body.get("payload", {})),
-            prev_event_hash=stored.prev_event_hash,
-            event_hash=stored.event_hash,
-        )
+        await _append_event_row(session, persistence, stored)
+
+
+def _should_apply_ratings(
+    persistence: GamePersistence,
+    ranked: bool,
+    state: GameState,
+) -> bool:
+    if not ranked or persistence.league_id is None or not persistence.agent_builds:
+        return False
+    if state.terminal_result not in ("TOWN", "MAFIA", "DRAW"):
+        return False
+    return all(s.public_player_id in persistence.agent_builds for s in state.seats)
+
+
+async def _persist_terminated_event(
+    persistence: GamePersistence,
+    stored: StoredEvent,
+    state: GameState,
+    ranked: bool,
+) -> None:
+    """Persist the ``GameTerminated`` row and rating updates atomically.
+
+    When ranked ratings apply (see :func:`_should_apply_ratings`) the
+    terminal event row and every rating update + audit row are written in
+    one ``session.begin()`` block so partial failures roll back together.
+    """
+    apply_ratings = _should_apply_ratings(persistence, ranked, state)
+    async with persistence.session_factory() as session, session.begin():
+        await _append_event_row(session, persistence, stored)
+        if apply_ratings:
+            assert persistence.league_id is not None
+            winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
+            seat_factions: dict[str, Faction] = {s.public_player_id: s.faction for s in state.seats}
+            agent_builds_by_seat: dict[str, uuid.UUID] = {
+                sid: persistence.agent_builds[sid] for sid in seat_factions
+            }
+            await update_ratings_for_game(
+                session,
+                league_id=persistence.league_id,
+                game_result=GameResult(
+                    game_id=persistence.game_id,
+                    winner=winner,
+                    seat_factions=seat_factions,
+                ),
+                agent_builds_by_seat=agent_builds_by_seat,
+            )
 
 
 def _request_prompt_hash(observation: Observation) -> str:
@@ -430,7 +491,11 @@ async def run_game(
     async def emit_and_persist(body: dict[str, Any], game_state: GameState) -> GameState:
         next_state = _emit(body, game_state, event_log)
         if persistence is not None:
-            await _persist_stored_event(persistence, event_log.events[-1])
+            stored = event_log.events[-1]
+            if stored.body["event_type"] == "GameTerminated":
+                await _persist_terminated_event(persistence, stored, next_state, ranked)
+            else:
+                await _persist_stored_event(persistence, stored)
         return next_state
 
     async def persist_pending_events(log_before: int) -> None:

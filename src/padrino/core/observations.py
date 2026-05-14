@@ -198,12 +198,19 @@ def build_observation(
 
 
 def _entry_from_stored(stored_body: dict[str, Any], sequence: int) -> EventEntry:
+    event_type = stored_body["event_type"]
+    payload = stored_body.get("payload", {})
+    # PRD §6.1 / line 476: role and faction are never revealed publicly
+    # except via game outcomes. PlayerEliminated stores them on the chain for
+    # transcript and replay, but the LLM-visible projection must strip them.
+    if event_type == "PlayerEliminated":
+        payload = {k: v for k, v in payload.items() if k not in {"role", "faction"}}
     return EventEntry(
         sequence=sequence,
         phase=stored_body["phase"],
-        event_type=stored_body["event_type"],
+        event_type=event_type,
         actor_player_id=stored_body.get("actor_player_id"),
-        payload=stored_body.get("payload", {}),
+        payload=payload,
     )
 
 
