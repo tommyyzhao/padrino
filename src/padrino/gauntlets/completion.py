@@ -177,7 +177,7 @@ async def _provisional_for_agent_builds(
     }
 
 
-async def _diagnostics_for_games(
+async def diagnostics_for_games(
     session: AsyncSession,
     game_ids: list[uuid.UUID],
 ) -> GauntletDiagnostics:
@@ -260,7 +260,7 @@ async def finalize_gauntlet_if_done(
         league_id=gauntlet.league_id,
         agent_build_ids=agent_build_ids,
     )
-    diagnostics = await _diagnostics_for_games(session, child_ids)
+    diagnostics = await diagnostics_for_games(session, child_ids)
 
     completed_at = datetime.now(UTC)
     gauntlet.status = "COMPLETED"
@@ -284,5 +284,6 @@ __all__ = [
     "AgentBuildProvisional",
     "GauntletDiagnostics",
     "GauntletFinalized",
+    "diagnostics_for_games",
     "finalize_gauntlet_if_done",
 ]
