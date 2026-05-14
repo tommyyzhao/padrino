@@ -16,6 +16,7 @@ Each iteration MUST append a dated section. Never replace existing content.
 
 - pydantic-settings: use `Settings(_env_file=None)` in tests so monkeypatch controls env vars without the on-disk .env interfering.
 - structlog configure_logging uses a module-level `_configured` flag for idempotency.
+- Mypy strict rejects module-level `def f(x: T) -> U` as a satisfier of a Protocol method (positional-only/staticmethod mismatch). Expose ruleset behaviour as `Final[dict[K, V]]` attributes (e.g. `ROLE_FACTIONS`) and have engine code read the mapping directly. Optional `*_for(...)` wrappers around the dict are fine for ergonomics, but the Protocol contract should be over the dict.
 
 ---
 
@@ -93,4 +94,14 @@ Thread: <url>
   - Mypy strict treats a Python module's `Final[int]` constants as structurally satisfying a `Protocol` with matching `int` class attributes — passing the `mini7_v1` module directly to `next_phase(current, ruleset: Ruleset)` typechecks without an explicit cast.
   - Ruff `RUF005`: prefer `(*a, x, *b)` unpacking over `a + (x,) + b` when stitching tuples.
   - Phase identifiers are `(kind, day, round)` triples — `round=0` for non-discussion phases, `round=1..DISCUSSION_ROUNDS_PER_DAY` for `DAY_DISCUSSION`. Phase day starts at 1 for daytime; `NIGHT_0_MAFIA_INTRO` uses `day=0`. Future resolvers should match this convention.
+---
+
+## 2026-05-14T01:30 - US-007
+- Implemented `src/padrino/core/engine/role_assignment.py`: `assign_roles(game_seed, ruleset)` builds the role multiset from `ruleset.ROLE_COUNTS`, seeds `SeededRng(sha256(b"roles" + game_seed))`, Fisher-Yates shuffles, and zips onto seats P01..P07 (seat_index 0..6). All seats start `alive=True` with None for `death_phase`, `last_protected_target`, and `queued_inspection_result`. Faction is read from `ruleset.ROLE_FACTIONS[role]`.
+- Renamed `_ROLE_FACTION` to public `ROLE_FACTIONS` in `padrino.core.rulesets.mini7_v1` so it satisfies the new `Ruleset` Protocol. `faction_for()` now reads `ROLE_FACTIONS` directly.
+- `tests/core/test_role_assignment.py`: 11 tests covering count, determinism, distinct seeds, exact role counts, P01..P07 ids, seat_index 0..6, alive defaults, faction↔role correspondence, return type, and mafia-position distribution across seeds.
+- Files changed: `src/padrino/core/engine/role_assignment.py`, `src/padrino/core/rulesets/mini7_v1.py`, `tests/core/test_role_assignment.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Mypy strict will not match a module-level `def faction_for(role: Role) -> Faction` against a Protocol method (`@staticmethod` or otherwise) because module functions are typed as Callables with named parameters, not positional-only staticmethods. Resolved by switching the Protocol contract to a `dict[Role, Faction]` attribute and dropping the method requirement.
+  - `f"P{i + 1:02d}"` is the canonical public-id format for seats — keep this exact pattern in any future code that constructs seats or compares ids.
 ---

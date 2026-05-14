@@ -36,7 +36,7 @@ _ROLE_FAMILY: Final[dict[Role, RoleFamily]] = {
     Role.VILLAGER: RoleFamily.VANILLA_TOWN,
 }
 
-_ROLE_FACTION: Final[dict[Role, Faction]] = {
+ROLE_FACTIONS: Final[dict[Role, Faction]] = {
     Role.MAFIA_GOON: Faction.MAFIA,
     Role.DETECTIVE: Faction.TOWN,
     Role.DOCTOR: Faction.TOWN,
@@ -51,4 +51,4 @@ def role_family_for(role: Role) -> RoleFamily:
 
 def faction_for(role: Role) -> Faction:
     """Return the Faction for a given Role."""
-    return _ROLE_FACTION[role]
+    return ROLE_FACTIONS[role]
