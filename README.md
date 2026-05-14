@@ -37,6 +37,10 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests
 uv run pytest -m "not integration"
+
+# Coverage report (CI enforces >=85% on the core engine)
+uv run pytest -m "not integration" --cov --cov-report=term-missing
+uv run coverage report --include='src/padrino/core/*' --fail-under=85
 ```
 
 ### Run the demo gauntlet

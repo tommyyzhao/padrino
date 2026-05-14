@@ -38,3 +38,6 @@ jobs:
 
       - name: Test (pytest)
         run: uv run pytest -m "not integration" --cov --cov-report=term-missing
+
+      - name: Core engine coverage gate (>=85%)
+        run: uv run coverage report --include='src/padrino/core/*' --fail-under=85
