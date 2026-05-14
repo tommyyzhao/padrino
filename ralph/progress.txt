@@ -183,3 +183,16 @@ Thread: <url>
   - `Literal["TOWN","MAFIA","DRAW"]` on `WinResult.winner` makes mypy ratify downstream `match`/`if` exhaustiveness — downstream callers should keep the literal narrow and not widen to `str`.
 ---
 
+
+## 2026-05-14T03:30 - US-015
+- Added `src/padrino/core/engine/events.py`: frozen Pydantic discriminated union `Event` over all 18 event types (GameCreated through GameTerminated). Each event carries `event_type` (Literal), `sequence`, `phase`, `visibility` (per-class Literal), `actor_player_id`, and a typed `payload` submodel. `EventAdapter: TypeAdapter[Event]` parses untagged dicts via the `event_type` discriminator. Per-event visibility is locked at the class level: PUBLIC for PublicMessageSubmitted / VoteSubmitted / DayVoteResolved / PlayerEliminated / GameTerminated, PRIVATE for chat/action submissions and DetectiveResultDelivered, SYSTEM for engine bookkeeping. `EVENT_TYPES` exposes the canonical tuple of event_type strings.
+- `tests/core/test_events.py`: 30 tests (parametrized round-trip x 18 + catalog/freeze/discriminator/mismatch/chat-payload-cleanliness/strictness/seat-assignment).
+- Files changed: `src/padrino/core/engine/events.py`, `tests/core/test_events.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Pydantic v2 discriminated unions: use `Annotated[A | B | ..., Field(discriminator="event_type")]` and wrap in `TypeAdapter(Event)` for free-form dict parsing. Default values on the discriminator field (`event_type: Literal["X"] = "X"`) keep constructors ergonomic while still enforcing the literal on validation.
+  - Ruff `UP007` rejects `typing.Union[A, B]` even inside `Annotated[...]` — use the `|` operator instead. This applies to discriminated unions over many members, where the long `|`-chain is the only ruff-clean form.
+  - `model_dump(mode="json")` followed by `canonical_dumps` is the canonical pattern for shipping an Event to the hash chain. Round-tripping back via `EventAdapter.validate_python(json.loads(blob))` recovers the exact same model — tests rely on this equality.
+  - Hash chain envelope fields (`event_hash`, `prev_event_hash`, `created_at`) are intentionally NOT on these models. Storage builds the envelope around the event body. Keep that split: `events.py` is the *body* contract; US-016's EventLog owns the chain envelope.
+  - Chat payloads (`PublicMessageSubmittedPayload`, `PrivateMessageSubmittedPayload`) carry only `text` (+ `round_index` or `channel_id`) — no `action`/`type`/`target` fields. Tests assert this structurally so the chat-vs-action firewall is enforced at the type level, not just at the resolver.
+  - Per-class visibility Literals (e.g. `visibility: Literal["PUBLIC"] = "PUBLIC"`) double as constructor defaults and runtime validators; mismatched visibility in stored payloads is rejected at parse time, which is what we want for replay safety.
+---
