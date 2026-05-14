@@ -160,3 +160,15 @@ Thread: <url>
   - The "queuing for next-day delivery" rule (suppressing the finding if the detective dies the same night) is *not* in this resolver — it lives in US-013's `resolve_night` composer. Keep the pure resolver agnostic about same-night death; it only knows whether the detective is alive *entering* the night.
   - Finding strings are exported as `FINDING_MAFIA` / `FINDING_TOWN` constants. Downstream observation builders should import these instead of re-typing the literals — avoids drift if a future ruleset ever extends the alignment vocabulary.
 ---
+
+## 2026-05-14T03:00 - US-013
+- Added `src/padrino/core/engine/resolvers/night.py`: frozen Pydantic `NightResolution(eliminated, protected, detective_finding: tuple[str, str] | None, mafia_kill_target)` plus pure `resolve_night(state, all_submissions: Mapping[str, Action])`. Composer routes each seat's submission to the right per-role resolver (mafia kill aggregates living mafia submissions; doctor and detective pull the single submission keyed by the respective role-seat's id), then applies: protect cancels kill iff `protected == mafia_kill_target`, and the detective finding is suppressed unless the detective survives the resolved eliminations.
+- `tests/core/test_night_resolution.py`: 12 tests covering protect saves, protect mismatched → death, no-kill/no-protect baseline, detective dies same night → finding suppressed, detective lives → finding queued, detective investigates town, mafia tie with protect irrelevant, already-dead detective, doctor repeat-violation does not save, town submissions to kill ignored, chat-field absence, immutability.
+- Files changed: `src/padrino/core/engine/resolvers/night.py`, `tests/core/test_night_resolution.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The composer is the layer that owns "who is eligible to submit which kind of action" — it filters `all_submissions` by seat faction/role *before* calling each per-role resolver. The per-role resolvers stay narrow and trust their inputs (mafia_kill: living mafia mapping; doctor/detective: single optional Action). Future N-night composers (or any orchestrator above the resolvers) should keep this filtering responsibility centralized rather than duplicating faction/role checks in each resolver.
+  - `detective_finding` is encoded as `tuple[str, str] | None` rather than as a `QueuedInspection` model so the night composer stays a pure outcome shape with no state-update semantics. The state reducer (US-017) is responsible for translating this tuple back into the seat's `queued_inspection_result` field on the next state.
+  - Suppression of the detective's finding when the detective dies the same night is composed at the *night-level*, not pushed back into the per-resolver — the per-resolver only knows entering-night liveness. Keep this invariant: per-resolver pureness over a single snapshot, composer applies cross-resolver effects.
+  - Use `next((s for s in state.seats if s.role is Role.X), None)` for unique role lookups in composers — short, readable, and matches the pattern already used inside doctor/detective resolvers.
+---
+
