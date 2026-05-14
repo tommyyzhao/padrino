@@ -72,3 +72,13 @@ Thread: <url>
   - For unbiased `randbelow(n)`, use `bit_length = (n - 1).bit_length()`, draw `ceil(bit_length / 8)` bytes, mask high bits to `(1 << bit_length) - 1`, then reject values `>= n`. Rejection probability is bounded at 50% per draw.
   - `SeededRng` is stateful: each `next_bytes`/`randbelow`/`shuffle`/`choice` advances the internal counter. Downstream callers should construct a fresh `SeededRng` per logical purpose (e.g., `SeededRng(sha256(b"roles" + game_seed))` for role assignment) to avoid coupling unrelated draws.
 ---
+
+## 2026-05-14T01:00 - US-005
+- Implemented `src/padrino/core/engine/hashing.py`: `GENESIS_HASH = "0" * 64` and `compute_event_hash(prev_event_hash, event_body)` which strips `event_hash`, `prev_event_hash`, and `created_at` from the body, canonical-JSON-encodes the remainder via US-003, and returns `sha256(prev.encode() + canonical_dumps(filtered)).hexdigest()`.
+- `tests/core/test_hashing.py`: 15 tests covering hex shape, determinism, explicit sha256 construction, sensitivity to body and prev-hash changes, all three excluded fields (individually and simultaneously), non-mutation of input, three-event chain validation, key-order invariance, and rejection of non-string keys.
+- Files changed: `src/padrino/core/engine/hashing.py`, `tests/core/test_hashing.py`, `ralph/prd.json`, `ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The hash payload concatenates `prev_event_hash.encode("utf-8")` with the canonical-JSON bytes directly (no separator). Downstream event writers must replicate this exactly when verifying chains.
+  - The excluded-key set is the single source of truth for "what the hash covers" — keep it as a module-level `frozenset` constant so future event-validation code can import it instead of re-listing the strings.
+  - Use a dict comprehension (`{k: v for k, v in body.items() if k not in EXCLUDED}`) to avoid mutating the caller's mapping; tests explicitly assert non-mutation.
+---

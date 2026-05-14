@@ -1,7 +1,7 @@
 {
   "project": "Padrino",
   "branchName": "ralph/padrino-v1",
-  "description": "Deterministic LLM benchmark and league engine for Mafia-style social deduction. v1 implements the mini7_v1 ruleset (2 Mafia, 1 Detective, 1 Doctor, 3 Villagers), an event-sourced replayable engine, a multi-provider LLM adapter (Cerebras zai-glm-4.7 primary, DeepInfra deepseek-ai/DeepSeek-V4-Flash fallback) via LiteLLM, an async tick-barrier game runner, SQLAlchemy 2.x async persistence over SQLite (Postgres-portable), OpenSkill ratings over clone gauntlets, and a FastAPI admin/spectator API. Backend-only — quality gates are ruff + mypy + pytest, no browser verification.",
+  "description": "Deterministic LLM benchmark and league engine for Mafia-style social deduction. v1 implements the mini7_v1 ruleset (2 Mafia, 1 Detective, 1 Doctor, 3 Villagers), an event-sourced replayable engine, a multi-provider LLM adapter (Cerebras zai-glm-4.7 primary, DeepInfra deepseek-ai/DeepSeek-V4-Flash fallback) via LiteLLM, an async tick-barrier game runner, SQLAlchemy 2.x async persistence over SQLite (Postgres-portable), OpenSkill ratings over clone gauntlets, and a FastAPI admin/spectator API. Backend-only \u2014 quality gates are ruff + mypy + pytest, no browser verification.",
   "userStories": [
     {
       "id": "US-001",
@@ -10,7 +10,7 @@
       "acceptanceCriteria": [
         "Create src/padrino/settings.py with a `Settings` BaseSettings class (pydantic-settings) that loads CEREBRAS_API_KEY, DEEPINFRA_API_KEY, PADRINO_DB_URL, PADRINO_LOG_LEVEL, PADRINO_LLM_TIMEOUT_SECONDS, PADRINO_TEMPERATURE, PADRINO_TOP_P, PADRINO_PRIMARY_MODEL, PADRINO_FALLBACK_MODEL from environment with sensible defaults matching .env.example",
         "Settings is exposed via a cached `get_settings()` accessor (functools.lru_cache)",
-        "Create src/padrino/logging.py with `configure_logging(level: str)` using structlog → JSON renderer, idempotent so repeated calls are safe",
+        "Create src/padrino/logging.py with `configure_logging(level: str)` using structlog \u2192 JSON renderer, idempotent so repeated calls are safe",
         "tests/test_settings.py verifies defaults, env-var overrides via monkeypatch, and that get_settings() returns the same instance",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
@@ -43,8 +43,8 @@
       "description": "As the engine, I need a deterministic JSON encoder so every event hash is reproducible across machines and Python versions.",
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/canonical_json.py exposing `canonical_dumps(obj: Any) -> bytes`",
-        "Output is UTF-8 with sorted object keys, no insignificant whitespace, ensure_ascii=False, and rejects float values (raises TypeError) — encode numerics as int or string",
-        "Datetimes are rejected (raise TypeError) — caller must pre-serialize timestamps to ISO strings if needed",
+        "Output is UTF-8 with sorted object keys, no insignificant whitespace, ensure_ascii=False, and rejects float values (raises TypeError) \u2014 encode numerics as int or string",
+        "Datetimes are rejected (raise TypeError) \u2014 caller must pre-serialize timestamps to ISO strings if needed",
         "tests/core/test_canonical_json.py covers: key ordering stable across dict insertion order, nested dicts/lists, unicode strings preserved, float raises, bytes raises, identical inputs produce byte-identical output",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
@@ -86,7 +86,7 @@
         "uv run pytest -m \"not integration\" passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -96,7 +96,7 @@
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/state.py with frozen Pydantic models: `Seat` (public_player_id, seat_index, role, faction, alive, death_phase | None, last_protected_target | None, queued_inspection_result | None), `Phase` (kind, day, round), `GameState` (ruleset_id, game_id, game_seed, current_phase, seats, day, terminal_result | None, terminal_reason | None)",
         "Helpers on GameState: `living_seats()`, `living_seats_by_faction(f)`, `seat_by_public_id(id)`, `alive_count_by_faction(f)`",
-        "Create src/padrino/core/engine/phases.py with `next_phase(current: Phase, ruleset) -> Phase` implementing the mini7_v1 sequence: SETUP → NIGHT_0_MAFIA_INTRO → DAY_1_DISCUSSION_ROUND_1 → ROUND_2 → ROUND_3 → DAY_1_VOTE → NIGHT_1_MAFIA_DISCUSSION → NIGHT_1_ACTIONS → DAY_2_… up to MAX_DAYS=5",
+        "Create src/padrino/core/engine/phases.py with `next_phase(current: Phase, ruleset) -> Phase` implementing the mini7_v1 sequence: SETUP \u2192 NIGHT_0_MAFIA_INTRO \u2192 DAY_1_DISCUSSION_ROUND_1 \u2192 ROUND_2 \u2192 ROUND_3 \u2192 DAY_1_VOTE \u2192 NIGHT_1_MAFIA_DISCUSSION \u2192 NIGHT_1_ACTIONS \u2192 DAY_2_\u2026 up to MAX_DAYS=5",
         "tests/core/test_state.py and tests/core/test_phases.py cover model immutability (mutation raises), helpers, and full phase-sequence enumeration without exceeding MAX_DAYS",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
@@ -114,7 +114,7 @@
         "Create src/padrino/core/engine/role_assignment.py with `assign_roles(game_seed: str, ruleset) -> list[Seat]` returning 7 seats with public_player_ids P01..P07, seat_index 0..6, and exactly 2 MAFIA_GOON / 1 DETECTIVE / 1 DOCTOR / 3 VILLAGER",
         "Implementation uses SeededRng(role_seed=sha256(b'roles' + game_seed.encode())) and Fisher-Yates over the canonical role multiset",
         "All seats start alive=True, death_phase=None, last_protected_target=None, queued_inspection_result=None",
-        "tests/core/test_role_assignment.py verifies: same seed → same assignment; different seeds → different assignments (with overwhelming probability across 100 trials); role counts always exact; public_player_ids unique and 'P01'..'P07'",
+        "tests/core/test_role_assignment.py verifies: same seed \u2192 same assignment; different seeds \u2192 different assignments (with overwhelming probability across 100 trials); role counts always exact; public_player_ids unique and 'P01'..'P07'",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -132,9 +132,9 @@
         "Discussion phases: only NOOP, legal_targets=[]",
         "Vote phase: VOTE (targets = living seats other than self) plus ABSTAIN",
         "Mafia discussion phase: only NOOP for mafia, nothing for town (town seats not eligible)",
-        "Night actions phase: mafia → MAFIA_KILL targets = living non-mafia; doctor → PROTECT targets = living seats including self EXCEPT last_protected_target; detective → INVESTIGATE targets = living seats other than self; villagers → NOOP only",
-        "Dead seats → empty allowed types (caller must skip them)",
-        "tests/core/test_legal_actions.py covers every role × every phase × alive/dead and confirms the doctor consecutive-protect constraint",
+        "Night actions phase: mafia \u2192 MAFIA_KILL targets = living non-mafia; doctor \u2192 PROTECT targets = living seats including self EXCEPT last_protected_target; detective \u2192 INVESTIGATE targets = living seats other than self; villagers \u2192 NOOP only",
+        "Dead seats \u2192 empty allowed types (caller must skip them)",
+        "tests/core/test_legal_actions.py covers every role \u00d7 every phase \u00d7 alive/dead and confirms the doctor consecutive-protect constraint",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -150,9 +150,9 @@
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/resolvers/day_vote.py with `resolve_day_vote(state, submissions: Mapping[str, Action]) -> DayVoteResult` (eliminated: str | None, vote_tally: dict[str, int], reason: str)",
         "Invalid targets (dead, non-existent, self-vote) become ABSTAIN with reason logged in result",
-        "Unique plurality of valid votes eliminates that target; ties → eliminated=None; all-abstain → eliminated=None",
+        "Unique plurality of valid votes eliminates that target; ties \u2192 eliminated=None; all-abstain \u2192 eliminated=None",
         "Submissions for dead players are ignored",
-        "tests/core/test_day_vote.py covers: unique-winner; 2-2 tie; all-abstain; self-vote → abstain; vote-for-dead → abstain; missing submission → abstain; chat field never read",
+        "tests/core/test_day_vote.py covers: unique-winner; 2-2 tie; all-abstain; self-vote \u2192 abstain; vote-for-dead \u2192 abstain; missing submission \u2192 abstain; chat field never read",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -168,8 +168,8 @@
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/resolvers/mafia_kill.py with `resolve_mafia_kill(state, mafia_submissions: Mapping[str, Action]) -> MafiaKillResult` (target: str | None, vote_tally: dict[str, int])",
         "Targets must be living non-mafia; invalid targets become no vote",
-        "Unique plurality determines target; tie → target=None; no valid votes → target=None",
-        "tests/core/test_mafia_kill.py covers: 2-vote agree; 1v1 tie → no kill; mafia-targets-mafia rejected; dead-mafia submission ignored; missing submissions tolerated",
+        "Unique plurality determines target; tie \u2192 target=None; no valid votes \u2192 target=None",
+        "tests/core/test_mafia_kill.py covers: 2-vote agree; 1v1 tie \u2192 no kill; mafia-targets-mafia rejected; dead-mafia submission ignored; missing submissions tolerated",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -184,11 +184,11 @@
       "description": "As the engine, I need a pure doctor-protect resolver that enforces the rule that the doctor may not protect the same player two nights in a row.",
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/resolvers/doctor_protect.py with `resolve_doctor_protect(state, doctor_submission: Action | None) -> DoctorProtectResult` (protected: str | None, reason: str)",
-        "If doctor is dead or no submission → protected=None",
-        "If submitted target equals doctor's `last_protected_target` → coerced to NOOP, protected=None, reason='REPEAT_VIOLATION'",
+        "If doctor is dead or no submission \u2192 protected=None",
+        "If submitted target equals doctor's `last_protected_target` \u2192 coerced to NOOP, protected=None, reason='REPEAT_VIOLATION'",
         "Self-protect is permitted unless it was the previous-night target",
-        "Invalid (non-living) target → NOOP",
-        "tests/core/test_doctor_protect.py covers: first-night any target OK; repeat → NOOP; alternating self / other allowed; dead doctor → None; invalid target → None",
+        "Invalid (non-living) target \u2192 NOOP",
+        "tests/core/test_doctor_protect.py covers: first-night any target OK; repeat \u2192 NOOP; alternating self / other allowed; dead doctor \u2192 None; invalid target \u2192 None",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -203,11 +203,11 @@
       "description": "As the engine, I need a pure detective-investigate resolver that produces a MAFIA/TOWN result to be queued for next-day delivery only if the detective survives the night.",
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/resolvers/detective.py with `resolve_detective_investigation(state, detective_submission: Action | None) -> DetectiveResult` (target: str | None, finding: 'MAFIA' | 'TOWN' | None)",
-        "Self-investigation is illegal — coerce to NOOP",
-        "Invalid (non-living, non-existent) target → NOOP",
+        "Self-investigation is illegal \u2014 coerce to NOOP",
+        "Invalid (non-living, non-existent) target \u2192 NOOP",
         "Finding is 'MAFIA' if target.faction == MAFIA, else 'TOWN'",
         "Queuing for next-day delivery is the caller's responsibility (this resolver is pure on state)",
-        "tests/core/test_detective.py covers: town target → 'TOWN'; mafia target → 'MAFIA'; self → None; dead target → None; no submission → None",
+        "tests/core/test_detective.py covers: town target \u2192 'TOWN'; mafia target \u2192 'MAFIA'; self \u2192 None; dead target \u2192 None; no submission \u2192 None",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -222,10 +222,10 @@
       "description": "As the engine, I need a function that composes mafia-kill, doctor-protect, and detective-investigate results into the actual deaths and queued findings for a night.",
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/resolvers/night.py with `resolve_night(state, all_submissions) -> NightResolution` (eliminated: str | None, protected: str | None, detective_finding: tuple[str, str] | None, mafia_kill_target: str | None)",
-        "If mafia kill target exists and equals protected target → no death (`eliminated=None`)",
-        "Else if mafia kill target exists → that seat is eliminated",
+        "If mafia kill target exists and equals protected target \u2192 no death (`eliminated=None`)",
+        "Else if mafia kill target exists \u2192 that seat is eliminated",
         "Detective finding is included only if the detective seat is still alive after eliminations are applied",
-        "tests/core/test_night_resolution.py covers: protect saves; protect mismatched → death occurs; no kill, no protect; detective dies same night → finding suppressed; detective lives → finding queued",
+        "tests/core/test_night_resolution.py covers: protect saves; protect mismatched \u2192 death occurs; no kill, no protect; detective dies same night \u2192 finding suppressed; detective lives \u2192 finding queued",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -240,8 +240,8 @@
       "description": "As the engine, I need a pure function that checks Town / Mafia / Draw conditions after every elimination and at MAX_DAYS exhaustion.",
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/win_conditions.py with `check_win(state) -> WinResult | None` returning ('TOWN', reason) when alive_mafia==0; ('MAFIA', reason) when alive_mafia >= alive_town; ('DRAW', 'MAX_DAYS_REACHED') when day > MAX_DAYS and no prior winner; None otherwise",
-        "Function is pure — does not mutate state",
-        "tests/core/test_win_conditions.py covers: last mafia eliminated → TOWN; 1-mafia vs 1-town parity → MAFIA; 2-mafia vs 3-town no winner → None; day 5 ends with no winner → DRAW; checking after terminal state is idempotent",
+        "Function is pure \u2014 does not mutate state",
+        "tests/core/test_win_conditions.py covers: last mafia eliminated \u2192 TOWN; 1-mafia vs 1-town parity \u2192 MAFIA; 2-mafia vs 3-town no winner \u2192 None; day 5 ends with no winner \u2192 DRAW; checking after terminal state is idempotent",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -257,7 +257,7 @@
       "acceptanceCriteria": [
         "Create src/padrino/core/engine/events.py with a Pydantic discriminated-union `Event` over: GameCreated, RolesAssigned, PhaseStarted, PublicMessageSubmitted, PrivateMessageSubmitted, VoteSubmitted, MafiaKillVoteSubmitted, ProtectSubmitted, InvestigateSubmitted, ActionTimedOut, OutputTruncated, OutputInvalid, DayVoteResolved, NightResolved, DetectiveResultDelivered, PlayerEliminated, PhaseResolved, GameTerminated",
         "Each event carries: event_type (literal), sequence (int), phase (str), visibility ('PUBLIC' | 'PRIVATE' | 'SYSTEM'), actor_player_id (str | None), payload (model-specific fields)",
-        "Events are frozen Pydantic models with strict types — no Any payloads",
+        "Events are frozen Pydantic models with strict types \u2014 no Any payloads",
         "tests/core/test_events.py round-trips every event type through canonical JSON and back",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
@@ -275,7 +275,7 @@
         "Create src/padrino/core/engine/event_log.py with `EventLog` class: `append(event_body: dict) -> StoredEvent` (assigns sequence, prev_event_hash, event_hash), `head_hash` property, `events` read-only view",
         "Sequence starts at 0 and is strictly contiguous",
         "First event's prev_event_hash == GENESIS_HASH",
-        "Class is pure (no DB, no clock) — caller supplies any `created_at` value via the event body, and it is excluded from hashing",
+        "Class is pure (no DB, no clock) \u2014 caller supplies any `created_at` value via the event body, and it is excluded from hashing",
         "tests/core/test_event_log.py covers: contiguous sequences; chain validates; tampering a payload field invalidates downstream hashes; head_hash matches last event",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
@@ -326,11 +326,11 @@
       "description": "As the agent contract layer, I need a function that builds the JSON observation given to a seat for a phase, including public events, private events, and legal actions.",
       "acceptanceCriteria": [
         "Create src/padrino/core/observations.py with `build_observation(state, seat, event_log, ruleset) -> Observation` (Pydantic model)",
-        "Observation fields match prd.md §6.1: ruleset_id, game_public_id, phase, day, round, you (player_id/alive/role/faction), alive_players, dead_players (with cause), public_events (most recent 80), private_events (role-appropriate), legal_actions, your_private_memory placeholder, message_limits",
+        "Observation fields match prd.md \u00a76.1: ruleset_id, game_public_id, phase, day, round, you (player_id/alive/role/faction), alive_players, dead_players (with cause), public_events (most recent 80), private_events (role-appropriate), legal_actions, your_private_memory placeholder, message_limits",
         "Mafia seats additionally get mafia_teammates and mafia-channel events",
         "Detective seats additionally get prior eligible inspection results",
         "Doctor seats additionally get previous-night protected target (to enforce no-repeat client-side)",
-        "tests/core/test_observation_builder.py verifies field presence for each role × phase combo and that town never sees mafia teammates or private mafia chat",
+        "tests/core/test_observation_builder.py verifies field presence for each role \u00d7 phase combo and that town never sees mafia teammates or private mafia chat",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -362,10 +362,10 @@
       "description": "As the agent contract layer, I need a Pydantic schema for agent responses that enforces field presence, types, and action consistency before any mechanical resolution.",
       "acceptanceCriteria": [
         "Create src/padrino/core/agents/contract.py with `AgentResponse` Pydantic model: public_message (str | None), private_message (str | None), action (Action with type and target), memory_update (str), rationale_summary (str | None)",
-        "`parse_agent_response(raw_text: str) -> AgentResponse | ResponseError` returns a tagged result — never raises",
-        "Invalid JSON → ResponseError(reason='INVALID_JSON')",
-        "Schema violations → ResponseError(reason='SCHEMA_VIOLATION', details=...)",
-        "Over-limit messages are NOT truncated here — that is the sanitizer's job (US-022)",
+        "`parse_agent_response(raw_text: str) -> AgentResponse | ResponseError` returns a tagged result \u2014 never raises",
+        "Invalid JSON \u2192 ResponseError(reason='INVALID_JSON')",
+        "Schema violations \u2192 ResponseError(reason='SCHEMA_VIOLATION', details=...)",
+        "Over-limit messages are NOT truncated here \u2014 that is the sanitizer's job (US-022)",
         "tests/agents/test_contract.py covers valid response, malformed JSON, missing fields, wrong types, extra unknown fields",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
@@ -381,7 +381,7 @@
       "description": "As the engine, I need deterministic surface normalization on visible chat so cosmetic encoding tricks cannot fingerprint or steganographically signal across messages.",
       "acceptanceCriteria": [
         "Create src/padrino/core/agents/sanitizer.py with `sanitize_visible_text(raw: str, max_chars: int) -> SanitizationResult` (cleaned: str, truncated: bool, replacements: list[str])",
-        "Steps in order: Unicode NFKC normalize → strip zero-width and control characters (except newline) → collapse whitespace runs to single space → limit repeated punctuation to 3 identical → strip markdown code blocks and tables → replace URLs with '[URL]' → replace long base64/hex-like strings (>24 chars) with '[ENCODED]' → enforce max length (truncate suffix)",
+        "Steps in order: Unicode NFKC normalize \u2192 strip zero-width and control characters (except newline) \u2192 collapse whitespace runs to single space \u2192 limit repeated punctuation to 3 identical \u2192 strip markdown code blocks and tables \u2192 replace URLs with '[URL]' \u2192 replace long base64/hex-like strings (>24 chars) with '[ENCODED]' \u2192 enforce max length (truncate suffix)",
         "Both raw and sanitized text are returned so the LLM call archive stores both",
         "tests/agents/test_sanitizer.py covers each transformation in isolation and chained, plus the truncation flag",
         "uv run ruff check . passes",
@@ -399,7 +399,7 @@
       "acceptanceCriteria": [
         "Create src/padrino/core/agents/coercion.py with `coerce_to_safe_action(phase: Phase, error_reason: str) -> Action` returning ABSTAIN in vote phases and NOOP everywhere else",
         "Create `coerce_response_failure(phase: Phase, error_reason: str) -> AgentResponse` returning a response with public_message=None, private_message=None, safe action, memory_update='', rationale_summary=None",
-        "tests/agents/test_coercion.py covers vote phase → ABSTAIN; night actions → NOOP; discussion → NOOP; same regardless of error_reason",
+        "tests/agents/test_coercion.py covers vote phase \u2192 ABSTAIN; night actions \u2192 NOOP; discussion \u2192 NOOP; same regardless of error_reason",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -411,7 +411,7 @@
     {
       "id": "US-024",
       "title": "Async tick barrier with hard timeout",
-      "description": "As the runner, I need a coroutine that builds observations for every eligible seat, dispatches them to the LLM adapter concurrently, and returns the validated responses once every call has either completed or timed out — never earlier.",
+      "description": "As the runner, I need a coroutine that builds observations for every eligible seat, dispatches them to the LLM adapter concurrently, and returns the validated responses once every call has either completed or timed out \u2014 never earlier.",
       "acceptanceCriteria": [
         "Create src/padrino/runner/tick.py with `async def run_tick(state, event_log, eligible_seats, adapter, timeout_s, ruleset) -> dict[str, AgentResponse]`",
         "Uses `asyncio.gather` with per-call `asyncio.wait_for(timeout_s)` so a slow agent cannot block faster agents from running but the gather waits for all",
@@ -448,10 +448,10 @@
     {
       "id": "US-026",
       "title": "Game runner orchestration loop",
-      "description": "As the runner, I need a `GameRunner` that loops phases — build observations, run tick, resolve, write events, check win — until the game terminates.",
+      "description": "As the runner, I need a `GameRunner` that loops phases \u2014 build observations, run tick, resolve, write events, check win \u2014 until the game terminates.",
       "acceptanceCriteria": [
         "Create src/padrino/runner/game_runner.py with `async def run_game(config: GameConfig, adapter: LlmAdapter, ranked: bool) -> GameOutcome` (final_state, event_log, llm_calls)",
-        "Loop order per phase: phase_started event → eligible seats → run_tick → record submission events → resolver → resolution events → win check → next_phase",
+        "Loop order per phase: phase_started event \u2192 eligible seats \u2192 run_tick \u2192 record submission events \u2192 resolver \u2192 resolution events \u2192 win check \u2192 next_phase",
         "Terminates on win/draw OR on day > MAX_DAYS",
         "Each phase yields control via `await asyncio.sleep(0)` so the event loop stays responsive",
         "Reducer is applied after every event so the in-memory state stays consistent",
@@ -504,7 +504,7 @@
       "description": "As the persistence layer, I need SQLAlchemy 2.x async ORM models for model_providers, model_configs, prompt_versions, agent_builds, leagues, gauntlets, gauntlet_roster_slots, games, game_seats.",
       "acceptanceCriteria": [
         "Create src/padrino/db/base.py with `Base = DeclarativeBase` and async session factory",
-        "Create src/padrino/db/models.py with the nine table models matching prd.md §12 (excluding game_events, llm_calls, ratings, rating_events — those come in later stories)",
+        "Create src/padrino/db/models.py with the nine table models matching prd.md \u00a712 (excluding game_events, llm_calls, ratings, rating_events \u2014 those come in later stories)",
         "All UUIDs use `Mapped[uuid.UUID]` with `default=uuid.uuid4`",
         "All timestamps use `Mapped[datetime]` with timezone=True",
         "JSON columns use `JSON` type (SQLite-compatible; Postgres-portable)",
@@ -541,7 +541,7 @@
       "description": "As the API layer, I need async repository classes that encapsulate CRUD for the nine tables from US-029 so routes never touch SQLAlchemy directly.",
       "acceptanceCriteria": [
         "Create src/padrino/db/repositories/ with one module per entity: providers.py, model_configs.py, prompt_versions.py, agent_builds.py, leagues.py, gauntlets.py, games.py",
-        "Each repository exposes `async def create(session, …) -> Model`, `async def get(session, id) -> Model | None`, `async def list(session, filters) -> list[Model]`",
+        "Each repository exposes `async def create(session, \u2026) -> Model`, `async def get(session, id) -> Model | None`, `async def list(session, filters) -> list[Model]`",
         "gauntlet repository includes `async def add_roster_slot(session, gauntlet_id, slot_index, agent_build_id)`",
         "games repository includes `async def list_by_gauntlet(session, gauntlet_id)`",
         "tests/db/test_repositories.py runs end-to-end CRUD against an in-memory aiosqlite DB for each repository",
@@ -558,10 +558,10 @@
       "title": "Event and llm_call persistence wired to runner",
       "description": "As the runner, I need to persist each event and each LLM call to the DB as the game runs so transcripts and replays survive a process restart.",
       "acceptanceCriteria": [
-        "Extend src/padrino/db/models.py with `GameEvent` and `LlmCall` models matching prd.md §12",
+        "Extend src/padrino/db/models.py with `GameEvent` and `LlmCall` models matching prd.md \u00a712",
         "Add alembic migration 0002 creating those two tables",
         "Create src/padrino/db/repositories/events.py with `append_event(session, game_id, event_body) -> GameEvent` and `list_events(session, game_id, visibility_filter)`",
-        "Create src/padrino/db/repositories/llm_calls.py with `record_call(session, …)` capturing request_json, raw_response, parsed_response, latency_ms, tokens, cost, provider_response_id, status, error",
+        "Create src/padrino/db/repositories/llm_calls.py with `record_call(session, \u2026)` capturing request_json, raw_response, parsed_response, latency_ms, tokens, cost, provider_response_id, status, error",
         "Wire GameRunner (US-026) to call these repositories after every event/LLM call",
         "tests/db/test_event_persistence.py runs a short scripted game with a real aiosqlite DB and asserts the persisted event chain matches the in-memory event log",
         "uv run ruff check . passes",
@@ -577,7 +577,7 @@
       "title": "Ratings and rating_events persistence",
       "description": "As the rating layer, I need the ratings and rating_events tables plus their repository so OpenSkill updates can be persisted and audited.",
       "acceptanceCriteria": [
-        "Add `Rating` and `RatingEvent` ORM models matching prd.md §12",
+        "Add `Rating` and `RatingEvent` ORM models matching prd.md \u00a712",
         "Add alembic migration 0003 for these tables with the unique constraint on (league_id, agent_build_id, scope_type, scope_value)",
         "Create src/padrino/db/repositories/ratings.py with `get_or_create_rating`, `update_rating`, `record_rating_event`",
         "tests/db/test_ratings_repo.py covers create, update, audit-log insertion, and the unique constraint",
@@ -616,7 +616,7 @@
         "Both attempts are recorded as separate LlmCall rows (status='OK', 'FALLBACK_OK', 'PRIMARY_FAILED', or 'BOTH_FAILED')",
         "Latency, input_tokens, output_tokens, and cost_usd are extracted from the LiteLLM response when present",
         "Response body is parsed via AgentResponse contract (US-021); failures coerced via US-023",
-        "tests/llm/test_litellm_adapter.py uses unittest.mock to stub litellm.acompletion and verifies: success path; primary failure → fallback success; both failures → coerced safe response with status='BOTH_FAILED'",
+        "tests/llm/test_litellm_adapter.py uses unittest.mock to stub litellm.acompletion and verifies: success path; primary failure \u2192 fallback success; both failures \u2192 coerced safe response with status='BOTH_FAILED'",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -671,9 +671,9 @@
         "Updates two scopes per agent_build: scope_type='GLOBAL' / scope_value='global' and scope_type='FACTION' / scope_value in {'TOWN','MAFIA'}",
         "Uses OpenSkill's `PlackettLuce` model with initial mu=25.0, sigma=25/3",
         "Town team = list of seats where faction==TOWN; Mafia team = MAFIA",
-        "Town win → ranks [Town=1, Mafia=2]; Mafia win → [Mafia=1, Town=2]; Draw → equal ranks",
+        "Town win \u2192 ranks [Town=1, Mafia=2]; Mafia win \u2192 [Mafia=1, Town=2]; Draw \u2192 equal ranks",
         "conservative_score = mu - 3*sigma persisted on every update",
-        "tests/ratings/test_openskill_service.py covers winner mu↑, loser mu↓, sigma↓ after rated game, draw equal-rank, role-family scope NOT updated in v1",
+        "tests/ratings/test_openskill_service.py covers winner mu\u2191, loser mu\u2193, sigma\u2193 after rated game, draw equal-rank, role-family scope NOT updated in v1",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -708,7 +708,7 @@
         "Marks gauntlet status='COMPLETED' once all child games are terminal",
         "Provisional flag per agent_build: provisional=True if total_games < 30 OR mafia_games < 5 OR town_games < 15",
         "Returns aggregate diagnostics: games_completed, timeout_rate, invalid_action_rate, average_public_message_chars",
-        "tests/gauntlets/test_completion.py covers all-games-terminal → COMPLETED, mid-progress → returns None, provisional threshold computation",
+        "tests/gauntlets/test_completion.py covers all-games-terminal \u2192 COMPLETED, mid-progress \u2192 returns None, provisional threshold computation",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
@@ -794,7 +794,7 @@
       "title": "Leaderboard route with provisional flag",
       "description": "As the API layer, I need GET /leagues/{id}/leaderboard returning OpenSkill global + faction scores per agent build with a provisional flag.",
       "acceptanceCriteria": [
-        "GET /leagues/{id}/leaderboard returns the JSON contract from prd.md §10.4: leaderboard_id, ruleset_id, prompt_version, rating_model, entries[]",
+        "GET /leagues/{id}/leaderboard returns the JSON contract from prd.md \u00a710.4: leaderboard_id, ruleset_id, prompt_version, rating_model, entries[]",
         "Each entry includes: agent_build_id, display_name, games, wins, draws, losses, mu, sigma, conservative_score, timeout_rate, invalid_action_rate, public_message_avg_chars, provisional",
         "role_family_breakdown field is present but empty {} in v1 (placeholder for v1.1)",
         "Sorted by conservative_score desc",
@@ -828,10 +828,10 @@
     {
       "id": "US-047",
       "title": "Coverage gate and core engine purity check",
-      "description": "As the project, I need CI to enforce ≥85% coverage on the core engine and verify no impure imports leak in.",
+      "description": "As the project, I need CI to enforce \u226585% coverage on the core engine and verify no impure imports leak in.",
       "acceptanceCriteria": [
         "Update CI workflow to fail if coverage on src/padrino/core/** drops below 85%",
-        "Add tests/core/test_purity.py that walks src/padrino/core/ with `ast` and asserts no module imports: padrino.db, padrino.llm, padrino.api, padrino.runner, sqlalchemy, litellm, httpx, random, secrets, asyncio, datetime (datetime.timezone is OK if only used for type hints — flag with comment if needed)",
+        "Add tests/core/test_purity.py that walks src/padrino/core/ with `ast` and asserts no module imports: padrino.db, padrino.llm, padrino.api, padrino.runner, sqlalchemy, litellm, httpx, random, secrets, asyncio, datetime (datetime.timezone is OK if only used for type hints \u2014 flag with comment if needed)",
         "Add tests/core/test_no_wallclock.py that asserts no `datetime.utcnow`, `datetime.now`, `time.time` call sites under src/padrino/core/",
         "Update README quickstart with the coverage command",
         "uv run ruff check . passes",
@@ -844,12 +844,12 @@
     },
     {
       "id": "US-048",
-      "title": "Observability hooks across gauntlet → game → phase → llm_call",
+      "title": "Observability hooks across gauntlet \u2192 game \u2192 phase \u2192 llm_call",
       "description": "As an operator, I need structured-log traces that connect a gauntlet to its games, each game to its phases, each phase to its LLM calls and events so diagnostics are tractable.",
       "acceptanceCriteria": [
         "Use structlog contextvars to bind gauntlet_id, game_id, phase_id, llm_call_id at the right levels in the runner / gauntlet scheduler / LiteLLM adapter",
-        "Emit structured events: game.started, phase.started, llm.call.started, llm.call.completed, llm.call.timeout, phase.resolved, game.completed, rating.updated — each at structlog INFO with the correlated IDs",
-        "Add a metrics-summary helper that aggregates: games completed, average phase duration, LLM latency p50/p95 per model, timeout rate, invalid JSON rate — exposed via `padrino metrics` CLI subcommand reading from the DB",
+        "Emit structured events: game.started, phase.started, llm.call.started, llm.call.completed, llm.call.timeout, phase.resolved, game.completed, rating.updated \u2014 each at structlog INFO with the correlated IDs",
+        "Add a metrics-summary helper that aggregates: games completed, average phase duration, LLM latency p50/p95 per model, timeout rate, invalid JSON rate \u2014 exposed via `padrino metrics` CLI subcommand reading from the DB",
         "tests/observability/test_logging_context.py captures structlog output and asserts the correlation IDs propagate",
         "uv run ruff check . passes",
         "uv run mypy src tests passes",
