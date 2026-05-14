@@ -571,8 +571,8 @@
         "uv run pytest -m \"not integration\" passes"
       ],
       "priority": 32,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "LlmCall.agent_build_id is nullable in v1: the runner has no per-seat build mapping today. A later gauntlet/scheduler story will populate it for ranked runs via GamePersistence.agent_builds."
     },
     {
       "id": "US-033",

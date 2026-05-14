@@ -1,0 +1,63 @@
+"""CRUD helpers for :class:`padrino.db.models.GameEvent`.
+
+The runner appends events here as the game runs, paralleling the in-memory
+:class:`padrino.core.engine.event_log.EventLog`. Persisted rows carry the
+full hash-chain envelope (``sequence``, ``prev_event_hash``, ``event_hash``)
+plus the event body fields, so the DB row alone is sufficient to verify the
+chain.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from padrino.db.models import GameEvent
+
+
+async def append_event(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    sequence: int,
+    event_type: str,
+    phase: str,
+    visibility: str,
+    actor_player_id: str | None,
+    payload: dict[str, Any],
+    prev_event_hash: str,
+    event_hash: str,
+) -> GameEvent:
+    """Insert one event row and return the persisted ORM object."""
+    obj = GameEvent(
+        game_id=game_id,
+        sequence=sequence,
+        event_type=event_type,
+        phase=phase,
+        visibility=visibility,
+        actor_player_id=actor_player_id,
+        payload=payload,
+        prev_event_hash=prev_event_hash,
+        event_hash=event_hash,
+    )
+    session.add(obj)
+    await session.flush()
+    return obj
+
+
+async def list_events(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+    *,
+    visibility_filter: str | None = None,
+) -> list[GameEvent]:
+    """Return all events for ``game_id`` in sequence order, optionally filtered."""
+    stmt = select(GameEvent).where(GameEvent.game_id == game_id)
+    if visibility_filter is not None:
+        stmt = stmt.where(GameEvent.visibility == visibility_filter)
+    stmt = stmt.order_by(GameEvent.sequence)
+    result = await session.execute(stmt)
+    return list(result.scalars())

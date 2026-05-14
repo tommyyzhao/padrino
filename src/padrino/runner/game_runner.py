@@ -26,14 +26,17 @@ Impure runner module; pure-core code does not import it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.core.agents.contract import AgentResponse
-from padrino.core.engine.event_log import EventLog
+from padrino.core.agents.contract import AgentResponse, ResponseError
+from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.events import EventAdapter
 from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.engine.phases import next_phase
@@ -44,8 +47,10 @@ from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED, check_win
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role
-from padrino.core.observations import format_phase_id
+from padrino.core.observations import Observation, format_phase_id
 from padrino.core.rulesets import mini7_v1
+from padrino.db.repositories import events as events_repo
+from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.runner.tick import run_tick
 
@@ -54,6 +59,22 @@ CAUSE_DAY_VOTE: Final[str] = "day_vote"
 CAUSE_NIGHT_KILL: Final[str] = "night_kill"
 
 _RULESETS: Final[dict[str, Any]] = {mini7_v1.RULESET_ID: mini7_v1}
+
+
+@dataclass(frozen=True, slots=True)
+class GamePersistence:
+    """Optional persistence target for :func:`run_game`.
+
+    When passed, every event flowing through ``_emit`` is mirrored to the
+    ``game_events`` table and every adapter call is mirrored to the
+    ``llm_calls`` table. ``agent_builds`` maps ``public_player_id`` → build
+    UUID for llm_call attribution; unmapped seats persist with
+    ``agent_build_id = NULL``.
+    """
+
+    session_factory: async_sessionmaker[AsyncSession]
+    game_id: uuid.UUID
+    agent_builds: Mapping[str, uuid.UUID] = field(default_factory=dict)
 
 
 class GameConfig(BaseModel):
@@ -77,17 +98,30 @@ class GameOutcome:
 
 
 class _RecordingAdapter:
-    """Wraps an :class:`LlmAdapter` so every :class:`AdapterResult` is captured."""
+    """Wraps an :class:`LlmAdapter` so every :class:`AdapterResult` is captured.
 
-    __slots__ = ("_inner", "_sink")
+    When ``persistence`` is supplied, each call is also mirrored to the
+    ``llm_calls`` table inside its own transaction. Failures still produce a
+    persisted row so audit logs remain complete.
+    """
 
-    def __init__(self, inner: LlmAdapter, sink: list[AdapterResult]) -> None:
+    __slots__ = ("_inner", "_persistence", "_sink")
+
+    def __init__(
+        self,
+        inner: LlmAdapter,
+        sink: list[AdapterResult],
+        persistence: GamePersistence | None,
+    ) -> None:
         self._inner = inner
         self._sink = sink
+        self._persistence = persistence
 
-    async def complete(self, observation: Any) -> AdapterResult:
+    async def complete(self, observation: Observation) -> AdapterResult:
         result = await self._inner.complete(observation)
         self._sink.append(result)
+        if self._persistence is not None:
+            await _persist_llm_call(self._persistence, observation, result)
         return result
 
 
@@ -106,6 +140,67 @@ def _emit(
     event_log.append(sealed)
     event = EventAdapter.validate_python(sealed)
     return apply_event(state, event)
+
+
+async def _persist_stored_event(
+    persistence: GamePersistence,
+    stored: StoredEvent,
+) -> None:
+    body = stored.body
+    async with persistence.session_factory() as session, session.begin():
+        await events_repo.append_event(
+            session,
+            game_id=persistence.game_id,
+            sequence=stored.sequence,
+            event_type=body["event_type"],
+            phase=body["phase"],
+            visibility=body["visibility"],
+            actor_player_id=body.get("actor_player_id"),
+            payload=dict(body.get("payload", {})),
+            prev_event_hash=stored.prev_event_hash,
+            event_hash=stored.event_hash,
+        )
+
+
+def _request_prompt_hash(observation: Observation) -> str:
+    raw = observation.model_dump_json().encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _parsed_response_to_json(result: AdapterResult) -> dict[str, Any] | None:
+    parsed = result.parsed_response
+    if isinstance(parsed, AgentResponse):
+        return parsed.model_dump(mode="json")
+    if isinstance(parsed, ResponseError):
+        return parsed.model_dump(mode="json")
+    return None
+
+
+async def _persist_llm_call(
+    persistence: GamePersistence,
+    observation: Observation,
+    result: AdapterResult,
+) -> None:
+    request_json = observation.model_dump(mode="json")
+    async with persistence.session_factory() as session, session.begin():
+        await llm_calls_repo.record_call(
+            session,
+            game_id=persistence.game_id,
+            agent_build_id=persistence.agent_builds.get(observation.you.player_id),
+            public_player_id=observation.you.player_id,
+            phase=observation.phase,
+            request_json=request_json,
+            request_prompt_hash=_request_prompt_hash(observation),
+            status=result.status,
+            raw_response=result.raw_response,
+            parsed_response=_parsed_response_to_json(result),
+            error=result.error,
+            latency_ms=result.latency_ms,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost_usd=result.cost_usd,
+            provider_response_id=result.provider_response_id,
+        )
 
 
 def _eligible_seats(state: GameState) -> list[Seat]:
@@ -316,16 +411,36 @@ async def run_game(
     config: GameConfig,
     adapter: LlmAdapter,
     ranked: bool,
+    *,
+    persistence: GamePersistence | None = None,
 ) -> GameOutcome:
-    """Run a full game start-to-finish and return the recorded outcome."""
+    """Run a full game start-to-finish and return the recorded outcome.
+
+    When ``persistence`` is supplied, every event flowing through the runner
+    is also persisted to the ``game_events`` table and every LLM call is
+    persisted to ``llm_calls``. The in-memory event log and DB rows stay in
+    lockstep — failure to persist propagates as an exception.
+    """
     ruleset = _RULESETS[config.ruleset_id]
     event_log = EventLog()
     llm_calls: list[AdapterResult] = []
-    recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls)
+    recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls, persistence)
     state = initial_state()
 
+    async def emit_and_persist(body: dict[str, Any], game_state: GameState) -> GameState:
+        next_state = _emit(body, game_state, event_log)
+        if persistence is not None:
+            await _persist_stored_event(persistence, event_log.events[-1])
+        return next_state
+
+    async def persist_pending_events(log_before: int) -> None:
+        if persistence is None:
+            return
+        for stored in event_log.events[log_before:]:
+            await _persist_stored_event(persistence, stored)
+
     # GameCreated
-    state = _emit(
+    state = await emit_and_persist(
         {
             "event_type": "GameCreated",
             "phase": "SETUP",
@@ -339,11 +454,10 @@ async def run_game(
             },
         },
         state,
-        event_log,
     )
 
     seats = assign_roles(config.game_seed, ruleset)
-    state = _emit(
+    state = await emit_and_persist(
         {
             "event_type": "RolesAssigned",
             "phase": "SETUP",
@@ -362,14 +476,13 @@ async def run_game(
             },
         },
         state,
-        event_log,
     )
 
     current_phase = next_phase(state.current_phase, ruleset)
 
     while True:
         if current_phase.kind is PhaseKind.TERMINAL:
-            state = _emit(
+            state = await emit_and_persist(
                 {
                     "event_type": "GameTerminated",
                     "phase": "TERMINAL",
@@ -381,12 +494,11 @@ async def run_game(
                     },
                 },
                 state,
-                event_log,
             )
             break
 
         phase_id = format_phase_id(current_phase)
-        state = _emit(
+        state = await emit_and_persist(
             {
                 "event_type": "PhaseStarted",
                 "phase": phase_id,
@@ -399,12 +511,12 @@ async def run_game(
                 },
             },
             state,
-            event_log,
         )
 
         eligible = _eligible_seats(state)
         responses: dict[str, AgentResponse] = {}
         if eligible:
+            log_before = len(event_log.events)
             responses = await run_tick(
                 state,
                 event_log,
@@ -414,6 +526,10 @@ async def run_game(
                 ruleset=ruleset,
                 ranked=ranked,
             )
+            # run_tick appends failure events (ActionTimedOut / OutputInvalid)
+            # directly to event_log without folding through emit_and_persist;
+            # mirror them to the DB now so the persisted chain stays complete.
+            await persist_pending_events(log_before)
 
         for seat in eligible:
             response = responses.get(seat.public_player_id)
@@ -426,16 +542,16 @@ async def run_game(
                 phase_id,
                 current_phase.round,
             ):
-                state = _emit(body, state, event_log)
+                state = await emit_and_persist(body, state)
 
         if current_phase.kind is PhaseKind.DAY_VOTE:
             for body in _resolve_day_vote_events(state, responses, phase_id):
-                state = _emit(body, state, event_log)
+                state = await emit_and_persist(body, state)
         elif current_phase.kind is PhaseKind.NIGHT_ACTIONS:
             for body in _resolve_night_events(state, responses, phase_id):
-                state = _emit(body, state, event_log)
+                state = await emit_and_persist(body, state)
 
-        state = _emit(
+        state = await emit_and_persist(
             {
                 "event_type": "PhaseResolved",
                 "phase": phase_id,
@@ -444,12 +560,11 @@ async def run_game(
                 "payload": {"resolved_phase": phase_id},
             },
             state,
-            event_log,
         )
 
         win = check_win(state, ruleset)
         if win is not None:
-            state = _emit(
+            state = await emit_and_persist(
                 {
                     "event_type": "GameTerminated",
                     "phase": phase_id,
@@ -458,7 +573,6 @@ async def run_game(
                     "payload": {"winner": win.winner, "reason": win.reason},
                 },
                 state,
-                event_log,
             )
             break
 
@@ -478,5 +592,6 @@ __all__ = [
     "MAFIA_CHANNEL_ID",
     "GameConfig",
     "GameOutcome",
+    "GamePersistence",
     "run_game",
 ]

@@ -1,11 +1,9 @@
 """SQLAlchemy 2.x ORM models for Padrino's core schema (prd.md §12).
 
-This module covers the nine tables required for build/league/gauntlet/game
-metadata: ``model_providers``, ``model_configs``, ``prompt_versions``,
+Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``agent_builds``, ``leagues``, ``gauntlets``, ``gauntlet_roster_slots``,
-``games``, ``game_seats``. The append-only ``game_events`` table, the
-``llm_calls`` table, and the ratings tables are intentionally deferred
-to later stories.
+``games``, ``game_seats``, ``game_events``, ``llm_calls``. The ratings tables
+are intentionally deferred to a later story.
 """
 
 from __future__ import annotations
@@ -179,13 +177,66 @@ class GameSeat(Base):
     death_phase: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class GameEvent(Base):
+    __tablename__ = "game_events"
+    __table_args__ = (UniqueConstraint("game_id", "sequence", name="uq_game_event_sequence"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    visibility: Mapped[str] = mapped_column(String, nullable=False)
+    actor_player_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    prev_event_hash: Mapped[str] = mapped_column(String, nullable=False)
+    event_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class LlmCall(Base):
+    __tablename__ = "llm_calls"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    event_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("game_events.id"), nullable=True
+    )
+    # ``agent_build_id`` is nullable in v1: the runner currently runs through a
+    # single LlmAdapter without a per-seat build mapping. A later story
+    # (gauntlet scheduler) will populate it for ranked runs.
+    agent_build_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=True
+    )
+    public_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    request_prompt_hash: Mapped[str] = mapped_column(String, nullable=False)
+    raw_response: Mapped[str | None] = mapped_column(String, nullable=True)
+    parsed_response: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Numeric(asdecimal=False), nullable=True)
+    provider_response_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 __all__ = [
     "AgentBuild",
     "Game",
+    "GameEvent",
     "GameSeat",
     "Gauntlet",
     "GauntletRosterSlot",
     "League",
+    "LlmCall",
     "ModelConfig",
     "ModelProvider",
     "PromptVersion",

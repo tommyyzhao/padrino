@@ -24,6 +24,8 @@ EXPECTED_TABLES = {
     "gauntlet_roster_slots",
     "games",
     "game_seats",
+    "game_events",
+    "llm_calls",
 }
 
 
