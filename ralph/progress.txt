@@ -172,3 +172,14 @@ Thread: <url>
   - Use `next((s for s in state.seats if s.role is Role.X), None)` for unique role lookups in composers — short, readable, and matches the pattern already used inside doctor/detective resolvers.
 ---
 
+## 2026-05-14T03:15 - US-014
+- Added `src/padrino/core/engine/win_conditions.py`: frozen Pydantic `WinResult(winner: Literal["TOWN","MAFIA","DRAW"], reason: str)` plus pure `check_win(state, ruleset)`. Priority order: (1) `alive_mafia == 0` → TOWN/ALL_MAFIA_ELIMINATED, (2) `alive_mafia >= alive_town` → MAFIA/PARITY_REACHED, (3) `state.day > ruleset.MAX_DAYS` → DRAW/MAX_DAYS_REACHED, else None. Reason strings exposed as module constants. `Ruleset` is a `Protocol` with `MAX_DAYS: int` — mini7_v1 satisfies it structurally.
+- `tests/core/test_win_conditions.py`: 14 tests covering town win when all mafia dead, 1v1 parity → MAFIA, 2v1 mafia advantage, 2v3 town majority → None, initial 2v5 → None, day=MAX_DAYS+1 draw, day=MAX_DAYS exact → None, town/mafia priority over MAX_DAYS, idempotency after `terminal_result` is stamped, non-mutation, WinResult frozen, 0-vs-0 edge case → TOWN.
+- Files changed: `src/padrino/core/engine/win_conditions.py`, `tests/core/test_win_conditions.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The acceptance-criterion signature `check_win(state) -> WinResult | None` is pseudo — adding a `ruleset: Ruleset` Protocol param (matching `phases.py`'s pattern) is fine and is the established way to keep `MAX_DAYS` out of state. Future engine-level pure functions should follow the same Protocol-injection idiom rather than reading the ruleset id off `state.ruleset_id` and re-importing.
+  - The function deliberately ignores `state.terminal_result` — idempotency falls out of pure recomputation from alive counts and `state.day`. Do not branch on `terminal_result` here; the reducer (US-017) is responsible for stamping the terminal fields exactly once.
+  - Priority order matters when multiple conditions hold (e.g., town win + day past MAX_DAYS): TOWN > MAFIA > DRAW. If the parity check fired before the alive_mafia==0 check, a 0v0 edge case would incorrectly return MAFIA (0 >= 0). Keep the TOWN-first ordering.
+  - `Literal["TOWN","MAFIA","DRAW"]` on `WinResult.winner` makes mypy ratify downstream `match`/`if` exhaustiveness — downstream callers should keep the literal narrow and not widen to `str`.
+---
+
