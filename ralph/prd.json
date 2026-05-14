@@ -1,0 +1,863 @@
+{
+  "project": "Padrino",
+  "branchName": "ralph/padrino-v1",
+  "description": "Deterministic LLM benchmark and league engine for Mafia-style social deduction. v1 implements the mini7_v1 ruleset (2 Mafia, 1 Detective, 1 Doctor, 3 Villagers), an event-sourced replayable engine, a multi-provider LLM adapter (Cerebras zai-glm-4.7 primary, DeepInfra deepseek-ai/DeepSeek-V4-Flash fallback) via LiteLLM, an async tick-barrier game runner, SQLAlchemy 2.x async persistence over SQLite (Postgres-portable), OpenSkill ratings over clone gauntlets, and a FastAPI admin/spectator API. Backend-only — quality gates are ruff + mypy + pytest, no browser verification.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Settings module and structured logging",
+      "description": "As an engineer, I need typed configuration loaded from .env and a JSON logger so every later module gets a consistent way to read settings and emit traces.",
+      "acceptanceCriteria": [
+        "Create src/padrino/settings.py with a `Settings` BaseSettings class (pydantic-settings) that loads CEREBRAS_API_KEY, DEEPINFRA_API_KEY, PADRINO_DB_URL, PADRINO_LOG_LEVEL, PADRINO_LLM_TIMEOUT_SECONDS, PADRINO_TEMPERATURE, PADRINO_TOP_P, PADRINO_PRIMARY_MODEL, PADRINO_FALLBACK_MODEL from environment with sensible defaults matching .env.example",
+        "Settings is exposed via a cached `get_settings()` accessor (functools.lru_cache)",
+        "Create src/padrino/logging.py with `configure_logging(level: str)` using structlog → JSON renderer, idempotent so repeated calls are safe",
+        "tests/test_settings.py verifies defaults, env-var overrides via monkeypatch, and that get_settings() returns the same instance",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Domain enums and mini7_v1 ruleset constants",
+      "description": "As an engineer, I need a single source of truth for factions, roles, role families, phases, action types, and the mini7_v1 numeric constants so every later module references the same vocabulary.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/enums.py with StrEnum classes: Faction (TOWN, MAFIA), Role (MAFIA_GOON, DETECTIVE, DOCTOR, VILLAGER), RoleFamily (DECEPTIVE, INVESTIGATIVE, PROTECTIVE, VANILLA_TOWN), ActionType (NOOP, ABSTAIN, VOTE, MAFIA_KILL, PROTECT, INVESTIGATE), PhaseKind (SETUP, NIGHT_0_MAFIA_INTRO, DAY_DISCUSSION, DAY_VOTE, NIGHT_MAFIA_DISCUSSION, NIGHT_ACTIONS, TERMINAL)",
+        "Create src/padrino/core/rulesets/mini7_v1.py exporting: RULESET_ID='mini7_v1', PLAYER_COUNT=7, ROLE_COUNTS={MAFIA_GOON:2, DETECTIVE:1, DOCTOR:1, VILLAGER:3}, DISCUSSION_ROUNDS_PER_DAY=3, MAX_DAYS=5, PUBLIC_MESSAGE_MAX_CHARS=600, PRIVATE_MESSAGE_MAX_CHARS=600, MEMORY_UPDATE_MAX_CHARS=1200, PUBLIC_TRANSCRIPT_RECENT_MESSAGE_LIMIT=80, LLM_TIMEOUT_SECONDS=45, TEMPERATURE=0.7, TOP_P=1.0",
+        "Helper `role_family_for(role: Role) -> RoleFamily` and `faction_for(role: Role) -> Faction` defined and tested",
+        "tests/core/test_mini7_constants.py verifies role counts sum to PLAYER_COUNT, all roles have a family, and ruleset is importable as a frozen namespace",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Canonical JSON serializer",
+      "description": "As the engine, I need a deterministic JSON encoder so every event hash is reproducible across machines and Python versions.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/canonical_json.py exposing `canonical_dumps(obj: Any) -> bytes`",
+        "Output is UTF-8 with sorted object keys, no insignificant whitespace, ensure_ascii=False, and rejects float values (raises TypeError) — encode numerics as int or string",
+        "Datetimes are rejected (raise TypeError) — caller must pre-serialize timestamps to ISO strings if needed",
+        "tests/core/test_canonical_json.py covers: key ordering stable across dict insertion order, nested dicts/lists, unicode strings preserved, float raises, bytes raises, identical inputs produce byte-identical output",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Seeded deterministic RNG",
+      "description": "As the engine, I need a pure SHA-256-based RNG so role assignments, reveal orders, and any random choice are reproducible from a seed without using Python's `random` module.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/rng.py with class `SeededRng(seed: str | bytes)` exposing: `next_bytes(n: int) -> bytes`, `randbelow(n: int) -> int` (rejection sampling, never modulo-bias), `shuffle(items: list[T]) -> list[T]` (Fisher-Yates returning new list), `choice(items: Sequence[T]) -> T`",
+        "Implementation derives each draw from sha256(seed_bytes + counter.to_bytes(8))",
+        "Module-level static assertion / test that `import random` is NOT imported by rng.py",
+        "tests/core/test_rng.py verifies: same seed produces same sequence; different seeds produce different sequences; randbelow output strictly in [0, n); shuffle preserves multiset; rng.py does not import `random` (check via ast)",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Hash-chain event hashing function",
+      "description": "As the engine, I need a function that derives `event_hash` from `prev_event_hash` plus the canonical-JSON body of an event (excluding the hash field and timestamps) so every game produces a tamper-evident audit log.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/hashing.py with `compute_event_hash(prev_event_hash: str, event_body: Mapping[str, Any]) -> str` returning hex digest",
+        "Function strips keys 'event_hash', 'prev_event_hash', and 'created_at' from event_body before hashing",
+        "Function uses canonical_dumps from US-003 to ensure deterministic input bytes",
+        "`GENESIS_HASH` constant = '0' * 64 is exported and used for the first event in a chain",
+        "tests/core/test_hashing.py verifies: same input produces same hash; tampering any non-excluded field changes hash; tampering excluded fields does NOT change hash; chain of three events validates when each prev matches the predecessor",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Game state Pydantic models and phase FSM",
+      "description": "As the engine, I need frozen Pydantic state models (Seat, GameState, Phase) and a phase-sequence function so resolvers operate on a typed snapshot.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/state.py with frozen Pydantic models: `Seat` (public_player_id, seat_index, role, faction, alive, death_phase | None, last_protected_target | None, queued_inspection_result | None), `Phase` (kind, day, round), `GameState` (ruleset_id, game_id, game_seed, current_phase, seats, day, terminal_result | None, terminal_reason | None)",
+        "Helpers on GameState: `living_seats()`, `living_seats_by_faction(f)`, `seat_by_public_id(id)`, `alive_count_by_faction(f)`",
+        "Create src/padrino/core/engine/phases.py with `next_phase(current: Phase, ruleset) -> Phase` implementing the mini7_v1 sequence: SETUP → NIGHT_0_MAFIA_INTRO → DAY_1_DISCUSSION_ROUND_1 → ROUND_2 → ROUND_3 → DAY_1_VOTE → NIGHT_1_MAFIA_DISCUSSION → NIGHT_1_ACTIONS → DAY_2_… up to MAX_DAYS=5",
+        "tests/core/test_state.py and tests/core/test_phases.py cover model immutability (mutation raises), helpers, and full phase-sequence enumeration without exceeding MAX_DAYS",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Role assignment from seed",
+      "description": "As the engine, I need a deterministic function that turns a game seed into a 7-seat role assignment so every clone-game with the same seed produces the same roster.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/role_assignment.py with `assign_roles(game_seed: str, ruleset) -> list[Seat]` returning 7 seats with public_player_ids P01..P07, seat_index 0..6, and exactly 2 MAFIA_GOON / 1 DETECTIVE / 1 DOCTOR / 3 VILLAGER",
+        "Implementation uses SeededRng(role_seed=sha256(b'roles' + game_seed.encode())) and Fisher-Yates over the canonical role multiset",
+        "All seats start alive=True, death_phase=None, last_protected_target=None, queued_inspection_result=None",
+        "tests/core/test_role_assignment.py verifies: same seed → same assignment; different seeds → different assignments (with overwhelming probability across 100 trials); role counts always exact; public_player_ids unique and 'P01'..'P07'",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Legal action computation per role and phase",
+      "description": "As the agent contract layer, I need a pure function that returns the legal action types and legal targets for a given player and phase so observation prompts and response validation share one source of truth.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/legal_actions.py with `legal_actions_for(state: GameState, seat: Seat) -> LegalActions` returning a Pydantic model with `allowed_action_types: list[ActionType]` and `legal_targets: list[str]`",
+        "Discussion phases: only NOOP, legal_targets=[]",
+        "Vote phase: VOTE (targets = living seats other than self) plus ABSTAIN",
+        "Mafia discussion phase: only NOOP for mafia, nothing for town (town seats not eligible)",
+        "Night actions phase: mafia → MAFIA_KILL targets = living non-mafia; doctor → PROTECT targets = living seats including self EXCEPT last_protected_target; detective → INVESTIGATE targets = living seats other than self; villagers → NOOP only",
+        "Dead seats → empty allowed types (caller must skip them)",
+        "tests/core/test_legal_actions.py covers every role × every phase × alive/dead and confirms the doctor consecutive-protect constraint",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Day vote resolver",
+      "description": "As the engine, I need a pure resolver that takes the set of submitted votes and returns the elimination result so day-vote tests are isolated from runner / event-log concerns.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/resolvers/day_vote.py with `resolve_day_vote(state, submissions: Mapping[str, Action]) -> DayVoteResult` (eliminated: str | None, vote_tally: dict[str, int], reason: str)",
+        "Invalid targets (dead, non-existent, self-vote) become ABSTAIN with reason logged in result",
+        "Unique plurality of valid votes eliminates that target; ties → eliminated=None; all-abstain → eliminated=None",
+        "Submissions for dead players are ignored",
+        "tests/core/test_day_vote.py covers: unique-winner; 2-2 tie; all-abstain; self-vote → abstain; vote-for-dead → abstain; missing submission → abstain; chat field never read",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Mafia night kill resolver",
+      "description": "As the engine, I need a pure resolver that picks the mafia kill target via unique plurality among living mafia votes.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/resolvers/mafia_kill.py with `resolve_mafia_kill(state, mafia_submissions: Mapping[str, Action]) -> MafiaKillResult` (target: str | None, vote_tally: dict[str, int])",
+        "Targets must be living non-mafia; invalid targets become no vote",
+        "Unique plurality determines target; tie → target=None; no valid votes → target=None",
+        "tests/core/test_mafia_kill.py covers: 2-vote agree; 1v1 tie → no kill; mafia-targets-mafia rejected; dead-mafia submission ignored; missing submissions tolerated",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Doctor protect resolver with no-consecutive-repeat",
+      "description": "As the engine, I need a pure doctor-protect resolver that enforces the rule that the doctor may not protect the same player two nights in a row.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/resolvers/doctor_protect.py with `resolve_doctor_protect(state, doctor_submission: Action | None) -> DoctorProtectResult` (protected: str | None, reason: str)",
+        "If doctor is dead or no submission → protected=None",
+        "If submitted target equals doctor's `last_protected_target` → coerced to NOOP, protected=None, reason='REPEAT_VIOLATION'",
+        "Self-protect is permitted unless it was the previous-night target",
+        "Invalid (non-living) target → NOOP",
+        "tests/core/test_doctor_protect.py covers: first-night any target OK; repeat → NOOP; alternating self / other allowed; dead doctor → None; invalid target → None",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Detective investigate resolver",
+      "description": "As the engine, I need a pure detective-investigate resolver that produces a MAFIA/TOWN result to be queued for next-day delivery only if the detective survives the night.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/resolvers/detective.py with `resolve_detective_investigation(state, detective_submission: Action | None) -> DetectiveResult` (target: str | None, finding: 'MAFIA' | 'TOWN' | None)",
+        "Self-investigation is illegal — coerce to NOOP",
+        "Invalid (non-living, non-existent) target → NOOP",
+        "Finding is 'MAFIA' if target.faction == MAFIA, else 'TOWN'",
+        "Queuing for next-day delivery is the caller's responsibility (this resolver is pure on state)",
+        "tests/core/test_detective.py covers: town target → 'TOWN'; mafia target → 'MAFIA'; self → None; dead target → None; no submission → None",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Night resolution composition",
+      "description": "As the engine, I need a function that composes mafia-kill, doctor-protect, and detective-investigate results into the actual deaths and queued findings for a night.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/resolvers/night.py with `resolve_night(state, all_submissions) -> NightResolution` (eliminated: str | None, protected: str | None, detective_finding: tuple[str, str] | None, mafia_kill_target: str | None)",
+        "If mafia kill target exists and equals protected target → no death (`eliminated=None`)",
+        "Else if mafia kill target exists → that seat is eliminated",
+        "Detective finding is included only if the detective seat is still alive after eliminations are applied",
+        "tests/core/test_night_resolution.py covers: protect saves; protect mismatched → death occurs; no kill, no protect; detective dies same night → finding suppressed; detective lives → finding queued",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Win condition checker",
+      "description": "As the engine, I need a pure function that checks Town / Mafia / Draw conditions after every elimination and at MAX_DAYS exhaustion.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/win_conditions.py with `check_win(state) -> WinResult | None` returning ('TOWN', reason) when alive_mafia==0; ('MAFIA', reason) when alive_mafia >= alive_town; ('DRAW', 'MAX_DAYS_REACHED') when day > MAX_DAYS and no prior winner; None otherwise",
+        "Function is pure — does not mutate state",
+        "tests/core/test_win_conditions.py covers: last mafia eliminated → TOWN; 1-mafia vs 1-town parity → MAFIA; 2-mafia vs 3-town no winner → None; day 5 ends with no winner → DRAW; checking after terminal state is idempotent",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Event type catalog",
+      "description": "As the event-sourcing layer, I need a typed catalog of every event the engine can emit so storage and replay both serialize/deserialize through the same discriminated union.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/events.py with a Pydantic discriminated-union `Event` over: GameCreated, RolesAssigned, PhaseStarted, PublicMessageSubmitted, PrivateMessageSubmitted, VoteSubmitted, MafiaKillVoteSubmitted, ProtectSubmitted, InvestigateSubmitted, ActionTimedOut, OutputTruncated, OutputInvalid, DayVoteResolved, NightResolved, DetectiveResultDelivered, PlayerEliminated, PhaseResolved, GameTerminated",
+        "Each event carries: event_type (literal), sequence (int), phase (str), visibility ('PUBLIC' | 'PRIVATE' | 'SYSTEM'), actor_player_id (str | None), payload (model-specific fields)",
+        "Events are frozen Pydantic models with strict types — no Any payloads",
+        "tests/core/test_events.py round-trips every event type through canonical JSON and back",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "In-memory event log writer with hash chain",
+      "description": "As the engine, I need an EventLog class that appends events, allocates sequence numbers, and computes hash chains so games produce tamper-evident audit trails before persistence is wired up.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/event_log.py with `EventLog` class: `append(event_body: dict) -> StoredEvent` (assigns sequence, prev_event_hash, event_hash), `head_hash` property, `events` read-only view",
+        "Sequence starts at 0 and is strictly contiguous",
+        "First event's prev_event_hash == GENESIS_HASH",
+        "Class is pure (no DB, no clock) — caller supplies any `created_at` value via the event body, and it is excluded from hashing",
+        "tests/core/test_event_log.py covers: contiguous sequences; chain validates; tampering a payload field invalidates downstream hashes; head_hash matches last event",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Reducer dispatching events to state",
+      "description": "As the engine, I need a pure reducer `(state, event) -> state` that handles every event type so live execution and replay share the same state-transition logic.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/reducer.py with `apply_event(state: GameState, event: Event) -> GameState` returning a NEW frozen state (no mutation)",
+        "Reducer handles: GameCreated (initializes state), RolesAssigned (sets seats), PhaseStarted (updates current_phase), PlayerEliminated (sets alive=False, death_phase), DetectiveResultDelivered (sets queued_inspection_result), ProtectSubmitted (records last_protected_target for next-night enforcement), GameTerminated (sets terminal_result, terminal_reason)",
+        "Message and submission events are recorded but do not mutate mechanical state (chat firewall)",
+        "Unknown event types raise; tests confirm exhaustiveness",
+        "tests/core/test_reducer.py replays a hand-crafted event sequence and asserts final state matches expected",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Replay modes (engine replay and frozen-response replay)",
+      "description": "As the engine, I need two replay entry points: (1) reconstruct final state from an event log; (2) re-run the engine using archived LLM responses to regenerate an identical event log.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/engine/replay.py with `replay_events(initial_config: GameConfig, events: Sequence[Event]) -> GameState` (uses reducer)",
+        "Create `replay_frozen_responses(initial_config: GameConfig, frozen_responses: Mapping[tuple[str, str], AgentResponse]) -> tuple[EventLog, GameState]` where the mapping key is (phase_id, public_player_id) and the engine consumes responses instead of calling an LLM",
+        "Frozen replay must reproduce identical sequence numbers and event hashes (excluding created_at) compared to the original run",
+        "tests/core/test_replay.py constructs a 7-seat game with scripted responses, captures the event log, then re-runs frozen-replay and asserts hash-chain equality",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Observation builder",
+      "description": "As the agent contract layer, I need a function that builds the JSON observation given to a seat for a phase, including public events, private events, and legal actions.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/observations.py with `build_observation(state, seat, event_log, ruleset) -> Observation` (Pydantic model)",
+        "Observation fields match prd.md §6.1: ruleset_id, game_public_id, phase, day, round, you (player_id/alive/role/faction), alive_players, dead_players (with cause), public_events (most recent 80), private_events (role-appropriate), legal_actions, your_private_memory placeholder, message_limits",
+        "Mafia seats additionally get mafia_teammates and mafia-channel events",
+        "Detective seats additionally get prior eligible inspection results",
+        "Doctor seats additionally get previous-night protected target (to enforce no-repeat client-side)",
+        "tests/core/test_observation_builder.py verifies field presence for each role × phase combo and that town never sees mafia teammates or private mafia chat",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Observation privacy filter for ranked mode",
+      "description": "As the benchmark, I need a guard that strips identity, ratings, and meta-game information from ranked observations so no agent gains a side-channel advantage.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/observation_privacy.py with `assert_ranked_observation_safe(obs: Observation) -> None` raising if any forbidden field appears",
+        "Forbidden in ranked mode (asserted): any mention of agent_build_id, model_id, provider name, ratings, win rates, gauntlet clone index, other games' transcripts, hidden roles (other than the agent's own role and mafia teammates for mafia)",
+        "Function is invoked by the runner before dispatching to the LLM adapter in ranked mode",
+        "tests/core/test_observation_privacy.py constructs an observation with each forbidden field present and asserts the function raises; clean observations pass",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Agent response schema and strict JSON validation",
+      "description": "As the agent contract layer, I need a Pydantic schema for agent responses that enforces field presence, types, and action consistency before any mechanical resolution.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/agents/contract.py with `AgentResponse` Pydantic model: public_message (str | None), private_message (str | None), action (Action with type and target), memory_update (str), rationale_summary (str | None)",
+        "`parse_agent_response(raw_text: str) -> AgentResponse | ResponseError` returns a tagged result — never raises",
+        "Invalid JSON → ResponseError(reason='INVALID_JSON')",
+        "Schema violations → ResponseError(reason='SCHEMA_VIOLATION', details=...)",
+        "Over-limit messages are NOT truncated here — that is the sanitizer's job (US-022)",
+        "tests/agents/test_contract.py covers valid response, malformed JSON, missing fields, wrong types, extra unknown fields",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "Output sanitizer",
+      "description": "As the engine, I need deterministic surface normalization on visible chat so cosmetic encoding tricks cannot fingerprint or steganographically signal across messages.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/agents/sanitizer.py with `sanitize_visible_text(raw: str, max_chars: int) -> SanitizationResult` (cleaned: str, truncated: bool, replacements: list[str])",
+        "Steps in order: Unicode NFKC normalize → strip zero-width and control characters (except newline) → collapse whitespace runs to single space → limit repeated punctuation to 3 identical → strip markdown code blocks and tables → replace URLs with '[URL]' → replace long base64/hex-like strings (>24 chars) with '[ENCODED]' → enforce max length (truncate suffix)",
+        "Both raw and sanitized text are returned so the LLM call archive stores both",
+        "tests/agents/test_sanitizer.py covers each transformation in isolation and chained, plus the truncation flag",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "Schema-failure coercion to NOOP/ABSTAIN",
+      "description": "As the runner, I need a function that maps any agent-response failure or timeout to a deterministic engine-safe action so a broken model can never crash a game.",
+      "acceptanceCriteria": [
+        "Create src/padrino/core/agents/coercion.py with `coerce_to_safe_action(phase: Phase, error_reason: str) -> Action` returning ABSTAIN in vote phases and NOOP everywhere else",
+        "Create `coerce_response_failure(phase: Phase, error_reason: str) -> AgentResponse` returning a response with public_message=None, private_message=None, safe action, memory_update='', rationale_summary=None",
+        "tests/agents/test_coercion.py covers vote phase → ABSTAIN; night actions → NOOP; discussion → NOOP; same regardless of error_reason",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "Async tick barrier with hard timeout",
+      "description": "As the runner, I need a coroutine that builds observations for every eligible seat, dispatches them to the LLM adapter concurrently, and returns the validated responses once every call has either completed or timed out — never earlier.",
+      "acceptanceCriteria": [
+        "Create src/padrino/runner/tick.py with `async def run_tick(state, event_log, eligible_seats, adapter, timeout_s, ruleset) -> dict[str, AgentResponse]`",
+        "Uses `asyncio.gather` with per-call `asyncio.wait_for(timeout_s)` so a slow agent cannot block faster agents from running but the gather waits for all",
+        "On timeout: ActionTimedOut event recorded, response coerced via US-023",
+        "On parse/schema failure: OutputInvalid event recorded, response coerced via US-023",
+        "Observation privacy filter (US-020) is invoked in ranked mode before adapter dispatch",
+        "tests/runner/test_tick.py uses a mock adapter that mixes slow/fast/error responses and confirms: no early return; all events recorded; coerced actions present for failures",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "Scripted agent and deterministic mock LLM adapter",
+      "description": "As the test suite, I need a deterministic mock adapter that returns canned responses keyed by (phase_id, public_player_id) and a scripted-agent factory so integration tests can drive full games without any network or randomness.",
+      "acceptanceCriteria": [
+        "Create src/padrino/llm/adapter.py defining `LlmAdapter` protocol with `async def complete(observation: Observation, agent_build) -> AdapterResult` (raw_response, parsed_response, latency_ms, input_tokens, output_tokens, cost_usd, provider_response_id, status, error)",
+        "Create src/padrino/llm/mock.py with `DeterministicMockAdapter(script: Mapping[tuple[str, str], AgentResponse])` returning the scripted response for each (phase_id, player_id) key",
+        "Mock adapter records each invocation in a public `.calls` list for test assertions",
+        "Create `make_villager_script`, `make_mafia_script`, `make_town_win_script`, `make_mafia_win_script` helpers in tests/conftest.py",
+        "tests/llm/test_mock_adapter.py verifies determinism and key-miss raises KeyError",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Game runner orchestration loop",
+      "description": "As the runner, I need a `GameRunner` that loops phases — build observations, run tick, resolve, write events, check win — until the game terminates.",
+      "acceptanceCriteria": [
+        "Create src/padrino/runner/game_runner.py with `async def run_game(config: GameConfig, adapter: LlmAdapter, ranked: bool) -> GameOutcome` (final_state, event_log, llm_calls)",
+        "Loop order per phase: phase_started event → eligible seats → run_tick → record submission events → resolver → resolution events → win check → next_phase",
+        "Terminates on win/draw OR on day > MAX_DAYS",
+        "Each phase yields control via `await asyncio.sleep(0)` so the event loop stays responsive",
+        "Reducer is applied after every event so the in-memory state stays consistent",
+        "tests/runner/test_game_runner.py runs a short scripted game and confirms terminal state + event-log hash chain integrity",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-027",
+      "title": "End-to-end scripted-game integration tests",
+      "description": "As the test suite, I need three end-to-end scripted games (Town win, Mafia win, Draw at MAX_DAYS) that exercise the runner from start to terminal state via the mock adapter.",
+      "acceptanceCriteria": [
+        "tests/integration/test_scripted_games.py implements three test functions, each constructing a full DeterministicMockAdapter script for all 7 seats across all phases of an entire game",
+        "Town-win test: scripted votes/actions eliminate both mafia by Day 3",
+        "Mafia-win test: scripted votes/protect/no-detect cause mafia to reach parity by Day 4",
+        "Draw test: scripted abstain-heavy play reaches Day > MAX_DAYS with no winner",
+        "Each test asserts: terminal_result matches expected; alive_count never increases; no events emitted after GameTerminated; event log hash-chain validates end-to-end",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-028",
+      "title": "Hypothesis stateful invariant tests",
+      "description": "As the test suite, I need property-based stateful tests that randomly drive the engine and confirm invariants hold across many generated traces.",
+      "acceptanceCriteria": [
+        "tests/core/test_invariants.py uses Hypothesis `RuleBasedStateMachine` to generate legal/illegal action sequences",
+        "Invariants asserted: alive_count is monotone non-increasing; a player dies at most once; dead players never produce visible messages; role counts never change; terminal game has exactly one terminal result; replay of generated event log equals live state",
+        "Use `max_examples=50` and `stateful_step_count=80` to keep CI fast",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "SQLAlchemy async models for core schema",
+      "description": "As the persistence layer, I need SQLAlchemy 2.x async ORM models for model_providers, model_configs, prompt_versions, agent_builds, leagues, gauntlets, gauntlet_roster_slots, games, game_seats.",
+      "acceptanceCriteria": [
+        "Create src/padrino/db/base.py with `Base = DeclarativeBase` and async session factory",
+        "Create src/padrino/db/models.py with the nine table models matching prd.md §12 (excluding game_events, llm_calls, ratings, rating_events — those come in later stories)",
+        "All UUIDs use `Mapped[uuid.UUID]` with `default=uuid.uuid4`",
+        "All timestamps use `Mapped[datetime]` with timezone=True",
+        "JSON columns use `JSON` type (SQLite-compatible; Postgres-portable)",
+        "tests/db/test_models.py instantiates each model in an in-memory aiosqlite DB and asserts FK constraints fire on invalid inserts",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "Alembic initial migration",
+      "description": "As the persistence layer, I need an alembic configuration and the initial 0001 migration that creates the schema from US-029.",
+      "acceptanceCriteria": [
+        "alembic.ini configured at repo root with sqlalchemy.url placeholder read from PADRINO_DB_URL",
+        "src/padrino/db/migrations/env.py wired to async engine + Base.metadata",
+        "src/padrino/db/migrations/versions/0001_initial.py creates all tables from US-029",
+        "`uv run alembic upgrade head` against a fresh SQLite file succeeds",
+        "tests/db/test_migrations.py runs upgrade head and downgrade base against in-memory aiosqlite",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes (migrations dir is mypy-excluded)",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "Async repository layer for builds/leagues/gauntlets/games",
+      "description": "As the API layer, I need async repository classes that encapsulate CRUD for the nine tables from US-029 so routes never touch SQLAlchemy directly.",
+      "acceptanceCriteria": [
+        "Create src/padrino/db/repositories/ with one module per entity: providers.py, model_configs.py, prompt_versions.py, agent_builds.py, leagues.py, gauntlets.py, games.py",
+        "Each repository exposes `async def create(session, …) -> Model`, `async def get(session, id) -> Model | None`, `async def list(session, filters) -> list[Model]`",
+        "gauntlet repository includes `async def add_roster_slot(session, gauntlet_id, slot_index, agent_build_id)`",
+        "games repository includes `async def list_by_gauntlet(session, gauntlet_id)`",
+        "tests/db/test_repositories.py runs end-to-end CRUD against an in-memory aiosqlite DB for each repository",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 31,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-032",
+      "title": "Event and llm_call persistence wired to runner",
+      "description": "As the runner, I need to persist each event and each LLM call to the DB as the game runs so transcripts and replays survive a process restart.",
+      "acceptanceCriteria": [
+        "Extend src/padrino/db/models.py with `GameEvent` and `LlmCall` models matching prd.md §12",
+        "Add alembic migration 0002 creating those two tables",
+        "Create src/padrino/db/repositories/events.py with `append_event(session, game_id, event_body) -> GameEvent` and `list_events(session, game_id, visibility_filter)`",
+        "Create src/padrino/db/repositories/llm_calls.py with `record_call(session, …)` capturing request_json, raw_response, parsed_response, latency_ms, tokens, cost, provider_response_id, status, error",
+        "Wire GameRunner (US-026) to call these repositories after every event/LLM call",
+        "tests/db/test_event_persistence.py runs a short scripted game with a real aiosqlite DB and asserts the persisted event chain matches the in-memory event log",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 32,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-033",
+      "title": "Ratings and rating_events persistence",
+      "description": "As the rating layer, I need the ratings and rating_events tables plus their repository so OpenSkill updates can be persisted and audited.",
+      "acceptanceCriteria": [
+        "Add `Rating` and `RatingEvent` ORM models matching prd.md §12",
+        "Add alembic migration 0003 for these tables with the unique constraint on (league_id, agent_build_id, scope_type, scope_value)",
+        "Create src/padrino/db/repositories/ratings.py with `get_or_create_rating`, `update_rating`, `record_rating_event`",
+        "tests/db/test_ratings_repo.py covers create, update, audit-log insertion, and the unique constraint",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 33,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-034",
+      "title": "Provider-agnostic LLM adapter interface",
+      "description": "As the LLM layer, I need a provider-agnostic `LlmAdapter` interface so the runner is decoupled from any specific SDK. The DeterministicMockAdapter (US-025) already conforms; this story finalizes the contract and the abstract base.",
+      "acceptanceCriteria": [
+        "Promote `LlmAdapter` from US-025 to a `typing.Protocol` in src/padrino/llm/adapter.py with explicit method signatures",
+        "Add `RoutingPolicy` Pydantic model: primary_model: str, fallback_model: str | None, max_retries: int, retry_on_error_classes: list[str]",
+        "Add `AgentBuild` Pydantic value object (provider, model_id, prompt_version, inference_params, adapter_version) decoupled from the SQLAlchemy model",
+        "tests/llm/test_adapter_protocol.py confirms DeterministicMockAdapter satisfies the Protocol (runtime_checkable assertion)",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 34,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-035",
+      "title": "LiteLLM-backed adapter with Cerebras primary and DeepInfra fallback",
+      "description": "As the LLM layer, I need a real LiteLLM-backed adapter that routes calls to cerebras/zai-glm-4.7 by default and falls back to deepinfra/deepseek-ai/DeepSeek-V4-Flash on failure.",
+      "acceptanceCriteria": [
+        "Create src/padrino/llm/litellm_adapter.py implementing the `LlmAdapter` protocol via `litellm.acompletion`",
+        "Adapter accepts RoutingPolicy and AgentBuild; calls primary model first; on non-retryable error or timeout calls fallback exactly once",
+        "Both attempts are recorded as separate LlmCall rows (status='OK', 'FALLBACK_OK', 'PRIMARY_FAILED', or 'BOTH_FAILED')",
+        "Latency, input_tokens, output_tokens, and cost_usd are extracted from the LiteLLM response when present",
+        "Response body is parsed via AgentResponse contract (US-021); failures coerced via US-023",
+        "tests/llm/test_litellm_adapter.py uses unittest.mock to stub litellm.acompletion and verifies: success path; primary failure → fallback success; both failures → coerced safe response with status='BOTH_FAILED'",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-036",
+      "title": "Real-provider integration test for one game day",
+      "description": "As the test suite, I need an integration test that runs a single mini7_v1 game day against real Cerebras + DeepInfra providers, skipped if API keys are absent.",
+      "acceptanceCriteria": [
+        "tests/integration/test_real_providers.py is marked `@pytest.mark.integration`",
+        "Test uses `pytest.skip` if CEREBRAS_API_KEY is unset",
+        "Test runs Day 1 only (one discussion round + vote + night) of a mini7_v1 game using all 7 seats backed by the LiteLLM adapter",
+        "Asserts: every LLM call has a non-empty raw_response OR was archived with status indicating fallback / failure; event hash chain validates; no exceptions escape",
+        "Cost cap: test fails if total cost_usd exceeds $0.10 across all calls (sanity guardrail)",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes (this test does NOT run in default suite)"
+      ],
+      "priority": 36,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-037",
+      "title": "Gauntlet scheduler with deterministic seed derivation",
+      "description": "As the gauntlet layer, I need a scheduler that takes a gauntlet config and produces N child games with deterministically-derived seeds.",
+      "acceptanceCriteria": [
+        "Create src/padrino/gauntlets/scheduler.py with `async def create_gauntlet(session, league_id, ruleset_id, prompt_version_id, clone_count, gauntlet_seed, roster) -> GauntletCreated` (gauntlet_id, game_ids)",
+        "Validates roster length matches PLAYER_COUNT=7 (NOT 15)",
+        "Validates clone_count in [1, 100]",
+        "Derives per-game seeds: game_seed_i = sha256_hex(b'game' + gauntlet_seed.encode() + i.to_bytes(4))",
+        "Inserts the gauntlet row, roster slots, and N game rows in one transaction",
+        "tests/gauntlets/test_scheduler.py covers happy path, roster-length-mismatch rejection, clone-count bounds, and seed determinism",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 37,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-038",
+      "title": "OpenSkill rating service (global and faction scopes)",
+      "description": "As the rating layer, I need a service that wraps OpenSkill PlackettLuce to update agent-build ratings for global and faction scopes after each game.",
+      "acceptanceCriteria": [
+        "Create src/padrino/ratings/openskill_service.py with `update_ratings_for_game(session, league_id, game_result, agent_builds_by_seat) -> list[RatingEvent]`",
+        "Updates two scopes per agent_build: scope_type='GLOBAL' / scope_value='global' and scope_type='FACTION' / scope_value in {'TOWN','MAFIA'}",
+        "Uses OpenSkill's `PlackettLuce` model with initial mu=25.0, sigma=25/3",
+        "Town team = list of seats where faction==TOWN; Mafia team = MAFIA",
+        "Town win → ranks [Town=1, Mafia=2]; Mafia win → [Mafia=1, Town=2]; Draw → equal ranks",
+        "conservative_score = mu - 3*sigma persisted on every update",
+        "tests/ratings/test_openskill_service.py covers winner mu↑, loser mu↓, sigma↓ after rated game, draw equal-rank, role-family scope NOT updated in v1",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 38,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-039",
+      "title": "Rating updates wired to game completion",
+      "description": "As the runner, I need to call the rating service whenever a game terminates in a ranked gauntlet so leaderboard data accumulates automatically.",
+      "acceptanceCriteria": [
+        "Extend GameRunner (US-026) to invoke `update_ratings_for_game` after the GameTerminated event when ranked=True",
+        "Rating updates are persisted in the SAME transaction as the GameTerminated event so partial failures roll back",
+        "Each rating update emits a RatingEvent audit row with before/after mu and sigma",
+        "tests/runner/test_rating_integration.py runs a scripted Town-win game and asserts both Town seats' ratings updated upward and Mafia seats' ratings updated downward",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 39,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-040",
+      "title": "Gauntlet completion and provisional flag logic",
+      "description": "As the gauntlet layer, I need a function that aggregates child-game outcomes, marks the gauntlet COMPLETED, and computes the provisional flag for each agent build's leaderboard entry.",
+      "acceptanceCriteria": [
+        "Create src/padrino/gauntlets/completion.py with `async def finalize_gauntlet_if_done(session, gauntlet_id) -> GauntletFinalized | None`",
+        "Marks gauntlet status='COMPLETED' once all child games are terminal",
+        "Provisional flag per agent_build: provisional=True if total_games < 30 OR mafia_games < 5 OR town_games < 15",
+        "Returns aggregate diagnostics: games_completed, timeout_rate, invalid_action_rate, average_public_message_chars",
+        "tests/gauntlets/test_completion.py covers all-games-terminal → COMPLETED, mid-progress → returns None, provisional threshold computation",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 40,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-041",
+      "title": "FastAPI app skeleton with health and readiness",
+      "description": "As the API layer, I need a FastAPI app with /healthz and /readyz endpoints so the rest of the routes have a host to attach to.",
+      "acceptanceCriteria": [
+        "Create src/padrino/api/app.py exposing `create_app() -> FastAPI`",
+        "Mount /healthz returning {\"status\":\"ok\"} synchronously",
+        "Mount /readyz checking DB connectivity (SELECT 1) and returning 200 on success, 503 with diagnostics on failure",
+        "Update src/padrino/cli.py with `padrino serve` subcommand that launches uvicorn against create_app()",
+        "tests/api/test_health.py uses httpx.AsyncClient to assert both endpoints",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 41,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-042",
+      "title": "Admin routes for providers, model configs, prompts, and agent builds",
+      "description": "As the API layer, I need POST/GET routes for the four admin entities so operators can register the building blocks of an agent build.",
+      "acceptanceCriteria": [
+        "POST /model-providers, POST /model-configs, POST /prompt-versions, POST /agent-builds with Pydantic request bodies",
+        "GET /agent-builds/{id} returns the build excluding any secret references",
+        "Routes use the repositories from US-031 and async DB sessions",
+        "tests/api/test_admin_routes.py covers each POST + GET roundtrip via httpx.AsyncClient",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-043",
+      "title": "League and gauntlet routes with roster validation",
+      "description": "As the API layer, I need POST /leagues and POST /gauntlets routes that validate roster size = 7 and trigger gauntlet scheduling.",
+      "acceptanceCriteria": [
+        "POST /leagues accepts {name, ruleset_id, ranked} and returns the created league",
+        "POST /gauntlets accepts {league_id, ruleset_id, prompt_version_id, clone_count, gauntlet_seed?, roster[]} and returns {gauntlet_id, status:'QUEUED', game_ids[]}",
+        "Validation rejects: roster length != 7 (HTTP 422), unknown agent_build_id, clone_count out of [1,100], incompatible prompt/ruleset",
+        "If gauntlet_seed omitted, server generates a 256-bit random hex (using os.urandom; runner core stays pure)",
+        "GET /gauntlets/{id} returns status, child games, and aggregate diagnostics from US-040",
+        "tests/api/test_gauntlet_routes.py covers happy path and each rejection",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-044",
+      "title": "Game inspection routes (get, events, transcript, replay)",
+      "description": "As the API layer, I need GET /games/{id}, GET /games/{id}/events, GET /games/{id}/transcript, and POST /games/{id}/replay so spectators (and later a frontend) can inspect game data.",
+      "acceptanceCriteria": [
+        "GET /games/{id} returns public game summary (status, terminal_result, current_phase, seat count)",
+        "GET /games/{id}/events?visibility=public returns the filtered event log; private events are returned only if the request carries an admin token (header X-Padrino-Admin-Token matches settings)",
+        "GET /games/{id}/transcript returns the post-game artifact: public chat, mafia chat, roles (revealed after terminal), actions, outcome",
+        "POST /games/{id}/replay invokes the engine-replay path and returns {game_id, replay_status:'PASS'|'FAIL', final_event_hash}",
+        "tests/api/test_game_routes.py covers each route, public/private visibility filtering, and replay PASS",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 44,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-045",
+      "title": "Leaderboard route with provisional flag",
+      "description": "As the API layer, I need GET /leagues/{id}/leaderboard returning OpenSkill global + faction scores per agent build with a provisional flag.",
+      "acceptanceCriteria": [
+        "GET /leagues/{id}/leaderboard returns the JSON contract from prd.md §10.4: leaderboard_id, ruleset_id, prompt_version, rating_model, entries[]",
+        "Each entry includes: agent_build_id, display_name, games, wins, draws, losses, mu, sigma, conservative_score, timeout_rate, invalid_action_rate, public_message_avg_chars, provisional",
+        "role_family_breakdown field is present but empty {} in v1 (placeholder for v1.1)",
+        "Sorted by conservative_score desc",
+        "tests/api/test_leaderboard.py constructs a small league with 2 agent builds, runs 3 scripted games, and asserts ordering + provisional flag values",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 45,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-046",
+      "title": "Demo gauntlet CLI command and README quickstart",
+      "description": "As a developer, I need a `padrino demo-gauntlet` CLI command that creates a 5-clone gauntlet with the mock adapter (or real Cerebras if --real flag) so a fresh checkout can produce a working demo.",
+      "acceptanceCriteria": [
+        "`padrino demo-gauntlet --seed SEED [--real] [--clones N]` creates an in-memory or file-backed gauntlet, runs all child games, prints the final leaderboard",
+        "Default is `--clones 5`, mock adapter (no API key needed). `--real` switches to LiteLLM adapter with Cerebras+DeepInfra",
+        "Command writes SQLite to ./padrino-demo.db by default",
+        "README quickstart section updated with the exact command and expected output preview",
+        "tests/cli/test_demo_gauntlet.py runs the command in mock mode against an in-memory DB and asserts a leaderboard JSON is printed",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-047",
+      "title": "Coverage gate and core engine purity check",
+      "description": "As the project, I need CI to enforce ≥85% coverage on the core engine and verify no impure imports leak in.",
+      "acceptanceCriteria": [
+        "Update CI workflow to fail if coverage on src/padrino/core/** drops below 85%",
+        "Add tests/core/test_purity.py that walks src/padrino/core/ with `ast` and asserts no module imports: padrino.db, padrino.llm, padrino.api, padrino.runner, sqlalchemy, litellm, httpx, random, secrets, asyncio, datetime (datetime.timezone is OK if only used for type hints — flag with comment if needed)",
+        "Add tests/core/test_no_wallclock.py that asserts no `datetime.utcnow`, `datetime.now`, `time.time` call sites under src/padrino/core/",
+        "Update README quickstart with the coverage command",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-048",
+      "title": "Observability hooks across gauntlet → game → phase → llm_call",
+      "description": "As an operator, I need structured-log traces that connect a gauntlet to its games, each game to its phases, each phase to its LLM calls and events so diagnostics are tractable.",
+      "acceptanceCriteria": [
+        "Use structlog contextvars to bind gauntlet_id, game_id, phase_id, llm_call_id at the right levels in the runner / gauntlet scheduler / LiteLLM adapter",
+        "Emit structured events: game.started, phase.started, llm.call.started, llm.call.completed, llm.call.timeout, phase.resolved, game.completed, rating.updated — each at structlog INFO with the correlated IDs",
+        "Add a metrics-summary helper that aggregates: games completed, average phase duration, LLM latency p50/p95 per model, timeout rate, invalid JSON rate — exposed via `padrino metrics` CLI subcommand reading from the DB",
+        "tests/observability/test_logging_context.py captures structlog output and asserts the correlation IDs propagate",
+        "uv run ruff check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "priority": 48,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+# Padrino — Ralph progress log
+
+This file accumulates iteration-by-iteration notes from autonomous coding loops.
+Each iteration MUST append a dated section. Never replace existing content.
+
+## Codebase Patterns
+(Reusable learnings discovered across iterations. Keep this section short and general — story-specific notes live in the iteration entries below.)
+
+- Project layout: `src/` layout under `src/padrino/`. Tests live in `tests/`. Use `from padrino.X import Y`.
+- Quality gates: `uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv run pytest -m "not integration"`. CI runs the same.
+- Pure core: nothing under `src/padrino/core/` may import from `padrino.db`, `padrino.llm`, `padrino.api`, `padrino.runner`, or call wall-clock / network / random. Inject impure dependencies via constructor.
+- Hash chain: `event_hash = sha256(prev_event_hash + canonical_json(event_without_hash_and_timestamp))`. Timestamps and the hash field itself are excluded from the hash input.
+- Mafia chat is never parsed for mechanics — `action` field only. Tests must enforce this.
+- Ranked observations never include model identity, ratings, gauntlet clone index, or other games' transcripts.
+- Use `from __future__ import annotations` at the top of every module. Pydantic v2 models with `model_config = ConfigDict(frozen=True)` for state/event types.
+
+---
+
+## Iteration log
+(Each iteration appends one entry below. Format:
+```
+## YYYY-MM-DDTHH:MM - US-XXX
+Thread: <url>
+- What was implemented
+- Files changed
+- **Learnings for future iterations:** ...
+---
+```
+)
