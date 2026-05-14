@@ -82,3 +82,15 @@ Thread: <url>
   - The excluded-key set is the single source of truth for "what the hash covers" — keep it as a module-level `frozenset` constant so future event-validation code can import it instead of re-listing the strings.
   - Use a dict comprehension (`{k: v for k, v in body.items() if k not in EXCLUDED}`) to avoid mutating the caller's mapping; tests explicitly assert non-mutation.
 ---
+
+## 2026-05-14T01:15 - US-006
+- Implemented `src/padrino/core/engine/state.py`: frozen Pydantic `QueuedInspection`, `Seat`, `Phase`, `GameState` models; `GameState` helpers `living_seats`, `living_seats_by_faction`, `seat_by_public_id`, `alive_count_by_faction`. Seats stored as `tuple[Seat, ...]` for true immutability.
+- Implemented `src/padrino/core/engine/phases.py`: `next_phase(current, ruleset)` FSM walking SETUP -> NIGHT_0_MAFIA_INTRO -> DAY_n_DISCUSSION x3 -> DAY_n_VOTE -> NIGHT_n_MAFIA_DISCUSSION -> NIGHT_n_ACTIONS, terminating at TERMINAL after night `MAX_DAYS`. Ruleset typed as a Protocol with `MAX_DAYS` and `DISCUSSION_ROUNDS_PER_DAY` int attributes — `padrino.core.rulesets.mini7_v1` satisfies it structurally.
+- `tests/core/test_state.py` (12) and `tests/core/test_phases.py` (11): immutability via `pydantic.ValidationError` on attribute assignment to frozen models, helpers, full SETUP->TERMINAL enumeration bounded by MAX_DAYS, invalid-round and TERMINAL-successor error cases.
+- Files changed: `src/padrino/core/engine/state.py`, `src/padrino/core/engine/phases.py`, `tests/core/test_state.py`, `tests/core/test_phases.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Pydantic v2 frozen models raise `pydantic.ValidationError` (not `TypeError`/`AttributeError`) on attribute assignment; test that exception, and add `# type: ignore[misc]` on the assignment line since mypy would otherwise reject mutation of a frozen field.
+  - Mypy strict treats a Python module's `Final[int]` constants as structurally satisfying a `Protocol` with matching `int` class attributes — passing the `mini7_v1` module directly to `next_phase(current, ruleset: Ruleset)` typechecks without an explicit cast.
+  - Ruff `RUF005`: prefer `(*a, x, *b)` unpacking over `a + (x,) + b` when stitching tuples.
+  - Phase identifiers are `(kind, day, round)` triples — `round=0` for non-discussion phases, `round=1..DISCUSSION_ROUNDS_PER_DAY` for `DAY_DISCUSSION`. Phase day starts at 1 for daytime; `NIGHT_0_MAFIA_INTRO` uses `day=0`. Future resolvers should match this convention.
+---
