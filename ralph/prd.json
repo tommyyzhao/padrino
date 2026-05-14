@@ -444,8 +444,8 @@
         "uv run pytest -m \"not integration\" passes"
       ],
       "priority": 25,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "LlmAdapter.complete signature kept as (observation) \u2014 agent_build is bound at adapter construction time (per US-024). Conftest helpers are parametric builders; the make_*_win_script scripts assume the canonical (P01,P02 mafia; P03..P07 town) seat layout that will be wired up by US-027."
     },
     {
       "id": "US-026",
