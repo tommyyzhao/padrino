@@ -51,3 +51,14 @@ Thread: <url>
   - Use `Final[dict[Role, int]]` for typed constant dicts; mypy strict accepts this without complaint.
   - "Importable as frozen namespace" simply means module-level `Final` constants — no MappingProxyType needed to satisfy the criterion.
 ---
+
+## 2026-05-14T00:30 - US-003
+- Implemented `src/padrino/core/engine/canonical_json.py`: `canonical_dumps(obj) -> bytes` using `json.dumps(sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)` plus a recursive `_validate` step that rejects floats, bytes/bytearray, sets, datetimes, dates, and non-string dict keys.
+- Tuples serialize as JSON arrays (handled natively by `json.dumps`).
+- `tests/core/test_canonical_json.py`: 18 tests covering key-order stability, recursion into nested lists/dicts, unicode preservation, control-char escaping, scalar types, empty containers, large ints, byte-identical output, and rejection of float/bytes/datetime/date/set/non-string keys.
+- Files changed: `src/padrino/core/engine/__init__.py`, `src/padrino/core/engine/canonical_json.py`, `tests/core/test_canonical_json.py`
+- **Learnings for future iterations:**
+  - `json.dumps(sort_keys=True)` silently coerces int dict keys to strings, so pre-validation is required to enforce the "string keys only" contract.
+  - Ruff's UP017 wants `datetime.UTC` over `datetime.timezone.utc` on Python 3.11+; use the new alias in tests.
+  - `bool` is a subclass of `int`, so the `isinstance(key, bool)` check must come *after* / alongside `isinstance(key, str)` to avoid accepting `True`/`False` as keys.
+---
