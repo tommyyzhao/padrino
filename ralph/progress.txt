@@ -105,3 +105,14 @@ Thread: <url>
   - Mypy strict will not match a module-level `def faction_for(role: Role) -> Faction` against a Protocol method (`@staticmethod` or otherwise) because module functions are typed as Callables with named parameters, not positional-only staticmethods. Resolved by switching the Protocol contract to a `dict[Role, Faction]` attribute and dropping the method requirement.
   - `f"P{i + 1:02d}"` is the canonical public-id format for seats — keep this exact pattern in any future code that constructs seats or compares ids.
 ---
+
+## 2026-05-14T01:45 - US-008
+- Implemented `src/padrino/core/engine/legal_actions.py`: frozen Pydantic `LegalActions(allowed_action_types, legal_targets)` model and `legal_actions_for(state, seat)` pure function. Dead seats → empty. Day discussion → NOOP only. Day vote → [VOTE, ABSTAIN] with living-other targets. Mafia discussion phases (both `NIGHT_0_MAFIA_INTRO` and `NIGHT_MAFIA_DISCUSSION`) → NOOP for mafia, empty for town. Night actions → role-dispatch (MAFIA_KILL on living non-mafia, PROTECT on living seats minus `last_protected_target`, INVESTIGATE on living non-self, villagers NOOP). SETUP / TERMINAL → empty for everyone.
+- `tests/core/test_legal_actions.py`: 73 parametrized tests covering every role × every phase × alive/dead, the doctor consecutive-protect constraint (self and non-self), dead-target exclusion in vote / kill / protect target lists, and detective being allowed to investigate mafia seats.
+- Files changed: `src/padrino/core/engine/legal_actions.py`, `tests/core/test_legal_actions.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `legal_actions_for` is now the single source of truth for "what can this seat do?" — observation builder (US-019) and response validator (US-021/US-023) MUST call it instead of re-deriving rules. Especially: doctor's `last_protected_target` exclusion lives here, not in the resolver.
+  - The PRD does not separately enumerate `NIGHT_0_MAFIA_INTRO` legal actions, but per `prd.md` §5.3 it allows living mafia to privately communicate with no kill — same eligibility shape as `NIGHT_MAFIA_DISCUSSION` (NOOP for mafia, town not prompted). The mafia intro and nightly mafia discussion phases share the same legal-actions branch.
+  - Doctor target list uses `s.public_player_id != seat.last_protected_target`; when `last_protected_target is None`, every living seat (including self) qualifies because `str != None` is always True. Keep this style — explicit `is None` short-circuit is unnecessary.
+  - Two module-level `LegalActions` singletons (`_EMPTY`, `_NOOP_ONLY`) are safe to share because the model is frozen; returning them avoids re-allocating the same empty payload many times per phase.
+---
