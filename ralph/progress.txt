@@ -116,3 +116,15 @@ Thread: <url>
   - Doctor target list uses `s.public_player_id != seat.last_protected_target`; when `last_protected_target is None`, every living seat (including self) qualifies because `str != None` is always True. Keep this style — explicit `is None` short-circuit is unnecessary.
   - Two module-level `LegalActions` singletons (`_EMPTY`, `_NOOP_ONLY`) are safe to share because the model is frozen; returning them avoids re-allocating the same empty payload many times per phase.
 ---
+
+## 2026-05-14T02:00 - US-009
+- Added `src/padrino/core/engine/actions.py`: frozen Pydantic `Action(type: ActionType, target: str | None)` — the sole mechanical-intent payload resolvers read. Chat / private_message / memory_update / rationale_summary deliberately absent.
+- Added `src/padrino/core/engine/resolvers/__init__.py` (new resolvers package) and `src/padrino/core/engine/resolvers/day_vote.py`: frozen `DayVoteResult(eliminated, vote_tally, reason)` plus pure `resolve_day_vote(state, submissions)`. Invalid voter cases (dead voter, missing submission, non-VOTE action type, self-vote, vote-for-dead, vote-for-nonexistent) all silently fold to ABSTAIN. Unique plurality → eliminated; tie or no votes → eliminated=None. Reason strings exposed as module constants (`REASON_UNIQUE_PLURALITY`, `REASON_TIE`, `REASON_ALL_ABSTAIN`).
+- `tests/core/test_day_vote.py`: 12 tests covering unique winner, 2-2 tie, all-abstain, self-vote, vote-for-dead, missing submission, non-existent target, dead-voter submissions ignored, non-VOTE action types, Action's field set (no chat), result immutability, empty-submissions case.
+- Files changed: `src/padrino/core/engine/actions.py`, `src/padrino/core/engine/resolvers/__init__.py`, `src/padrino/core/engine/resolvers/day_vote.py`, `tests/core/test_day_vote.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The `Action` model lives in `padrino.core.engine.actions` and is the single mechanical-input contract for every resolver. Future resolvers (night kill, protect, investigate) MUST import this same model and MUST NOT re-derive a separate per-resolver Action shape.
+  - Per AGENTS.md "chat is never parsed for mechanics", the absence of any chat-shaped fields on `Action` is a structural enforcement — a `test_chat_field_is_never_read` style assertion on `Action.model_fields` keeps it that way. Worth replicating in every future resolver test file.
+  - Submissions are keyed by `public_player_id` (the seat's `Pxx`). Resolvers should iterate `state.seats` in seat order (not `submissions.items()`) so that tally insertion order is deterministic across re-runs.
+  - Reason strings are module-level constants (e.g. `REASON_UNIQUE_PLURALITY`); use the same pattern for downstream resolvers to avoid magic strings and keep tests stable under refactors.
+---
