@@ -625,7 +625,7 @@
       ],
       "priority": 35,
       "passes": true,
-      "notes": "LiteLlmAdapter routes through litellm.acompletion with primary cerebras/zai-glm-4.7 and optional fallback. Per-attempt records exposed via .last_attempts (so a future recording multiplexer can persist both as separate llm_calls rows). Parse failures (invalid_json, schema_violation) do not trigger fallback — only call-site exceptions do. When both calls fail, the AdapterResult carries status='both_failed' and parsed_response is a coerced safe AgentResponse (ABSTAIN in vote phases, NOOP otherwise) so the runner's existing failure path stays uniform."
+      "notes": "LiteLlmAdapter routes through litellm.acompletion with primary cerebras/zai-glm-4.7 and optional fallback. Per-attempt records exposed via .last_attempts (so a future recording multiplexer can persist both as separate llm_calls rows). Parse failures (invalid_json, schema_violation) do not trigger fallback \u2014 only call-site exceptions do. When both calls fail, the AdapterResult carries status='both_failed' and parsed_response is a coerced safe AgentResponse (ABSTAIN in vote phases, NOOP otherwise) so the runner's existing failure path stays uniform."
     },
     {
       "id": "US-036",
@@ -642,7 +642,7 @@
         "uv run pytest -m \"not integration\" passes (this test does NOT run in default suite)"
       ],
       "priority": 36,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
