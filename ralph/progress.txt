@@ -128,3 +128,13 @@ Thread: <url>
   - Submissions are keyed by `public_player_id` (the seat's `Pxx`). Resolvers should iterate `state.seats` in seat order (not `submissions.items()`) so that tally insertion order is deterministic across re-runs.
   - Reason strings are module-level constants (e.g. `REASON_UNIQUE_PLURALITY`); use the same pattern for downstream resolvers to avoid magic strings and keep tests stable under refactors.
 ---
+
+## 2026-05-14T02:15 - US-010
+- Added `src/padrino/core/engine/resolvers/mafia_kill.py`: frozen Pydantic `MafiaKillResult(target, vote_tally, reason)` plus pure `resolve_mafia_kill(state, mafia_submissions)`. Only living mafia seats vote. Targets must be living non-mafia; self / dead / mafia / nonexistent / mismatched-action-type submissions silently drop. Unique plurality → target; tie → None; no valid votes → None. Reasons exposed as module constants (`REASON_UNIQUE_PLURALITY`, `REASON_TIE`, `REASON_ALL_INVALID`).
+- `tests/core/test_mafia_kill.py`: 13 tests covering 2-vote agreement, 1v1 tie, mafia-targets-mafia rejection, dead-mafia-voter ignored, missing submissions, dead target, self target, nonexistent target, non-MAFIA_KILL action types, empty submissions, town submissions ignored, chat-field absence, result immutability.
+- Files changed: `src/padrino/core/engine/resolvers/mafia_kill.py`, `tests/core/test_mafia_kill.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Eligibility-by-faction filtering belongs in the resolver loop (`seat.faction is not Faction.MAFIA → continue`), not in a precomputed "voter ids" set. Keeps the iteration order tied to `state.seats` ordering for deterministic tally insertion, matching the US-009 pattern.
+  - `REASON_ALL_INVALID` (mafia kill) vs `REASON_ALL_ABSTAIN` (day vote): the day-vote semantics allow an explicit `ABSTAIN` action whereas mafia kill does not — every non-`MAFIA_KILL` submission is "invalid" rather than "abstain". Choose reason-string names to reflect this contract.
+  - The "living non-mafia" precomputed set is cheap and lets the inner loop stay readable; reuse this pattern in the doctor protect (US-011) and detective investigate (US-012) resolvers — they also have a single eligible-target set per resolution.
+---
