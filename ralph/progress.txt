@@ -40,3 +40,14 @@ Thread: <url>
   - pydantic-settings reads `.env` by default; tests that monkeypatch env vars must construct `Settings(_env_file=None)` so disk keys do not override patches.
   - `importlib.reload` of a module with lru_cache does not clear the cache of the already-imported reference; constructing a fresh instance with `Settings(_env_file=None)` is cleaner.
 ---
+
+## 2026-05-14T00:15 - US-002
+- Implemented `src/padrino/core/enums.py`: StrEnum classes Faction, Role, RoleFamily, ActionType, PhaseKind.
+- Implemented `src/padrino/core/rulesets/mini7_v1.py`: all numeric constants (PLAYER_COUNT=7, MAX_DAYS=5, etc.), ROLE_COUNTS dict, `role_family_for()` and `faction_for()` helpers.
+- `tests/core/test_mini7_constants.py`: 7 tests covering role count sum, all-roles coverage, family/faction mappings, and full constants validation.
+- Files changed: `src/padrino/core/__init__.py`, `src/padrino/core/enums.py`, `src/padrino/core/rulesets/__init__.py`, `src/padrino/core/rulesets/mini7_v1.py`, `tests/core/__init__.py`, `tests/core/test_mini7_constants.py`
+- **Learnings for future iterations:**
+  - StrEnum is available in Python 3.11+ stdlib — no extra dependency needed.
+  - Use `Final[dict[Role, int]]` for typed constant dicts; mypy strict accepts this without complaint.
+  - "Importable as frozen namespace" simply means module-level `Final` constants — no MappingProxyType needed to satisfy the criterion.
+---
