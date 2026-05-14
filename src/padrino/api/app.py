@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.api.routes.admin import router as admin_router
 from padrino.db.base import create_engine, create_session_factory
 from padrino.settings import get_settings
 
@@ -42,6 +43,7 @@ def create_app(
         version="0.1.0",
     )
     app.state.session_factory = session_factory
+    app.include_router(admin_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
