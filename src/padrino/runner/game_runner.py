@@ -32,6 +32,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, cast
 
+import structlog
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -52,8 +53,17 @@ from padrino.core.rulesets import mini7_v1
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.llm.adapter import AdapterResult, LlmAdapter
+from padrino.observability.events import (
+    EVENT_GAME_COMPLETED,
+    EVENT_GAME_STARTED,
+    EVENT_PHASE_RESOLVED,
+    EVENT_PHASE_STARTED,
+    EVENT_RATING_UPDATED,
+)
 from padrino.ratings.openskill_service import GameResult, update_ratings_for_game
 from padrino.runner.tick import run_tick
+
+_logger = structlog.get_logger("padrino.runner")
 
 MAFIA_CHANNEL_ID: Final[str] = "mafia"
 CAUSE_DAY_VOTE: Final[str] = "day_vote"
@@ -220,6 +230,12 @@ async def _persist_terminated_event(
                     seat_factions=seat_factions,
                 ),
                 agent_builds_by_seat=agent_builds_by_seat,
+            )
+            _logger.info(
+                EVENT_RATING_UPDATED,
+                league_id=str(persistence.league_id),
+                winner=winner,
+                seats=len(agent_builds_by_seat),
             )
 
 
@@ -488,6 +504,17 @@ async def run_game(
     recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls, persistence)
     state = initial_state()
 
+    game_ctx_keys = ("game_id", "ruleset_id")
+    structlog.contextvars.bind_contextvars(
+        game_id=config.game_id,
+        ruleset_id=config.ruleset_id,
+    )
+    _logger.info(
+        EVENT_GAME_STARTED,
+        ranked=ranked,
+        timeout_s=config.timeout_s,
+    )
+
     async def emit_and_persist(body: dict[str, Any], game_state: GameState) -> GameState:
         next_state = _emit(body, game_state, event_log)
         if persistence is not None:
@@ -545,104 +572,121 @@ async def run_game(
 
     current_phase = next_phase(state.current_phase, ruleset)
 
-    while True:
-        if current_phase.kind is PhaseKind.TERMINAL:
+    try:
+        while True:
+            if current_phase.kind is PhaseKind.TERMINAL:
+                state = await emit_and_persist(
+                    {
+                        "event_type": "GameTerminated",
+                        "phase": "TERMINAL",
+                        "visibility": "PUBLIC",
+                        "actor_player_id": None,
+                        "payload": {
+                            "winner": "DRAW",
+                            "reason": REASON_MAX_DAYS_REACHED,
+                        },
+                    },
+                    state,
+                )
+                break
+
+            phase_id = format_phase_id(current_phase)
+            structlog.contextvars.bind_contextvars(phase_id=phase_id)
             state = await emit_and_persist(
                 {
-                    "event_type": "GameTerminated",
-                    "phase": "TERMINAL",
-                    "visibility": "PUBLIC",
+                    "event_type": "PhaseStarted",
+                    "phase": phase_id,
+                    "visibility": "SYSTEM",
                     "actor_player_id": None,
                     "payload": {
-                        "winner": "DRAW",
-                        "reason": REASON_MAX_DAYS_REACHED,
+                        "phase_kind": current_phase.kind.value,
+                        "day": current_phase.day,
+                        "round": current_phase.round,
                     },
                 },
                 state,
             )
-            break
-
-        phase_id = format_phase_id(current_phase)
-        state = await emit_and_persist(
-            {
-                "event_type": "PhaseStarted",
-                "phase": phase_id,
-                "visibility": "SYSTEM",
-                "actor_player_id": None,
-                "payload": {
-                    "phase_kind": current_phase.kind.value,
-                    "day": current_phase.day,
-                    "round": current_phase.round,
-                },
-            },
-            state,
-        )
-
-        eligible = _eligible_seats(state)
-        responses: dict[str, AgentResponse] = {}
-        if eligible:
-            log_before = len(event_log.events)
-            responses = await run_tick(
-                state,
-                event_log,
-                eligible,
-                recording,
-                timeout_s=config.timeout_s,
-                ruleset=ruleset,
-                ranked=ranked,
+            _logger.info(
+                EVENT_PHASE_STARTED,
+                phase_kind=current_phase.kind.value,
+                day=current_phase.day,
+                round=current_phase.round,
             )
-            # run_tick appends failure events (ActionTimedOut / OutputInvalid)
-            # directly to event_log without folding through emit_and_persist;
-            # mirror them to the DB now so the persisted chain stays complete.
-            await persist_pending_events(log_before)
 
-        for seat in eligible:
-            response = responses.get(seat.public_player_id)
-            if response is None:
-                continue
-            for body in _submission_events_for(
-                seat,
-                response,
-                current_phase.kind,
-                phase_id,
-                current_phase.round,
-            ):
-                state = await emit_and_persist(body, state)
+            eligible = _eligible_seats(state)
+            responses: dict[str, AgentResponse] = {}
+            if eligible:
+                log_before = len(event_log.events)
+                responses = await run_tick(
+                    state,
+                    event_log,
+                    eligible,
+                    recording,
+                    timeout_s=config.timeout_s,
+                    ruleset=ruleset,
+                    ranked=ranked,
+                )
+                # run_tick appends failure events (ActionTimedOut / OutputInvalid)
+                # directly to event_log without folding through emit_and_persist;
+                # mirror them to the DB now so the persisted chain stays complete.
+                await persist_pending_events(log_before)
 
-        if current_phase.kind is PhaseKind.DAY_VOTE:
-            for body in _resolve_day_vote_events(state, responses, phase_id):
-                state = await emit_and_persist(body, state)
-        elif current_phase.kind is PhaseKind.NIGHT_ACTIONS:
-            for body in _resolve_night_events(state, responses, phase_id):
-                state = await emit_and_persist(body, state)
+            for seat in eligible:
+                response = responses.get(seat.public_player_id)
+                if response is None:
+                    continue
+                for body in _submission_events_for(
+                    seat,
+                    response,
+                    current_phase.kind,
+                    phase_id,
+                    current_phase.round,
+                ):
+                    state = await emit_and_persist(body, state)
 
-        state = await emit_and_persist(
-            {
-                "event_type": "PhaseResolved",
-                "phase": phase_id,
-                "visibility": "SYSTEM",
-                "actor_player_id": None,
-                "payload": {"resolved_phase": phase_id},
-            },
-            state,
-        )
+            if current_phase.kind is PhaseKind.DAY_VOTE:
+                for body in _resolve_day_vote_events(state, responses, phase_id):
+                    state = await emit_and_persist(body, state)
+            elif current_phase.kind is PhaseKind.NIGHT_ACTIONS:
+                for body in _resolve_night_events(state, responses, phase_id):
+                    state = await emit_and_persist(body, state)
 
-        win = check_win(state, ruleset)
-        if win is not None:
             state = await emit_and_persist(
                 {
-                    "event_type": "GameTerminated",
+                    "event_type": "PhaseResolved",
                     "phase": phase_id,
-                    "visibility": "PUBLIC",
+                    "visibility": "SYSTEM",
                     "actor_player_id": None,
-                    "payload": {"winner": win.winner, "reason": win.reason},
+                    "payload": {"resolved_phase": phase_id},
                 },
                 state,
             )
-            break
+            _logger.info(EVENT_PHASE_RESOLVED)
 
-        current_phase = next_phase(current_phase, ruleset)
-        await asyncio.sleep(0)
+            win = check_win(state, ruleset)
+            if win is not None:
+                state = await emit_and_persist(
+                    {
+                        "event_type": "GameTerminated",
+                        "phase": phase_id,
+                        "visibility": "PUBLIC",
+                        "actor_player_id": None,
+                        "payload": {"winner": win.winner, "reason": win.reason},
+                    },
+                    state,
+                )
+                break
+
+            current_phase = next_phase(current_phase, ruleset)
+            await asyncio.sleep(0)
+
+        _logger.info(
+            EVENT_GAME_COMPLETED,
+            winner=state.terminal_result,
+            reason=state.terminal_reason,
+        )
+    finally:
+        structlog.contextvars.unbind_contextvars(*game_ctx_keys, "phase_id")
 
     return GameOutcome(
         final_state=state,

@@ -6,12 +6,16 @@ Subcommands:
 - ``padrino serve`` — launch the FastAPI app via uvicorn.
 - ``padrino demo-gauntlet`` — bootstrap a SQLite-backed demo league, run a
   gauntlet, and print the resulting leaderboard JSON.
+- ``padrino metrics`` — read aggregated observability metrics (game counts,
+  phase durations, LLM latency percentiles, timeout / invalid-JSON rates)
+  from a Padrino database and print them as JSON.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import typer
 import uvicorn
@@ -21,6 +25,14 @@ app = typer.Typer(
     help="Padrino: deterministic LLM benchmark engine for Mafia-style social deduction.",
     no_args_is_help=True,
 )
+
+
+@app.callback()
+def _configure_logging_callback() -> None:
+    """Route structlog INFO events to stderr so stdout only carries CLI payloads."""
+    from padrino.logging import configure_logging
+
+    configure_logging("INFO")
 
 
 @app.command()
@@ -43,6 +55,35 @@ def serve(
 
     application = create_app()
     uvicorn.run(application, host=host, port=port, reload=reload, log_level=log_level)
+
+
+@app.command("metrics")
+def metrics(
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino-demo.db",
+        "--db-url",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+) -> None:
+    """Print aggregated observability metrics as JSON."""
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.observability.metrics import (
+        compute_metrics_summary,
+        metrics_summary_to_dict,
+    )
+
+    async def _run() -> dict[str, Any]:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            async with session_factory() as session:
+                summary = await compute_metrics_summary(session)
+        finally:
+            await engine.dispose()
+        return metrics_summary_to_dict(summary)
+
+    payload = asyncio.run(_run())
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @app.command("demo-gauntlet")

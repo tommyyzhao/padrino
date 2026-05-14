@@ -27,9 +27,12 @@ Impure runner module; pure-core code does not import it.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+import structlog
 
 from padrino.core.agents.coercion import coerce_response_failure, coerce_to_safe_action
 from padrino.core.agents.contract import AgentResponse, ResponseError
@@ -40,8 +43,14 @@ from padrino.core.enums import ActionType
 from padrino.core.observation_privacy import assert_ranked_observation_safe
 from padrino.core.observations import Ruleset, build_observation, format_phase_id
 from padrino.llm.adapter import LlmAdapter
+from padrino.observability.events import (
+    EVENT_LLM_CALL_COMPLETED,
+    EVENT_LLM_CALL_STARTED,
+    EVENT_LLM_CALL_TIMEOUT,
+)
 
 _REASON_TIMEOUT = "TIMEOUT"
+_logger = structlog.get_logger("padrino.llm")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,34 +128,51 @@ async def _call_one_seat(
 
     expected = _expected_action_type(state, seat)
 
+    llm_call_id = uuid.uuid4().hex
+    tokens = structlog.contextvars.bind_contextvars(
+        llm_call_id=llm_call_id,
+        seat=seat.public_player_id,
+    )
     try:
-        result = await asyncio.wait_for(adapter.complete(observation), timeout=timeout_s)
-    except TimeoutError:
-        defaulted = coerce_to_safe_action(state.current_phase, _REASON_TIMEOUT).type.value
-        return _build_failure_outcome(
-            state=state,
-            seat=seat,
-            phase_id=phase_id,
-            reason=_REASON_TIMEOUT,
-            event_type="ActionTimedOut",
-            payload={"expected_action_type": expected, "defaulted_to": defaulted},
+        _logger.info(EVENT_LLM_CALL_STARTED, phase=phase_id)
+        try:
+            result = await asyncio.wait_for(adapter.complete(observation), timeout=timeout_s)
+        except TimeoutError:
+            _logger.info(EVENT_LLM_CALL_TIMEOUT, phase=phase_id, timeout_s=timeout_s)
+            defaulted = coerce_to_safe_action(state.current_phase, _REASON_TIMEOUT).type.value
+            return _build_failure_outcome(
+                state=state,
+                seat=seat,
+                phase_id=phase_id,
+                reason=_REASON_TIMEOUT,
+                event_type="ActionTimedOut",
+                payload={"expected_action_type": expected, "defaulted_to": defaulted},
+            )
+
+        _logger.info(
+            EVENT_LLM_CALL_COMPLETED,
+            phase=phase_id,
+            status=result.status,
+            latency_ms=result.latency_ms,
         )
 
-    parsed = result.parsed_response
-    if isinstance(parsed, ResponseError):
-        return _build_failure_outcome(
-            state=state,
-            seat=seat,
-            phase_id=phase_id,
-            reason=parsed.reason,
-            event_type="OutputInvalid",
-            payload={
-                "reason": parsed.reason,
-                "validation_errors": (parsed.details,) if parsed.details else (),
-            },
-        )
+        parsed = result.parsed_response
+        if isinstance(parsed, ResponseError):
+            return _build_failure_outcome(
+                state=state,
+                seat=seat,
+                phase_id=phase_id,
+                reason=parsed.reason,
+                event_type="OutputInvalid",
+                payload={
+                    "reason": parsed.reason,
+                    "validation_errors": (parsed.details,) if parsed.details else (),
+                },
+            )
 
-    return _SeatOutcome(seat_id=seat.public_player_id, response=parsed, failure_event=None)
+        return _SeatOutcome(seat_id=seat.public_player_id, response=parsed, failure_event=None)
+    finally:
+        structlog.contextvars.reset_contextvars(**tokens)
 
 
 def _build_failure_outcome(

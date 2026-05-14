@@ -20,10 +20,14 @@ import uuid
 from dataclasses import dataclass
 from typing import Final
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.rulesets import mini7_v1
 from padrino.db.repositories import gauntlets as gauntlets_repo
+from padrino.observability.events import EVENT_GAUNTLET_CREATED
+
+_logger = structlog.get_logger("padrino.gauntlets")
 
 MIN_CLONE_COUNT: Final[int] = 1
 MAX_CLONE_COUNT: Final[int] = 100
@@ -93,6 +97,14 @@ async def create_gauntlet(
             )
             game_ids.append(game.id)
 
+    _logger.info(
+        EVENT_GAUNTLET_CREATED,
+        gauntlet_id=str(gauntlet.id),
+        league_id=str(league_id),
+        ruleset_id=ruleset_id,
+        clone_count=clone_count,
+        games=[str(gid) for gid in game_ids],
+    )
     return GauntletCreated(gauntlet_id=gauntlet.id, game_ids=tuple(game_ids))
 
 

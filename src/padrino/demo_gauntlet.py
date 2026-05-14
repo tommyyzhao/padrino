@@ -15,6 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.state import Seat
@@ -194,28 +195,35 @@ async def run_demo_gauntlet(
             f"P{i + 1:02d}": agent_build_id for i in range(mini7_v1.PLAYER_COUNT)
         }
 
-        for index, game_id in enumerate(created.game_ids):
-            adapter = _make_adapter(real, cfg_settings)
-            game_seed = derive_game_seed(seed, index)
-            config = GameConfig(
-                game_id=str(game_id),
-                game_seed=game_seed,
-                ruleset_id=mini7_v1.RULESET_ID,
-                timeout_s=float(cfg_settings.padrino_llm_timeout_seconds),
-            )
-            persistence = GamePersistence(
-                session_factory=session_factory,
-                game_id=game_id,
-                agent_builds=agent_builds_by_seat,
-                league_id=league_id,
-            )
-            outcome = await run_game(config, adapter, ranked=True, persistence=persistence)
-            await _backfill_seats(
-                session_factory,
-                game_id=game_id,
-                seats=outcome.final_state.seats,
-                agent_build_id=agent_build_id,
-            )
+        gauntlet_tokens = structlog.contextvars.bind_contextvars(
+            gauntlet_id=str(created.gauntlet_id),
+            league_id=str(league_id),
+        )
+        try:
+            for index, game_id in enumerate(created.game_ids):
+                adapter = _make_adapter(real, cfg_settings)
+                game_seed = derive_game_seed(seed, index)
+                config = GameConfig(
+                    game_id=str(game_id),
+                    game_seed=game_seed,
+                    ruleset_id=mini7_v1.RULESET_ID,
+                    timeout_s=float(cfg_settings.padrino_llm_timeout_seconds),
+                )
+                persistence = GamePersistence(
+                    session_factory=session_factory,
+                    game_id=game_id,
+                    agent_builds=agent_builds_by_seat,
+                    league_id=league_id,
+                )
+                outcome = await run_game(config, adapter, ranked=True, persistence=persistence)
+                await _backfill_seats(
+                    session_factory,
+                    game_id=game_id,
+                    seats=outcome.final_state.seats,
+                    agent_build_id=agent_build_id,
+                )
+        finally:
+            structlog.contextvars.reset_contextvars(**gauntlet_tokens)
 
         async with session_factory() as session:
             board = await compute_leaderboard(
