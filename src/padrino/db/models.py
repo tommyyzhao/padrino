@@ -2,8 +2,8 @@
 
 Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``agent_builds``, ``leagues``, ``gauntlets``, ``gauntlet_roster_slots``,
-``games``, ``game_seats``, ``game_events``, ``llm_calls``. The ratings tables
-are intentionally deferred to a later story.
+``games``, ``game_seats``, ``game_events``, ``llm_calls``, ``ratings``,
+``rating_events``.
 """
 
 from __future__ import annotations
@@ -228,6 +228,54 @@ class LlmCall(Base):
     )
 
 
+class Rating(Base):
+    __tablename__ = "ratings"
+    __table_args__ = (
+        UniqueConstraint(
+            "league_id",
+            "agent_build_id",
+            "scope_type",
+            "scope_value",
+            name="uq_rating_scope",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_value: Mapped[str] = mapped_column(String, nullable=False)
+    mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    conservative_score: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    games: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class RatingEvent(Base):
+    __tablename__ = "rating_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_value: Mapped[str] = mapped_column(String, nullable=False)
+    before_mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    before_sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    after_mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    after_sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 __all__ = [
     "AgentBuild",
     "Game",
@@ -240,4 +288,6 @@ __all__ = [
     "ModelConfig",
     "ModelProvider",
     "PromptVersion",
+    "Rating",
+    "RatingEvent",
 ]

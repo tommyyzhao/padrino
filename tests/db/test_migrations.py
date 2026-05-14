@@ -26,6 +26,8 @@ EXPECTED_TABLES = {
     "game_seats",
     "game_events",
     "llm_calls",
+    "ratings",
+    "rating_events",
 }
 
 
