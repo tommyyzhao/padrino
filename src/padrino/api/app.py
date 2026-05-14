@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.routes.admin import router as admin_router
+from padrino.api.routes.games import router as games_router
 from padrino.api.routes.gauntlets import router as gauntlets_router
 from padrino.api.routes.leagues import router as leagues_router
 from padrino.db.base import create_engine, create_session_factory
@@ -28,9 +29,13 @@ def _default_session_factory() -> async_sessionmaker[AsyncSession]:
     return create_session_factory(engine)
 
 
+_UNSET: Any = object()
+
+
 def create_app(
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    admin_token: str | None | Any = _UNSET,
 ) -> FastAPI:
     """Build and return the Padrino FastAPI application.
 
@@ -38,6 +43,10 @@ def create_app(
     factory from :func:`padrino.settings.get_settings` lazily on the first
     readiness probe. Tests typically pass an explicit factory so the app
     does not touch the on-disk database.
+
+    ``admin_token`` overrides ``Settings.padrino_admin_token`` for the
+    ``X-Padrino-Admin-Token`` check on game-inspection routes. Defaults
+    (when omitted) to the value from :func:`padrino.settings.get_settings`.
     """
     app = FastAPI(
         title="Padrino",
@@ -45,9 +54,14 @@ def create_app(
         version="0.1.0",
     )
     app.state.session_factory = session_factory
+    if admin_token is _UNSET:
+        app.state.admin_token = get_settings().padrino_admin_token
+    else:
+        app.state.admin_token = admin_token
     app.include_router(admin_router)
     app.include_router(leagues_router)
     app.include_router(gauntlets_router)
+    app.include_router(games_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

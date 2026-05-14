@@ -30,4 +30,16 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
             raise
 
 
-__all__ = ["get_session", "get_session_factory"]
+def get_admin_token(request: Request) -> str | None:
+    """Return the configured admin token, or ``None`` if unset.
+
+    Stored on ``app.state.admin_token`` by :func:`padrino.api.app.create_app`
+    so tests can override the value without monkeypatching environment vars.
+    """
+    token: Any = getattr(request.app.state, "admin_token", None)
+    if token is None:
+        return None
+    return str(token)
+
+
+__all__ = ["get_admin_token", "get_session", "get_session_factory"]

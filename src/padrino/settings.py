@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     padrino_primary_model: str = "cerebras/zai-glm-4.7"
     padrino_fallback_model: str = "deepinfra/deepseek-ai/DeepSeek-V4-Flash"
 
+    # API
+    padrino_admin_token: str | None = None
+
 
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:
