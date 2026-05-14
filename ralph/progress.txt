@@ -196,3 +196,15 @@ Thread: <url>
   - Chat payloads (`PublicMessageSubmittedPayload`, `PrivateMessageSubmittedPayload`) carry only `text` (+ `round_index` or `channel_id`) — no `action`/`type`/`target` fields. Tests assert this structurally so the chat-vs-action firewall is enforced at the type level, not just at the resolver.
   - Per-class visibility Literals (e.g. `visibility: Literal["PUBLIC"] = "PUBLIC"`) double as constructor defaults and runtime validators; mismatched visibility in stored payloads is rejected at parse time, which is what we want for replay safety.
 ---
+
+
+## 2026-05-14T03:45 - US-016
+- Added `src/padrino/core/engine/event_log.py`: frozen Pydantic `StoredEvent(sequence, prev_event_hash, event_hash, body: dict[str, Any])` and `EventLog` class with `__slots__ = ("_events",)`. `append(event_body)` shallow-copies the body, assigns the next contiguous sequence from `len(self._events)`, links `prev_event_hash` to `self.head_hash` (which returns `GENESIS_HASH` for an empty log), computes `event_hash` via `compute_event_hash`, appends the StoredEvent, and returns it. `events` property exposes a read-only tuple snapshot.
+- `tests/core/test_event_log.py`: 13 tests covering empty-log genesis head, first-append-links-to-genesis, contiguous sequence assignment, chain prev→hash linkage, full recomputation validation, tampering invalidates downstream hashes, `created_at` exclusion from the hash, immutable tuple snapshot semantics, frozen StoredEvent rejection of attribute mutation, caller-side body mutation after append does not move the hash, and an AST guard against forbidden DB/clock imports.
+- Files changed: `src/padrino/core/engine/event_log.py`, `tests/core/test_event_log.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - The append-side shallow `dict(event_body)` copy is the firewall between caller-owned body dicts and the stored chain — without it, a caller mutating their input mapping after append would silently change `StoredEvent.body` (and therefore any future replay/verification against the recorded `event_hash`). Replicate this pattern wherever a body crosses a storage boundary.
+  - `EventLog` is intentionally generic over `Mapping[str, Any]` rather than `Event` from US-015. Persistence (US-032) and replay (US-018) will wrap typed Event models by `model_dump(mode="json")`-ing them and handing the dict to `append`. Keeping the log Event-agnostic lets it serve both runtime and replay codepaths without an Event-type import cycle.
+  - `pytest.raises(Exception)` trips ruff `B017` ("blind exception"). For pydantic frozen-attribute tests use `pytest.raises(ValidationError)` explicitly — matches the existing pattern in `test_state.py`.
+  - The chain envelope (`sequence`, `prev_event_hash`, `event_hash`) lives on `StoredEvent`, not on the Event body. The reducer (US-017) and replay (US-018) should read the envelope from `StoredEvent` and the typed payload from `EventAdapter.validate_python(stored.body)` — keep these layers separate.
+---
