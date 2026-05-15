@@ -27,6 +27,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20",
+    "asyncpg>=0.29",
     "alembic>=1.13",
     "litellm>=1.50",
     "openskill>=6.0",
@@ -44,6 +45,8 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.6",
     "vcrpy>=8.1.1",
+    "testcontainers>=4.7",
+    "psycopg[binary]>=3.2",
 ]
 
 [project.urls]
@@ -109,7 +112,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["src/padrino/db/migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "openskill.*", "vcr.*"]
+module = ["litellm.*", "openskill.*", "vcr.*", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
@@ -129,6 +132,7 @@ markers = [
     "integration: marks tests that hit real LLM providers (deselect with '-m \"not integration\"')",
     "slow: marks slow tests",
     "live_llm: marks recorded-cassette contract tests against real LLM providers (deselected by default; opt-in via '-m live_llm')",
+    "postgres: marks tests that require a Docker daemon to spin up Postgres (skipped automatically without docker; opt-in via '-m postgres')",
 ]
 
 [tool.coverage.run]

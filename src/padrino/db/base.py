@@ -26,9 +26,30 @@ def _enable_sqlite_foreign_keys(dbapi_connection: Any, _: Any) -> None:
     cursor.close()
 
 
-def create_engine(url: str, *, echo: bool = False) -> AsyncEngine:
-    """Build an async engine, enabling SQLite FK enforcement when applicable."""
-    engine = create_async_engine(url, echo=echo, future=True)
+def create_engine(
+    url: str,
+    *,
+    echo: bool = False,
+    pool_size: int | None = None,
+    max_overflow: int | None = None,
+) -> AsyncEngine:
+    """Build an async engine for Padrino's supported dialects.
+
+    The dialect is selected from the URL scheme: ``sqlite+aiosqlite://`` for
+    local single-writer deployments (FK enforcement is enabled via a connect
+    listener since SQLite leaves it off by default) and
+    ``postgresql+asyncpg://`` for shared / managed deployments (FKs are on by
+    default; only Postgres receives the optional ``pool_size`` /
+    ``max_overflow`` kwargs because the SQLite ``StaticPool`` and aiosqlite
+    connection model don't honor a server-side connection pool).
+    """
+    kwargs: dict[str, Any] = {"echo": echo, "future": True}
+    if url.startswith("postgresql"):
+        if pool_size is not None:
+            kwargs["pool_size"] = pool_size
+        if max_overflow is not None:
+            kwargs["max_overflow"] = max_overflow
+    engine = create_async_engine(url, **kwargs)
     if url.startswith("sqlite"):
         event.listen(engine.sync_engine, "connect", _enable_sqlite_foreign_keys)
     return engine

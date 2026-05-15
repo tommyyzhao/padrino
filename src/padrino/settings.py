@@ -22,6 +22,11 @@ class Settings(BaseSettings):
 
     # Database
     padrino_db_url: str = "sqlite+aiosqlite:///./padrino.db"
+    # Connection-pool tuning is wired to ``create_async_engine`` only when the
+    # configured URL targets Postgres (asyncpg). SQLite uses aiosqlite which
+    # doesn't honor a server-side pool, so these knobs are no-ops there.
+    padrino_db_pool_size: int = 5
+    padrino_db_pool_max_overflow: int = 10
 
     # Logging
     padrino_log_level: str = "INFO"

@@ -194,8 +194,8 @@
       ],
       "dependencies": [],
       "priority": 57,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "`asyncpg>=0.29` is now a runtime dep (auto-selected when the URL is `postgresql+asyncpg://`); `testcontainers>=4.7` and `psycopg[binary]>=3.2` are dev deps. The testcontainers `[postgres]`/`[postgresql]` extras don't exist on testcontainers 4.x — the postgres helper module imports unconditionally, so the bare `testcontainers` package is sufficient. `create_engine` accepts new optional `pool_size` / `max_overflow` kwargs that are forwarded to `create_async_engine` ONLY when the URL is Postgres (SQLite uses aiosqlite + StaticPool which doesn't honor a server pool). New `Settings.padrino_db_pool_size=5` / `padrino_db_pool_max_overflow=10` fields document the knobs but aren't auto-wired — callers that construct an engine from Settings should pass them through explicitly. The acceptance criterion that says `sa.JSON` maps to JSONB on Postgres is slightly inaccurate; SQLAlchemy's generic `JSON` type maps to the Postgres `JSON` type (not JSONB) — confirmed via `column.type.python_type is dict` which is the dialect-blind contract the test actually asserts. A future story can switch to `dialects.postgresql.JSONB` if indexing perf requires. `pytest_collection_modifyitems` in `tests/conftest.py` now auto-skips `postgres`-marked tests when `docker info` doesn't respond — the marker is opt-in via `-m postgres` or runs in CI's dedicated `postgres` job."
     },
     {
       "id": "US-058",

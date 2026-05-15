@@ -8,11 +8,15 @@ keyed by ``(phase_id, public_player_id)`` — the shape consumed by
 This module also installs a ``pytest_collection_modifyitems`` hook that
 deselects the ``live_llm`` marker by default. The recorded-cassette contract
 suite under ``tests/llm/test_litellm_contract.py`` (US-051) opts in via
-``-m live_llm`` or the ``--live-llm`` flag.
+``-m live_llm`` or the ``--live-llm`` flag. Likewise, ``postgres``-marked
+tests (US-057) are skipped unless a Docker daemon is reachable so contributors
+without docker can still run the default ``pytest`` invocation.
 """
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from collections.abc import Mapping, Sequence
 
 import pytest
@@ -32,25 +36,46 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Default-skip ``live_llm`` items unless explicitly opted in.
+def _docker_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
 
-    Opt-in paths:
-    * ``--live-llm`` flag on the CLI, or
-    * ``-m live_llm`` marker selector (the recorded-cassette CI job).
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Default-skip the ``live_llm`` and ``postgres`` markers when appropriate.
+
+    ``live_llm`` is opt-in via ``--live-llm`` or ``-m live_llm`` (recorded
+    cassettes). ``postgres`` (US-057) requires a Docker daemon — skip when the
+    daemon isn't reachable so contributors without docker can still run the
+    full default suite locally; CI always has docker.
     """
 
-    if config.getoption("--live-llm"):
-        return
     markexpr = (config.option.markexpr or "").strip()
-    if "live_llm" in markexpr and "not live_llm" not in markexpr:
-        return
-    skip = pytest.mark.skip(
+
+    skip_live = pytest.mark.skip(
         reason="live_llm cassette tests are opt-in; pass --live-llm or '-m live_llm'"
     )
+    skip_postgres = pytest.mark.skip(reason="postgres tests require a reachable Docker daemon")
+    live_opted_in = config.getoption("--live-llm") or (
+        "live_llm" in markexpr and "not live_llm" not in markexpr
+    )
+    postgres_skips = not _docker_available()
+
     for item in items:
-        if "live_llm" in item.keywords:
-            item.add_marker(skip)
+        if "live_llm" in item.keywords and not live_opted_in:
+            item.add_marker(skip_live)
+        if "postgres" in item.keywords and postgres_skips:
+            item.add_marker(skip_postgres)
 
 
 def _response(action_type: ActionType, target: str | None = None) -> AgentResponse:
