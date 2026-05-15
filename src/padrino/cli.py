@@ -9,12 +9,14 @@ Subcommands:
 - ``padrino metrics`` — read aggregated observability metrics (game counts,
   phase durations, LLM latency percentiles, timeout / invalid-JSON rates)
   from a Padrino database and print them as JSON.
+- ``padrino scheduler`` — run the async gauntlet scheduler loop until SIGTERM.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from typing import Any
 
 import typer
@@ -104,6 +106,49 @@ def demo_gauntlet(
 
     response = asyncio.run(run_demo_gauntlet(seed=seed, clones=clones, db_url=db_url, real=real))
     typer.echo(json.dumps(response, indent=2, sort_keys=True))
+
+
+@app.command("scheduler")
+def scheduler(
+    concurrency: int = typer.Option(
+        4, "--concurrency", help="Max concurrent in-flight games across all gauntlets."
+    ),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+) -> None:
+    """Run the async gauntlet scheduler until SIGTERM / SIGINT."""
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.runner.scheduler import run_scheduler
+
+    async def _run() -> None:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def _request_stop() -> None:
+                stop_event.set()
+
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, _request_stop)
+                except NotImplementedError:
+                    # Windows: signal handlers on loops are not supported.
+                    signal.signal(sig, lambda *_a: _request_stop())
+
+            await run_scheduler(
+                session_factory,
+                concurrency=concurrency,
+                stop_event=stop_event,
+            )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

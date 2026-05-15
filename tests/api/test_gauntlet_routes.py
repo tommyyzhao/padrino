@@ -151,9 +151,10 @@ async def test_create_gauntlet_happy_path_with_explicit_seed(client: AsyncClient
             "roster": roster,
         },
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
     body = response.json()
-    assert body["status"] == "QUEUED"
+    assert body["status"] == "PENDING"
+    assert response.headers["location"] == f"/gauntlets/{body['gauntlet_id']}"
     uuid.UUID(body["gauntlet_id"])
     assert len(body["game_ids"]) == 3
     for gid in body["game_ids"]:
@@ -175,7 +176,7 @@ async def test_create_gauntlet_omitted_seed_is_generated(client: AsyncClient) ->
             "roster": roster,
         },
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
     body = response.json()
     # Fetch the gauntlet to confirm a 256-bit hex seed was stored.
     detail = await client.get(f"/gauntlets/{body['gauntlet_id']}")
@@ -343,7 +344,7 @@ async def test_get_gauntlet_returns_status_games_and_diagnostics(client: AsyncCl
             "roster": roster,
         },
     )
-    assert created.status_code == 201, created.text
+    assert created.status_code == 202, created.text
     gauntlet_id = created.json()["gauntlet_id"]
     game_ids = created.json()["game_ids"]
 
@@ -351,7 +352,7 @@ async def test_get_gauntlet_returns_status_games_and_diagnostics(client: AsyncCl
     assert detail.status_code == 200, detail.text
     body = detail.json()
     assert body["id"] == gauntlet_id
-    assert body["status"] == "QUEUED"
+    assert body["status"] == "PENDING"
     assert body["league_id"] == league_id
     assert body["ruleset_id"] == mini7_v1.RULESET_ID
     assert body["clone_count"] == 3

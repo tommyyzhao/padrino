@@ -125,6 +125,7 @@ class Gauntlet(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GauntletRosterSlot(Base):

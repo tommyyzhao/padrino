@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,10 +106,11 @@ class GauntletDetailResponse(BaseModel):
 @router.post(
     "/gauntlets",
     response_model=GauntletCreateResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def create_gauntlet_route(
     body: GauntletCreate,
+    response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> GauntletCreateResponse:
     if len(body.roster) != 7:
@@ -166,7 +167,7 @@ async def create_gauntlet_route(
         clone_count=body.clone_count,
         gauntlet_seed=seed,
         ranked=league.ranked,
-        status="QUEUED",
+        status="PENDING",
     )
     for slot_index, agent_build_id in enumerate(body.roster):
         await gauntlets_repo.add_roster_slot(session, gauntlet.id, slot_index, agent_build_id)
@@ -181,6 +182,7 @@ async def create_gauntlet_route(
         )
         game_ids.append(game.id)
 
+    response.headers["Location"] = f"/gauntlets/{gauntlet.id}"
     return GauntletCreateResponse(
         gauntlet_id=gauntlet.id,
         status=gauntlet.status,

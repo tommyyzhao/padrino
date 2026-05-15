@@ -129,8 +129,8 @@
       ],
       "dependencies": ["US-049"],
       "priority": 54,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Gauntlet status strings normalized to uppercase PENDING / RUNNING / COMPLETED (the v1 API route used QUEUED — that was the one outlier and is now PENDING to match the repo default + the rest of the codebase). POST /gauntlets returns 202 with `Location: /gauntlets/{id}`; the route still validates roster + clone_count + FK existence synchronously, just no longer runs games inline. Scheduler lives at `padrino.runner.scheduler`; `game_runner.py`'s purity-firewall test scans only that one file, so sibling impure imports (asyncio, datetime, structlog) in the scheduler module are fine. New migration 0007 adds the nullable `gauntlets.heartbeat_at` column. SQLite drops tzinfo on read (Postgres preserves it); `padrino.db.repositories.gauntlets._aware()` coerces naive datetimes to UTC before comparing — needed for stale-heartbeat detection to work cross-dialect. The scheduler injects an `adapter_factory` (default NoopMockAdapter) and a `game_executor` (default = `run_game`); tests substitute a `_FakeExecutor` that flips `Game.status='COMPLETED'` instead of running a full mini7 game. Concurrency is bounded by an injected `asyncio.Semaphore` (defaults to `Semaphore(concurrency)`). Five new observability events registered: scheduler.tick, scheduler.gauntlet.started, scheduler.gauntlet.completed, scheduler.heartbeat, scheduler.stale_reset."
     },
     {
       "id": "US-055",

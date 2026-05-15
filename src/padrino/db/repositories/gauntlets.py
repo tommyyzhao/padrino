@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.db.models import Gauntlet, GauntletRosterSlot
+
+
+def _aware(dt: datetime) -> datetime:
+    """Coerce a naive datetime (e.g. from aiosqlite) to UTC.
+
+    The application always writes timezone-aware UTC values; SQLite drops the
+    tz on read, while Postgres preserves it. Treating naive rows as UTC keeps
+    cross-dialect comparisons (stale-heartbeat detection) honest.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 async def create(
@@ -85,3 +96,84 @@ async def list_roster_slots(
     )
     result = await session.execute(stmt)
     return list(result.scalars())
+
+
+async def claim_oldest_pending(
+    session: AsyncSession,
+    *,
+    now: datetime,
+) -> Gauntlet | None:
+    """Flip the oldest ``PENDING`` gauntlet to ``RUNNING`` and return it.
+
+    Returns ``None`` when no pending gauntlets exist. The status flip and
+    heartbeat stamp happen inside the caller-supplied session; the caller is
+    expected to commit. SQLite's lack of ``FOR UPDATE`` is fine here because
+    the scheduler is single-writer.
+    """
+    stmt = (
+        select(Gauntlet)
+        .where(Gauntlet.status == "PENDING")
+        .order_by(Gauntlet.created_at, Gauntlet.id)
+        .limit(1)
+    )
+    obj = (await session.execute(stmt)).scalars().first()
+    if obj is None:
+        return None
+    obj.status = "RUNNING"
+    obj.heartbeat_at = now
+    await session.flush()
+    return obj
+
+
+async def update_heartbeat(
+    session: AsyncSession,
+    gauntlet_id: uuid.UUID,
+    *,
+    now: datetime,
+) -> None:
+    obj = await session.get(Gauntlet, gauntlet_id)
+    if obj is None:
+        return
+    obj.heartbeat_at = now
+    await session.flush()
+
+
+async def mark_completed(
+    session: AsyncSession,
+    gauntlet_id: uuid.UUID,
+    *,
+    now: datetime,
+) -> None:
+    obj = await session.get(Gauntlet, gauntlet_id)
+    if obj is None:
+        return
+    obj.status = "COMPLETED"
+    obj.completed_at = now
+    obj.heartbeat_at = None
+    await session.flush()
+
+
+async def reset_stale_running(
+    session: AsyncSession,
+    *,
+    older_than: datetime,
+) -> list[uuid.UUID]:
+    """Flip every ``RUNNING`` gauntlet whose heartbeat is older than ``older_than`` back to ``PENDING``.
+
+    Returns the ids that were reset. Gauntlets with a NULL ``heartbeat_at``
+    are also treated as stale because the only way the column is NULL on a
+    RUNNING row is a crash between status flip and first heartbeat write.
+    """
+    stmt = select(Gauntlet).where(Gauntlet.status == "RUNNING")
+    rows = list((await session.execute(stmt)).scalars().all())
+    reset: list[uuid.UUID] = []
+    cutoff = _aware(older_than)
+    for obj in rows:
+        hb = obj.heartbeat_at
+        if hb is None or _aware(hb) < cutoff:
+            obj.status = "PENDING"
+            obj.heartbeat_at = None
+            reset.append(obj.id)
+    if reset:
+        await session.flush()
+    return reset
