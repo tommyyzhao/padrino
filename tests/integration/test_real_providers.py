@@ -96,6 +96,7 @@ async def test_real_providers_one_game_day(monkeypatch: pytest.MonkeyPatch) -> N
         routing_policy=routing,
         agent_build=build,
         timeout_s=float(settings.padrino_llm_timeout_seconds),
+        auth_secret_ref="env:CEREBRAS_API_KEY",
     )
 
     stub = _day1_ruleset_stub()

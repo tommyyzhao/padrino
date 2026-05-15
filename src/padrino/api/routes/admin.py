@@ -29,6 +29,7 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     providers as providers_repo,
 )
+from padrino.llm.secrets import SecretResolutionError, resolve_secret
 
 router = APIRouter()
 
@@ -123,6 +124,15 @@ async def create_model_provider(
     body: ModelProviderCreate,
     session: AsyncSession = Depends(get_session),
 ) -> ModelProviderResponse:
+    # Fail loud now rather than silently 401-ing when a game later tries to use
+    # this provider with an unresolvable credential reference.
+    try:
+        resolve_secret(body.auth_secret_ref)
+    except SecretResolutionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"auth_secret_ref could not be resolved: {exc}",
+        ) from exc
     obj = await providers_repo.create(
         session,
         name=body.name,

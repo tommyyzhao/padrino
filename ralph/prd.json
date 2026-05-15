@@ -42,8 +42,8 @@
       ],
       "dependencies": [],
       "priority": 50,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "LiteLlmAdapter now requires a keyword-only `auth_secret_ref: str`; it calls `padrino.llm.secrets.resolve_secret` at construction and stashes the resolved value on `self._auth_secret` (never re-read per request). POST /model-providers also resolves the ref at creation so deployments with a misconfigured env: var or file: path 422 immediately rather than 401-ing later. `tests/api/test_admin_routes.py` uses an autouse monkeypatch fixture to set CEREBRAS_API_KEY and X for the duration of each test."
     },
     {
       "id": "US-051",

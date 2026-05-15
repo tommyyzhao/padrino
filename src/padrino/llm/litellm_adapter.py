@@ -38,6 +38,7 @@ from padrino.llm.adapter import (
     AgentBuild,
     RoutingPolicy,
 )
+from padrino.llm.secrets import resolve_secret
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are a player in a hidden-role social-deduction game. "
@@ -69,7 +70,14 @@ def build_messages(
 class LiteLlmAdapter:
     """LiteLLM-backed adapter with primary→fallback routing."""
 
-    __slots__ = ("_build", "_policy", "_system_prompt", "_timeout_s", "last_attempts")
+    __slots__ = (
+        "_auth_secret",
+        "_build",
+        "_policy",
+        "_system_prompt",
+        "_timeout_s",
+        "last_attempts",
+    )
 
     def __init__(
         self,
@@ -77,8 +85,12 @@ class LiteLlmAdapter:
         routing_policy: RoutingPolicy,
         agent_build: AgentBuild,
         timeout_s: float,
+        auth_secret_ref: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     ) -> None:
+        # Resolve credentials once at construction so a misconfigured provider
+        # fails loudly at boot instead of silently 401-ing on first call.
+        self._auth_secret = resolve_secret(auth_secret_ref)
         self._policy = routing_policy
         self._build = agent_build
         self._system_prompt = system_prompt

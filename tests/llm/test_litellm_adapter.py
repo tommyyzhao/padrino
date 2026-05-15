@@ -27,8 +27,15 @@ from padrino.core.observations import Observation, build_observation
 from padrino.core.rulesets import mini7_v1
 from padrino.llm.adapter import AdapterResult, AgentBuild, LlmAdapter, RoutingPolicy
 from padrino.llm.litellm_adapter import LiteLlmAdapter, build_messages
+from padrino.llm.secrets import SecretResolutionError
 
 ACOMPLETION_PATH = "padrino.llm.litellm_adapter.litellm.acompletion"
+_AUTH_SECRET_ENV = "PADRINO_TEST_LITELLM_KEY"
+
+
+@pytest.fixture(autouse=True)
+def _set_auth_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(_AUTH_SECRET_ENV, "test-key-value")
 
 
 def _seat(pid: str, idx: int, role: Role, faction: Faction) -> Seat:
@@ -120,7 +127,12 @@ def _build_adapter(
         inference_params={"temperature": 0.7, "top_p": 1.0},
         adapter_version="litellm-1",
     )
-    return LiteLlmAdapter(routing_policy=policy, agent_build=build, timeout_s=5.0)
+    return LiteLlmAdapter(
+        routing_policy=policy,
+        agent_build=build,
+        timeout_s=5.0,
+        auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
+    )
 
 
 def test_litellm_adapter_satisfies_protocol() -> None:
@@ -329,6 +341,91 @@ def test_missing_usage_metadata_yields_none_token_counts() -> None:
     assert result.input_tokens is None
     assert result.output_tokens is None
     assert result.cost_usd is None
+
+
+def test_constructor_resolves_auth_secret_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adapter must resolve ``auth_secret_ref`` at construction, not per call."""
+    monkeypatch.setenv("PADRINO_ROTATING_SECRET", "first-value")
+    policy = RoutingPolicy(primary_model="x", fallback_model=None)
+    build = AgentBuild(
+        provider="p",
+        model_id="m",
+        prompt_version="pv",
+        inference_params={},
+        adapter_version="a",
+    )
+    adapter = LiteLlmAdapter(
+        routing_policy=policy,
+        agent_build=build,
+        timeout_s=1.0,
+        auth_secret_ref="env:PADRINO_ROTATING_SECRET",
+    )
+    # Rotating the env after construction must not change the cached value.
+    monkeypatch.setenv("PADRINO_ROTATING_SECRET", "second-value")
+    assert adapter._auth_secret == "first-value"
+
+
+def test_constructor_fails_loudly_on_unresolvable_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PADRINO_NEVER_SET", raising=False)
+    policy = RoutingPolicy(primary_model="x", fallback_model=None)
+    build = AgentBuild(
+        provider="p",
+        model_id="m",
+        prompt_version="pv",
+        inference_params={},
+        adapter_version="a",
+    )
+    with pytest.raises(SecretResolutionError):
+        LiteLlmAdapter(
+            routing_policy=policy,
+            agent_build=build,
+            timeout_s=1.0,
+            auth_secret_ref="env:PADRINO_NEVER_SET",
+        )
+
+
+def test_complete_does_not_reread_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``resolve_secret`` is called exactly once at construction, never per call."""
+    monkeypatch.setenv("PADRINO_COUNT_SECRET", "value")
+    call_count = {"n": 0}
+    import padrino.llm.litellm_adapter as litellm_mod
+    from padrino.llm import secrets as secrets_mod
+
+    real_resolve = secrets_mod.resolve_secret
+
+    def counting_resolve(ref: str) -> str:
+        call_count["n"] += 1
+        return real_resolve(ref)
+
+    monkeypatch.setattr(litellm_mod, "resolve_secret", counting_resolve)
+
+    policy = RoutingPolicy(primary_model="m", fallback_model=None)
+    build = AgentBuild(
+        provider="p",
+        model_id="m",
+        prompt_version="pv",
+        inference_params={},
+        adapter_version="a",
+    )
+    response = _fake_completion(content=_valid_response_json(Action(type=ActionType.NOOP)))
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.NIGHT_0_MAFIA_INTRO, day=0, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
+        adapter = LiteLlmAdapter(
+            routing_policy=policy,
+            agent_build=build,
+            timeout_s=1.0,
+            auth_secret_ref="env:PADRINO_COUNT_SECRET",
+        )
+        # Construction reads exactly once.
+        assert call_count["n"] == 1
+        asyncio.run(adapter.complete(obs))
+        asyncio.run(adapter.complete(obs))
+
+    # Subsequent calls never re-read the secret.
+    assert call_count["n"] == 1
 
 
 def test_litellm_adapter_does_not_import_db_or_random() -> None:

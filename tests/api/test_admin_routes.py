@@ -14,6 +14,18 @@ from padrino.api.app import create_app
 from padrino.db.base import Base, create_engine, create_session_factory
 
 
+@pytest.fixture(autouse=True)
+def _stub_provider_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub env vars referenced by ``auth_secret_ref`` so resolution succeeds.
+
+    The admin POST /model-providers route resolves the secret reference at
+    creation time (US-050). Tests use ``env:CEREBRAS_API_KEY`` and ``env:X``
+    as placeholders — set both to test values for the duration of the test.
+    """
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-cerebras-key")
+    monkeypatch.setenv("X", "test-x-value")
+
+
 @pytest_asyncio.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     eng = create_engine("sqlite+aiosqlite:///:memory:")
@@ -226,3 +238,28 @@ async def test_create_provider_validation_rejects_empty_name(client: AsyncClient
         json={"name": "", "auth_secret_ref": "env:X"},
     )
     assert response.status_code == 422
+
+
+async def test_create_provider_rejects_unresolvable_secret_ref(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PADRINO_NEVER_DEFINED_KEY", raising=False)
+    response = await client.post(
+        "/model-providers",
+        json={
+            "name": "broken",
+            "auth_secret_ref": "env:PADRINO_NEVER_DEFINED_KEY",
+        },
+    )
+    assert response.status_code == 422
+    assert "auth_secret_ref" in response.json()["detail"]
+
+
+async def test_create_provider_rejects_unknown_scheme(client: AsyncClient) -> None:
+    response = await client.post(
+        "/model-providers",
+        json={"name": "vault-proto", "auth_secret_ref": "vault:secret/data"},
+    )
+    assert response.status_code == 422
+    assert "scheme" in response.json()["detail"]

@@ -69,6 +69,7 @@ def _make_adapter(real: bool, settings: Settings) -> LlmAdapter:
         routing_policy=routing,
         agent_build=build,
         timeout_s=float(settings.padrino_llm_timeout_seconds),
+        auth_secret_ref="env:CEREBRAS_API_KEY",
     )
 
 
