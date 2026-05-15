@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.api.deps import get_admin_token, get_session
 from padrino.core.engine.event_log import StoredEvent
 from padrino.core.engine.replay import ReplayHashMismatchError, replay_event_log
-from padrino.db.models import Game, GameEvent, GameSeat
+from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 
@@ -33,8 +33,7 @@ VisibilityFilter = Literal["public", "all"]
 class GameDetailResponse(BaseModel):
     id: uuid.UUID
     status: str
-    terminal_result: str | None
-    terminal_reason: str | None
+    terminal_result: dict[str, Any] | None
     current_phase: str | None
     seat_count: int
 
@@ -123,20 +122,6 @@ async def _game_or_404(session: AsyncSession, game_id: uuid.UUID) -> Game:
     return obj
 
 
-async def _terminated_event(session: AsyncSession, game_id: uuid.UUID) -> GameEvent | None:
-    stmt = (
-        select(GameEvent)
-        .where(
-            GameEvent.game_id == game_id,
-            GameEvent.event_type == "GameTerminated",
-        )
-        .order_by(GameEvent.sequence)
-        .limit(1)
-    )
-    result = await session.execute(stmt)
-    return result.scalars().first()
-
-
 @router.get("/games/{game_id}", response_model=GameDetailResponse)
 async def get_game(
     game_id: uuid.UUID,
@@ -148,7 +133,6 @@ async def get_game(
         id=obj.id,
         status=obj.status,
         terminal_result=obj.terminal_result,
-        terminal_reason=obj.terminal_reason,
         current_phase=obj.current_phase,
         seat_count=seats,
     )
@@ -195,9 +179,8 @@ async def get_game_transcript(
     game_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
 ) -> TranscriptResponse:
-    await _game_or_404(session, game_id)
-    terminated = await _terminated_event(session, game_id)
-    if terminated is None:
+    game = await _game_or_404(session, game_id)
+    if game.status != "COMPLETED" or game.terminal_result is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"game {game_id} has not terminated yet",
@@ -252,8 +235,8 @@ async def get_game_transcript(
             )
 
     outcome = Outcome(
-        winner=str(terminated.payload["winner"]),
-        reason=str(terminated.payload["reason"]),
+        winner=str(game.terminal_result["winner"]),
+        reason=str(game.terminal_result["reason"]),
     )
 
     return TranscriptResponse(

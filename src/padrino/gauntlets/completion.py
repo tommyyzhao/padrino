@@ -39,7 +39,7 @@ PROVISIONAL_TOTAL_GAMES: Final[int] = 30
 PROVISIONAL_MAFIA_GAMES: Final[int] = 5
 PROVISIONAL_TOWN_GAMES: Final[int] = 15
 
-_TERMINATED_EVENT_TYPE: Final[str] = "GameTerminated"
+_COMPLETED_STATUS: Final[str] = "COMPLETED"
 _PUBLIC_MESSAGE_EVENT_TYPE: Final[str] = "PublicMessageSubmitted"
 _TIMEOUT_EVENT_TYPE: Final[str] = "ActionTimedOut"
 _INVALID_EVENT_TYPE: Final[str] = "OutputInvalid"
@@ -110,13 +110,9 @@ async def _all_games_terminal(
     ids = list(game_ids)
     if not ids:
         return False
-    stmt = (
-        select(GameEvent.game_id)
-        .where(
-            GameEvent.game_id.in_(ids),
-            GameEvent.event_type == _TERMINATED_EVENT_TYPE,
-        )
-        .distinct()
+    stmt = select(Game.id).where(
+        Game.id.in_(ids),
+        Game.status == _COMPLETED_STATUS,
     )
     rows = (await session.execute(stmt)).scalars().all()
     return set(rows) == set(ids)
@@ -130,12 +126,10 @@ async def _league_terminal_game_ids(
     stmt = (
         select(Game.id)
         .join(Gauntlet, Gauntlet.id == Game.gauntlet_id)
-        .join(GameEvent, GameEvent.game_id == Game.id)
         .where(
             Gauntlet.league_id == league_id,
-            GameEvent.event_type == _TERMINATED_EVENT_TYPE,
+            Game.status == _COMPLETED_STATUS,
         )
-        .distinct()
     )
     return list((await session.execute(stmt)).scalars().all())
 

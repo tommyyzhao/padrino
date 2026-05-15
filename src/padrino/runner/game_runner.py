@@ -51,6 +51,7 @@ from padrino.core.enums import ActionType, Faction, PhaseKind, Role
 from padrino.core.observations import Observation, format_phase_id
 from padrino.core.rulesets import mini7_v1
 from padrino.db.repositories import events as events_repo
+from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.observability.events import (
@@ -68,6 +69,7 @@ _logger = structlog.get_logger("padrino.runner")
 MAFIA_CHANNEL_ID: Final[str] = "mafia"
 CAUSE_DAY_VOTE: Final[str] = "day_vote"
 CAUSE_NIGHT_KILL: Final[str] = "night_kill"
+STATUS_COMPLETED: Final[str] = "COMPLETED"
 
 _RULESETS: Final[dict[str, Any]] = {mini7_v1.RULESET_ID: mini7_v1}
 
@@ -82,10 +84,14 @@ class GamePersistence:
     UUID for llm_call attribution; unmapped seats persist with
     ``agent_build_id = NULL``.
 
-    When ``league_id`` is set, ``ranked=True``, and ``agent_builds`` covers
-    every seat in the final state, the runner additionally invokes the
-    OpenSkill rating service in the SAME transaction as the
-    ``GameTerminated`` event row so partial failures roll back together.
+    On the ``RolesAssigned`` event the runner additionally writes one
+    ``game_seats`` row per seat sourced from the event payload; this requires
+    ``agent_builds`` to cover every seat in the assignment.
+
+    On the ``GameTerminated`` event the runner sets ``Game.status='COMPLETED'``
+    and ``Game.terminal_result={winner, reason, day_terminated}`` in the same
+    transaction as the event row and (when applicable) the rating updates so
+    partial failures roll back together.
     """
 
     session_factory: async_sessionmaker[AsyncSession]
@@ -187,6 +193,51 @@ async def _persist_stored_event(
         await _append_event_row(session, persistence, stored)
 
 
+async def _persist_roles_assigned(
+    persistence: GamePersistence,
+    stored: StoredEvent,
+) -> None:
+    """Persist the ``RolesAssigned`` event row and one ``game_seats`` row per seat.
+
+    Both writes share one ``session.begin()`` so the event row and the seat
+    rows are committed atomically. Skips the seat backfill when
+    ``persistence.agent_builds`` does not cover every seat in the payload —
+    callers that drive ``run_game`` without per-seat builds (legacy tests
+    using ``persistence=None``-style flows) still get the event row.
+    """
+    assignments = stored.body.get("payload", {}).get("assignments", [])
+    seat_specs: list[dict[str, Any]] = []
+    for entry in assignments:
+        public_id = entry["public_player_id"]
+        ab_id = persistence.agent_builds.get(public_id)
+        if ab_id is None:
+            seat_specs = []
+            break
+        seat_specs.append(
+            {
+                "public_player_id": public_id,
+                "seat_index": entry["seat_index"],
+                "agent_build_id": ab_id,
+                "role": entry["role"],
+                "faction": entry["faction"],
+            }
+        )
+
+    async with persistence.session_factory() as session, session.begin():
+        await _append_event_row(session, persistence, stored)
+        for spec in seat_specs:
+            await games_repo.add_seat(
+                session,
+                game_id=persistence.game_id,
+                public_player_id=spec["public_player_id"],
+                seat_index=spec["seat_index"],
+                agent_build_id=spec["agent_build_id"],
+                role=spec["role"],
+                faction=spec["faction"],
+                alive=True,
+            )
+
+
 def _should_apply_ratings(
     persistence: GamePersistence,
     ranked: bool,
@@ -204,16 +255,31 @@ async def _persist_terminated_event(
     stored: StoredEvent,
     state: GameState,
     ranked: bool,
+    day_terminated: int,
 ) -> None:
-    """Persist the ``GameTerminated`` row and rating updates atomically.
+    """Persist the ``GameTerminated`` row, game-row finalize, and ratings atomically.
 
-    When ranked ratings apply (see :func:`_should_apply_ratings`) the
-    terminal event row and every rating update + audit row are written in
-    one ``session.begin()`` block so partial failures roll back together.
+    Inside one ``session.begin()`` we write the terminal event row, flip
+    ``Game.status='COMPLETED'`` with ``Game.terminal_result`` = ``{winner,
+    reason, day_terminated}``, and (when applicable) every rating update +
+    audit row so partial failures roll back together.
     """
     apply_ratings = _should_apply_ratings(persistence, ranked, state)
+    terminal_result_payload: dict[str, Any] = {
+        "winner": state.terminal_result,
+        "reason": state.terminal_reason,
+        "day_terminated": day_terminated,
+    }
     async with persistence.session_factory() as session, session.begin():
         await _append_event_row(session, persistence, stored)
+        await games_repo.update_status(
+            session,
+            persistence.game_id,
+            status=STATUS_COMPLETED,
+            terminal_result=terminal_result_payload,
+            current_phase=stored.body["phase"],
+            event_hash_head=stored.event_hash,
+        )
         if apply_ratings:
             assert persistence.league_id is not None
             winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
@@ -515,12 +581,23 @@ async def run_game(
         timeout_s=config.timeout_s,
     )
 
-    async def emit_and_persist(body: dict[str, Any], game_state: GameState) -> GameState:
+    async def emit_and_persist(
+        body: dict[str, Any],
+        game_state: GameState,
+        *,
+        day_terminated: int | None = None,
+    ) -> GameState:
         next_state = _emit(body, game_state, event_log)
         if persistence is not None:
             stored = event_log.events[-1]
-            if stored.body["event_type"] == "GameTerminated":
-                await _persist_terminated_event(persistence, stored, next_state, ranked)
+            event_type = stored.body["event_type"]
+            if event_type == "GameTerminated":
+                assert day_terminated is not None
+                await _persist_terminated_event(
+                    persistence, stored, next_state, ranked, day_terminated
+                )
+            elif event_type == "RolesAssigned":
+                await _persist_roles_assigned(persistence, stored)
             else:
                 await _persist_stored_event(persistence, stored)
         return next_state
@@ -587,6 +664,7 @@ async def run_game(
                         },
                     },
                     state,
+                    day_terminated=current_phase.day,
                 )
                 break
 
@@ -674,6 +752,7 @@ async def run_game(
                         "payload": {"winner": win.winner, "reason": win.reason},
                     },
                     state,
+                    day_terminated=current_phase.day,
                 )
                 break
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.deps import get_session
-from padrino.db.models import GameEvent
+from padrino.db.models import Game
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -77,8 +77,7 @@ class GauntletCreateResponse(BaseModel):
 class GameSummary(BaseModel):
     id: uuid.UUID
     status: str
-    terminal_result: str | None
-    terminal_reason: str | None
+    terminal_result: dict[str, Any] | None
     current_phase: str | None
 
 
@@ -203,13 +202,9 @@ async def get_gauntlet(
     games = await games_repo.list_by_gauntlet(session, gauntlet_id)
     game_ids = [g.id for g in games]
     if game_ids:
-        terminal_stmt = (
-            select(GameEvent.game_id)
-            .where(
-                GameEvent.game_id.in_(game_ids),
-                GameEvent.event_type == "GameTerminated",
-            )
-            .distinct()
+        terminal_stmt = select(Game.id).where(
+            Game.id.in_(game_ids),
+            Game.status == "COMPLETED",
         )
         terminal_ids = list((await session.execute(terminal_stmt)).scalars().all())
     else:
@@ -231,7 +226,6 @@ async def get_gauntlet(
                 id=g.id,
                 status=g.status,
                 terminal_result=g.terminal_result,
-                terminal_reason=g.terminal_reason,
                 current_phase=g.current_phase,
             )
             for g in games

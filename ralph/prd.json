@@ -22,8 +22,8 @@
       ],
       "dependencies": [],
       "priority": 49,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Game.status uses uppercase 'COMPLETED' to match the existing Gauntlet.status convention (CREATED/RUNNING/COMPLETED); the story's lowercase example was treated as illustrative. Game.terminal_reason column was dropped — reason now lives inside the JSON terminal_result."
     },
     {
       "id": "US-050",

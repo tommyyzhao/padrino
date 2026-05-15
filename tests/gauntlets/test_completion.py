@@ -184,8 +184,18 @@ async def _terminate_game(
     *,
     game_id: uuid.UUID,
     winner: str = "TOWN",
+    reason: str = "town_eliminated_all_mafia",
 ) -> None:
-    await _append_chained(session, game_id=game_id, bodies=[_terminated_body(winner=winner)])
+    await _append_chained(
+        session, game_id=game_id, bodies=[_terminated_body(winner=winner, reason=reason)]
+    )
+    # US-049: terminal games carry status='COMPLETED' and a JSON terminal_result.
+    await games_repo.update_status(
+        session,
+        game_id,
+        status="COMPLETED",
+        terminal_result={"winner": winner, "reason": reason, "day_terminated": 1},
+    )
 
 
 async def test_returns_none_when_some_games_not_terminal(
@@ -584,6 +594,18 @@ async def test_diagnostics_aggregate_over_child_games(
                 _terminated_body(winner="MAFIA"),
             ],
         )
+        # US-049: terminal games carry status='COMPLETED'.
+        for gid in gauntlet.game_ids:
+            await games_repo.update_status(
+                session,
+                gid,
+                status="COMPLETED",
+                terminal_result={
+                    "winner": "TOWN",
+                    "reason": "town_eliminated_all_mafia",
+                    "day_terminated": 1,
+                },
+            )
 
     async with session_factory() as session:
         result = await finalize_gauntlet_if_done(session, gauntlet.gauntlet_id)

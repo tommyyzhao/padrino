@@ -4,8 +4,8 @@ This module is the v1 "fresh-checkout quickstart": it stands up a SQLite
 database, seeds the minimal admin rows (provider, model config, prompt
 version, league, agent build), schedules one gauntlet, runs every child game
 through either the deterministic mock adapter or the real LiteLLM adapter,
-backfills ``game_seats`` from each game's final state, and computes the
-league leaderboard.
+and computes the league leaderboard. ``game_seats`` rows are written by the
+runner itself (US-049) as part of the ``RolesAssigned`` transaction.
 
 Lives in the impure layer; pure-core does not import it.
 """
@@ -18,14 +18,10 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.core.engine.state import Seat
 from padrino.core.rulesets import mini7_v1
 from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
-)
-from padrino.db.repositories import (
-    games as games_repo,
 )
 from padrino.db.repositories import (
     leagues as leagues_repo,
@@ -127,28 +123,6 @@ async def _seed_minimal_admin(
         return league.id, agent_build.id, pv.id
 
 
-async def _backfill_seats(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    game_id: uuid.UUID,
-    seats: tuple[Seat, ...],
-    agent_build_id: uuid.UUID,
-) -> None:
-    """Insert one ``GameSeat`` row per seat from the runner's final state."""
-    async with session_factory() as session, session.begin():
-        for seat in seats:
-            await games_repo.add_seat(
-                session,
-                game_id=game_id,
-                public_player_id=seat.public_player_id,
-                seat_index=seat.seat_index,
-                agent_build_id=agent_build_id,
-                role=seat.role.value,
-                faction=seat.faction.value,
-                alive=seat.alive,
-            )
-
-
 async def run_demo_gauntlet(
     *,
     seed: str,
@@ -215,13 +189,7 @@ async def run_demo_gauntlet(
                     agent_builds=agent_builds_by_seat,
                     league_id=league_id,
                 )
-                outcome = await run_game(config, adapter, ranked=True, persistence=persistence)
-                await _backfill_seats(
-                    session_factory,
-                    game_id=game_id,
-                    seats=outcome.final_state.seats,
-                    agent_build_id=agent_build_id,
-                )
+                await run_game(config, adapter, ranked=True, persistence=persistence)
         finally:
             structlog.contextvars.reset_contextvars(**gauntlet_tokens)
 

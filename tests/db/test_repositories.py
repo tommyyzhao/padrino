@@ -463,8 +463,11 @@ async def test_games_update_status(
             session,
             game_id,
             status="COMPLETED",
-            terminal_result="TOWN",
-            terminal_reason="ALL_MAFIA_ELIMINATED",
+            terminal_result={
+                "winner": "TOWN",
+                "reason": "ALL_MAFIA_ELIMINATED",
+                "day_terminated": 2,
+            },
             current_phase="TERMINAL",
             event_hash_head="a" * 64,
             completed_at=completed_at,
@@ -476,7 +479,11 @@ async def test_games_update_status(
         loaded = await games.get(session, game_id)
         assert loaded is not None
         assert loaded.status == "COMPLETED"
-        assert loaded.terminal_result == "TOWN"
+        assert loaded.terminal_result == {
+            "winner": "TOWN",
+            "reason": "ALL_MAFIA_ELIMINATED",
+            "day_terminated": 2,
+        }
         assert loaded.event_hash_head == "a" * 64
 
         miss = await games.update_status(session, uuid.uuid4(), status="X")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,8 +68,7 @@ async def update_status(
     game_id: uuid.UUID,
     *,
     status: str,
-    terminal_result: str | None = None,
-    terminal_reason: str | None = None,
+    terminal_result: dict[str, Any] | None = None,
     current_phase: str | None = None,
     event_hash_head: str | None = None,
     started_at: datetime | None = None,
@@ -80,8 +80,6 @@ async def update_status(
     game.status = status
     if terminal_result is not None:
         game.terminal_result = terminal_result
-    if terminal_reason is not None:
-        game.terminal_reason = terminal_reason
     if current_phase is not None:
         game.current_phase = current_phase
     if event_hash_head is not None:

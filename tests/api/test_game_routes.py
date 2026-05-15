@@ -90,8 +90,8 @@ async def _seed_completed_game(
 ) -> uuid.UUID:
     """Insert a league, agent builds, run a town-win scripted game, return game_id.
 
-    Also writes ``GameSeat`` rows for the assigned roster since the runner
-    does not populate that table directly in v1.
+    The runner (US-049) writes ``game_seats`` rows itself via the
+    ``RolesAssigned`` event so this helper does not pre-populate them.
     """
     seats = assign_roles(_GAME_SEED, mini7_v1)
     mafia = [s.public_player_id for s in seats if s.faction is Faction.MAFIA]
@@ -144,17 +144,6 @@ async def _seed_completed_game(
         )
         league_id = league.id
         game_id = game.id
-        for seat in seats:
-            await games_repo.add_seat(
-                session,
-                game_id=game_id,
-                public_player_id=seat.public_player_id,
-                seat_index=seat.seat_index,
-                agent_build_id=builds[seat.seat_index],
-                role=seat.role.value,
-                faction=seat.faction.value,
-                alive=True,
-            )
     agent_builds_by_seat = {f"P{i + 1:02d}": builds[i] for i in range(mini7_v1.PLAYER_COUNT)}
 
     script = make_town_win_script(
@@ -185,12 +174,13 @@ async def test_get_game_returns_summary_and_seat_count(
     body = response.json()
     assert body["id"] == str(game_id)
     assert body["seat_count"] == mini7_v1.PLAYER_COUNT
-    # status is whatever was set when the row was created; runner does not update it.
-    assert isinstance(body["status"], str)
-    # current_phase / terminal_* are nullable strings.
+    # Runner (US-049) flips status to COMPLETED on GameTerminated.
+    assert body["status"] == "COMPLETED"
     assert "current_phase" in body
-    assert "terminal_result" in body
-    assert "terminal_reason" in body
+    assert body["terminal_result"] is not None
+    assert body["terminal_result"]["winner"] == "TOWN"
+    assert "reason" in body["terminal_result"]
+    assert "day_terminated" in body["terminal_result"]
 
 
 async def test_get_game_not_found(client: AsyncClient) -> None:
