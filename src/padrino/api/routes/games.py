@@ -11,14 +11,21 @@ the stored hashes survived the replay.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.deps import get_admin_token, get_session
+from padrino.api.pagination import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    MIN_LIMIT,
+    CursorPage,
+    paginate_keyset,
+)
 from padrino.core.engine.event_log import StoredEvent
 from padrino.core.engine.replay import ReplayHashMismatchError, replay_event_log
 from padrino.db.models import Game, GameSeat
@@ -120,6 +127,59 @@ async def _game_or_404(session: AsyncSession, game_id: uuid.UUID) -> Game:
             detail=f"game {game_id} not found",
         )
     return obj
+
+
+class GameListEntry(BaseModel):
+    id: uuid.UUID
+    status: str
+    ruleset_id: str
+    gauntlet_id: uuid.UUID | None
+    terminal_result: dict[str, Any] | None
+    current_phase: str | None
+
+
+class GameListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+    status: str | None = None
+    gauntlet_id: uuid.UUID | None = None
+    ruleset_id: str | None = None
+
+
+@router.get("/games", response_model=CursorPage[GameListEntry])
+async def list_games(
+    query: Annotated[GameListQuery, Query()],
+    session: AsyncSession = Depends(get_session),
+) -> CursorPage[GameListEntry]:
+    stmt = select(Game)
+    if query.status is not None:
+        stmt = stmt.where(Game.status == query.status)
+    if query.gauntlet_id is not None:
+        stmt = stmt.where(Game.gauntlet_id == query.gauntlet_id)
+    if query.ruleset_id is not None:
+        stmt = stmt.where(Game.ruleset_id == query.ruleset_id)
+    rows, next_cursor = await paginate_keyset(
+        session,
+        stmt,
+        created_at_col=Game.created_at,
+        id_col=Game.id,
+        limit=query.limit,
+        cursor=query.cursor,
+    )
+    items = [
+        GameListEntry(
+            id=g.id,
+            status=g.status,
+            ruleset_id=g.ruleset_id,
+            gauntlet_id=g.gauntlet_id,
+            terminal_result=g.terminal_result,
+            current_phase=g.current_phase,
+        )
+        for g in rows
+    ]
+    return CursorPage[GameListEntry](items=items, next_cursor=next_cursor)
 
 
 @router.get("/games/{game_id}", response_model=GameDetailResponse)

@@ -10,13 +10,27 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.deps import get_session
+from padrino.api.pagination import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    MIN_LIMIT,
+    CursorPage,
+    paginate_keyset,
+)
+from padrino.db.models import (
+    AgentBuild,
+    ModelConfig,
+    ModelProvider,
+    PromptVersion,
+)
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -255,6 +269,172 @@ async def create_agent_build(
         active=obj.active,
         created_at=obj.created_at,
     )
+
+
+class ModelProviderListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+    name: str | None = None
+
+
+@router.get("/model-providers", response_model=CursorPage[ModelProviderResponse])
+async def list_model_providers(
+    query: Annotated[ModelProviderListQuery, Query()],
+    session: AsyncSession = Depends(get_session),
+) -> CursorPage[ModelProviderResponse]:
+    stmt = select(ModelProvider)
+    if query.name is not None:
+        stmt = stmt.where(ModelProvider.name == query.name)
+    rows, next_cursor = await paginate_keyset(
+        session,
+        stmt,
+        created_at_col=ModelProvider.created_at,
+        id_col=ModelProvider.id,
+        limit=query.limit,
+        cursor=query.cursor,
+    )
+    items = [
+        ModelProviderResponse(
+            id=r.id,
+            name=r.name,
+            base_url=r.base_url,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+    return CursorPage[ModelProviderResponse](items=items, next_cursor=next_cursor)
+
+
+class ModelConfigListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+    provider_id: uuid.UUID | None = None
+    model_name: str | None = None
+
+
+@router.get("/model-configs", response_model=CursorPage[ModelConfigResponse])
+async def list_model_configs(
+    query: Annotated[ModelConfigListQuery, Query()],
+    session: AsyncSession = Depends(get_session),
+) -> CursorPage[ModelConfigResponse]:
+    stmt = select(ModelConfig)
+    if query.provider_id is not None:
+        stmt = stmt.where(ModelConfig.provider_id == query.provider_id)
+    if query.model_name is not None:
+        stmt = stmt.where(ModelConfig.model_name == query.model_name)
+    rows, next_cursor = await paginate_keyset(
+        session,
+        stmt,
+        created_at_col=ModelConfig.created_at,
+        id_col=ModelConfig.id,
+        limit=query.limit,
+        cursor=query.cursor,
+    )
+    items = [
+        ModelConfigResponse(
+            id=r.id,
+            provider_id=r.provider_id,
+            model_name=r.model_name,
+            model_version=r.model_version,
+            default_temperature=r.default_temperature,
+            default_top_p=r.default_top_p,
+            default_max_output_tokens=r.default_max_output_tokens,
+            supports_structured_outputs=r.supports_structured_outputs,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+    return CursorPage[ModelConfigResponse](items=items, next_cursor=next_cursor)
+
+
+class PromptVersionListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+    ruleset_id: str | None = None
+
+
+@router.get("/prompt-versions", response_model=CursorPage[PromptVersionResponse])
+async def list_prompt_versions(
+    query: Annotated[PromptVersionListQuery, Query()],
+    session: AsyncSession = Depends(get_session),
+) -> CursorPage[PromptVersionResponse]:
+    stmt = select(PromptVersion)
+    if query.ruleset_id is not None:
+        stmt = stmt.where(PromptVersion.ruleset_id == query.ruleset_id)
+    rows, next_cursor = await paginate_keyset(
+        session,
+        stmt,
+        created_at_col=PromptVersion.created_at,
+        id_col=PromptVersion.id,
+        limit=query.limit,
+        cursor=query.cursor,
+    )
+    items = [
+        PromptVersionResponse(
+            id=r.id,
+            ruleset_id=r.ruleset_id,
+            version=r.version,
+            system_prompt=r.system_prompt,
+            developer_prompt=r.developer_prompt,
+            response_schema=r.response_schema,
+            prompt_hash=r.prompt_hash,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+    return CursorPage[PromptVersionResponse](items=items, next_cursor=next_cursor)
+
+
+class AgentBuildListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+    active: bool | None = None
+    model_config_id: uuid.UUID | None = None
+    prompt_version_id: uuid.UUID | None = None
+
+
+@router.get("/agent-builds", response_model=CursorPage[AgentBuildResponse])
+async def list_agent_builds(
+    query: Annotated[AgentBuildListQuery, Query()],
+    session: AsyncSession = Depends(get_session),
+) -> CursorPage[AgentBuildResponse]:
+    stmt = select(AgentBuild)
+    if query.active is not None:
+        stmt = stmt.where(AgentBuild.active == query.active)
+    if query.model_config_id is not None:
+        stmt = stmt.where(AgentBuild.model_config_id == query.model_config_id)
+    if query.prompt_version_id is not None:
+        stmt = stmt.where(AgentBuild.prompt_version_id == query.prompt_version_id)
+    rows, next_cursor = await paginate_keyset(
+        session,
+        stmt,
+        created_at_col=AgentBuild.created_at,
+        id_col=AgentBuild.id,
+        limit=query.limit,
+        cursor=query.cursor,
+    )
+    items = [
+        AgentBuildResponse(
+            id=r.id,
+            display_name=r.display_name,
+            model_config_id=r.model_config_id,
+            prompt_version_id=r.prompt_version_id,
+            adapter_version=r.adapter_version,
+            inference_params=r.inference_params,
+            active=r.active,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+    return CursorPage[AgentBuildResponse](items=items, next_cursor=next_cursor)
 
 
 @router.get("/agent-builds/{agent_build_id}", response_model=AgentBuildResponse)

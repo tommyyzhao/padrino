@@ -17,13 +17,20 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.deps import get_session
-from padrino.db.models import Game
+from padrino.api.pagination import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    MIN_LIMIT,
+    CursorPage,
+    paginate_keyset,
+)
+from padrino.db.models import Game, Gauntlet
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -188,6 +195,58 @@ async def create_gauntlet_route(
         status=gauntlet.status,
         game_ids=game_ids,
     )
+
+
+class GauntletListEntry(BaseModel):
+    id: uuid.UUID
+    league_id: uuid.UUID
+    ruleset_id: str
+    clone_count: int
+    status: str
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class GauntletListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+    status: str | None = None
+    league_id: uuid.UUID | None = None
+
+
+@router.get("/gauntlets", response_model=CursorPage[GauntletListEntry])
+async def list_gauntlets(
+    query: Annotated[GauntletListQuery, Query()],
+    session: AsyncSession = Depends(get_session),
+) -> CursorPage[GauntletListEntry]:
+    stmt = select(Gauntlet)
+    if query.status is not None:
+        stmt = stmt.where(Gauntlet.status == query.status)
+    if query.league_id is not None:
+        stmt = stmt.where(Gauntlet.league_id == query.league_id)
+    rows, next_cursor = await paginate_keyset(
+        session,
+        stmt,
+        created_at_col=Gauntlet.created_at,
+        id_col=Gauntlet.id,
+        limit=query.limit,
+        cursor=query.cursor,
+    )
+    items = [
+        GauntletListEntry(
+            id=g.id,
+            league_id=g.league_id,
+            ruleset_id=g.ruleset_id,
+            clone_count=g.clone_count,
+            status=g.status,
+            created_at=g.created_at,
+            completed_at=g.completed_at,
+        )
+        for g in rows
+    ]
+    return CursorPage[GauntletListEntry](items=items, next_cursor=next_cursor)
 
 
 @router.get("/gauntlets/{gauntlet_id}", response_model=GauntletDetailResponse)

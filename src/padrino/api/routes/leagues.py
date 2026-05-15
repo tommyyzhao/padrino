@@ -14,13 +14,22 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.deps import get_session
+from padrino.api.pagination import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    MIN_LIMIT,
+    InvalidCursorError,
+    decode_index_cursor,
+    encode_index_cursor,
+    invalid_cursor_error,
+)
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.leaderboards.service import compute_leaderboard, entry_to_response
 
@@ -92,11 +101,22 @@ class LeaderboardResponse(BaseModel):
     prompt_version: str
     rating_model: str
     entries: list[LeaderboardEntryResponse]
+    next_cursor: str | None = None
+
+
+class LeaderboardListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+    gauntlet_id: uuid.UUID | None = None
+    provisional: bool | None = None
 
 
 @router.get("/leagues/{league_id}/leaderboard", response_model=LeaderboardResponse)
 async def get_leaderboard(
     league_id: uuid.UUID,
+    query: Annotated[LeaderboardListQuery, Query()],
     session: AsyncSession = Depends(get_session),
 ) -> LeaderboardResponse:
     league = await leagues_repo.get(session, league_id)
@@ -106,15 +126,34 @@ async def get_leaderboard(
             detail=f"league {league_id} not found",
         )
     leaderboard = await compute_leaderboard(
-        session, league_id=league_id, ruleset_id=league.ruleset_id
+        session,
+        league_id=league_id,
+        ruleset_id=league.ruleset_id,
+        gauntlet_id=query.gauntlet_id,
     )
-    entries: list[dict[str, Any]] = [entry_to_response(e) for e in leaderboard.entries]
+    filtered = [
+        e
+        for e in leaderboard.entries
+        if query.provisional is None or e.provisional == query.provisional
+    ]
+    start = 0
+    if query.cursor is not None:
+        try:
+            start = decode_index_cursor(query.cursor)
+        except InvalidCursorError as exc:
+            raise invalid_cursor_error() from exc
+    page = filtered[start : start + query.limit]
+    next_cursor = (
+        encode_index_cursor(start + query.limit) if start + query.limit < len(filtered) else None
+    )
+    entries: list[dict[str, Any]] = [entry_to_response(e) for e in page]
     return LeaderboardResponse(
         leaderboard_id=leaderboard.leaderboard_id,
         ruleset_id=leaderboard.ruleset_id,
         prompt_version=leaderboard.prompt_version,
         rating_model=leaderboard.rating_model,
         entries=[LeaderboardEntryResponse(**entry) for entry in entries],
+        next_cursor=next_cursor,
     )
 
 

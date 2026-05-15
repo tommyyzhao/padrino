@@ -149,8 +149,8 @@
       ],
       "dependencies": [],
       "priority": 55,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Game model gained a `created_at` column (migration 0008) — every other table already had it, but v1 Games tracked only `started_at` and a keyset (created_at, id) cursor needs a stable, non-null column. Existing rows backfill from started_at → completed_at → CURRENT_TIMESTAMP, then NOT NULL. New `padrino.api.pagination` module exposes `CursorPage[T]` (Generic[T] Pydantic model with items / next_cursor / total_estimate), opaque base64 cursors via `encode_cursor(created_at, id)` + `decode_cursor` (keyset) and `encode_index_cursor / decode_index_cursor` (for the leaderboard's in-memory ordering), and `paginate_keyset(...)` which applies the WHERE (created_at, id) > (cursor_created_at, cursor_id) keyset comparison + ORDER BY (created_at, id) + LIMIT n+1 to a SQLAlchemy Select. Limit bounds are MIN=1, DEFAULT=50, MAX=200. Tampered cursors raise `InvalidCursorError` which routes turn into HTTP 400 `{detail: 'invalid_cursor'}`. Per-route filters: `/games` accepts status/gauntlet_id/ruleset_id; `/gauntlets` accepts status/league_id; `/leagues/{id}/leaderboard` accepts gauntlet_id/provisional; `/model-providers` accepts name; `/model-configs` accepts provider_id/model_name; `/prompt-versions` accepts ruleset_id; `/agent-builds` accepts active/model_config_id/prompt_version_id. Unknown query params 422 via Pydantic ConfigDict(extra='forbid') on per-route QueryModel classes consumed via `Annotated[QueryModel, Query()]`. Leaderboard route paginates in-memory entries via an index cursor and keeps the existing `entries` field name for back-compat; CursorPage isn't used as its envelope because the leaderboard payload also carries leaderboard_id / ruleset_id / prompt_version / rating_model. `compute_leaderboard(...)` now accepts an optional `gauntlet_id` filter."
     },
     {
       "id": "US-056",

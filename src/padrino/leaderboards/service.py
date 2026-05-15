@@ -105,9 +105,16 @@ def _is_provisional(total: int, town: int, mafia: int) -> bool:
 
 
 async def _terminal_games_in_league(
-    session: AsyncSession, league_id: uuid.UUID
+    session: AsyncSession,
+    league_id: uuid.UUID,
+    gauntlet_id: uuid.UUID | None = None,
 ) -> dict[uuid.UUID, str]:
-    """Return ``{game_id: winner}`` for every terminal game under ``league_id``."""
+    """Return ``{game_id: winner}`` for every terminal game under ``league_id``.
+
+    When ``gauntlet_id`` is provided the result is narrowed to that one
+    gauntlet — used by the leaderboard route to scope a query to a single
+    bracket without recomputing the full league.
+    """
     stmt = (
         select(Game.id, GameEvent.payload)
         .join(Gauntlet, Gauntlet.id == Game.gauntlet_id)
@@ -117,6 +124,8 @@ async def _terminal_games_in_league(
             GameEvent.event_type == _TERMINATED_EVENT_TYPE,
         )
     )
+    if gauntlet_id is not None:
+        stmt = stmt.where(Game.gauntlet_id == gauntlet_id)
     out: dict[uuid.UUID, str] = {}
     for game_id, payload in (await session.execute(stmt)).all():
         winner = payload.get("winner") if isinstance(payload, dict) else None
@@ -348,14 +357,16 @@ async def compute_leaderboard(
     *,
     league_id: uuid.UUID,
     ruleset_id: str,
+    gauntlet_id: uuid.UUID | None = None,
 ) -> Leaderboard:
     """Aggregate the per-AB leaderboard rows for one league.
 
     The caller is responsible for resolving the league row and verifying it
     exists; this helper accepts the ruleset id directly so it can run in the
-    same transaction.
+    same transaction. ``gauntlet_id`` scopes the aggregation to one gauntlet
+    bracket inside the league.
     """
-    winners = await _terminal_games_in_league(session, league_id)
+    winners = await _terminal_games_in_league(session, league_id, gauntlet_id=gauntlet_id)
     seats = await _seats_for_games(session, winners.keys())
     events = await _events_for_games(session, winners.keys())
 
