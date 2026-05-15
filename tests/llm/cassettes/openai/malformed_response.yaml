@@ -1,0 +1,21 @@
+interactions:
+- request:
+    method: POST
+    uri: https://api.openai.com/v1/chat/completions
+    body: ''
+    headers:
+      authorization:
+      - SCRUBBED
+      content-type:
+      - application/json
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      content-type:
+      - application/json
+    body:
+      string: |
+        {"id":"chatcmpl-test-openai-bad-001","object":"chat.completion","created":1700000001,"model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"message":{"role":"assistant","content":"this is definitely not JSON {{{"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":12,"total_tokens":132}}
+version: 1

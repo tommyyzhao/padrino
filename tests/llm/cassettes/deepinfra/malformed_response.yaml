@@ -1,0 +1,21 @@
+interactions:
+- request:
+    method: POST
+    uri: https://api.deepinfra.com/v1/openai/chat/completions
+    body: ''
+    headers:
+      authorization:
+      - SCRUBBED
+      content-type:
+      - application/json
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      content-type:
+      - application/json
+    body:
+      string: |
+        {"id":"chatcmpl-test-deepinfra-bad-001","object":"chat.completion","created":1700000021,"model":"deepseek-ai/DeepSeek-V4-Flash","choices":[{"index":0,"message":{"role":"assistant","content":"oops not json {"},"finish_reason":"stop"}],"usage":{"prompt_tokens":108,"completion_tokens":6,"total_tokens":114}}
+version: 1

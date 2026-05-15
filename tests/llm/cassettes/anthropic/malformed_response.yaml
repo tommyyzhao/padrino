@@ -1,0 +1,21 @@
+interactions:
+- request:
+    method: POST
+    uri: https://api.anthropic.com/v1/messages
+    body: ''
+    headers:
+      x-api-key:
+      - SCRUBBED
+      content-type:
+      - application/json
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      content-type:
+      - application/json
+    body:
+      string: |
+        {"id":"msg_test_anthropic_bad_001","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"surely this is not valid JSON"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":92,"output_tokens":8}}
+version: 1

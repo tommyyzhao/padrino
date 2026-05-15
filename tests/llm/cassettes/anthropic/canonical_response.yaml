@@ -1,0 +1,21 @@
+interactions:
+- request:
+    method: POST
+    uri: https://api.anthropic.com/v1/messages
+    body: ''
+    headers:
+      x-api-key:
+      - SCRUBBED
+      content-type:
+      - application/json
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      content-type:
+      - application/json
+    body:
+      string: |
+        {"id":"msg_test_anthropic_001","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"{\"public_message\":\"I'll observe before voting.\",\"private_message\":null,\"action\":{\"type\":\"ABSTAIN\",\"target\":null},\"memory_update\":\"d1 — no clear tells\",\"rationale_summary\":\"abstaining to gather info\"}"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":92,"output_tokens":36}}
+version: 1

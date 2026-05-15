@@ -1,0 +1,21 @@
+interactions:
+- request:
+    method: POST
+    uri: https://api.cerebras.ai/v1/chat/completions
+    body: ''
+    headers:
+      authorization:
+      - SCRUBBED
+      content-type:
+      - application/json
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      content-type:
+      - application/json
+    body:
+      string: |
+        {"id":"chatcmpl-test-cerebras-001","object":"chat.completion","created":1700000010,"model":"zai-glm-4.7","choices":[{"index":0,"message":{"role":"assistant","content":"{\"public_message\":\"Let me lay out my read.\",\"private_message\":null,\"action\":{\"type\":\"ABSTAIN\",\"target\":null},\"memory_update\":\"d1 baseline read\",\"rationale_summary\":\"low info\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":110,"completion_tokens":42,"total_tokens":152}}
+version: 1

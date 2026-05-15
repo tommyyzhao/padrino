@@ -4,16 +4,53 @@ The helpers below assemble ``dict[tuple[str, str], AgentResponse]`` scripts
 keyed by ``(phase_id, public_player_id)`` — the shape consumed by
 :class:`padrino.llm.mock.DeterministicMockAdapter`. Integration tests
 (US-027+) compose these to drive complete games without a real LLM.
+
+This module also installs a ``pytest_collection_modifyitems`` hook that
+deselects the ``live_llm`` marker by default. The recorded-cassette contract
+suite under ``tests/llm/test_litellm_contract.py`` (US-051) opts in via
+``-m live_llm`` or the ``--live-llm`` flag.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+import pytest
+
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
 from padrino.core.enums import ActionType
 from padrino.core.rulesets import mini7_v1
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--live-llm",
+        action="store_true",
+        default=False,
+        help="run recorded-cassette live LLM contract tests (US-051)",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Default-skip ``live_llm`` items unless explicitly opted in.
+
+    Opt-in paths:
+    * ``--live-llm`` flag on the CLI, or
+    * ``-m live_llm`` marker selector (the recorded-cassette CI job).
+    """
+
+    if config.getoption("--live-llm"):
+        return
+    markexpr = (config.option.markexpr or "").strip()
+    if "live_llm" in markexpr and "not live_llm" not in markexpr:
+        return
+    skip = pytest.mark.skip(
+        reason="live_llm cassette tests are opt-in; pass --live-llm or '-m live_llm'"
+    )
+    for item in items:
+        if "live_llm" in item.keywords:
+            item.add_marker(skip)
 
 
 def _response(action_type: ActionType, target: str | None = None) -> AgentResponse:

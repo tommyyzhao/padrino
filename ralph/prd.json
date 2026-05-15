@@ -63,8 +63,8 @@
       ],
       "dependencies": ["US-050"],
       "priority": 51,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Used vcrpy (8.1.1) over pytest-recording for fewer moving parts. Cassettes live at tests/llm/cassettes/<provider>/{canonical,malformed}_response.yaml. The `live_llm` marker is registered in pyproject; tests/conftest.py installs a pytest_collection_modifyitems hook that default-skips live_llm items unless --live-llm or `-m live_llm` is passed. vcrpy 8.x ships httpcore stubs (not the older httpx_stubs name) which transparently intercept litellm's async httpx transport for all five providers. Cassettes were hand-authored against the actual provider URLs observed by probing litellm (openai → api.openai.com/v1/chat/completions; anthropic → api.anthropic.com/v1/messages; cerebras → api.cerebras.ai/v1/chat/completions; deepinfra → api.deepinfra.com/v1/openai/chat/completions; ollama → localhost:11434/api/generate — note /generate not /chat for the `ollama/` prefix). CI gains a separate `live-llm-cassettes` job that runs `uv run pytest -m live_llm --live-llm`."
     },
     {
       "id": "US-052",

@@ -43,6 +43,7 @@ dev = [
     "hypothesis>=6.100",
     "mypy>=1.10",
     "ruff>=0.6",
+    "vcrpy>=8.1.1",
 ]
 
 [project.urls]
@@ -105,7 +106,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["src/padrino/db/migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "openskill.*"]
+module = ["litellm.*", "openskill.*", "vcr.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
@@ -124,6 +125,7 @@ addopts = [
 markers = [
     "integration: marks tests that hit real LLM providers (deselect with '-m \"not integration\"')",
     "slow: marks slow tests",
+    "live_llm: marks recorded-cassette contract tests against real LLM providers (deselected by default; opt-in via '-m live_llm')",
 ]
 
 [tool.coverage.run]
@@ -139,3 +141,4 @@ exclude_lines = [
     "if __name__ == .__main__.:",
 ]
 show_missing = true
+
