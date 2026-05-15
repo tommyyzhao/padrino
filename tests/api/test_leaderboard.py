@@ -1,4 +1,4 @@
-"""Tests for the leaderboard route (US-045).
+"""Tests for the leaderboard route (US-045 / US-052).
 
 Validates ``GET /leagues/{id}/leaderboard``:
 
@@ -6,7 +6,8 @@ Validates ``GET /leagues/{id}/leaderboard``:
   prompt_version, rating_model, entries[]).
 * Entries are sorted by conservative_score desc and include the required
   per-agent_build counters + provisional flag.
-* role_family_breakdown is an empty dict in v1.
+* role_family_breakdown is populated per (agent_build, role_family) seat-game
+  bucket (US-052).
 """
 
 from __future__ import annotations
@@ -336,9 +337,25 @@ async def test_leaderboard_entry_fields_and_provisional(
     }
     for entry in (a_entry, b_entry):
         assert required.issubset(entry.keys())
-        assert entry["role_family_breakdown"] == {}
         # Only 3 games — total below the 30-game threshold for everyone.
         assert entry["provisional"] is True
+
+    # A: 12 seat-games split as 6 DECEPTIVE (mafia goon) + 6 VANILLA_TOWN
+    # (villager) — wins balance across the (TOWN, TOWN, MAFIA) winner tuple.
+    assert set(a_entry["role_family_breakdown"].keys()) == {"DECEPTIVE", "VANILLA_TOWN"}
+    assert a_entry["role_family_breakdown"]["DECEPTIVE"]["games"] == 6
+    # P01,P02 mafia x 3 games. Games 1,2 town-win -> 4 losses; game 3 mafia-win -> 2 wins.
+    assert a_entry["role_family_breakdown"]["DECEPTIVE"]["wins"] == 2
+    assert a_entry["role_family_breakdown"]["DECEPTIVE"]["losses"] == 4
+    assert a_entry["role_family_breakdown"]["VANILLA_TOWN"]["games"] == 6
+    assert a_entry["role_family_breakdown"]["VANILLA_TOWN"]["wins"] == 4  # games 1+2
+    assert a_entry["role_family_breakdown"]["VANILLA_TOWN"]["losses"] == 2
+
+    # B: 9 seat-games all VANILLA_TOWN.
+    assert set(b_entry["role_family_breakdown"].keys()) == {"VANILLA_TOWN"}
+    assert b_entry["role_family_breakdown"]["VANILLA_TOWN"]["games"] == 9
+    assert b_entry["role_family_breakdown"]["VANILLA_TOWN"]["wins"] == 6
+    assert b_entry["role_family_breakdown"]["VANILLA_TOWN"]["losses"] == 3
 
     # A: 4 seats per game (P01-P04: 2 mafia, 2 town) x 3 games = 12 seat-games.
     # Two games TOWN wins, one MAFIA wins.

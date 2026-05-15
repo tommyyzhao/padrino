@@ -20,7 +20,8 @@ from typing import Any, Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.core.enums import Faction
+from padrino.core.enums import Faction, Role
+from padrino.core.rulesets import mini7_v1
 from padrino.db.models import (
     AgentBuild,
     Game,
@@ -222,6 +223,44 @@ def _per_ab_counters(
     return counters
 
 
+def _per_ab_role_family_breakdown(
+    seats: list[GameSeat],
+    winners: dict[uuid.UUID, str],
+) -> dict[uuid.UUID, dict[str, dict[str, float]]]:
+    """Aggregate per-(agent_build, role_family) seat-game counters.
+
+    Returns a mapping ``{agent_build_id: {role_family.value: {games, wins,
+    draws, losses, win_rate}}}``. ``win_rate`` is ``wins / games`` (0.0 when
+    ``games == 0``). Seats whose role string is not a valid ``Role`` enum
+    member are skipped silently — they should not occur in practice but the
+    leaderboard route stays robust against historical rows.
+    """
+    out: dict[uuid.UUID, dict[str, dict[str, float]]] = {}
+    for seat in seats:
+        try:
+            role = Role(seat.role)
+        except ValueError:
+            continue
+        family = mini7_v1.role_family_for(role).value
+        ab_bucket = out.setdefault(seat.agent_build_id, {})
+        rf_bucket = ab_bucket.setdefault(
+            family, {"games": 0.0, "wins": 0.0, "draws": 0.0, "losses": 0.0, "win_rate": 0.0}
+        )
+        rf_bucket["games"] += 1
+        winner = winners.get(seat.game_id)
+        if winner == "DRAW":
+            rf_bucket["draws"] += 1
+        elif winner == seat.faction:
+            rf_bucket["wins"] += 1
+        elif winner is not None:
+            rf_bucket["losses"] += 1
+    for ab_bucket in out.values():
+        for rf_bucket in ab_bucket.values():
+            games = rf_bucket["games"]
+            rf_bucket["win_rate"] = (rf_bucket["wins"] / games) if games else 0.0
+    return out
+
+
 def _per_ab_event_metrics(
     events: list[GameEvent],
     seat_by_game_actor: dict[tuple[uuid.UUID, str], uuid.UUID],
@@ -265,6 +304,7 @@ def _build_entry(
     counts: dict[str, int],
     metrics: dict[str, float] | None,
     rating: Rating | None,
+    role_family_breakdown: dict[str, dict[str, float]],
 ) -> LeaderboardEntry:
     submissions = (metrics or {}).get("submissions", 0.0)
     timeouts = (metrics or {}).get("timeouts", 0.0)
@@ -298,7 +338,7 @@ def _build_entry(
         timeout_rate=timeout_rate,
         invalid_action_rate=invalid_rate,
         public_message_avg_chars=pm_avg,
-        role_family_breakdown={},
+        role_family_breakdown=role_family_breakdown,
         provisional=_is_provisional(counts["games"], counts["town_games"], counts["mafia_games"]),
     )
 
@@ -324,6 +364,7 @@ async def compute_leaderboard(
     }
     counters = _per_ab_counters(seats, winners)
     metrics = _per_ab_event_metrics(events, seat_by_game_actor)
+    role_family_breakdowns = _per_ab_role_family_breakdown(seats, winners)
 
     ratings = await _ratings_global(session, league_id=league_id, agent_build_ids=counters.keys())
     display_names = await _agent_build_display_names(session, counters.keys())
@@ -336,6 +377,7 @@ async def compute_leaderboard(
             counts=counts,
             metrics=metrics.get(ab_id),
             rating=ratings.get(ab_id),
+            role_family_breakdown=role_family_breakdowns.get(ab_id, {}),
         )
         for ab_id, counts in counters.items()
     ]

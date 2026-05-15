@@ -42,7 +42,7 @@ def test_demo_gauntlet_prints_leaderboard_json(tmp_path: Path) -> None:
     assert payload["ruleset_id"] == mini7_v1.RULESET_ID
     assert payload["rating_model"] == "openskill_plackett_luce_v1"
     assert payload["leaderboard_id"]
-    assert payload["prompt_version"] == "demo-prompt-v1"
+    assert payload["prompt_version"] == "canonical_mini7_v1"
     assert len(payload["game_ids"]) == clones
 
     entries = payload["entries"]
@@ -73,7 +73,22 @@ def test_demo_gauntlet_prints_leaderboard_json(tmp_path: Path) -> None:
     assert entry["draws"] == entry["games"]
     assert entry["wins"] == 0
     assert entry["losses"] == 0
-    assert entry["role_family_breakdown"] == {}
+    # US-052: role_family_breakdown is populated from game_seats once the
+    # demo seeds canonical per-role-family prompts. Each game has all four
+    # role families present (2 deceptive, 1 investigative, 1 protective, 3
+    # vanilla town), and the noop mock adapter takes every game to a DRAW.
+    breakdown = entry["role_family_breakdown"]
+    assert set(breakdown.keys()) == {"DECEPTIVE", "INVESTIGATIVE", "PROTECTIVE", "VANILLA_TOWN"}
+    assert breakdown["DECEPTIVE"]["games"] == 2 * clones
+    assert breakdown["INVESTIGATIVE"]["games"] == clones
+    assert breakdown["PROTECTIVE"]["games"] == clones
+    assert breakdown["VANILLA_TOWN"]["games"] == 3 * clones
+    for family_metrics in breakdown.values():
+        # MAX_DAYS_REACHED DRAWs: zero wins, zero losses, every game a draw.
+        assert family_metrics["draws"] == family_metrics["games"]
+        assert family_metrics["wins"] == 0
+        assert family_metrics["losses"] == 0
+        assert family_metrics["win_rate"] == 0.0
     assert entry["provisional"] is True
 
 

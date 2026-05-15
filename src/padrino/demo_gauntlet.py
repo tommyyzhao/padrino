@@ -41,11 +41,17 @@ from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.adapter import LlmAdapter, RoutingPolicy
 from padrino.llm.litellm_adapter import LiteLlmAdapter
 from padrino.llm.mock import NoopMockAdapter
+from padrino.llm.prompts import (
+    CANONICAL_RESPONSE_SCHEMA,
+    CANONICAL_VERSION,
+    canonical_prompts_by_role,
+    iter_canonical_prompts,
+)
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
 from padrino.settings import Settings
 
 DEMO_ADAPTER_VERSION = "demo-v1"
-DEMO_PROMPT_VERSION = "demo-prompt-v1"
+DEMO_PROMPT_VERSION = CANONICAL_VERSION
 
 
 def _make_adapter(real: bool, settings: Settings) -> LlmAdapter:
@@ -70,6 +76,7 @@ def _make_adapter(real: bool, settings: Settings) -> LlmAdapter:
         agent_build=build,
         timeout_s=float(settings.padrino_llm_timeout_seconds),
         auth_secret_ref="env:CEREBRAS_API_KEY",
+        system_prompts_by_role=canonical_prompts_by_role(),
     )
 
 
@@ -97,15 +104,24 @@ async def _seed_minimal_admin(
             default_max_output_tokens=4096,
             supports_structured_outputs=True,
         )
-        pv = await prompt_versions_repo.create(
-            session,
-            ruleset_id=mini7_v1.RULESET_ID,
-            version=DEMO_PROMPT_VERSION,
-            system_prompt="demo",
-            developer_prompt="demo",
-            response_schema={"type": "object"},
-            prompt_hash=f"demo-{uuid.uuid4().hex}",
-        )
+        # Seed one prompt_versions row per RoleFamily so the runtime resolution
+        # in `LiteLlmAdapter.system_prompts_by_role` is grounded by an actual
+        # DB row. The gauntlet's FK points at the VANILLA_TOWN row because
+        # every roster includes citizens; the choice is arbitrary among the
+        # four canonical rows (they all carry version=CANONICAL_VERSION).
+        canonical_rows: dict[str, Any] = {}
+        for template in iter_canonical_prompts(mini7_v1.RULESET_ID):
+            row = await prompt_versions_repo.create(
+                session,
+                ruleset_id=template.ruleset_id,
+                version=template.version,
+                system_prompt=template.system_prompt,
+                developer_prompt=template.role_family.value,
+                response_schema=CANONICAL_RESPONSE_SCHEMA,
+                prompt_hash=template.prompt_hash,
+            )
+            canonical_rows[template.role_family.value] = row
+        pv = canonical_rows["VANILLA_TOWN"]
         league = await leagues_repo.create(
             session,
             name="Demo League",

@@ -86,8 +86,8 @@
       ],
       "dependencies": ["US-049"],
       "priority": 52,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Followed the actual `RoleFamily` enum (DECEPTIVE / INVESTIGATIVE / PROTECTIVE / VANILLA_TOWN); the story's TOWN_INVESTIGATOR/etc. labels were illustrative. Per-seat prompt resolution lives in `LiteLlmAdapter.system_prompts_by_role: Mapping[Role, str] | None`; when set, the per-call system prompt is `mapping[obs.you.role]` with a fallback to the static `system_prompt` arg. An AgentBuild that pins a non-canonical prompt routes through the static `system_prompt` arg (no mapping). The bundled-prompts directory `padrino/llm/prompts/mini7_v1/` had to be renamed-aliased inside `padrino.llm.prompts.__init__` (`from padrino.core.rulesets import mini7_v1 as _mini7_ruleset`) because subpackage import otherwise rebinds the parent namespace's `mini7_v1` attribute to the empty subpackage. The `prompt_versions` table is unchanged (no new column); the 4 canonical rows all carry `version='canonical_mini7_v1'` and are distinguishable by the `developer_prompt` column which now stores the RoleFamily enum value. Leaderboard `role_family_breakdown` shape: `{role_family_value: {games, wins, draws, losses, win_rate}}`."
     },
     {
       "id": "US-053",

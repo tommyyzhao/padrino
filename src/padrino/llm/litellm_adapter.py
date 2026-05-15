@@ -20,6 +20,7 @@ Impure module: lives in the ``llm`` layer and is never imported by pure-core.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Any, Final
 
 import litellm
@@ -30,7 +31,7 @@ from padrino.core.agents.contract import (
     parse_agent_response,
 )
 from padrino.core.engine.actions import Action
-from padrino.core.enums import ActionType
+from padrino.core.enums import ActionType, Role
 from padrino.core.observations import Observation
 from padrino.llm.adapter import (
     AdapterResult,
@@ -75,6 +76,7 @@ class LiteLlmAdapter:
         "_build",
         "_policy",
         "_system_prompt",
+        "_system_prompts_by_role",
         "_timeout_s",
         "last_attempts",
     )
@@ -87,6 +89,7 @@ class LiteLlmAdapter:
         timeout_s: float,
         auth_secret_ref: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        system_prompts_by_role: Mapping[Role, str] | None = None,
     ) -> None:
         # Resolve credentials once at construction so a misconfigured provider
         # fails loudly at boot instead of silently 401-ing on first call.
@@ -94,6 +97,13 @@ class LiteLlmAdapter:
         self._policy = routing_policy
         self._build = agent_build
         self._system_prompt = system_prompt
+        # When ``system_prompts_by_role`` is provided (canonical-prompt path,
+        # US-052) the per-call prompt is looked up by ``observation.you.role``.
+        # Otherwise every seat gets the same ``system_prompt`` — preserves the
+        # pre-US-052 behaviour for tests and the v1 mock harness.
+        self._system_prompts_by_role: Mapping[Role, str] | None = (
+            dict(system_prompts_by_role) if system_prompts_by_role is not None else None
+        )
         self._timeout_s = timeout_s
         self.last_attempts: tuple[AdapterResult, ...] = ()
 
@@ -130,8 +140,13 @@ class LiteLlmAdapter:
         self.last_attempts = tuple(attempts)
         return synthesized
 
+    def _system_prompt_for(self, observation: Observation) -> str:
+        if self._system_prompts_by_role is None:
+            return self._system_prompt
+        return self._system_prompts_by_role.get(observation.you.role, self._system_prompt)
+
     async def _call_model(self, observation: Observation, model_id: str) -> AdapterResult:
-        messages = build_messages(observation, system_prompt=self._system_prompt)
+        messages = build_messages(observation, system_prompt=self._system_prompt_for(observation))
         kwargs: dict[str, Any] = {
             "model": model_id,
             "messages": messages,
