@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.auth import require_admin, require_read
 from padrino.api.deps import get_session
 from padrino.api.pagination import (
     DEFAULT_LIMIT,
@@ -133,6 +134,7 @@ class AgentBuildResponse(BaseModel):
     "/model-providers",
     response_model=ModelProviderResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
 )
 async def create_model_provider(
     body: ModelProviderCreate,
@@ -165,6 +167,7 @@ async def create_model_provider(
     "/model-configs",
     response_model=ModelConfigResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
 )
 async def create_model_config(
     body: ModelConfigCreate,
@@ -203,6 +206,7 @@ async def create_model_config(
     "/prompt-versions",
     response_model=PromptVersionResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
 )
 async def create_prompt_version(
     body: PromptVersionCreate,
@@ -233,6 +237,7 @@ async def create_prompt_version(
     "/agent-builds",
     response_model=AgentBuildResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
 )
 async def create_agent_build(
     body: AgentBuildCreate,
@@ -279,7 +284,11 @@ class ModelProviderListQuery(BaseModel):
     name: str | None = None
 
 
-@router.get("/model-providers", response_model=CursorPage[ModelProviderResponse])
+@router.get(
+    "/model-providers",
+    response_model=CursorPage[ModelProviderResponse],
+    dependencies=[Depends(require_read)],
+)
 async def list_model_providers(
     query: Annotated[ModelProviderListQuery, Query()],
     session: AsyncSession = Depends(get_session),
@@ -316,7 +325,11 @@ class ModelConfigListQuery(BaseModel):
     model_name: str | None = None
 
 
-@router.get("/model-configs", response_model=CursorPage[ModelConfigResponse])
+@router.get(
+    "/model-configs",
+    response_model=CursorPage[ModelConfigResponse],
+    dependencies=[Depends(require_read)],
+)
 async def list_model_configs(
     query: Annotated[ModelConfigListQuery, Query()],
     session: AsyncSession = Depends(get_session),
@@ -359,7 +372,11 @@ class PromptVersionListQuery(BaseModel):
     ruleset_id: str | None = None
 
 
-@router.get("/prompt-versions", response_model=CursorPage[PromptVersionResponse])
+@router.get(
+    "/prompt-versions",
+    response_model=CursorPage[PromptVersionResponse],
+    dependencies=[Depends(require_read)],
+)
 async def list_prompt_versions(
     query: Annotated[PromptVersionListQuery, Query()],
     session: AsyncSession = Depends(get_session),
@@ -401,7 +418,11 @@ class AgentBuildListQuery(BaseModel):
     prompt_version_id: uuid.UUID | None = None
 
 
-@router.get("/agent-builds", response_model=CursorPage[AgentBuildResponse])
+@router.get(
+    "/agent-builds",
+    response_model=CursorPage[AgentBuildResponse],
+    dependencies=[Depends(require_read)],
+)
 async def list_agent_builds(
     query: Annotated[AgentBuildListQuery, Query()],
     session: AsyncSession = Depends(get_session),
@@ -437,7 +458,11 @@ async def list_agent_builds(
     return CursorPage[AgentBuildResponse](items=items, next_cursor=next_cursor)
 
 
-@router.get("/agent-builds/{agent_build_id}", response_model=AgentBuildResponse)
+@router.get(
+    "/agent-builds/{agent_build_id}",
+    response_model=AgentBuildResponse,
+    dependencies=[Depends(require_read)],
+)
 async def get_agent_build(
     agent_build_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),

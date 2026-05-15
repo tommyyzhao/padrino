@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.auth import require_admin, require_read
 from padrino.api.deps import get_session
 from padrino.api.pagination import (
     DEFAULT_LIMIT,
@@ -114,6 +115,7 @@ class GauntletDetailResponse(BaseModel):
     "/gauntlets",
     response_model=GauntletCreateResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_admin)],
 )
 async def create_gauntlet_route(
     body: GauntletCreate,
@@ -216,7 +218,11 @@ class GauntletListQuery(BaseModel):
     league_id: uuid.UUID | None = None
 
 
-@router.get("/gauntlets", response_model=CursorPage[GauntletListEntry])
+@router.get(
+    "/gauntlets",
+    response_model=CursorPage[GauntletListEntry],
+    dependencies=[Depends(require_read)],
+)
 async def list_gauntlets(
     query: Annotated[GauntletListQuery, Query()],
     session: AsyncSession = Depends(get_session),
@@ -249,7 +255,11 @@ async def list_gauntlets(
     return CursorPage[GauntletListEntry](items=items, next_cursor=next_cursor)
 
 
-@router.get("/gauntlets/{gauntlet_id}", response_model=GauntletDetailResponse)
+@router.get(
+    "/gauntlets/{gauntlet_id}",
+    response_model=GauntletDetailResponse,
+    dependencies=[Depends(require_read)],
+)
 async def get_gauntlet(
     gauntlet_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),

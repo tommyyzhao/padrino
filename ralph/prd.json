@@ -170,8 +170,8 @@
       ],
       "dependencies": [],
       "priority": 56,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "API-key auth is opt-in via `create_app(auth_required=True, admin_token=..., rate_limiter=...)`. When auth_required=False (the default — preserves every existing test as-is) requests without credentials synthesize an admin context. The Bearer header is `Authorization: Bearer pk_<urlsafe-base64-32>`; raw keys live ONLY in the POST /admin/keys response, never persisted (sha256 hash + 6-char display prefix stored). `X-Padrino-Admin-Token` continues to grant admin scope but the response middleware (`admin_token_deprecation_middleware`) stamps `Deprecation: true` + `Sunset: Sun, 01 Jan 2027 00:00:00 GMT` headers on every shim-authenticated response. Per-key sliding-window rate limit lives in `padrino.api.auth.RateLimiter` with an injectable clock; per-scope ceilings from three new Settings fields (`padrino_rate_limit_admin_per_minute=600`, `padrino_rate_limit_submitter_per_minute=60`, `padrino_rate_limit_spectator_per_minute=1200`) — the story's single `padrino_rate_limit_per_minute` knob was split into three because the three defaults can't coexist on one field. `require_admin` (= scope `admin`) gates every POST/DELETE; `require_read` (= scope `admin` OR `spectator`) gates every GET (and the read-only `/games/{id}/replay` POST). Scopes are checked with the admin-always-wins policy: `admin` scope satisfies any required scope set, anything else needs an intersection. Migration 0009 creates `api_keys (id, key_hash UNIQUE, key_prefix, scopes JSON, label, created_at, last_used_at, disabled_at)`. The submitter scope is wired but no submitter-only endpoint exists yet — US-062 will add /ingest."
     },
     {
       "id": "US-057",

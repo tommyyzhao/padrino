@@ -15,7 +15,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.api.auth import RateLimiter, admin_token_deprecation_middleware
 from padrino.api.routes.admin import router as admin_router
+from padrino.api.routes.admin_keys import router as admin_keys_router
 from padrino.api.routes.games import router as games_router
 from padrino.api.routes.gauntlets import router as gauntlets_router
 from padrino.api.routes.leagues import router as leagues_router
@@ -36,6 +38,8 @@ def create_app(
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     admin_token: str | None | Any = _UNSET,
+    auth_required: bool = False,
+    rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
     """Build and return the Padrino FastAPI application.
 
@@ -45,8 +49,16 @@ def create_app(
     does not touch the on-disk database.
 
     ``admin_token`` overrides ``Settings.padrino_admin_token`` for the
-    ``X-Padrino-Admin-Token`` check on game-inspection routes. Defaults
+    legacy ``X-Padrino-Admin-Token`` back-compat shim (US-056). Defaults
     (when omitted) to the value from :func:`padrino.settings.get_settings`.
+
+    ``auth_required`` (US-056) gates whether requests without a valid Bearer
+    token are rejected with 401. Existing dev deployments and the legacy
+    test suites run with ``False`` (the default) so unauthenticated
+    requests synthesize an admin context. New deployments flip the bit on.
+
+    ``rate_limiter`` injects a custom :class:`padrino.api.auth.RateLimiter`
+    so tests can pin the clock without sleeping.
     """
     app = FastAPI(
         title="Padrino",
@@ -58,7 +70,12 @@ def create_app(
         app.state.admin_token = get_settings().padrino_admin_token
     else:
         app.state.admin_token = admin_token
+    app.state.auth_required = auth_required
+    app.state.auth_settings = get_settings()
+    app.state.rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter()
+    app.middleware("http")(admin_token_deprecation_middleware)
     app.include_router(admin_router)
+    app.include_router(admin_keys_router)
     app.include_router(leagues_router)
     app.include_router(gauntlets_router)
     app.include_router(games_router)

@@ -261,6 +261,21 @@ class Rating(Base):
     )
 
 
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    key_prefix: Mapped[str] = mapped_column(String, nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    label: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class RatingEvent(Base):
     __tablename__ = "rating_events"
 
@@ -283,6 +298,7 @@ class RatingEvent(Base):
 
 __all__ = [
     "AgentBuild",
+    "ApiKey",
     "Game",
     "GameEvent",
     "GameSeat",

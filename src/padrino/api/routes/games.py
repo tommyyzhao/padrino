@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.auth import require_read
 from padrino.api.deps import get_admin_token, get_session
 from padrino.api.pagination import (
     DEFAULT_LIMIT,
@@ -148,7 +149,11 @@ class GameListQuery(BaseModel):
     ruleset_id: str | None = None
 
 
-@router.get("/games", response_model=CursorPage[GameListEntry])
+@router.get(
+    "/games",
+    response_model=CursorPage[GameListEntry],
+    dependencies=[Depends(require_read)],
+)
 async def list_games(
     query: Annotated[GameListQuery, Query()],
     session: AsyncSession = Depends(get_session),
@@ -182,7 +187,11 @@ async def list_games(
     return CursorPage[GameListEntry](items=items, next_cursor=next_cursor)
 
 
-@router.get("/games/{game_id}", response_model=GameDetailResponse)
+@router.get(
+    "/games/{game_id}",
+    response_model=GameDetailResponse,
+    dependencies=[Depends(require_read)],
+)
 async def get_game(
     game_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
@@ -198,7 +207,11 @@ async def get_game(
     )
 
 
-@router.get("/games/{game_id}/events", response_model=EventsResponse)
+@router.get(
+    "/games/{game_id}/events",
+    response_model=EventsResponse,
+    dependencies=[Depends(require_read)],
+)
 async def list_game_events(
     game_id: uuid.UUID,
     visibility: VisibilityFilter = Query(default="public"),
@@ -234,7 +247,11 @@ async def list_game_events(
     return EventsResponse(game_id=game_id, visibility=visibility, events=entries)
 
 
-@router.get("/games/{game_id}/transcript", response_model=TranscriptResponse)
+@router.get(
+    "/games/{game_id}/transcript",
+    response_model=TranscriptResponse,
+    dependencies=[Depends(require_read)],
+)
 async def get_game_transcript(
     game_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
@@ -309,7 +326,11 @@ async def get_game_transcript(
     )
 
 
-@router.post("/games/{game_id}/replay", response_model=ReplayResponse)
+@router.post(
+    "/games/{game_id}/replay",
+    response_model=ReplayResponse,
+    dependencies=[Depends(require_read)],
+)
 async def replay_game(
     game_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),

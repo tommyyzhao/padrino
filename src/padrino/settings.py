@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     # API
     padrino_admin_token: str | None = None
 
+    # API-key auth (US-056). When the app is built with ``auth_required=True``
+    # every request must carry a valid Bearer token (or the back-compat
+    # ``X-Padrino-Admin-Token`` header). Rate limits are per-key sliding
+    # windows expressed in requests per minute; the per-scope defaults below
+    # match the priorities of each role (admin > spectator > submitter).
+    padrino_rate_limit_admin_per_minute: int = 600
+    padrino_rate_limit_submitter_per_minute: int = 60
+    padrino_rate_limit_spectator_per_minute: int = 1200
+
 
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:

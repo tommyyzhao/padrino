@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.auth import require_admin, require_read
 from padrino.api.deps import get_session
 from padrino.api.pagination import (
     DEFAULT_LIMIT,
@@ -58,6 +59,7 @@ class LeagueResponse(BaseModel):
     "/leagues",
     response_model=LeagueResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
 )
 async def create_league(
     body: LeagueCreate,
@@ -113,7 +115,11 @@ class LeaderboardListQuery(BaseModel):
     provisional: bool | None = None
 
 
-@router.get("/leagues/{league_id}/leaderboard", response_model=LeaderboardResponse)
+@router.get(
+    "/leagues/{league_id}/leaderboard",
+    response_model=LeaderboardResponse,
+    dependencies=[Depends(require_read)],
+)
 async def get_leaderboard(
     league_id: uuid.UUID,
     query: Annotated[LeaderboardListQuery, Query()],
