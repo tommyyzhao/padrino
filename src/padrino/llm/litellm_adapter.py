@@ -19,8 +19,9 @@ Impure module: lives in the ``llm`` layer and is never imported by pure-core.
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Final
 
 import litellm
@@ -31,6 +32,7 @@ from padrino.core.agents.contract import (
     parse_agent_response,
 )
 from padrino.core.engine.actions import Action
+from padrino.core.engine.rng import SeededRng
 from padrino.core.enums import ActionType, Role
 from padrino.core.observations import Observation
 from padrino.llm.adapter import (
@@ -38,6 +40,13 @@ from padrino.llm.adapter import (
     AdapterStatus,
     AgentBuild,
     RoutingPolicy,
+)
+from padrino.llm.retry import (
+    LlmCallFailed,
+    RetryExhausted,
+    RetryPolicy,
+    default_retry_policy,
+    with_retry,
 )
 from padrino.llm.secrets import resolve_secret
 
@@ -75,6 +84,8 @@ class LiteLlmAdapter:
         "_auth_secret",
         "_build",
         "_policy",
+        "_retry_policy",
+        "_sleeper",
         "_system_prompt",
         "_system_prompts_by_role",
         "_timeout_s",
@@ -90,6 +101,8 @@ class LiteLlmAdapter:
         auth_secret_ref: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         system_prompts_by_role: Mapping[Role, str] | None = None,
+        retry_policy: RetryPolicy | None = None,
+        sleeper: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         # Resolve credentials once at construction so a misconfigured provider
         # fails loudly at boot instead of silently 401-ing on first call.
@@ -105,6 +118,12 @@ class LiteLlmAdapter:
             dict(system_prompts_by_role) if system_prompts_by_role is not None else None
         )
         self._timeout_s = timeout_s
+        # Retry seam (US-053): bounded exponential backoff with injectable
+        # sleeper so tests pin time. ``sleeper`` defaults to ``asyncio.sleep``.
+        self._retry_policy = retry_policy if retry_policy is not None else default_retry_policy()
+        self._sleeper: Callable[[float], Awaitable[None]] = (
+            sleeper if sleeper is not None else asyncio.sleep
+        )
         self.last_attempts: tuple[AdapterResult, ...] = ()
 
     async def complete(self, observation: Observation) -> AdapterResult:
@@ -118,7 +137,10 @@ class LiteLlmAdapter:
             return primary
 
         if self._policy.fallback_model is None:
-            failed = primary.model_copy(update={"status": "primary_failed"})
+            terminal_status: AdapterStatus = (
+                "exhausted" if primary.failure is not None else "primary_failed"
+            )
+            failed = primary.model_copy(update={"status": terminal_status})
             attempts[-1] = failed
             self.last_attempts = tuple(attempts)
             return _with_coerced_response(failed, observation)
@@ -132,8 +154,14 @@ class LiteLlmAdapter:
             self.last_attempts = tuple(attempts)
             return promoted
 
+        # Either path exhausting retries promotes the final status to
+        # ``exhausted`` so ``tick.py`` emits a single ``ActionTimedOut`` with
+        # ``reason='llm_exhausted'``. Non-retryable failures keep the legacy
+        # ``both_failed`` shape (parsed_response is coerced to a safe action).
+        is_exhausted = fallback.failure is not None or primary.failure is not None
+        synthesized_status: AdapterStatus = "exhausted" if is_exhausted else "both_failed"
         synthesized = _with_coerced_response(
-            fallback.model_copy(update={"status": "both_failed"}),
+            fallback.model_copy(update={"status": synthesized_status}),
             observation,
         )
         attempts.append(synthesized)
@@ -154,8 +182,38 @@ class LiteLlmAdapter:
             **self._build.inference_params,
         }
         start = time.monotonic()
+        # Deterministic jitter seed: bind to the observation contents so a
+        # replay of the same observation produces an identical backoff schedule.
+        rng = SeededRng(f"{observation.phase}:{observation.you.player_id}:{model_id}")
+
+        async def _call() -> Any:
+            return await litellm.acompletion(**kwargs)
+
         try:
-            response = await litellm.acompletion(**kwargs)
+            response, _attempt_history = await with_retry(
+                _call,
+                self._retry_policy,
+                sleeper=self._sleeper,
+                rng=rng,
+            )
+        except RetryExhausted as exc:
+            latency_ms = _elapsed_ms(start)
+            failure = LlmCallFailed(
+                error_kind=exc.error_kind,
+                error_message=exc.error_message,
+                attempts=exc.attempts,
+            )
+            return AdapterResult(
+                raw_response="",
+                parsed_response=ResponseError(
+                    reason="SCHEMA_VIOLATION",
+                    details=f"{exc.error_kind}: {exc.error_message}",
+                ),
+                latency_ms=latency_ms,
+                status="provider_error",
+                error=f"{exc.error_kind}: {exc.error_message}",
+                failure=failure,
+            )
         except Exception as exc:
             latency_ms = _elapsed_ms(start)
             return AdapterResult(

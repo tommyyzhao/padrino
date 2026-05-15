@@ -325,6 +325,7 @@ async def _persist_llm_call(
     result: AdapterResult,
 ) -> None:
     request_json = observation.model_dump(mode="json")
+    failure = result.failure
     async with persistence.session_factory() as session, session.begin():
         await llm_calls_repo.record_call(
             session,
@@ -338,6 +339,8 @@ async def _persist_llm_call(
             raw_response=result.raw_response,
             parsed_response=_parsed_response_to_json(result),
             error=result.error,
+            error_kind=failure.error_kind if failure is not None else None,
+            error_message=failure.error_message if failure is not None else None,
             latency_ms=result.latency_ms,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,

@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from padrino.core.agents.contract import AgentResponse, ResponseError
 from padrino.core.observations import Observation
+from padrino.llm.retry import LlmCallFailed
 
 AdapterStatus = Literal[
     "ok",
@@ -38,6 +39,7 @@ AdapterStatus = Literal[
     "primary_failed",
     "fallback_ok",
     "both_failed",
+    "exhausted",
 ]
 
 
@@ -55,6 +57,7 @@ class AdapterResult(BaseModel):
     provider_response_id: str | None = None
     status: AdapterStatus = "ok"
     error: str | None = None
+    failure: LlmCallFailed | None = None
 
 
 class RoutingPolicy(BaseModel):

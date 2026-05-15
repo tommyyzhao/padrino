@@ -107,8 +107,8 @@
       ],
       "dependencies": ["US-050", "US-051"],
       "priority": 53,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "`padrino.llm.retry` exposes `RetryPolicy`, `RetryExhausted`, `RetryAttempt`, `LlmCallFailed`, `default_retry_policy()`, `with_retry()`, and `DEFAULT_RETRY_ON`. `with_retry(call, policy, *, sleeper, rng)` injects both time and randomness — `sleeper` defaults to `asyncio.sleep` on the adapter; jitter draws from `padrino.core.engine.rng.SeededRng` (no `random` import) seeded with `f'{observation.phase}:{observation.you.player_id}:{model_id}'`. Default policy: 3 attempts, 0.5 s base, 16 s cap, retry on RateLimitError / APIConnectionError / InternalServerError / TimeoutError. Import path is `from litellm.exceptions import ...` (NOT `import litellm; litellm.RateLimitError`) — mypy strict rejects the latter as `attr-defined` even with the `litellm.*` ignore_missing_imports override. AdapterResult gained `status='exhausted'` and `failure: LlmCallFailed | None`; tick.py inspects status=='exhausted' and emits ONE `ActionTimedOut` event with `payload.reason='llm_exhausted'`, `error_kind`, `error_message`, `attempts`. Two new nullable string columns `llm_calls.error_kind` and `llm_calls.error_message` added via migration 0006; `record_call(...)` accepts both. Existing `test_both_failures_yield_coerced_safe_response_in_vote_phase` updated to use two RuntimeErrors (the original mix included TimeoutError which is now retryable and would consume 3 fallback attempts instead of 1)."
     },
     {
       "id": "US-054",

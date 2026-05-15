@@ -45,11 +45,13 @@ from padrino.core.observations import Ruleset, build_observation, format_phase_i
 from padrino.llm.adapter import LlmAdapter
 from padrino.observability.events import (
     EVENT_LLM_CALL_COMPLETED,
+    EVENT_LLM_CALL_EXHAUSTED,
     EVENT_LLM_CALL_STARTED,
     EVENT_LLM_CALL_TIMEOUT,
 )
 
 _REASON_TIMEOUT = "TIMEOUT"
+_REASON_LLM_EXHAUSTED = "llm_exhausted"
 _logger = structlog.get_logger("padrino.llm")
 
 
@@ -155,6 +157,35 @@ async def _call_one_seat(
             status=result.status,
             latency_ms=result.latency_ms,
         )
+
+        if result.status == "exhausted":
+            failure = result.failure
+            error_kind = failure.error_kind if failure is not None else "Unknown"
+            error_message = failure.error_message if failure is not None else (result.error or "")
+            attempts_made = failure.attempts if failure is not None else 0
+            _logger.info(
+                EVENT_LLM_CALL_EXHAUSTED,
+                phase=phase_id,
+                error_kind=error_kind,
+                attempts=attempts_made,
+            )
+            return _build_failure_outcome(
+                state=state,
+                seat=seat,
+                phase_id=phase_id,
+                reason=_REASON_LLM_EXHAUSTED,
+                event_type="ActionTimedOut",
+                payload={
+                    "expected_action_type": expected,
+                    "defaulted_to": coerce_to_safe_action(
+                        state.current_phase, _REASON_LLM_EXHAUSTED
+                    ).type.value,
+                    "reason": _REASON_LLM_EXHAUSTED,
+                    "error_kind": error_kind,
+                    "error_message": error_message,
+                    "attempts": attempts_made,
+                },
+            )
 
         parsed = result.parsed_response
         if isinstance(parsed, ResponseError):

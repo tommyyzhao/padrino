@@ -208,10 +208,13 @@ def test_primary_failure_falls_back_to_secondary() -> None:
 
 def test_both_failures_yield_coerced_safe_response_in_vote_phase() -> None:
     obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    # Both errors are RuntimeError so neither is retryable under the default
+    # policy — exhaustion would only fire on litellm.RateLimitError / Timeout
+    # and produces the new ``exhausted`` status (covered in test_retry.py).
     mock = AsyncMock(
         side_effect=[
             RuntimeError("primary down"),
-            TimeoutError("fallback timeout"),
+            RuntimeError("fallback down"),
         ]
     )
     with patch(ACOMPLETION_PATH, new=mock):
@@ -226,7 +229,7 @@ def test_both_failures_yield_coerced_safe_response_in_vote_phase() -> None:
     assert result.parsed_response.private_message is None
     assert result.parsed_response.memory_update == ""
     assert result.error is not None
-    assert "fallback timeout" in result.error
+    assert "fallback down" in result.error
     assert len(adapter.last_attempts) == 2
     assert adapter.last_attempts[0].status == "primary_failed"
     assert adapter.last_attempts[1].status == "both_failed"
