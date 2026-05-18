@@ -41,6 +41,9 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     providers as providers_repo,
 )
+from padrino.db.repositories import (
+    scheduler_heartbeats as scheduler_heartbeats_repo,
+)
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import NoopMockAdapter
 from padrino.runner.game_runner import GameConfig, GamePersistence
@@ -360,6 +363,38 @@ async def test_no_pending_gauntlets_returns_when_stop_set(
         timeout=2.0,
     )
     await setter
+
+
+async def test_worker_heartbeat_is_written_each_tick(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The scheduler must write its per-worker heartbeat to ``scheduler_heartbeats``."""
+    stop = asyncio.Event()
+    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+
+    async def _signal() -> None:
+        # Allow a couple of tick iterations so the heartbeat row exists.
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    setter = asyncio.create_task(_signal())
+    await asyncio.wait_for(
+        run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            options=options,
+            worker_id="test-worker:42",
+        ),
+        timeout=2.0,
+    )
+    await setter
+
+    async with session_factory() as session:
+        beats = await scheduler_heartbeats_repo.list_(session)
+    assert len(beats) == 1
+    assert beats[0].worker_id == "test-worker:42"
+    assert beats[0].beat_at.tzinfo is not None
 
 
 async def test_heartbeat_is_written_while_gauntlet_in_flight(

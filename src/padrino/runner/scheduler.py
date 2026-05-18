@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import socket
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -30,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import gauntlets as gauntlets_repo
+from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import NoopMockAdapter
 from padrino.observability.events import (
@@ -38,6 +41,7 @@ from padrino.observability.events import (
     EVENT_SCHEDULER_HEARTBEAT,
     EVENT_SCHEDULER_STALE_RESET,
     EVENT_SCHEDULER_TICK,
+    EVENT_SCHEDULER_WORKER_HEARTBEAT,
 )
 from padrino.observability.metrics import scheduler_inflight_gauntlets
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
@@ -51,6 +55,11 @@ DEFAULT_STALE_FACTOR: Final[float] = 2.0
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def default_worker_id() -> str:
+    """Return the canonical worker identifier ``"<hostname>:<pid>"``."""
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 # Type aliases for injectable seams.
@@ -260,6 +269,24 @@ async def _recover_stale_running(
     return reset
 
 
+async def _write_worker_heartbeat(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    worker_id: str,
+    beat_at: datetime,
+) -> None:
+    async with session_factory() as session, session.begin():
+        await scheduler_heartbeats_repo.upsert(
+            session,
+            worker_id=worker_id,
+            beat_at=beat_at,
+        )
+    _logger.info(
+        EVENT_SCHEDULER_WORKER_HEARTBEAT,
+        worker_id=worker_id,
+    )
+
+
 async def _claim_next_pending(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -283,6 +310,7 @@ async def run_scheduler(
     options: SchedulerOptions | None = None,
     clock: Clock | None = None,
     sleeper: Sleeper | None = None,
+    worker_id: str | None = None,
 ) -> None:
     """Drain pending gauntlets until ``stop_event`` is set.
 
@@ -309,6 +337,7 @@ async def run_scheduler(
     make_adapter = adapter_factory or NoopMockAdapter
     tick_clock: Clock = clock or _utcnow
     tick_sleeper: Sleeper = sleeper or asyncio.sleep
+    wid = worker_id or default_worker_id()
 
     stale_threshold_s = opts.heartbeat_interval_s * opts.stale_factor
     await _recover_stale_running(
@@ -318,7 +347,12 @@ async def run_scheduler(
     )
 
     while not stop_event.is_set():
-        _logger.info(EVENT_SCHEDULER_TICK)
+        _logger.info(EVENT_SCHEDULER_TICK, worker_id=wid)
+        await _write_worker_heartbeat(
+            session_factory,
+            worker_id=wid,
+            beat_at=tick_clock(),
+        )
         gauntlet_id = await _claim_next_pending(session_factory, clock=tick_clock)
         if gauntlet_id is None:
             with contextlib.suppress(TimeoutError):
@@ -345,5 +379,6 @@ __all__ = [
     "GameExecutor",
     "SchedulerOptions",
     "Sleeper",
+    "default_worker_id",
     "run_scheduler",
 ]

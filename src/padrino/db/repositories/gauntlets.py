@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.db.models import Gauntlet, GauntletRosterSlot
@@ -151,6 +151,23 @@ async def mark_completed(
     obj.completed_at = now
     obj.heartbeat_at = None
     await session.flush()
+
+
+async def count_by_status(session: AsyncSession, status: str) -> int:
+    """Return the number of gauntlet rows with the given ``status``."""
+    stmt = select(func.count()).select_from(Gauntlet).where(Gauntlet.status == status)
+    result = await session.execute(stmt)
+    return int(result.scalar_one())
+
+
+async def oldest_pending_created_at(session: AsyncSession) -> datetime | None:
+    """Return ``MIN(created_at)`` over ``PENDING`` rows, or ``None``."""
+    stmt = select(func.min(Gauntlet.created_at)).where(Gauntlet.status == "PENDING")
+    result = await session.execute(stmt)
+    value = result.scalar_one_or_none()
+    if value is None:
+        return None
+    return _aware(value)
 
 
 async def reset_stale_running(

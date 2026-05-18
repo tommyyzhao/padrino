@@ -276,6 +276,13 @@ class ApiKey(Base):
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class SchedulerHeartbeat(Base):
+    __tablename__ = "scheduler_heartbeats"
+
+    worker_id: Mapped[str] = mapped_column(String, primary_key=True)
+    beat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class RatingEvent(Base):
     __tablename__ = "rating_events"
 
@@ -311,4 +318,5 @@ __all__ = [
     "PromptVersion",
     "Rating",
     "RatingEvent",
+    "SchedulerHeartbeat",
 ]

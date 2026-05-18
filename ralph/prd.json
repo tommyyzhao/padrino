@@ -255,8 +255,8 @@
       ],
       "dependencies": ["US-054", "US-059"],
       "priority": 60,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New migration 0010 adds `scheduler_heartbeats(worker_id TEXT PK, beat_at TIMESTAMPTZ NOT NULL)` — one row per worker, upserted on every scheduler tick (US-054's per-gauntlet `gauntlets.heartbeat_at` remains the crash-recovery seam; this is the per-worker liveness seam). New repository `padrino.db.repositories.scheduler_heartbeats` with `upsert(session, worker_id, beat_at)`, `latest_beat(session)`, and `list_(session)` (naive datetimes from aiosqlite are coerced to UTC via the same `_aware()` pattern from `gauntlets_repo`). `padrino.runner.scheduler.run_scheduler` accepts an optional `worker_id` kwarg (defaults to `default_worker_id()` = `f'{socket.gethostname()}:{os.getpid()}'`) and writes the worker heartbeat at the top of each tick before `_claim_next_pending`. `padrino_scheduler_inflight_gauntlets` gauge continues to be inc/dec'd in `_drive_gauntlet` (in-process precise tracking is strictly better than periodic sampling). New event `scheduler.worker.heartbeat` (EVENT_SCHEDULER_WORKER_HEARTBEAT) — distinct from the per-gauntlet `scheduler.heartbeat`. New route `padrino.api.routes.health` exposes `GET /healthz/scheduler` returning `{status, last_heartbeat_at, pending_gauntlets, running_gauntlets, oldest_pending_age_s}` — no auth (matches `/healthz`'s scrape-pattern policy). Thresholds: status='down' if `last_heartbeat_at is None` OR age > 30 s; 'degraded' if `oldest_pending_age_s > 60`; otherwise 'ok'. Helpers `gauntlets_repo.count_by_status(status)` and `gauntlets_repo.oldest_pending_created_at()` are the only new aggregate seams. EXPECTED_TABLES in `tests/db/test_migrations_all_dialects.py` was extended with `scheduler_heartbeats` so the postgres downgrade-cleanup loop drops the new table between tests."
     },
     {
       "id": "US-061",

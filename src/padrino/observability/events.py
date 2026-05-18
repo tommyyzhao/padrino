@@ -25,6 +25,7 @@ EVENT_SCHEDULER_GAUNTLET_STARTED: Final[str] = "scheduler.gauntlet.started"
 EVENT_SCHEDULER_GAUNTLET_COMPLETED: Final[str] = "scheduler.gauntlet.completed"
 EVENT_SCHEDULER_HEARTBEAT: Final[str] = "scheduler.heartbeat"
 EVENT_SCHEDULER_STALE_RESET: Final[str] = "scheduler.stale_reset"
+EVENT_SCHEDULER_WORKER_HEARTBEAT: Final[str] = "scheduler.worker.heartbeat"
 
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "EVENT_SCHEDULER_HEARTBEAT",
     "EVENT_SCHEDULER_STALE_RESET",
     "EVENT_SCHEDULER_TICK",
+    "EVENT_SCHEDULER_WORKER_HEARTBEAT",
 ]

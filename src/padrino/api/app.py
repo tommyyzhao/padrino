@@ -21,6 +21,7 @@ from padrino.api.routes.admin import router as admin_router
 from padrino.api.routes.admin_keys import router as admin_keys_router
 from padrino.api.routes.games import router as games_router
 from padrino.api.routes.gauntlets import router as gauntlets_router
+from padrino.api.routes.health import router as health_router
 from padrino.api.routes.leagues import router as leagues_router
 from padrino.observability.metrics import (
     CONTENT_TYPE_LATEST,
@@ -114,6 +115,7 @@ def create_app(
     app.include_router(leagues_router)
     app.include_router(gauntlets_router)
     app.include_router(games_router)
+    app.include_router(health_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
