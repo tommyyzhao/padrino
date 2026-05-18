@@ -53,4 +53,26 @@ async def get_by_game_id(session: AsyncSession, game_id: str) -> IngestedGame | 
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-__all__ = ["UNVERIFIED", "VERIFIED", "create", "get_by_game_id"]
+async def count_by_submitter(session: AsyncSession) -> dict[uuid.UUID | None, int]:
+    """Return ``{submitter_key_id: count}`` across every ingested row.
+
+    The ``None`` bucket counts admin-submitted bundles (no submitter api_key id).
+    """
+    from sqlalchemy import func
+
+    stmt = select(IngestedGame.submitter_key_id, func.count(IngestedGame.id)).group_by(
+        IngestedGame.submitter_key_id
+    )
+    out: dict[uuid.UUID | None, int] = {}
+    for sid, count in (await session.execute(stmt)).all():
+        out[sid] = int(count)
+    return out
+
+
+__all__ = [
+    "UNVERIFIED",
+    "VERIFIED",
+    "count_by_submitter",
+    "create",
+    "get_by_game_id",
+]

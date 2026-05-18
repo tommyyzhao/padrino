@@ -24,6 +24,7 @@ from padrino.api.routes.gauntlets import router as gauntlets_router
 from padrino.api.routes.health import router as health_router
 from padrino.api.routes.ingest import router as ingest_router
 from padrino.api.routes.leagues import router as leagues_router
+from padrino.api.routes.public import router as public_router
 from padrino.observability.metrics import (
     CONTENT_TYPE_LATEST,
     api_requests_total,
@@ -118,6 +119,7 @@ def create_app(
     app.include_router(games_router)
     app.include_router(health_router)
     app.include_router(ingest_router)
+    app.include_router(public_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # spectator scope as the read-only API surface.
     padrino_metrics_require_auth: bool = False
 
+    # Public read API (US-063). The ``/public/*`` routes default to requiring
+    # the spectator scope (or admin). Flipping this on serves the federated
+    # leaderboard + ingested-bundle reads anonymously, which is the right
+    # default for a centrally-hosted shared leaderboard.
+    padrino_public_leaderboard_anonymous: bool = False
+
 
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:
