@@ -13,6 +13,7 @@ Subcommands:
 - ``padrino bootstrap`` — take a fresh database to a ready-to-serve state
   (migrations, canonical prompts, default league, optional admin key, optional
   provider registration).
+- ``padrino export game`` — emit a signed JSON bundle for one completed game.
 """
 
 from __future__ import annotations
@@ -201,6 +202,76 @@ def bootstrap(
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     if not result.succeeded:
         raise typer.Exit(code=1)
+
+
+export_app = typer.Typer(
+    name="export",
+    help="Export Padrino artifacts (signed game bundles).",
+    no_args_is_help=True,
+)
+app.add_typer(export_app)
+
+
+@export_app.command("game")
+def export_game_cmd(
+    game_id: str = typer.Argument(..., help="UUID of the COMPLETED game to export."),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Write the bundle JSON to this file instead of stdout.",
+        dir_okay=False,
+        file_okay=True,
+        resolve_path=True,
+    ),
+    sign: bool = typer.Option(
+        False,
+        "--sign",
+        help=(
+            "Sign the bundle with the Ed25519 seed in env "
+            "PADRINO_EXPORT_PRIVATE_KEY (base64, 32 bytes)."
+        ),
+    ),
+) -> None:
+    """Emit a signed JSON game-export bundle for ``game_id``."""
+    import uuid as _uuid
+
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.export.bundle import Ed25519Signer, ExportError, export_game
+
+    try:
+        gid = _uuid.UUID(game_id)
+    except ValueError as exc:
+        typer.echo(f"invalid game_id: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    signer = Ed25519Signer.from_env("PADRINO_EXPORT_PRIVATE_KEY") if sign else None
+
+    async def _run() -> str:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            async with session_factory() as session:
+                bundle = await export_game(session, gid, signer=signer)
+        finally:
+            await engine.dispose()
+        return bundle.model_dump_json(indent=2)
+
+    try:
+        rendered = asyncio.run(_run())
+    except ExportError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    if out is None:
+        typer.echo(rendered)
+    else:
+        out.write_text(rendered, encoding="utf-8")
+        typer.echo(str(out))
 
 
 if __name__ == "__main__":
