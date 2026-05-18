@@ -1,0 +1,159 @@
+name: Release
+
+# Cuts a versioned Padrino release. The workflow:
+#
+# 1. Refuses to proceed if CHANGELOG.md's `## [Unreleased]` section is empty
+#    for the tag being cut (every release must roll its bullets into a dated
+#    heading).
+# 2. Runs the full test matrix on Ubuntu and macOS for Python 3.12 and 3.13.
+# 3. Builds the Dockerfile and publishes the image to
+#    `ghcr.io/<owner>/padrino:<version>` plus `:latest`.
+# 4. Signs the image with cosign keyless OIDC.
+#
+# The image signature is verifiable with `cosign verify
+# ghcr.io/<owner>/padrino:<version> --certificate-identity-regexp
+# "^https://github.com/<owner>/padrino/.github/workflows/release.yml@.*"
+# --certificate-oidc-issuer "https://token.actions.githubusercontent.com"`.
+# Operators pinning the issuer / identity should consult
+# `docs/deployment/central-backend.md`.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  changelog-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify CHANGELOG.md has unreleased entries
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          python <<'PY'
+          import os
+          import re
+          import sys
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          version = tag.lstrip("v")
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+
+          pattern = re.compile(
+              r"^## \[Unreleased\]\s*\n(?P<body>.*?)(?=^## \[)",
+              re.DOTALL | re.MULTILINE,
+          )
+          match = pattern.search(text)
+          if not match:
+              sys.stderr.write("CHANGELOG.md is missing a `## [Unreleased]` section.\n")
+              sys.exit(1)
+
+          body = match.group("body").strip()
+          stripped = "\n".join(
+              line for line in body.splitlines() if line.strip() and not line.lstrip().startswith("###")
+          ).strip()
+          if not stripped:
+              sys.stderr.write(
+                  f"CHANGELOG.md `## [Unreleased]` section is empty; cannot cut v{version}.\n"
+              )
+              sys.exit(1)
+
+          print(f"Unreleased section has content; cutting v{version}.")
+          PY
+
+  test-matrix:
+    needs: changelog-gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check .
+
+      - name: Typecheck (mypy)
+        run: uv run mypy src tests
+
+      - name: Unit + integration tests (no live LLM)
+        run: uv run pytest -m "not integration" --cov --cov-report=term-missing
+
+      - name: Core engine coverage gate (>=85%)
+        run: uv run coverage report --include='src/padrino/core/*' --fail-under=85
+
+  publish-image:
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag version
+        id: meta
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          owner_lc=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "version=${version}"
+            echo "image=ghcr.io/${owner_lc}/padrino"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+          provenance: false
+
+      - name: Sign image with cosign keyless OIDC
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          digest='${{ steps.build.outputs.digest }}'
+          image='${{ steps.meta.outputs.image }}'
+          cosign sign --yes "${image}@${digest}"

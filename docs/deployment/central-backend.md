@@ -182,6 +182,43 @@ Postgres provider's continuous backup). The hash chain on the event log
 makes per-game tampering detectable but does NOT recover lost rows; the
 backup tier is mandatory.
 
+## Verifying the published image
+
+Each `v*` tag is published to GHCR as
+`ghcr.io/<owner>/padrino:<version>` and `:latest`, and the image is signed
+with [cosign](https://docs.sigstore.dev/cosign/overview/) keyless OIDC via
+GitHub's Sigstore-backed identity flow (see
+`.github/workflows/release.yml`). There is no long-lived signing key — the
+chain of trust is anchored to the workflow's certificate identity, which
+operators can pin verbatim.
+
+The expected certificate identity for an upstream release is the workflow
+URL plus the tag ref:
+
+```
+identity      = https://github.com/<owner>/padrino/.github/workflows/release.yml@refs/tags/<tag>
+identity_re   = ^https://github\.com/<owner>/padrino/\.github/workflows/release\.yml@refs/tags/v.*$
+oidc_issuer   = https://token.actions.githubusercontent.com
+```
+
+Pin the issuer and the identity regex when verifying — that pair is the
+cosign "fingerprint" for a keyless OIDC release and is what operators
+record alongside the image digest. Replace `<owner>` with the org or user
+that owns the GHCR namespace; for the upstream Padrino repo it is
+`tommyyzhao`.
+
+Verify a pulled image:
+
+```
+cosign verify ghcr.io/<owner>/padrino:<version> \
+    --certificate-identity-regexp "^https://github\.com/<owner>/padrino/\.github/workflows/release\.yml@refs/tags/v.*$" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+```
+
+A successful verify prints the signing certificate's SAN (the workflow
+identity) and the transparency-log entry id. Pin those values in your
+deployment runbook so a future image with a different identity is rejected.
+
 ## Verified runbook
 
 The block below is executed end-to-end by `tests/docs/test_runbooks.py`.
