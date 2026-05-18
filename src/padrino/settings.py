@@ -49,7 +49,10 @@ class Settings(BaseSettings):
     # windows expressed in requests per minute; the per-scope defaults below
     # match the priorities of each role (admin > spectator > submitter).
     padrino_rate_limit_admin_per_minute: int = 600
-    padrino_rate_limit_submitter_per_minute: int = 60
+    # The submitter ceiling defaults to 30/min — set conservatively because
+    # ``POST /ingest/game`` (US-062) is the only submitter-scoped endpoint and
+    # one submission carries up to 10 MB of replayed event history.
+    padrino_rate_limit_submitter_per_minute: int = 30
     padrino_rate_limit_spectator_per_minute: int = 1200
 
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any

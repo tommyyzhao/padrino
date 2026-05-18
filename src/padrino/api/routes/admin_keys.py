@@ -8,6 +8,7 @@ keys exist and disable stale ones.
 
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import datetime
 from typing import Annotated
@@ -35,6 +36,14 @@ from padrino.db.repositories import api_keys as api_keys_repo
 router = APIRouter(prefix="/admin")
 
 
+def _is_valid_ed25519_pubkey_b64(value: str) -> bool:
+    try:
+        raw = base64.urlsafe_b64decode(value.encode("ascii"))
+    except (ValueError, base64.binascii.Error):  # type: ignore[attr-defined]
+        return False
+    return len(raw) == 32
+
+
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -42,6 +51,7 @@ class _StrictModel(BaseModel):
 class AdminKeyCreate(_StrictModel):
     label: str = Field(min_length=1)
     scopes: list[str] = Field(min_length=1)
+    submission_public_key: str | None = None
 
 
 class AdminKeyResponse(BaseModel):
@@ -49,6 +59,7 @@ class AdminKeyResponse(BaseModel):
     label: str
     scopes: list[str]
     key_prefix: str
+    submission_public_key: str | None
     created_at: datetime
     last_used_at: datetime | None
     disabled_at: datetime | None
@@ -71,6 +82,7 @@ def _to_response(obj: ApiKey) -> AdminKeyResponse:
         label=obj.label,
         scopes=list(obj.scopes),
         key_prefix=obj.key_prefix,
+        submission_public_key=obj.submission_public_key,
         created_at=obj.created_at,
         last_used_at=obj.last_used_at,
         disabled_at=obj.disabled_at,
@@ -93,18 +105,27 @@ async def create_api_key(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"unknown scope(s): {sorted(unknown)}",
         )
+    if body.submission_public_key is not None and not _is_valid_ed25519_pubkey_b64(
+        body.submission_public_key
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="submission_public_key must be urlsafe-base64 of a 32-byte Ed25519 key",
+        )
     raw_key = generate_raw_key()
     obj = await api_keys_repo.create(
         session,
         raw_key=raw_key,
         scopes=body.scopes,
         label=body.label,
+        submission_public_key=body.submission_public_key,
     )
     return AdminKeyCreateResponse(
         id=obj.id,
         label=obj.label,
         scopes=list(obj.scopes),
         key_prefix=obj.key_prefix,
+        submission_public_key=obj.submission_public_key,
         created_at=obj.created_at,
         last_used_at=obj.last_used_at,
         disabled_at=obj.disabled_at,

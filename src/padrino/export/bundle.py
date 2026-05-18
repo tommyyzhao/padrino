@@ -334,7 +334,7 @@ def _event_body(event: EventEnvelope) -> dict[str, Any]:
     }
 
 
-def _verify_chain(events: Sequence[EventEnvelope]) -> str:
+def verify_chain(events: Sequence[EventEnvelope]) -> str:
     """Replay the chain through a fresh :class:`EventLog` and return the tip hash.
 
     Raises :class:`ReplayHashMismatchError` if any event's recomputed hash
@@ -351,6 +351,11 @@ def _verify_chain(events: Sequence[EventEnvelope]) -> str:
     ]
     log = replay_event_log(stored)
     return log.head_hash
+
+
+# Backwards-compatible alias for internal callers that referenced the
+# pre-publication name (kept private leading underscore as the old export).
+_verify_chain = verify_chain
 
 
 # --------------------------------------------------------------------------- #
@@ -384,7 +389,7 @@ async def export_game(
 
     events = [_envelope_from_row(row) for row in event_rows]
     assert_bundle_payload_safe(events)
-    tip_hash = _verify_chain(events)
+    tip_hash = verify_chain(events)
 
     league_id: str | None = None
     if game.gauntlet_id is not None:
@@ -485,4 +490,5 @@ __all__ = [
     "canonical_bundle_bytes",
     "export_game",
     "verify_bundle_signature",
+    "verify_chain",
 ]

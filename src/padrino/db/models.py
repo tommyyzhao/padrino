@@ -269,11 +269,33 @@ class ApiKey(Base):
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
     scopes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     label: Mapped[str] = mapped_column(String, nullable=False)
+    submission_public_key: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IngestedGame(Base):
+    __tablename__ = "ingested_games"
+    __table_args__ = (UniqueConstraint("game_id", name="uq_ingested_games_game_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[str] = mapped_column(String, nullable=False)
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    league_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    gauntlet_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    tip_hash: Mapped[str] = mapped_column(String, nullable=False)
+    signer_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
+    verification_status: Mapped[str] = mapped_column(String, nullable=False)
+    submitter_key_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("api_keys.id"), nullable=True
+    )
+    bundle: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
 
 
 class SchedulerHeartbeat(Base):
@@ -311,6 +333,7 @@ __all__ = [
     "GameSeat",
     "Gauntlet",
     "GauntletRosterSlot",
+    "IngestedGame",
     "League",
     "LlmCall",
     "ModelConfig",

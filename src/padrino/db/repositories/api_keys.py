@@ -34,12 +34,14 @@ async def create(
     raw_key: str,
     scopes: list[str],
     label: str,
+    submission_public_key: str | None = None,
 ) -> ApiKey:
     obj = ApiKey(
         key_hash=hash_api_key(raw_key),
         key_prefix=display_prefix(raw_key),
         scopes=list(scopes),
         label=label,
+        submission_public_key=submission_public_key,
     )
     session.add(obj)
     await session.flush()

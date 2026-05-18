@@ -39,6 +39,7 @@ EXPECTED_TABLES = {
     "rating_events",
     "api_keys",
     "scheduler_heartbeats",
+    "ingested_games",
 }
 
 
