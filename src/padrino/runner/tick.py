@@ -49,6 +49,7 @@ from padrino.observability.events import (
     EVENT_LLM_CALL_STARTED,
     EVENT_LLM_CALL_TIMEOUT,
 )
+from padrino.observability.metrics import record_invalid_action
 
 _REASON_TIMEOUT = "TIMEOUT"
 _REASON_LLM_EXHAUSTED = "llm_exhausted"
@@ -216,6 +217,7 @@ def _build_failure_outcome(
     payload: dict[str, Any],
 ) -> _SeatOutcome:
     response = coerce_response_failure(state.current_phase, reason)
+    record_invalid_action(reason=reason)
     body: dict[str, Any] = {
         "event_type": event_type,
         "phase": phase_id,

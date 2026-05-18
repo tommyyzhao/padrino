@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     padrino_rate_limit_submitter_per_minute: int = 60
     padrino_rate_limit_spectator_per_minute: int = 1200
 
+    # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any
+    # scraper that can reach the process; flipping the flag requires the same
+    # spectator scope as the read-only API surface.
+    padrino_metrics_require_auth: bool = False
+
 
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:

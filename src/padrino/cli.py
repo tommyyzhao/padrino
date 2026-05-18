@@ -10,6 +10,9 @@ Subcommands:
   phase durations, LLM latency percentiles, timeout / invalid-JSON rates)
   from a Padrino database and print them as JSON.
 - ``padrino scheduler`` — run the async gauntlet scheduler loop until SIGTERM.
+- ``padrino bootstrap`` — take a fresh database to a ready-to-serve state
+  (migrations, canonical prompts, default league, optional admin key, optional
+  provider registration).
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -69,7 +73,7 @@ def metrics(
 ) -> None:
     """Print aggregated observability metrics as JSON."""
     from padrino.db.base import create_engine, create_session_factory
-    from padrino.observability.metrics import (
+    from padrino.observability.summary import (
         compute_metrics_summary,
         metrics_summary_to_dict,
     )
@@ -149,6 +153,54 @@ def scheduler(
             await engine.dispose()
 
     asyncio.run(_run())
+
+
+@app.command("bootstrap")
+def bootstrap(
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+    with_admin_key: bool = typer.Option(
+        False,
+        "--with-admin-key",
+        help="Mint an admin API key and print the raw value once to stdout.",
+    ),
+    providers: Path | None = typer.Option(
+        None,
+        "--providers",
+        help="Path to a YAML file declaring providers to register.",
+        exists=False,
+        dir_okay=False,
+        file_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """Take a fresh database to a ready-to-serve Padrino deployment."""
+    from padrino.bootstrap import bootstrap as _bootstrap
+
+    result = asyncio.run(
+        _bootstrap(
+            db_url=db_url,
+            with_admin_key=with_admin_key,
+            providers_path=providers,
+        )
+    )
+
+    payload: dict[str, Any] = {
+        "succeeded": result.succeeded,
+        "steps": [{"name": s.name, "status": s.status, "detail": s.detail} for s in result.steps],
+    }
+    if result.failed_step is not None:
+        payload["failed_step"] = result.failed_step
+        payload["failure_message"] = result.failure_message
+    if result.admin_raw_key is not None:
+        payload["admin_raw_key"] = result.admin_raw_key
+
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+    if not result.succeeded:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

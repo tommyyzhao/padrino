@@ -49,6 +49,7 @@ from padrino.llm.retry import (
     with_retry,
 )
 from padrino.llm.secrets import resolve_secret
+from padrino.observability.metrics import record_llm_call
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are a player in a hidden-role social-deduction game. "
@@ -203,6 +204,7 @@ class LiteLlmAdapter:
                 error_message=exc.error_message,
                 attempts=exc.attempts,
             )
+            record_llm_call(model_id=model_id, status="provider_error", latency_ms=latency_ms)
             return AdapterResult(
                 raw_response="",
                 parsed_response=ResponseError(
@@ -216,6 +218,7 @@ class LiteLlmAdapter:
             )
         except Exception as exc:
             latency_ms = _elapsed_ms(start)
+            record_llm_call(model_id=model_id, status="provider_error", latency_ms=latency_ms)
             return AdapterResult(
                 raw_response="",
                 parsed_response=ResponseError(
@@ -237,6 +240,7 @@ class LiteLlmAdapter:
             status = "invalid_json"
         else:
             status = "schema_violation"
+        record_llm_call(model_id=model_id, status=status, latency_ms=latency_ms)
 
         return AdapterResult(
             raw_response=text,

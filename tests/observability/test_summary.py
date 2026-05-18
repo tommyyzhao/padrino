@@ -1,4 +1,4 @@
-"""Tests for :mod:`padrino.observability.metrics`.
+"""Tests for :mod:`padrino.observability.summary`.
 
 Seeds a SQLite database via the demo gauntlet (NoopMockAdapter, 2 clones,
 ranked=True) and asserts the aggregated summary covers games_completed,
@@ -25,7 +25,7 @@ from padrino.db.repositories import (
     providers,
 )
 from padrino.demo_gauntlet import run_demo_gauntlet
-from padrino.observability.metrics import (
+from padrino.observability.summary import (
     UNKNOWN_MODEL,
     LatencyStats,
     _percentile,
@@ -311,7 +311,7 @@ async def test_phase_duration_pairs_started_and_resolved(
 
 def test_metrics_summary_to_dict_sorts_model_keys() -> None:
     """``metrics_summary_to_dict`` returns model_name keys in sorted order."""
-    from padrino.observability.metrics import MetricsSummary
+    from padrino.observability.summary import MetricsSummary
 
     summary = MetricsSummary(
         games_completed=1,

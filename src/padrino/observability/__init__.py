@@ -6,8 +6,11 @@ The observability layer owns:
   by the runner, gauntlet scheduler, and LLM adapter to emit correlated
   structured events (``game.started``, ``phase.started``, ``llm.call.*``,
   ``phase.resolved``, ``game.completed``, ``rating.updated``).
-* :mod:`padrino.observability.metrics` — DB-backed aggregations consumed by
+* :mod:`padrino.observability.summary` — DB-backed aggregations consumed by
   the ``padrino metrics`` CLI subcommand.
+* :mod:`padrino.observability.metrics` — Prometheus Counter / Histogram /
+  Gauge instances (US-059) updated at the same call sites that emit the
+  US-048 structured logs, exposed through the ``GET /metrics`` endpoint.
 
 Impure layer: imports from ``padrino.db.*``. Pure-core code never imports
 this package.
@@ -26,7 +29,7 @@ from padrino.observability.events import (
     EVENT_PHASE_STARTED,
     EVENT_RATING_UPDATED,
 )
-from padrino.observability.metrics import (
+from padrino.observability.summary import (
     LatencyStats,
     MetricsSummary,
     compute_metrics_summary,

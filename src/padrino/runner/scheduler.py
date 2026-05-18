@@ -39,6 +39,7 @@ from padrino.observability.events import (
     EVENT_SCHEDULER_STALE_RESET,
     EVENT_SCHEDULER_TICK,
 )
+from padrino.observability.metrics import scheduler_inflight_gauntlets
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
 
 _logger = structlog.get_logger("padrino.scheduler")
@@ -192,6 +193,7 @@ async def _drive_gauntlet(
         games=len(child_game_ids),
         gauntlet_seed=gauntlet_seed,
     )
+    scheduler_inflight_gauntlets.inc()
 
     hb_stop = asyncio.Event()
     hb_task = asyncio.create_task(
@@ -227,6 +229,7 @@ async def _drive_gauntlet(
     finally:
         hb_stop.set()
         await hb_task
+        scheduler_inflight_gauntlets.dec()
 
     completed_at = clock()
     async with session_factory() as session, session.begin():

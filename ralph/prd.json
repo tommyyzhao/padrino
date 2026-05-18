@@ -215,8 +215,8 @@
       ],
       "dependencies": ["US-050", "US-052", "US-056", "US-057"],
       "priority": 58,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New module `padrino.bootstrap` + `padrino bootstrap` Typer command. Step order: (1) `alembic upgrade head` via `alembic.command.upgrade` driven from a `asyncio.to_thread` worker (alembic's env.py uses `asyncio.run` internally and would conflict with the CLI's outer `asyncio.run`); (2) safety-net seed of canonical mini7_v1 prompts (idempotent — counts existing rows by version+role_family and inserts only missing ones; on a fresh DB migration 0005 already populates them so this step reports 'skipped'); (3) seed a default mini7_v1 League if no row with name='Default League' exists (the story's 'seed default mini7_v1 ruleset row' criterion was interpreted as default-League since there is no rulesets table); (4) optional `--with-admin-key` calls `api_keys_repo.create` with scope=['admin'] and label='bootstrap-admin' — the raw key is returned in the JSON exactly once; (5) optional `--providers path.yaml` parses via the strict `ProvidersFile`/`ProviderSpec` Pydantic models (`extra='forbid'`), resolves each `auth_secret_ref` eagerly (US-050 SecretResolutionError → BootstrapError → exit 1), and inserts providers whose name doesn't already exist. Output is JSON to stdout with `{succeeded, steps, failed_step?, failure_message?, admin_raw_key?}`. Exit code 0 on success, 1 with the failing step name on any failure. New runtime dep `pyyaml>=6.0`; new dev dep `types-PyYAML>=6.0`."
     },
     {
       "id": "US-059",
@@ -235,8 +235,8 @@
       ],
       "dependencies": [],
       "priority": 59,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Renamed legacy `padrino.observability.metrics` → `padrino.observability.summary` (the DB-backed `padrino metrics` CLI surface from US-048) so the new module name was free for the Prometheus instruments. New `padrino.observability.metrics` exposes `REGISTRY` (a dedicated `CollectorRegistry`, NOT the prometheus_client global), Counter/Histogram/Gauge instances, helpers (`record_llm_call`, `record_phase_duration`, `record_game_completed`, `record_invalid_action`), `split_litellm_model_id` (parses `cerebras/zai-glm-4.7` → `('cerebras','zai-glm-4.7')`; the deepinfra triple-slash form keeps everything after the first slash as the model name), `render_prometheus_text`, `reset_metrics` (test seam — clears `_metrics` on every collector). `padrino.observability.timing.time_phase` is a context-manager wrapper around `time.monotonic()` that game_runner.py imports — the purity firewall rejects only `random/secrets/datetime/time` direct imports, so re-exporting through a helper is safe. Metrics are updated at the same call sites as the US-048 structured logs: `padrino_llm_calls_total` + `padrino_llm_latency_seconds` from `LiteLlmAdapter._call_model`, `padrino_phase_duration_seconds` from a `with time_phase(...)` block wrapping the per-phase body in `game_runner.run_game`, `padrino_games_total` at the end of `run_game`, `padrino_invalid_action_total` from `tick._build_failure_outcome`, `padrino_scheduler_inflight_gauntlets` from `scheduler._drive_gauntlet` inc/dec. `GET /metrics` returns `text/plain; version=0.0.4; charset=utf-8` (matches Prometheus exposition spec); `metrics_middleware` records `padrino_api_requests_total{route,method,status}` using the route template (`request.scope['route'].path`) so dynamic ids don't blow up the cardinality. `Settings.padrino_metrics_require_auth: bool = False` defaults to open scraping; `create_app(metrics_require_auth=True)` (or the env var) routes the endpoint through `Depends(require_read)`."
     },
     {
       "id": "US-060",
@@ -378,6 +378,91 @@
       ],
       "dependencies": ["US-051", "US-057", "US-064", "US-065"],
       "priority": 66,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-067",
+      "title": "Per-model rating rollup and Mafia leaderboard by model identity",
+      "description": "As a benchmark consumer, I need a leaderboard that shows one row per unique LLM model identity (e.g. `gpt-5.5`, `claude-opus-4.7`, `cerebras/zai-glm-4.7`) so I can compare 'Claude Opus 4.7 vs GPT-5.5 at Mafia' without first reasoning about agent-build variants.",
+      "acceptanceCriteria": [
+        "New helper `padrino.ratings.model_rollup.rollup_by_model(session, league_id, ruleset_id) -> list[ModelLeaderboardEntry]` aggregates ratings across every `agent_build_id` that shares a `(model_provider.name, model_config.model_name, model_config.model_version)` triple; output entries carry `model_key` (canonical `'<provider>/<model_name>[@<version>]'`), `display_name`, `mu`, `sigma`, `conservative_score`, `games`, `wins`, `draws`, `losses`, per-faction (TOWN/MAFIA) sub-aggregates, and `agent_build_count`",
+        "Aggregation rule: combine PlackettLuce ratings across builds for the same model identity using games-weighted mean for mu and the standard `sqrt(sum(sigma_i^2 * n_i^2)) / sum(n_i)` propagation for sigma; conservative_score = mu - 3*sigma post-aggregation; never recompute from raw events (read-only over `ratings` + `game_seats`)",
+        "Two new endpoints under `/public/models` (spectator scope, US-056): `GET /public/models/leaderboard?ruleset_id=...&league_id=...` returns paginated entries (US-055 cursor) sorted by `conservative_score desc`; `GET /public/models/{model_key}` returns the detail view including per-faction breakdown, build list (display_name only, no secrets), and recent games (last 25 game_ids)",
+        "Endpoints are cached on `max(ratings.updated_at)` for the league + ruleset so a write invalidates naturally; cache lives in `padrino.ratings.model_rollup` (in-process LRU keyed by `(league_id, ruleset_id, updated_at_tick)`)",
+        "`tests/ratings/test_model_rollup.py` covers: two builds for the same model collapse into one row, two builds for different models stay separate, faction sub-aggregates sum to the global counts, games-weighted aggregation matches the closed-form expectation on a hand-built fixture",
+        "`tests/api/test_public_models.py` covers: leaderboard sort + cursor stability, detail endpoint shape, spectator scope required, anonymous-access flag honored (mirrors US-063 pattern)",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run coverage report --include='src/padrino/core/*' --fail-under=85 passes"
+      ],
+      "dependencies": ["US-055", "US-056", "US-063"],
+      "priority": 67,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-068",
+      "title": "Localhost end-to-end QA smoke harness",
+      "description": "As a release-gate operator, I need a single scripted localhost smoke that boots the API + scheduler against a fresh Postgres, runs a real demo gauntlet through cassettes, and asserts the public leaderboard / model rollup / replay endpoints all return the expected shape so I learn about wiring regressions before tagging a release.",
+      "acceptanceCriteria": [
+        "New CLI subcommand `padrino smoke localhost [--db-url ...] [--port 8000] [--keep-running]` orchestrates: (1) `padrino bootstrap --with-admin-key`, (2) start API + scheduler as child processes, (3) wait for `/healthz` and `/healthz/scheduler` to both report 200, (4) submit a demo gauntlet via the admin API, (5) poll `/gauntlets/{id}` until `status='COMPLETED'` (timeout 120 s), (6) hit `/leagues/{id}/leaderboard`, `/public/leaderboard`, `/public/models/leaderboard`, and `/public/games/{id}/events` and assert each returns ≥ 1 row and the documented schema, (7) tear down children (skipped when `--keep-running`)",
+        "All LLM calls inside the smoke route through the recorded cassettes from US-051 — no live network; the smoke is the only place outside `live-llm-cassettes` CI that exercises the full LiteLLM path end-to-end",
+        "Exit code: 0 only if every assertion passes; non-zero exit prints a structured JSON failure report including the failing step + last 50 lines of API/scheduler stderr",
+        "`tests/cli/test_smoke_localhost.py` runs the smoke against an in-process ASGI lifespan (no subprocess) on SQLite so CI doesn't need Postgres for the unit-style check; a second test marked `@pytest.mark.integration` runs the full subprocess + Postgres path",
+        "`README.md` gains a 'Localhost smoke' subsection under the bootstrap quickstart with the single-command invocation",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-058", "US-059", "US-060", "US-063", "US-064", "US-067"],
+      "priority": 68,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-069",
+      "title": "Live dashboard frontend (SvelteKit) for games, leaderboards, and replays",
+      "description": "As a community spectator, I need a browser dashboard that lists in-flight and completed games, shows the per-model leaderboard, and lets me scrub through any game's event log so I can watch Mafia matches without curl-ing endpoints.",
+      "acceptanceCriteria": [
+        "New sibling project at `web/dashboard/` (NOT under `src/padrino/` — pure-core firewall is untouched): SvelteKit 2 + TypeScript + Tailwind + shadcn-svelte, package manager pnpm, `pnpm dev`/`pnpm build`/`pnpm test`/`pnpm lint`/`pnpm check` (svelte-check) scripts wired",
+        "Routes: `/` (home — KPIs: total games, active gauntlets, top 3 models), `/leaderboard` (full per-model leaderboard from US-067 with faction tabs Global/Town/Mafia + cursor pagination), `/games` (paginated list of completed + in-flight games), `/games/[id]` (replay viewer with phase-by-phase event scrubber, role-safe public projection — never display role/faction unless game is terminal)",
+        "API client lives at `web/dashboard/src/lib/api/` with a single `PadrinoClient` typed against the OpenAPI schema served from `/openapi.json`; `VITE_PADRINO_API_BASE_URL` env var configures the base URL (defaults to `http://localhost:8000`)",
+        "Replay viewer reads `/public/games/{id}/events` (paginated), groups by phase, and exposes prev/next/jump-to-phase controls; never calls a private/admin endpoint",
+        "Auth-free for spectators when `Settings.padrino_public_leaderboard_anonymous=True`; otherwise dashboard prompts for a spectator API key stored in `sessionStorage` only (never localStorage, never cookies)",
+        "`web/dashboard/README.md` (the one frontend doc the wave authorizes) covers dev setup, build, and how to point at a remote backend",
+        "`docker-compose.yml` (US-064) gains a `dashboard` service that builds + serves the static export on port 5173; the bootstrap path documents the dashboard URL",
+        "Quality gates for the frontend run inside its own subtree: `pnpm -C web/dashboard lint`, `pnpm -C web/dashboard check`, `pnpm -C web/dashboard test` (Vitest unit tests for the API client + replay scrubber) all pass; backend gates unchanged",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-063", "US-064", "US-067"],
+      "priority": 69,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-070",
+      "title": "Playwright end-to-end browser tests for the dashboard",
+      "description": "As a maintainer shipping a public dashboard, I need a Playwright suite that drives the dashboard against a live backend so visual regressions and broken endpoints are caught before users see them.",
+      "acceptanceCriteria": [
+        "`web/dashboard/tests/e2e/` Playwright suite (TypeScript) with three specs: `leaderboard.spec.ts` (loads `/leaderboard`, asserts ≥ 1 model row, switches Town/Mafia tabs, paginates), `games.spec.ts` (loads `/games`, opens the first completed game, scrubs through phases), `home.spec.ts` (KPIs render, top-3 models link to leaderboard)",
+        "Test harness: a single `pnpm -C web/dashboard test:e2e` script boots the backend via `padrino smoke localhost --keep-running --port 8123` (US-068), waits for readiness, runs Playwright against `http://localhost:5173`, then tears the backend down; cassettes from US-051 supply LLM responses",
+        "CI job `dashboard-e2e` in `.github/workflows/ci.yml` (US-066) runs the full suite on `ubuntu-latest` with Playwright's pre-installed browsers; artifact upload on failure includes trace.zip + screenshot",
+        "Selectors use `data-testid` attributes added to the dashboard components — never raw CSS classes — so refactors don't silently break the suite",
+        "Visual-regression snapshots stored under `web/dashboard/tests/e2e/__snapshots__/`; updates require explicit `pnpm test:e2e -- --update-snapshots` and a reviewer ack",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-068", "US-069"],
+      "priority": 70,
       "passes": false,
       "notes": ""
     }

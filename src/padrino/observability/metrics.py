@@ -1,212 +1,227 @@
-"""DB-backed metrics aggregation for the ``padrino metrics`` CLI.
+"""Prometheus metrics surface for Padrino (US-059).
 
-Reads from ``game_events``, ``llm_calls``, ``agent_builds``, and
-``model_configs`` to compute high-level operational metrics:
+Defines the canonical :class:`Counter`, :class:`Histogram`, and
+:class:`Gauge` instances every observability seam in Padrino updates. The
+``/metrics`` endpoint (see :mod:`padrino.api.app`) exposes the current
+snapshot in Prometheus text format.
 
-* ``games_completed`` — count of games with a ``GameTerminated`` row.
-* ``avg_phase_duration_seconds`` — mean of ``(PhaseResolved.created_at -
-  PhaseStarted.created_at)`` across all phases that have both endpoints.
-* ``llm_latency`` — per-model p50 / p95 ``latency_ms`` plus sample count;
-  models without an ``agent_build_id`` fall under the ``"unknown"`` bucket.
-* ``timeout_rate`` — ``ActionTimedOut`` event count divided by total LLM
-  attempts (timeouts + persisted ``llm_calls`` rows).
-* ``invalid_json_rate`` — fraction of persisted ``llm_calls`` whose status is
-  ``invalid_json`` or ``schema_violation``.
+Metric inventory:
 
-Impure module — uses SQLAlchemy and wall-clock arithmetic.
+* ``padrino_llm_calls_total{provider,model,status}`` — every LLM completion
+  attempted by the runner, tagged with the routing status (``ok``,
+  ``invalid_json``, ``provider_error``, etc.).
+* ``padrino_llm_latency_seconds{provider,model}`` — wall-clock latency of
+  every completed LLM call (success or failure).
+* ``padrino_phase_duration_seconds{ruleset,phase_kind}`` — wall-clock
+  duration of every phase the runner resolves.
+* ``padrino_games_total{outcome,ruleset}`` — every completed game (one
+  increment at ``GameTerminated``).
+* ``padrino_invalid_action_total{reason}`` — every coerced safe action the
+  runner falls back to (timeout, schema violation, llm_exhausted).
+* ``padrino_scheduler_inflight_gauntlets`` — current count of gauntlets
+  being driven by ``padrino.runner.scheduler``.
+* ``padrino_api_requests_total{route,method,status}`` — every HTTP request
+  served by the FastAPI app, counted by template path + status code.
+
+The instruments live on a single :class:`CollectorRegistry` exposed through
+:data:`REGISTRY` so tests can clear state without touching the global
+``prometheus_client.REGISTRY`` shared by other libraries.
+
+Impure module — never imported by pure-core.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
-from typing import Any, Final
+from typing import Final
 
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
+from prometheus_client.parser import text_string_to_metric_families
 
-from padrino.db.models import AgentBuild, GameEvent, LlmCall, ModelConfig
+CONTENT_TYPE_LATEST: Final[str] = "text/plain; version=0.0.4; charset=utf-8"
 
-_PHASE_STARTED: Final[str] = "PhaseStarted"
-_PHASE_RESOLVED: Final[str] = "PhaseResolved"
-_GAME_TERMINATED: Final[str] = "GameTerminated"
-_ACTION_TIMED_OUT: Final[str] = "ActionTimedOut"
+UNKNOWN_LABEL: Final[str] = "unknown"
 
-_INVALID_JSON_STATUSES: Final[frozenset[str]] = frozenset({"invalid_json", "schema_violation"})
+# Per-LLM-call latency buckets in seconds; tuned for the 0.1-60 s envelope
+# observed across all five wave-2 providers.
+_LLM_LATENCY_BUCKETS: Final[tuple[float, ...]] = (
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    20.0,
+    45.0,
+    60.0,
+)
 
-UNKNOWN_MODEL: Final[str] = "unknown"
+# Phase durations span a wider window — discussion phases finish in milliseconds
+# under the mock adapter and can stretch to many seconds under live providers.
+_PHASE_DURATION_BUCKETS: Final[tuple[float, ...]] = (
+    0.001,
+    0.01,
+    0.1,
+    0.5,
+    1.0,
+    5.0,
+    15.0,
+    30.0,
+    60.0,
+    180.0,
+)
 
 
-@dataclass(frozen=True, slots=True)
-class LatencyStats:
-    """Latency percentiles + sample count for one model."""
-
-    samples: int
-    p50_ms: int | None
-    p95_ms: int | None
+REGISTRY: CollectorRegistry = CollectorRegistry()
 
 
-@dataclass(frozen=True, slots=True)
-class MetricsSummary:
-    """Top-level metrics payload returned by :func:`compute_metrics_summary`."""
+llm_calls_total = Counter(
+    "padrino_llm_calls_total",
+    "Count of LLM completion attempts by provider, model, and routing status.",
+    labelnames=("provider", "model", "status"),
+    registry=REGISTRY,
+)
 
-    games_completed: int
-    avg_phase_duration_seconds: float | None
-    llm_latency: dict[str, LatencyStats]
-    timeout_rate: float | None
-    invalid_json_rate: float | None
-    total_llm_calls: int
-    total_timeouts: int
+llm_latency_seconds = Histogram(
+    "padrino_llm_latency_seconds",
+    "Wall-clock latency of LLM completion attempts.",
+    labelnames=("provider", "model"),
+    buckets=_LLM_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
+
+phase_duration_seconds = Histogram(
+    "padrino_phase_duration_seconds",
+    "Wall-clock duration of resolved game phases.",
+    labelnames=("ruleset", "phase_kind"),
+    buckets=_PHASE_DURATION_BUCKETS,
+    registry=REGISTRY,
+)
+
+games_total = Counter(
+    "padrino_games_total",
+    "Count of completed games by terminal outcome and ruleset.",
+    labelnames=("outcome", "ruleset"),
+    registry=REGISTRY,
+)
+
+invalid_action_total = Counter(
+    "padrino_invalid_action_total",
+    "Count of seat actions coerced to a safe fallback by the runner.",
+    labelnames=("reason",),
+    registry=REGISTRY,
+)
+
+scheduler_inflight_gauntlets = Gauge(
+    "padrino_scheduler_inflight_gauntlets",
+    "Number of gauntlets currently being driven by the scheduler loop.",
+    registry=REGISTRY,
+)
+
+api_requests_total = Counter(
+    "padrino_api_requests_total",
+    "Count of HTTP requests served by the FastAPI app.",
+    labelnames=("route", "method", "status"),
+    registry=REGISTRY,
+)
 
 
-def _percentile(sorted_values: list[int], q: float) -> int | None:
-    """Return the ``q`` quantile of ``sorted_values`` using nearest-rank.
+def split_litellm_model_id(model_id: str | None) -> tuple[str, str]:
+    """Return ``(provider, model)`` parsed from a litellm-style model id.
 
-    ``q`` is in ``[0, 1]``. Returns ``None`` for an empty list.
+    LiteLLM model ids carry an optional ``<provider>/<model>`` prefix
+    (e.g. ``"cerebras/zai-glm-4.7"`` → ``("cerebras", "zai-glm-4.7")``).
+    Strings without a prefix bucket under ``("unknown", <model_id>)``;
+    empty / ``None`` inputs return ``("unknown", "unknown")``.
     """
-    if not sorted_values:
-        return None
-    if q <= 0:
-        return sorted_values[0]
-    if q >= 1:
-        return sorted_values[-1]
-    rank = max(1, round(q * len(sorted_values)))
-    return sorted_values[rank - 1]
+    if not model_id:
+        return UNKNOWN_LABEL, UNKNOWN_LABEL
+    if "/" in model_id:
+        provider, _, model = model_id.partition("/")
+        provider = provider or UNKNOWN_LABEL
+        model = model or UNKNOWN_LABEL
+        return provider, model
+    return UNKNOWN_LABEL, model_id
 
 
-async def _games_completed(session: AsyncSession) -> int:
-    stmt = select(func.count(func.distinct(GameEvent.game_id))).where(
-        GameEvent.event_type == _GAME_TERMINATED
-    )
-    value = (await session.execute(stmt)).scalar()
-    return int(value or 0)
+def record_llm_call(
+    *,
+    model_id: str | None,
+    status: str,
+    latency_ms: int | None,
+) -> None:
+    """Increment the call counter and observe latency for one LLM attempt."""
+    provider, model = split_litellm_model_id(model_id)
+    llm_calls_total.labels(provider=provider, model=model, status=status).inc()
+    if latency_ms is not None and latency_ms >= 0:
+        llm_latency_seconds.labels(provider=provider, model=model).observe(latency_ms / 1000.0)
 
 
-async def _avg_phase_duration_seconds(session: AsyncSession) -> float | None:
-    """Pair PhaseStarted / PhaseResolved rows on (game_id, phase) and average.
+def record_phase_duration(*, ruleset: str, phase_kind: str, duration_s: float) -> None:
+    """Observe the wall-clock duration of one resolved phase."""
+    if duration_s < 0:
+        return
+    phase_duration_seconds.labels(ruleset=ruleset, phase_kind=phase_kind).observe(duration_s)
 
-    Phases without both endpoints are skipped. Returns ``None`` when no paired
-    phase exists in the DB.
+
+def record_game_completed(*, outcome: str, ruleset: str) -> None:
+    """Increment the games counter for one terminal game."""
+    games_total.labels(outcome=outcome, ruleset=ruleset).inc()
+
+
+def record_invalid_action(*, reason: str) -> None:
+    """Increment the invalid-action counter for one coerced safe action."""
+    invalid_action_total.labels(reason=reason).inc()
+
+
+def render_prometheus_text() -> bytes:
+    """Return the current snapshot serialized as Prometheus text exposition."""
+    return generate_latest(REGISTRY)
+
+
+def reset_metrics() -> None:
+    """Reset every collector in :data:`REGISTRY` to its initial value.
+
+    Test-only seam: ``prometheus_client`` does not ship a public ``reset()``,
+    but iterating ``_metrics`` (the per-label-set child cache) is the
+    documented workaround used by upstream tests.
     """
-    stmt = select(
-        GameEvent.game_id, GameEvent.phase, GameEvent.event_type, GameEvent.created_at
-    ).where(GameEvent.event_type.in_({_PHASE_STARTED, _PHASE_RESOLVED}))
-    started: dict[tuple[Any, str], Any] = {}
-    resolved: dict[tuple[Any, str], Any] = {}
-    for game_id, phase, event_type, created_at in (await session.execute(stmt)).all():
-        key = (game_id, phase)
-        if event_type == _PHASE_STARTED:
-            started[key] = created_at
-        else:
-            resolved[key] = created_at
-    deltas: list[float] = []
-    for key, start in started.items():
-        end = resolved.get(key)
-        if end is None or start is None:
-            continue
-        delta = (end - start).total_seconds()
-        if delta < 0:
-            continue
-        deltas.append(delta)
-    if not deltas:
-        return None
-    return sum(deltas) / len(deltas)
-
-
-async def _llm_latency_per_model(session: AsyncSession) -> dict[str, LatencyStats]:
-    stmt = (
-        select(LlmCall.latency_ms, ModelConfig.model_name)
-        .select_from(LlmCall)
-        .outerjoin(AgentBuild, AgentBuild.id == LlmCall.agent_build_id)
-        .outerjoin(ModelConfig, ModelConfig.id == AgentBuild.model_config_id)
-    )
-    buckets: dict[str, list[int]] = defaultdict(list)
-    for latency_ms, model_name in (await session.execute(stmt)).all():
-        if latency_ms is None:
-            continue
-        bucket = model_name if isinstance(model_name, str) and model_name else UNKNOWN_MODEL
-        buckets[bucket].append(int(latency_ms))
-    out: dict[str, LatencyStats] = {}
-    for name, latencies in buckets.items():
-        latencies.sort()
-        out[name] = LatencyStats(
-            samples=len(latencies),
-            p50_ms=_percentile(latencies, 0.50),
-            p95_ms=_percentile(latencies, 0.95),
-        )
-    return out
-
-
-async def _timeout_and_invalid_rates(
-    session: AsyncSession,
-) -> tuple[float | None, float | None, int, int]:
-    """Compute (timeout_rate, invalid_json_rate, total_llm_calls, total_timeouts)."""
-    total_calls = int((await session.execute(select(func.count(LlmCall.id)))).scalar() or 0)
-    invalid_count = int(
-        (
-            await session.execute(
-                select(func.count(LlmCall.id)).where(LlmCall.status.in_(_INVALID_JSON_STATUSES))
-            )
-        ).scalar()
-        or 0
-    )
-    timeout_count = int(
-        (
-            await session.execute(
-                select(func.count(GameEvent.id)).where(GameEvent.event_type == _ACTION_TIMED_OUT)
-            )
-        ).scalar()
-        or 0
-    )
-    total_attempts = total_calls + timeout_count
-    timeout_rate = (timeout_count / total_attempts) if total_attempts else None
-    invalid_rate = (invalid_count / total_calls) if total_calls else None
-    return timeout_rate, invalid_rate, total_calls, timeout_count
-
-
-async def compute_metrics_summary(session: AsyncSession) -> MetricsSummary:
-    """Aggregate operational metrics across the whole DB."""
-    games_completed = await _games_completed(session)
-    avg_phase = await _avg_phase_duration_seconds(session)
-    latency = await _llm_latency_per_model(session)
-    timeout_rate, invalid_rate, total_calls, total_timeouts = await _timeout_and_invalid_rates(
-        session
-    )
-    return MetricsSummary(
-        games_completed=games_completed,
-        avg_phase_duration_seconds=avg_phase,
-        llm_latency=latency,
-        timeout_rate=timeout_rate,
-        invalid_json_rate=invalid_rate,
-        total_llm_calls=total_calls,
-        total_timeouts=total_timeouts,
-    )
-
-
-def metrics_summary_to_dict(summary: MetricsSummary) -> dict[str, Any]:
-    """Serialize a :class:`MetricsSummary` as a JSON-ready dict."""
-    return {
-        "games_completed": summary.games_completed,
-        "avg_phase_duration_seconds": summary.avg_phase_duration_seconds,
-        "llm_latency": {
-            name: {
-                "samples": stats.samples,
-                "p50_ms": stats.p50_ms,
-                "p95_ms": stats.p95_ms,
-            }
-            for name, stats in sorted(summary.llm_latency.items())
-        },
-        "timeout_rate": summary.timeout_rate,
-        "invalid_json_rate": summary.invalid_json_rate,
-        "total_llm_calls": summary.total_llm_calls,
-        "total_timeouts": summary.total_timeouts,
-    }
+    for collector in (
+        llm_calls_total,
+        llm_latency_seconds,
+        phase_duration_seconds,
+        games_total,
+        invalid_action_total,
+        api_requests_total,
+    ):
+        collector._metrics.clear()
+    scheduler_inflight_gauntlets.set(0)
 
 
 __all__ = [
-    "UNKNOWN_MODEL",
-    "LatencyStats",
-    "MetricsSummary",
-    "compute_metrics_summary",
-    "metrics_summary_to_dict",
+    "CONTENT_TYPE_LATEST",
+    "REGISTRY",
+    "UNKNOWN_LABEL",
+    "api_requests_total",
+    "games_total",
+    "invalid_action_total",
+    "llm_calls_total",
+    "llm_latency_seconds",
+    "phase_duration_seconds",
+    "record_game_completed",
+    "record_invalid_action",
+    "record_llm_call",
+    "record_phase_duration",
+    "render_prometheus_text",
+    "reset_metrics",
+    "scheduler_inflight_gauntlets",
+    "split_litellm_model_id",
+    "text_string_to_metric_families",
 ]
