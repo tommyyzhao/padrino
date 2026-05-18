@@ -1,0 +1,41 @@
+# Build cache and editor / VCS metadata
+.git
+.gitignore
+.github
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.hypothesis
+__pycache__
+*.pyc
+*.pyo
+
+# Local secrets and sample databases
+.env
+.env.local
+padrino.db
+padrino-demo.db
+padrino*.db-journal
+*.db
+*.sqlite
+*.sqlite3
+
+# Test + coverage artifacts
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
+
+# Docs and docs-only assets that don't ship in the image
+ralph/
+docs/
+
+# Tests are not needed in the runtime image
+tests/
+
+# Editor / IDE
+.idea
+.vscode
+*.swp
+*.swo

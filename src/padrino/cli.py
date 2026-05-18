@@ -56,11 +56,22 @@ def serve(
     port: int = typer.Option(8000, help="TCP port to listen on."),
     reload: bool = typer.Option(False, help="Enable uvicorn auto-reload (dev only)."),
     log_level: str = typer.Option("info", help="uvicorn log level."),
+    db_url: str | None = typer.Option(
+        None,
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL. Falls back to PADRINO_DB_URL / Settings default.",
+    ),
 ) -> None:
     """Run the Padrino FastAPI app under uvicorn."""
     from padrino.api.app import create_app
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.settings import get_settings
 
-    application = create_app()
+    resolved_url = db_url if db_url is not None else get_settings().padrino_db_url
+    engine = create_engine(resolved_url)
+    session_factory = create_session_factory(engine)
+    application = create_app(session_factory=session_factory)
     uvicorn.run(application, host=host, port=port, reload=reload, log_level=log_level)
 
 
@@ -121,6 +132,7 @@ def scheduler(
     db_url: str = typer.Option(
         "sqlite+aiosqlite:///./padrino.db",
         "--db-url",
+        envvar="PADRINO_DB_URL",
         help="SQLAlchemy async URL for the Padrino database.",
     ),
 ) -> None:
@@ -161,6 +173,7 @@ def bootstrap(
     db_url: str = typer.Option(
         "sqlite+aiosqlite:///./padrino.db",
         "--db-url",
+        envvar="PADRINO_DB_URL",
         help="SQLAlchemy async URL for the Padrino database.",
     ),
     with_admin_key: bool = typer.Option(

@@ -1,0 +1,40 @@
+# US-064: Example override for self-hosting deployments.
+#
+# Rename to `docker-compose.override.yml` to apply automatically. The file is
+# loaded by `docker compose up` on top of the canonical `docker-compose.yml`.
+# Use it to layer in provider secrets, a `providers.yaml` file consumed at
+# bootstrap, or local port remapping without touching the tracked compose
+# definition.
+
+services:
+  bootstrap:
+    environment:
+      # Each `auth_secret_ref` in providers.yaml resolves via env: or
+      # file: schemes (US-050). Inject env vars here so the bootstrap
+      # container sees them when registering providers.
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
+    volumes:
+      # Bind-mount the providers manifest so bootstrap can register them.
+      - ./providers.yaml:/etc/padrino/providers.yaml:ro
+      # Bind-mount the host secret directory for the `file:/secrets/<name>`
+      # scheme. Files MUST be readable only by their owner (chmod 600); the
+      # secret resolver refuses world-readable files.
+      - ./secrets:/secrets:ro
+    command: ["bootstrap", "--providers", "/etc/padrino/providers.yaml"]
+
+  api:
+    environment:
+      # Forward the same secrets to the API service so the LiteLLM adapter
+      # can resolve them at request time (US-050).
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
+    volumes:
+      - ./secrets:/secrets:ro
+
+  scheduler:
+    environment:
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
+    volumes:
+      - ./secrets:/secrets:ro

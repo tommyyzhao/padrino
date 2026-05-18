@@ -43,6 +43,56 @@ uv run pytest -m "not integration" --cov --cov-report=term-missing
 uv run coverage report --include='src/padrino/core/*' --fail-under=85
 ```
 
+### Bootstrap a deployment
+
+Take a fresh database to a ready-to-serve state in one command. The bootstrap
+runs migrations, seeds the canonical mini7_v1 prompts, creates a default
+league, and (optionally) mints an admin API key and registers LLM providers
+from a YAML file. Every step is idempotent — re-running is a no-op:
+
+```bash
+# Minimal — schema + default league:
+uv run padrino bootstrap --db-url sqlite+aiosqlite:///./padrino.db
+
+# Full one-liner — also mints an admin key and registers providers:
+uv run padrino bootstrap \
+    --db-url sqlite+aiosqlite:///./padrino.db \
+    --with-admin-key \
+    --providers providers.yaml
+```
+
+The `--providers` YAML uses the schema:
+
+```yaml
+providers:
+  - name: cerebras
+    auth_secret_ref: env:CEREBRAS_API_KEY
+    base_url: https://api.cerebras.ai
+    default_model: zai-glm-4.7
+    timeout_s: 30.0
+```
+
+The admin key is printed exactly once in the command's JSON output —
+record it somewhere safe; only its sha256 is stored.
+
+### Run the full stack via docker-compose
+
+The bundled `docker-compose.yml` brings up Postgres, runs `padrino bootstrap`
+once, and then keeps the API + scheduler online — no local Python required:
+
+```bash
+cp .env.example .env             # set POSTGRES_PASSWORD (defaults to 'padrino')
+docker compose up --build --wait # builds the image, waits for healthchecks
+curl http://localhost:8000/healthz
+curl http://localhost:8000/healthz/scheduler
+curl http://localhost:8000/metrics | head
+```
+
+To layer in `providers.yaml` plus host-mounted secret files, copy
+`docker-compose.override.yml.example` to `docker-compose.override.yml` and
+edit the bind mounts to point at your `providers.yaml` + `secrets/` directory.
+Tear down with `docker compose down -v`.
+
 ### Run the demo gauntlet
 
 A self-contained gauntlet using the deterministic mock adapter — no API keys

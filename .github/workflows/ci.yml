@@ -85,3 +85,27 @@ jobs:
 
       - name: Postgres dialect + migrations suite
         run: uv run pytest -m postgres
+
+  compose-smoke:
+    # US-064: build the bundled Dockerfile and bring the full docker-compose
+    # stack (postgres + bootstrap + api + scheduler) up against `pytest -m
+    # docker`. Push-to-main only so PRs stay fast — pull-request validation
+    # runs the rest of the matrix.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: docker-compose smoke suite
+        run: uv run pytest -m docker

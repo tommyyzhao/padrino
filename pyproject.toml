@@ -137,6 +137,7 @@ markers = [
     "slow: marks slow tests",
     "live_llm: marks recorded-cassette contract tests against real LLM providers (deselected by default; opt-in via '-m live_llm')",
     "postgres: marks tests that require a Docker daemon to spin up Postgres (skipped automatically without docker; opt-in via '-m postgres')",
+    "docker: marks tests that drive the bundled docker-compose stack (skipped automatically without docker; opt-in via '-m docker')",
 ]
 
 [tool.coverage.run]

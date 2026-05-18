@@ -52,12 +52,15 @@ def _docker_available() -> bool:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Default-skip the ``live_llm`` and ``postgres`` markers when appropriate.
+    """Default-skip the ``live_llm``, ``postgres`` and ``docker`` markers.
 
-    ``live_llm`` is opt-in via ``--live-llm`` or ``-m live_llm`` (recorded
-    cassettes). ``postgres`` (US-057) requires a Docker daemon — skip when the
-    daemon isn't reachable so contributors without docker can still run the
-    full default suite locally; CI always has docker.
+    ``live_llm`` (US-051) is opt-in via ``--live-llm`` or ``-m live_llm``
+    (recorded cassettes). ``postgres`` (US-057) requires a Docker daemon — it
+    auto-skips when one isn't reachable, but runs by default on docker-equipped
+    machines because the per-test cost is small (one shared container).
+    ``docker`` (US-064) brings up the full compose stack including image
+    builds, which is expensive — so it is strictly opt-in via ``-m docker``
+    even when a Docker daemon is available.
     """
 
     markexpr = (config.option.markexpr or "").strip()
@@ -66,16 +69,26 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         reason="live_llm cassette tests are opt-in; pass --live-llm or '-m live_llm'"
     )
     skip_postgres = pytest.mark.skip(reason="postgres tests require a reachable Docker daemon")
+    skip_docker_unavailable = pytest.mark.skip(
+        reason="docker tests require a reachable Docker daemon"
+    )
+    skip_docker_optin = pytest.mark.skip(reason="docker tests are opt-in; pass '-m docker'")
     live_opted_in = config.getoption("--live-llm") or (
         "live_llm" in markexpr and "not live_llm" not in markexpr
     )
-    postgres_skips = not _docker_available()
+    docker_opted_in = "docker" in markexpr and "not docker" not in markexpr
+    docker_available = _docker_available()
 
     for item in items:
         if "live_llm" in item.keywords and not live_opted_in:
             item.add_marker(skip_live)
-        if "postgres" in item.keywords and postgres_skips:
+        if "postgres" in item.keywords and not docker_available:
             item.add_marker(skip_postgres)
+        if "docker" in item.keywords:
+            if not docker_available:
+                item.add_marker(skip_docker_unavailable)
+            elif not docker_opted_in:
+                item.add_marker(skip_docker_optin)
 
 
 def _response(action_type: ActionType, target: str | None = None) -> AgentResponse:

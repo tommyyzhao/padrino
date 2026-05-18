@@ -1,0 +1,116 @@
+# US-064: Padrino self-hosting stack.
+#
+# Services:
+#   - postgres : the canonical first-class database target (US-057).
+#   - bootstrap: one-shot init container running `padrino bootstrap` against
+#                postgres; api/scheduler wait for it to exit 0.
+#   - api      : `padrino serve` on port 8000 with `/healthz` healthcheck.
+#   - scheduler: `padrino scheduler` with `/healthz/scheduler` readiness probe
+#                (US-060 — the scheduler container queries the api service over
+#                the compose-private network).
+#
+# The same image (built once) serves all three padrino services; the only
+# difference is the argv passed to the `padrino` entrypoint.
+
+x-padrino-env: &padrino-env
+  PADRINO_DB_URL: postgresql+asyncpg://padrino:${POSTGRES_PASSWORD:-padrino}@postgres:5432/padrino
+  PADRINO_LOG_LEVEL: ${PADRINO_LOG_LEVEL:-INFO}
+  PADRINO_API_HOST: 0.0.0.0
+  PADRINO_API_PORT: "8000"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: padrino
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-padrino}
+      POSTGRES_DB: padrino
+    volumes:
+      - padrino-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U padrino -d padrino"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    # Postgres only needs to be reachable inside the compose network. Expose
+    # it on the host by uncommenting the line below in a local override file.
+    # ports:
+    #   - "5432:5432"
+
+  bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PADRINO_IMAGE:-padrino:dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *padrino-env
+    command: ["bootstrap"]
+    # One-shot: exits 0 once migrations + seeds complete. api/scheduler use
+    # `service_completed_successfully` to gate on a clean exit.
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PADRINO_IMAGE:-padrino:dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *padrino-env
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${PADRINO_API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys,urllib.request as u; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PADRINO_IMAGE:-padrino:dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    environment:
+      <<: *padrino-env
+    command: ["scheduler", "--concurrency", "${PADRINO_SCHEDULER_CONCURRENCY:-4}"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys,urllib.request as u; sys.exit(0 if u.urlopen('http://api:8000/healthz/scheduler', timeout=3).status==200 else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  padrino-postgres-data:
