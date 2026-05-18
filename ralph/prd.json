@@ -392,8 +392,8 @@
         "US-064"
       ],
       "priority": 65,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Three new deployment guides under `docs/deployment/` (central-backend.md, self-host.md, byo-model.md). Each ends with a 'Verified runbook' section whose `# verified`-tagged bash blocks are extracted by `tests/docs/test_runbooks.py` and executed end-to-end (exit 0 asserted). Extraction regex: ```bash\\n# verified\\b...```. Each block runs in its own scratch directory under tmp_path; `PADRINO_DB_URL` is injected pointing at a sandbox SQLite file; `uv run X` invocations are rewritten to `<repo>/.venv/bin/X` so subprocess runs skip uv's project-resolution / sync cost while keeping the doc text natural for users. README condensed: kept title/status/scope/quickstart/architecture/license, deleted the embedded bootstrap+docker-compose+demo-gauntlet sections, added a 'Deployment options' table linking to the three new guides. central-backend.md covers the threat model, managed-Postgres + container-host MVP, DNS/TLS, admin-key bootstrap, the `PADRINO_PUBLIC_LEADERBOARD_ANONYMOUS` flag, submitter onboarding (Ed25519 keygen + pubkey registration via `/admin/keys`), and pg_dump/pg_restore. self-host.md covers the docker-compose stack, `providers.yaml` wiring via `docker-compose.override.yml`, secret file mounts under `/secrets`, troubleshooting (missing env var, alembic drift, port conflict), and the bare-Python self-host loop. byo-model.md covers the ModelProvider/ModelConfig/AgentBuild distinction, the LiteLLM provider identifier matrix, bootstrap + live `/admin/model-providers` paths, cassette recording (US-051) with PADRINO_RECORD_LLM=1, and per-build prompt customization."
     },
     {
       "id": "US-066",

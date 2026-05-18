@@ -15,10 +15,10 @@ See [`ralph/prd.json`](./ralph/prd.json) for the user-story plan and [`ralph/pro
 ## v1 scope at a glance
 
 - **Ruleset**: `mini7_v1` — exactly 7 players (2 Mafia, 1 Detective, 1 Doctor, 3 Villagers).
-- **Engine**: pure-Python, async, single-process, deterministic. SQLite + asyncio. No Celery, no Redis.
-- **LLM providers**: Cerebras `zai-glm-4.7` (primary) + DeepInfra `deepseek-ai/DeepSeek-V4-Flash` (fallback), routed through LiteLLM. Multi-provider abstraction from day one.
-- **Output**: append-only hash-chained event log per game + OpenSkill ratings (global + faction) over clone gauntlets.
-- **No frontend** in v1, but the REST API and data layer are designed to back a cloud spectator hub later.
+- **Engine**: pure-Python, async, single-process, deterministic. SQLite + asyncio (Postgres is a first-class target via asyncpg). No Celery, no Redis.
+- **LLM providers**: any provider supported by [LiteLLM](https://docs.litellm.ai/docs/providers) (Cerebras, DeepInfra, OpenAI, Anthropic, Ollama, …) — see [Deployment options](#deployment-options) below for how to wire one in.
+- **Output**: append-only hash-chained event log per game + OpenSkill ratings (global + faction) over clone gauntlets, plus a signed export bundle suitable for federated ingestion.
+- **No frontend** in v1, but the REST API and data layer are designed to back a cloud spectator hub.
 
 See [`prd.md`](./prd.md) (vision) and [`ralph/prd.json`](./ralph/prd.json) (executable plan) for the full specification.
 
@@ -30,7 +30,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 git clone https://github.com/tommyyzhao/padrino.git
 cd padrino
 uv sync --all-extras
-cp .env.example .env   # fill in CEREBRAS_API_KEY for real games
+cp .env.example .env   # fill in provider keys for real games
 
 # Run quality gates
 uv run ruff check .
@@ -38,105 +38,34 @@ uv run ruff format --check .
 uv run mypy src tests
 uv run pytest -m "not integration"
 
-# Coverage report (CI enforces >=85% on the core engine)
-uv run pytest -m "not integration" --cov --cov-report=term-missing
-uv run coverage report --include='src/padrino/core/*' --fail-under=85
-```
+# Bring an empty database up to schema-head + seed canonical prompts
+uv run padrino bootstrap
 
-### Bootstrap a deployment
-
-Take a fresh database to a ready-to-serve state in one command. The bootstrap
-runs migrations, seeds the canonical mini7_v1 prompts, creates a default
-league, and (optionally) mints an admin API key and registers LLM providers
-from a YAML file. Every step is idempotent — re-running is a no-op:
-
-```bash
-# Minimal — schema + default league:
-uv run padrino bootstrap --db-url sqlite+aiosqlite:///./padrino.db
-
-# Full one-liner — also mints an admin key and registers providers:
-uv run padrino bootstrap \
-    --db-url sqlite+aiosqlite:///./padrino.db \
-    --with-admin-key \
-    --providers providers.yaml
-```
-
-The `--providers` YAML uses the schema:
-
-```yaml
-providers:
-  - name: cerebras
-    auth_secret_ref: env:CEREBRAS_API_KEY
-    base_url: https://api.cerebras.ai
-    default_model: zai-glm-4.7
-    timeout_s: 30.0
-```
-
-The admin key is printed exactly once in the command's JSON output —
-record it somewhere safe; only its sha256 is stored.
-
-### Run the full stack via docker-compose
-
-The bundled `docker-compose.yml` brings up Postgres, runs `padrino bootstrap`
-once, and then keeps the API + scheduler online — no local Python required:
-
-```bash
-cp .env.example .env             # set POSTGRES_PASSWORD (defaults to 'padrino')
-docker compose up --build --wait # builds the image, waits for healthchecks
-curl http://localhost:8000/healthz
-curl http://localhost:8000/healthz/scheduler
-curl http://localhost:8000/metrics | head
-```
-
-To layer in `providers.yaml` plus host-mounted secret files, copy
-`docker-compose.override.yml.example` to `docker-compose.override.yml` and
-edit the bind mounts to point at your `providers.yaml` + `secrets/` directory.
-Tear down with `docker compose down -v`.
-
-### Run the demo gauntlet
-
-A self-contained gauntlet using the deterministic mock adapter — no API keys
-needed. Writes a SQLite database to `./padrino-demo.db` and prints the
-resulting leaderboard JSON on stdout:
-
-```bash
+# Smoke-test the engine end-to-end (deterministic mock adapter, no API key needed)
 uv run padrino demo-gauntlet --seed demo-seed-001 --clones 5
 ```
 
-Pass `--real` to switch to the LiteLLM adapter with Cerebras + DeepInfra
-routing (requires `CEREBRAS_API_KEY` and optionally `DEEPINFRA_API_KEY`):
+The full quality-gate matrix plus a SQLite-backed self-host walkthrough lives
+in [`docs/deployment/self-host.md`](./docs/deployment/self-host.md).
 
-```bash
-uv run padrino demo-gauntlet --seed demo-seed-001 --clones 5 --real
-```
+## Deployment options
 
-Expected mock output (truncated):
+| Path                                                                       | Use when                                                                                          |
+|----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------|
+| [`docs/deployment/self-host.md`](./docs/deployment/self-host.md)           | You want to run Padrino on a laptop, home-lab box, or single VM via `docker compose up`.          |
+| [`docs/deployment/central-backend.md`](./docs/deployment/central-backend.md) | You're hosting the canonical / shared public leaderboard that other Padrino deployments submit into. |
+| [`docs/deployment/byo-model.md`](./docs/deployment/byo-model.md)           | You're adding a new LLM provider, recording cassettes, or customizing per-role prompts.            |
 
-```json
-{
-  "entries": [
-    {
-      "agent_build_id": "…",
-      "display_name": "demo-build",
-      "games": 35,
-      "draws": 35,
-      "wins": 0,
-      "losses": 0,
-      "provisional": true,
-      …
-    }
-  ],
-  "ruleset_id": "mini7_v1",
-  "rating_model": "openskill_plackett_luce_v1",
-  …
-}
-```
+Each guide ends with a "Verified runbook" section whose `# verified` bash
+blocks are executed end-to-end by `tests/docs/test_runbooks.py` — the docs
+cannot silently rot.
 
 ## Architecture (v1)
 
 ```
               ┌────────────────────────────────────────────────────────┐
-              │  FastAPI HTTP layer  (admin, gauntlets, transcripts)   │
+              │  FastAPI HTTP layer  (admin, gauntlets, transcripts,   │
+              │  /metrics, /ingest, /public/*)                         │
               └─────────────────────────┬──────────────────────────────┘
                                         │
               ┌─────────────────────────┴──────────────────────────────┐
@@ -149,9 +78,9 @@ Expected mock output (truncated):
         │                               │                               │
    ┌────┴────┐                  ┌───────┴────────┐              ┌───────┴───────┐
    │ Core    │                  │ LLM Adapter    │              │ SQLAlchemy 2  │
-   │ engine  │                  │ LiteLLM router │              │ aiosqlite     │
-   │ (pure)  │                  │ Cerebras +     │              │ Alembic       │
-   │         │                  │ DeepInfra      │              │ migrations    │
+   │ engine  │                  │ LiteLLM router │              │ aiosqlite /   │
+   │ (pure)  │                  │ + secrets seam │              │ asyncpg       │
+   │         │                  │                │              │ Alembic       │
    └─────────┘                  └────────────────┘              └───────────────┘
 ```
 
