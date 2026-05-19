@@ -22,9 +22,10 @@ spectator scope (or admin) is required.
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +49,14 @@ from padrino.api.pagination import (
 from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
 from padrino.db.models import ApiKey, IngestedGame
 from padrino.db.repositories import ingested_games as ingested_games_repo
+from padrino.db.repositories import leagues as leagues_repo
+from padrino.ratings.model_rollup import (
+    detail_for_model,
+    rollup_by_model,
+)
+from padrino.ratings.model_rollup import (
+    entry_to_response as model_entry_to_response,
+)
 from padrino.ratings.public_leaderboard import (
     compute_public_leaderboard,
     entry_to_response,
@@ -412,6 +421,174 @@ async def public_submitters(
     return PublicSubmittersResponse(items=items, total_estimate=len(items))
 
 
+class PublicModelFactionAggregate(BaseModel):
+    mu: float
+    sigma: float
+    conservative_score: float
+    games: int
+    wins: int
+    draws: int
+    losses: int
+
+
+class PublicModelEntryResponse(BaseModel):
+    model_key: str
+    display_name: str
+    model_provider: str
+    model_name: str
+    model_version: str | None
+    mu: float
+    sigma: float
+    conservative_score: float
+    games: int
+    wins: int
+    draws: int
+    losses: int
+    town: PublicModelFactionAggregate
+    mafia: PublicModelFactionAggregate
+    agent_build_count: int
+
+
+class PublicModelLeaderboardQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ruleset_id: str = Field(min_length=1)
+    league_id: uuid.UUID
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+
+
+class PublicModelLeaderboardResponse(BaseModel):
+    league_id: uuid.UUID
+    ruleset_id: str
+    rating_model: str
+    cache_tag: str
+    entries: list[PublicModelEntryResponse]
+    next_cursor: str | None = None
+    total_estimate: int
+
+
+class PublicModelBuildEntry(BaseModel):
+    agent_build_id: uuid.UUID
+    display_name: str
+
+
+class PublicModelDetailQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ruleset_id: str = Field(min_length=1)
+    league_id: uuid.UUID
+
+
+class PublicModelDetailResponse(BaseModel):
+    league_id: uuid.UUID
+    ruleset_id: str
+    rating_model: str
+    cache_tag: str
+    entry: PublicModelEntryResponse
+    builds: list[PublicModelBuildEntry]
+    recent_game_ids: list[uuid.UUID]
+
+
+async def _resolve_league_for_ruleset(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    ruleset_id: str,
+) -> None:
+    """404 when the league is unknown; 422 when the ruleset doesn't match."""
+    league = await leagues_repo.get(session, league_id)
+    if league is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"league {league_id} not found",
+        )
+    if league.ruleset_id != ruleset_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ruleset_id_mismatch",
+        )
+
+
+@router.get(
+    "/public/models/leaderboard",
+    response_model=PublicModelLeaderboardResponse,
+)
+async def public_models_leaderboard(
+    query: Annotated[PublicModelLeaderboardQuery, Query()],
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicModelLeaderboardResponse:
+    await _resolve_league_for_ruleset(
+        session, league_id=query.league_id, ruleset_id=query.ruleset_id
+    )
+    rollup = await rollup_by_model(session, query.league_id, query.ruleset_id)
+    entries = list(rollup.entries)
+    start = 0
+    if query.cursor is not None:
+        try:
+            start = decode_index_cursor(query.cursor)
+        except InvalidCursorError as exc:
+            raise invalid_cursor_error() from exc
+    page = entries[start : start + query.limit]
+    next_cursor = (
+        encode_index_cursor(start + query.limit) if start + query.limit < len(entries) else None
+    )
+    return PublicModelLeaderboardResponse(
+        league_id=rollup.league_id,
+        ruleset_id=rollup.ruleset_id,
+        rating_model=rollup.rating_model,
+        cache_tag=rollup.cache_tag,
+        entries=[PublicModelEntryResponse(**model_entry_to_response(e)) for e in page],  # type: ignore[arg-type]
+        next_cursor=next_cursor,
+        total_estimate=len(entries),
+    )
+
+
+@router.get(
+    "/public/models/{model_key:path}",
+    response_model=PublicModelDetailResponse,
+)
+async def public_model_detail(
+    query: Annotated[PublicModelDetailQuery, Query()],
+    model_key: Annotated[str, Path(min_length=1)],
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicModelDetailResponse:
+    await _resolve_league_for_ruleset(
+        session, league_id=query.league_id, ruleset_id=query.ruleset_id
+    )
+    detail = await detail_for_model(
+        session,
+        league_id=query.league_id,
+        ruleset_id=query.ruleset_id,
+        model_key=model_key,
+    )
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"model {model_key} not found",
+        )
+    # Reuse the cache_tag from a fresh rollup call — rollup_by_model is cached
+    # so this is a hashmap lookup, not a recomputation.
+    rollup = await rollup_by_model(session, query.league_id, query.ruleset_id)
+    return PublicModelDetailResponse(
+        league_id=rollup.league_id,
+        ruleset_id=rollup.ruleset_id,
+        rating_model=rollup.rating_model,
+        cache_tag=rollup.cache_tag,
+        entry=PublicModelEntryResponse(**model_entry_to_response(detail.entry)),  # type: ignore[arg-type]
+        builds=[
+            PublicModelBuildEntry(
+                agent_build_id=b.agent_build_id,
+                display_name=b.display_name,
+            )
+            for b in detail.builds
+        ],
+        recent_game_ids=list(detail.recent_game_ids),
+    )
+
+
 __all__ = [
     "PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS",
     "PublicChatEntry",
@@ -420,6 +597,11 @@ __all__ = [
     "PublicGameResponse",
     "PublicLeaderboardEntryResponse",
     "PublicLeaderboardResponse",
+    "PublicModelBuildEntry",
+    "PublicModelDetailResponse",
+    "PublicModelEntryResponse",
+    "PublicModelFactionAggregate",
+    "PublicModelLeaderboardResponse",
     "PublicSubmitterEntry",
     "PublicSubmittersResponse",
     "PublicTranscriptResponse",
