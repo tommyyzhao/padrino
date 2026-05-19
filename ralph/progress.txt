@@ -79,6 +79,8 @@ inherited from wave 1 are NOT duplicated here; read the archive for those.)
   applies any time a dataclass method takes `**kwargs` alongside a positional
   named the same as a likely caller kwarg.
 - Per-model rating rollup seam (US-067): `padrino.ratings.model_rollup.rollup_by_model(session, league_id, ruleset_id)` is the single helper that collapses every `agent_build_id` sharing one `(provider.name, model_config.model_name, model_config.model_version)` triple into one `ModelLeaderboardEntry`. Aggregation rule is games-weighted mu (`sum(mu_i * n_i) / sum(n_i)`) + propagation sigma (`sqrt(sum((sigma_i * n_i)^2)) / sum(n_i)`) — `n_i` is the rating row's `games` counter, which counts seat-games (not unique games). Cache key includes `max(ratings.updated_at)` so a fresh write naturally invalidates. Canonical `model_key` format is `'<provider>/<model_name>[@<version>]'`; expose via `model_key_for(provider, model_name, model_version)` rather than hand-formatting. Two endpoints (`/public/models/leaderboard`, `/public/models/{model_key:path}`) share US-063's `require_public_read` dep so the anonymous-flag mirror is automatic — new public surfaces should reuse the same dep instead of rolling their own auth check.
+- Frontend project location (US-069): the SvelteKit dashboard lives at `web/dashboard/` — a sibling of `src/padrino/`, NOT under it. The pure-core firewall + AST tests in `tests/runner/test_game_runner.py` etc only walk `src/padrino/` so they never see the TypeScript subtree. `web/dashboard/.gitignore` lists `node_modules/`, `.svelte-kit/`, `build/`. The frontend has its own four-gate matrix (`pnpm lint`, `pnpm check`, `pnpm test`, `pnpm build`) run only by stories scoped to the dashboard subtree; backend stories ignore it. Future frontend stories that need a new gate (e.g. Playwright in US-070) should add another `pnpm <task>` script and document it in `web/dashboard/README.md`.
+- pnpm 11 build-script approval (US-069): pnpm 11 flipped `strictDepBuilds` to `true` by default, and the `[ERR_PNPM_IGNORED_BUILDS]` failure for esbuild surfaces every `pnpm run X` because pnpm now runs `runDepsStatusCheck` before scripts. The legacy `pnpm.onlyBuiltDependencies` field in `package.json` is no longer read by pnpm 11. The canonical fix is `pnpm-workspace.yaml` (even for a non-workspace project) with `packages: ['.']` + `allowBuilds: {esbuild: true}`. Running `pnpm approve-builds` creates this file with a templated `set this to true or false` line — replace that with the literal value `true`. After that no `.npmrc` overrides are needed and every `pnpm <script>` call succeeds.
 
 ---
 
@@ -93,6 +95,70 @@ inherited from wave 1 are NOT duplicated here; read the archive for those.)
 ---
 ```
 )
+
+## 2026-05-18T17:32 - US-069
+- New sibling project at `web/dashboard/` — SvelteKit 2 + TypeScript +
+  Tailwind, pnpm package manager, static SPA output via
+  `@sveltejs/adapter-static`. Routes: `/` (KPIs: total games / active
+  gauntlets / top model), `/leaderboard` (per-model rollup from US-067 with
+  Global/Town/Mafia tabs + cursor pagination), `/games` (paginated list with
+  All / In flight / Completed filter), `/games/[id]` (replay scrubber that
+  pages `/public/games/{id}/events`, groups by phase, exposes prev/next +
+  jump-to-phase). The replay viewer NEVER calls a private/admin endpoint
+  and redacts role-revealing event payloads (`RolesAssigned`,
+  `PlayerEliminated`, `GameTerminated`) until a `GameTerminated` event has
+  been observed in the page.
+- API client at `web/dashboard/src/lib/api/`: a single `PadrinoClient` typed
+  against the FastAPI response shapes (mirrored by hand in `types.ts`),
+  `VITE_PADRINO_API_BASE_URL` env var (default `http://localhost:8000`),
+  Bearer-token Authorization when a spectator key is set. `loadApiKeyFromSession`
+  / `saveApiKeyToSession` is the only persistence path — sessionStorage only,
+  never localStorage or cookies (per AC).
+- Vitest unit tests (19 total) cover URL building, header attachment, error
+  shape, sessionStorage round-trip, phase grouping, scrubber navigation +
+  clamping, role-safe projection, and the role-revealing event-type set.
+- `docker-compose.yml` gained a `dashboard` service that builds from
+  `web/dashboard/Dockerfile`, depends on `api: service_healthy`, and exposes
+  port 5173 with the `VITE_PADRINO_API_BASE_URL` build arg.
+- `web/dashboard/README.md` covers dev setup, build, and how to point at a
+  remote backend.
+- Files changed: `web/dashboard/**` (new project), `docker-compose.yml`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Svelte 5 runes (`$state`, `$derived`, `$props`) clash with variable
+    names — never name a `$state(...)` slot `state` (the rune lookup
+    rebinds before the let-declaration is initialized and svelte-check
+    raises "Block-scoped variable '$state' used before its declaration").
+    Use a descriptive name like `scrubberState`. The same rule applies to
+    any other rune token.
+  - `pnpm 11` workflow gotcha: `pnpm test` (and any other lifecycle
+    script) runs `runDepsStatusCheck`, which fails when there are ignored
+    build scripts. Required config in `web/dashboard/pnpm-workspace.yaml`:
+    `packages: ['.']` + `allowBuilds: {esbuild: true}`. `pnpm approve-builds`
+    writes the file but with a placeholder `set this to true or false` —
+    replace with the literal `true`. The legacy `pnpm.onlyBuiltDependencies`
+    field in `package.json` is no longer read.
+  - Mocking `fetch` in vitest with `.mockResolvedValue(response)` reuses
+    the same `Response` object across calls; the second consumer of
+    `response.json()` returns `null` because the body stream is already
+    drained. Use `.mockImplementation(() => Promise.resolve(jsonResponse(...)))`
+    to mint a fresh Response per call when the test issues more than one
+    request through the same client.
+  - SvelteKit static SPA needs `export const ssr = false; export const
+    prerender = false;` in a top-level `+layout.ts` because the routes hit
+    `sessionStorage` / `window` at module load through the
+    `clientStore.svelte.ts` rune store; without SSR off, build-time
+    rendering crashes on `window is not defined`.
+  - The dashboard intentionally consumes both `/public/*` (anonymous-mode
+    safe) and the auth-gated `/games`, `/gauntlets` routes. When
+    `auth_required=False` (the default `create_app` mode), the synthetic
+    admin context lets unauthenticated requests through, so the
+    self-hosted default flow needs no key. When `auth_required=True`, the
+    sessionStorage-backed key is sent as `Authorization: Bearer ...` by
+    `PadrinoClient`; an `ApiKeyPrompt` component is wired but only
+    surfaces when a route 401/403s — the dashboard intentionally tries
+    the unauthenticated path first to keep the spectator flow zero-friction.
+---
 
 ## 2026-05-18T17:17 - US-068
 - New `padrino.smoke` module with two execution modes: `run_smoke_in_process`

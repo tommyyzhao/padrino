@@ -1,0 +1,15 @@
+node_modules/
+.svelte-kit/
+build/
+.vite/
+.DS_Store
+*.log
+coverage/
+.env
+.env.*
+!.env.example
+
+# Re-include the SvelteKit `$lib` directory — the root `.gitignore` excludes
+# `lib/` (Python venv directory), which collides with the frontend layout.
+!src/lib/
+!src/lib/**

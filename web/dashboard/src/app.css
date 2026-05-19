@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --muted: 210 40% 96%;
+    --accent: 210 40% 96%;
+    --border: 214 32% 91%;
+    --primary: 222 47% 11%;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 222 47% 6%;
+      --foreground: 210 40% 98%;
+      --card: 222 47% 8%;
+      --muted: 217 33% 17%;
+      --accent: 217 33% 17%;
+      --border: 217 33% 17%;
+      --primary: 210 40% 98%;
+    }
+  }
+
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+}

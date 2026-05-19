@@ -8,9 +8,11 @@
 #   - scheduler: `padrino scheduler` with `/healthz/scheduler` readiness probe
 #                (US-060 — the scheduler container queries the api service over
 #                the compose-private network).
+#   - dashboard: SvelteKit spectator dashboard (US-069) served on port 5173.
 #
 # The same image (built once) serves all three padrino services; the only
-# difference is the argv passed to the `padrino` entrypoint.
+# difference is the argv passed to the `padrino` entrypoint. The dashboard
+# has its own image built from `web/dashboard/`.
 
 x-padrino-env: &padrino-env
   PADRINO_DB_URL: postgresql+asyncpg://padrino:${POSTGRES_PASSWORD:-padrino}@postgres:5432/padrino
@@ -110,6 +112,22 @@ services:
       timeout: 5s
       retries: 6
       start_period: 30s
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./web/dashboard
+      dockerfile: Dockerfile
+      args:
+        VITE_PADRINO_API_BASE_URL: ${VITE_PADRINO_API_BASE_URL:-http://localhost:8000}
+    image: ${PADRINO_DASHBOARD_IMAGE:-padrino-dashboard:dev}
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      VITE_PADRINO_API_BASE_URL: ${VITE_PADRINO_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${PADRINO_DASHBOARD_PORT:-5173}:5173"
     restart: unless-stopped
 
 volumes:
