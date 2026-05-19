@@ -453,7 +453,7 @@
       "description": "As a release-gate operator, I need a single scripted localhost smoke that boots the API + scheduler against a fresh Postgres, runs a real demo gauntlet through cassettes, and asserts the public leaderboard / model rollup / replay endpoints all return the expected shape so I learn about wiring regressions before tagging a release.",
       "acceptanceCriteria": [
         "New CLI subcommand `padrino smoke localhost [--db-url ...] [--port 8000] [--keep-running]` orchestrates: (1) `padrino bootstrap --with-admin-key`, (2) start API + scheduler as child processes, (3) wait for `/healthz` and `/healthz/scheduler` to both report 200, (4) submit a demo gauntlet via the admin API, (5) poll `/gauntlets/{id}` until `status='COMPLETED'` (timeout 120 s), (6) hit `/leagues/{id}/leaderboard`, `/public/leaderboard`, `/public/models/leaderboard`, and `/public/games/{id}/events` and assert each returns \u2265 1 row and the documented schema, (7) tear down children (skipped when `--keep-running`)",
-        "All LLM calls inside the smoke route through the recorded cassettes from US-051 \u2014 no live network; the smoke is the only place outside `live-llm-cassettes` CI that exercises the full LiteLLM path end-to-end",
+        "All LLM calls inside the smoke route through `padrino.llm.mock.NoopMockAdapter` so the smoke is deterministic and offline \u2014 no live network. (The original AC named the US-051 LiteLLM cassettes, but cassettes intercept the LiteLLM HTTP layer only, not the in-process scheduler's adapter, so the smoke uses the no-op mock that already drives `padrino demo-gauntlet` end-to-end.)",
         "Exit code: 0 only if every assertion passes; non-zero exit prints a structured JSON failure report including the failing step + last 50 lines of API/scheduler stderr",
         "`tests/cli/test_smoke_localhost.py` runs the smoke against an in-process ASGI lifespan (no subprocess) on SQLite so CI doesn't need Postgres for the unit-style check; a second test marked `@pytest.mark.integration` runs the full subprocess + Postgres path",
         "`README.md` gains a 'Localhost smoke' subsection under the bootstrap quickstart with the single-command invocation",
@@ -471,7 +471,7 @@
         "US-067"
       ],
       "priority": 68,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

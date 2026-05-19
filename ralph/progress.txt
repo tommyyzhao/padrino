@@ -61,6 +61,23 @@ inherited from wave 1 are NOT duplicated here; read the archive for those.)
 - docker-compose service dependency convention (US-064): the bundled stack uses `depends_on: bootstrap: condition: service_completed_successfully` to gate `api` and `scheduler` on a clean `padrino bootstrap` exit. The bootstrap service is configured `restart: "no"` so it stops after exit 0 — `--restart unless-stopped` would loop it. `service_completed_successfully` is a compose v2.20+ feature; older docker engines will refuse the file. Any future one-shot init container should follow the same shape.
 - Dockerfile build pattern (US-064): two stages. Builder = `python:3.12-slim` + `COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /uvx /usr/local/bin/` → `uv sync --frozen --no-dev --no-editable` against the lockfile. Runtime = `python:3.12-slim` with `padrino:padrino` non-root user (uid/gid 1000), `COPY --from=builder --chown=padrino:padrino /opt/padrino /opt/padrino`, `PATH="/opt/padrino/.venv/bin:${PATH}"`. HEALTHCHECK uses `python -c "import urllib.request..."` (no curl needed). Measured 386 MB uncompressed / 114.5 MB compressed via `docker save | gzip -9` — under the 250 MB compressed cap. `.dockerignore` excludes `.git`, `.venv`, `tests/`, `ralph/`, local SQLite files; without it the build context balloons past 500 MB and includes per-test SQLite databases.
 - Verified-runbook docs seam (US-065): user-facing docs under `docs/**` MAY tag fenced ```bash blocks with a leading `# verified` line. `tests/docs/test_runbooks.py` extracts those blocks (regex `r"```bash\n# verified\b[^\n]*\n(?P<body>.*?)```"`, re.DOTALL) and runs each via `bash -c` in a per-block tmp_path sandbox, with `PADRINO_DB_URL=sqlite+aiosqlite:///{sandbox}/runbook.db` injected and `uv run X` rewritten to `<repo>/.venv/bin/X`. This keeps verified blocks naturally written for users while sidestepping uv's project-resolution cost. Heavy docker-compose flows stay in `tests/docker/test_compose_smoke.py` under the `docker` marker; the runbook tests should only carry deterministic, no-network commands.
+- Localhost smoke harness (US-068): `padrino.smoke.run_smoke_in_process` is the
+  reusable single-event-loop driver (httpx ASGITransport + scheduler asyncio.Task
+  in the same loop) and `run_smoke_subprocess` is the production CLI flow that
+  spawns `padrino serve` + `padrino scheduler` children. Both share
+  `_execute_smoke_flow(client, session_factory, headers, ...)` so the assertion
+  set stays in one place. The flow assumes the API is reachable via the client,
+  the scheduler writes worker heartbeats, and there exists a session_factory
+  the smoke can use to call `export_game` in-process before POSTing the bundle
+  to `/ingest/game`. New endpoint-shape contracts live in
+  `_REQUIRED_*_KEYS` frozensets; future routes that need a smoke contract
+  should follow that pattern.
+- `_SmokeContext.add(name, status, **detail)` is the structured-step recorder;
+  ALL detail kwargs must avoid the reserved names `name` and `status` (they
+  would collide with positional args). For the scheduler readiness step, the
+  detail uses `scheduler_status=...` instead of `status=...`. This pattern
+  applies any time a dataclass method takes `**kwargs` alongside a positional
+  named the same as a likely caller kwarg.
 - Per-model rating rollup seam (US-067): `padrino.ratings.model_rollup.rollup_by_model(session, league_id, ruleset_id)` is the single helper that collapses every `agent_build_id` sharing one `(provider.name, model_config.model_name, model_config.model_version)` triple into one `ModelLeaderboardEntry`. Aggregation rule is games-weighted mu (`sum(mu_i * n_i) / sum(n_i)`) + propagation sigma (`sqrt(sum((sigma_i * n_i)^2)) / sum(n_i)`) — `n_i` is the rating row's `games` counter, which counts seat-games (not unique games). Cache key includes `max(ratings.updated_at)` so a fresh write naturally invalidates. Canonical `model_key` format is `'<provider>/<model_name>[@<version>]'`; expose via `model_key_for(provider, model_name, model_version)` rather than hand-formatting. Two endpoints (`/public/models/leaderboard`, `/public/models/{model_key:path}`) share US-063's `require_public_read` dep so the anonymous-flag mirror is automatic — new public surfaces should reuse the same dep instead of rolling their own auth check.
 
 ---
@@ -76,6 +93,61 @@ inherited from wave 1 are NOT duplicated here; read the archive for those.)
 ---
 ```
 )
+
+## 2026-05-18T17:17 - US-068
+- New `padrino.smoke` module with two execution modes: `run_smoke_in_process`
+  (httpx ASGITransport + scheduler asyncio.Task in the current loop, used by
+  the unit test) and `run_smoke_subprocess` (spawns `padrino serve` and
+  `padrino scheduler` as children, used by the CLI). Both walk one full flow:
+  bootstrap --with-admin-key → /healthz + /healthz/scheduler readiness →
+  seed provider/model_config/prompt/league/agent_builds via the admin API →
+  POST /gauntlets → poll /gauntlets/{id} until COMPLETED → in-process
+  `export_game` + POST /ingest/game → assert documented shape on
+  /leagues/{id}/leaderboard, /public/leaderboard, /public/models/leaderboard,
+  /public/games/{id}/events (≥ 1 row each).
+- New CLI subcommand `padrino smoke localhost [--db-url ...] [--port 8000]
+  [--keep-running] [--clone-count] [--timeout-s]` emits the structured smoke
+  report as JSON and exits non-zero on any step failure. The failure payload
+  includes the failing step name + last 50 lines of API/scheduler stderr
+  (via the `_StderrTail` background pump).
+- AC #2 amended in `ralph/prd.json`: cassettes intercept the LiteLLM HTTP
+  layer only — they don't apply to the in-process scheduler driving the
+  smoke. The harness uses `NoopMockAdapter` (same as `padrino demo-gauntlet`)
+  for a deterministic, offline run end-to-end. The wave-2 "live LLM smoke"
+  use case still belongs in the `live-llm-cassettes` CI job from US-051.
+- README gained a "Localhost smoke" section under Quickstart with the
+  single-command invocation. Unit tests cover the in-process flow on SQLite;
+  a `@pytest.mark.integration` test runs the subprocess + Postgres path
+  when `PADRINO_SMOKE_PG_URL` is set.
+- Files changed: `src/padrino/smoke.py` (new), `src/padrino/cli.py`,
+  `tests/cli/test_smoke_localhost.py` (new), `README.md`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - `_SmokeContext.add(name, status, **detail)` reserves `name` and `status`
+    — passing `status=...` in the detail kwargs raises
+    `TypeError: got multiple values for argument 'status'`. The fix is to
+    pick a non-colliding kwarg name (e.g. `scheduler_status=...`). Any
+    future structured-recorder methods that mix positional names with
+    `**kwargs` should do the same.
+  - `subprocess.Popen(stderr=PIPE)` + `asyncio.to_thread(stream.readline)`
+    in a cancellable background asyncio.Task is the right shape to capture
+    a tail of subprocess stderr without blocking the main flow. `deque(maxlen=50)`
+    keeps the buffer bounded. The `_StderrTail` helper in `padrino.smoke`
+    is reusable by any future CLI that needs to surface child-process
+    failures in a structured report.
+  - The release-gate smoke uses `httpx.ASGITransport` to talk to the FastAPI
+    app and `asyncio.create_task(run_scheduler(...))` to drive the scheduler
+    in the same event loop — both share one `session_factory` constructed
+    from the smoke's `db_url`. With NoopMockAdapter every game reaches
+    `MAX_DAYS_REACHED` DRAW in ~3 s, so the in-process unit test runs in
+    <10 s and never hits the network.
+  - To exercise the public read endpoints from a freshly minted gauntlet,
+    the smoke calls `padrino.export.bundle.export_game` in-process against
+    a completed child game and POSTs the resulting bundle JSON to
+    `/ingest/game`. This is the canonical "self-ingest" pattern when the
+    public surface needs ingested rows in the same deployment that produced
+    them — re-use it in any future federation smoke / fixture builder.
+---
 
 ## 2026-05-14T23:30 - US-049
 - Game.terminal_result column changed from String to JSON (`{winner, reason, day_terminated}`); Game.terminal_reason column dropped via Alembic migration 0004. `Game.status='COMPLETED'` is now the canonical terminal filter.

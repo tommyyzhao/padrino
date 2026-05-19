@@ -45,6 +45,21 @@ uv run padrino bootstrap
 uv run padrino demo-gauntlet --seed demo-seed-001 --clones 5
 ```
 
+### Localhost smoke
+
+`padrino smoke localhost` is the release-gate end-to-end check: it walks a
+fresh database through `padrino bootstrap --with-admin-key`, brings up the
+API + scheduler as child processes, drives a mini-7 gauntlet through the
+deterministic mock adapter, exports + ingests one completed game, and
+asserts the documented response shape on the per-league leaderboard plus
+the public leaderboard / per-model leaderboard / public events endpoints.
+A non-zero exit code prints a structured JSON failure report including the
+failing step and the last 50 lines of API + scheduler stderr.
+
+```bash
+uv run padrino smoke localhost --db-url sqlite+aiosqlite:///./padrino-smoke.db
+```
+
 The full quality-gate matrix plus a SQLite-backed self-host walkthrough lives
 in [`docs/deployment/self-host.md`](./docs/deployment/self-host.md).
 

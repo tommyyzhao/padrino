@@ -14,6 +14,10 @@ Subcommands:
   (migrations, canonical prompts, default league, optional admin key, optional
   provider registration).
 - ``padrino export game`` — emit a signed JSON bundle for one completed game.
+- ``padrino smoke localhost`` — release-gate smoke that runs bootstrap, brings
+  up the API + scheduler as child processes, drives a mock-adapter gauntlet
+  to completion, exports + ingests one game, and asserts the documented
+  shape on the public read endpoints.
 """
 
 from __future__ import annotations
@@ -285,6 +289,54 @@ def export_game_cmd(
     else:
         out.write_text(rendered, encoding="utf-8")
         typer.echo(str(out))
+
+
+smoke_app = typer.Typer(
+    name="smoke",
+    help="End-to-end smoke harnesses for release-gate validation.",
+    no_args_is_help=True,
+)
+app.add_typer(smoke_app)
+
+
+@smoke_app.command("localhost")
+def smoke_localhost(
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino-smoke.db",
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL for the smoke database.",
+    ),
+    port: int = typer.Option(8000, "--port", help="TCP port for the spawned API child."),
+    keep_running: bool = typer.Option(
+        False,
+        "--keep-running",
+        help="Skip teardown of the API + scheduler children on success.",
+    ),
+    clone_count: int = typer.Option(
+        1, "--clone-count", help="Number of child games to schedule in the smoke gauntlet."
+    ),
+    timeout_s: float = typer.Option(
+        120.0,
+        "--timeout-s",
+        help="Maximum seconds to wait for the gauntlet to reach COMPLETED.",
+    ),
+) -> None:
+    """Run the localhost end-to-end smoke harness (US-068)."""
+    from padrino.smoke import run_smoke_subprocess
+
+    result = asyncio.run(
+        run_smoke_subprocess(
+            db_url=db_url,
+            port=port,
+            keep_running=keep_running,
+            clone_count=clone_count,
+            gauntlet_timeout_s=timeout_s,
+        )
+    )
+    typer.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    if not result.succeeded:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
