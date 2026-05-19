@@ -8,10 +8,11 @@ inspection, leaderboard) attach to the same app.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -65,6 +66,7 @@ def create_app(
     auth_required: bool = False,
     rate_limiter: RateLimiter | None = None,
     metrics_require_auth: bool | None = None,
+    cors_allow_origins: Sequence[str] | None = None,
 ) -> FastAPI:
     """Build and return the Padrino FastAPI application.
 
@@ -90,6 +92,11 @@ def create_app(
     :attr:`Settings.padrino_metrics_require_auth` (off — Prometheus scrape
     pattern). Flipping it on enforces the same scope check as the rest of
     the read surface.
+
+    ``cors_allow_origins`` (US-070) wires Starlette's ``CORSMiddleware``
+    when the sequence is non-empty. Defaults to the comma-separated list
+    parsed from :attr:`Settings.padrino_cors_allow_origins`; empty leaves
+    CORS off and the API behaves as wave-1.
     """
     settings = get_settings()
     app = FastAPI(
@@ -110,6 +117,18 @@ def create_app(
         if metrics_require_auth is None
         else metrics_require_auth
     )
+    if cors_allow_origins is None:
+        origins = [o.strip() for o in settings.padrino_cors_allow_origins.split(",") if o.strip()]
+    else:
+        origins = [o for o in cors_allow_origins if o]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=("*" not in origins),
+            allow_methods=["GET", "HEAD", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "Accept"],
+        )
     app.middleware("http")(admin_token_deprecation_middleware)
     app.middleware("http")(metrics_middleware)
     app.include_router(admin_router)

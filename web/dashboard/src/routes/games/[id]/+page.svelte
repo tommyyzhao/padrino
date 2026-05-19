@@ -72,21 +72,23 @@
   <a class="text-sm underline" href="/games">← Games</a>
 </div>
 
-<h1 class="mb-2 text-xl font-semibold">Replay</h1>
-<p class="mb-4 font-mono text-xs text-muted-foreground">{gameId}</p>
+<h1 class="mb-2 text-xl font-semibold" data-testid="replay-title">Replay</h1>
+<p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="replay-game-id">
+  {gameId}
+</p>
 
 {#if loading && allEvents.length === 0}
-  <p>Loading…</p>
+  <p data-testid="replay-loading">Loading…</p>
 {:else if error}
-  <p class="text-sm text-red-500">{error}</p>
+  <p class="text-sm text-red-500" data-testid="replay-error">{error}</p>
 {:else}
-  <div class="mb-4 grid gap-3 sm:grid-cols-[200px_1fr]">
+  <div class="mb-4 grid gap-3 sm:grid-cols-[200px_1fr]" data-testid="replay-shell">
     <Card class="self-start">
       <h2 class="mb-2 text-sm font-semibold">Phases</h2>
       {#if scrubberState.groups.length === 0}
-        <p class="text-xs text-muted-foreground">No events.</p>
+        <p class="text-xs text-muted-foreground" data-testid="replay-phase-empty">No events.</p>
       {:else}
-        <ul class="flex flex-col gap-1 text-sm">
+        <ul class="flex flex-col gap-1 text-sm" data-testid="replay-phase-list">
           {#each scrubberState.groups as g (g.phase)}
             <li>
               <button
@@ -94,6 +96,9 @@
                   (scrubberState.currentIndex === g.index
                     ? 'bg-primary text-background'
                     : 'hover:bg-accent')}
+                data-testid="replay-phase-pill"
+                data-phase={g.phase}
+                data-active={scrubberState.currentIndex === g.index}
                 onclick={() => (scrubberState = jumpTo(scrubberState, g.phase))}
               >
                 {g.phase}
@@ -106,17 +111,23 @@
 
     <Card>
       <div class="mb-3 flex items-center justify-between">
-        <div class="text-sm font-medium">
+        <div class="text-sm font-medium" data-testid="replay-current-phase">
           {group ? group.phase : '—'}
-          <span class="text-xs text-muted-foreground"
+          <span class="text-xs text-muted-foreground" data-testid="replay-position"
             >({(group?.index ?? 0) + 1} / {scrubberState.groups.length})</span
           >
         </div>
         <div class="flex gap-2">
-          <Button variant="outline" disabled={scrubberState.currentIndex <= 0} onclick={() => (scrubberState = scrubPrev(scrubberState))}>
+          <Button
+            testid="replay-prev"
+            variant="outline"
+            disabled={scrubberState.currentIndex <= 0}
+            onclick={() => (scrubberState = scrubPrev(scrubberState))}
+          >
             ←
           </Button>
           <Button
+            testid="replay-next"
             variant="outline"
             disabled={scrubberState.currentIndex >= scrubberState.groups.length - 1}
             onclick={() => (scrubberState = scrubNext(scrubberState))}
@@ -127,19 +138,24 @@
       </div>
 
       {#if !isTerminal}
-        <p class="mb-3 rounded-md border border-border bg-muted px-3 py-2 text-xs">
+        <p
+          class="mb-3 rounded-md border border-border bg-muted px-3 py-2 text-xs"
+          data-testid="replay-in-flight-warning"
+        >
           Game is still in flight — role-revealing events are hidden until terminal.
         </p>
       {/if}
 
       {#if projectedEvents.length === 0}
-        <p class="text-sm text-muted-foreground">No events in this phase.</p>
+        <p class="text-sm text-muted-foreground" data-testid="replay-events-empty">
+          No events in this phase.
+        </p>
       {:else}
-        <ol class="flex flex-col gap-2 text-sm">
+        <ol class="flex flex-col gap-2 text-sm" data-testid="replay-event-list">
           {#each projectedEvents as ev (ev.event_hash)}
-            <li class="rounded-md border border-border p-2 text-xs">
+            <li class="rounded-md border border-border p-2 text-xs" data-testid="replay-event">
               <div class="flex items-center justify-between">
-                <span class="font-mono">{ev.event_type}</span>
+                <span class="font-mono" data-testid="replay-event-type">{ev.event_type}</span>
                 <span class="text-muted-foreground"
                   >#{ev.sequence} · {shortenHash(ev.event_hash)}</span
                 >
@@ -159,7 +175,9 @@
 
       {#if nextCursor}
         <div class="mt-3 flex justify-center">
-          <Button variant="outline" onclick={loadMore}>Load more events</Button>
+          <Button testid="replay-load-more" variant="outline" onclick={loadMore}>
+            Load more events
+          </Button>
         </div>
       {/if}
     </Card>

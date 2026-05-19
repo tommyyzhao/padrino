@@ -7,6 +7,7 @@
     onclick?: (event: MouseEvent) => void;
     disabled?: boolean;
     variant?: 'default' | 'outline' | 'ghost';
+    testid?: string;
     children?: import('svelte').Snippet;
   }
 
@@ -16,6 +17,7 @@
     onclick,
     disabled = false,
     variant = 'default',
+    testid,
     children
   }: Props = $props();
 
@@ -28,6 +30,12 @@
   };
 </script>
 
-<button {type} {disabled} {onclick} class={cn(base, variants[variant], className)}>
+<button
+  {type}
+  {disabled}
+  {onclick}
+  data-testid={testid}
+  class={cn(base, variants[variant], className)}
+>
   {@render children?.()}
 </button>

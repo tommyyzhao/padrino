@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     # default for a centrally-hosted shared leaderboard.
     padrino_public_leaderboard_anonymous: bool = False
 
+    # CORS (US-070). Comma-separated list of allowed origins for the SvelteKit
+    # dashboard (and any other browser-side consumer). Empty string disables
+    # CORS entirely — the API responds without ``Access-Control-Allow-*``
+    # headers, matching the wave-1 default. ``*`` is supported and disables
+    # the credentialed-origin echo (matches Starlette's CORSMiddleware
+    # semantics).
+    padrino_cors_allow_origins: str = ""
+
 
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:

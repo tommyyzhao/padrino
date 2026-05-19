@@ -57,30 +57,36 @@
   onMount(load);
 </script>
 
-<div class="grid gap-4 sm:grid-cols-3">
+<div class="grid gap-4 sm:grid-cols-3" data-testid="home-kpis">
   <Card>
     <div class="text-xs uppercase tracking-wider text-muted-foreground">Total games</div>
-    <div class="mt-1 text-3xl font-semibold">{totalGames ?? '—'}</div>
+    <div class="mt-1 text-3xl font-semibold" data-testid="home-kpi-total-games">
+      {totalGames ?? '—'}
+    </div>
   </Card>
   <Card>
     <div class="text-xs uppercase tracking-wider text-muted-foreground">Active gauntlets</div>
-    <div class="mt-1 text-3xl font-semibold">{activeGauntlets ?? '—'}</div>
+    <div class="mt-1 text-3xl font-semibold" data-testid="home-kpi-active-gauntlets">
+      {activeGauntlets ?? '—'}
+    </div>
   </Card>
   <Card>
     <div class="text-xs uppercase tracking-wider text-muted-foreground">Top model</div>
-    <div class="mt-1 text-xl font-semibold">
+    <div class="mt-1 text-xl font-semibold" data-testid="home-kpi-top-model">
       {topModels[0]?.display_name ?? '—'}
     </div>
   </Card>
 </div>
 
-<section class="mt-8">
+<section class="mt-8" data-testid="home-top-models">
   <h2 class="mb-3 text-lg font-semibold">Top 3 models</h2>
   {#if topModels.length === 0}
-    <p class="text-sm text-muted-foreground">No ranked results yet.</p>
+    <p class="text-sm text-muted-foreground" data-testid="home-top-models-empty">
+      No ranked results yet.
+    </p>
   {:else}
     <Card>
-      <table class="w-full text-sm">
+      <table class="w-full text-sm" data-testid="home-top-models-table">
         <thead class="text-left text-xs uppercase tracking-wider text-muted-foreground">
           <tr>
             <th class="pb-2">Rank</th>
@@ -91,9 +97,17 @@
         </thead>
         <tbody>
           {#each topModels as model, i (model.model_key)}
-            <tr class="border-t border-border">
+            <tr class="border-t border-border" data-testid="home-top-model-row">
               <td class="py-2">{i + 1}</td>
-              <td class="py-2 font-medium">{model.display_name}</td>
+              <td class="py-2 font-medium">
+                <a
+                  href="/leaderboard"
+                  class="underline-offset-2 hover:underline"
+                  data-testid="home-top-model-link"
+                >
+                  {model.display_name}
+                </a>
+              </td>
               <td class="py-2 text-right">{model.conservative_score.toFixed(2)}</td>
               <td class="py-2 text-right">{model.games}</td>
             </tr>

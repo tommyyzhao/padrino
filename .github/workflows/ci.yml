@@ -87,6 +87,64 @@ jobs:
       - name: Postgres dialect + migrations suite
         run: uv run pytest -m postgres
 
+  dashboard-e2e:
+    # US-070: Playwright browser tests for the SvelteKit dashboard. Boots
+    # the backend via `padrino smoke localhost --keep-running --port 8123`
+    # (US-068), builds + previews the static dashboard SPA, and runs the
+    # functional specs (leaderboard / games / home) against a real
+    # Chromium. Visual-regression checks are opt-in via PADRINO_E2E_VISUAL.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync backend dependencies
+        run: uv sync --all-extras
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/dashboard/pnpm-lock.yaml
+
+      - name: Install dashboard dependencies
+        working-directory: web/dashboard
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers (chromium)
+        working-directory: web/dashboard
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run dashboard e2e suite
+        working-directory: web/dashboard
+        env:
+          CI: "1"
+          PADRINO_REPO_ROOT: ${{ github.workspace }}
+        run: pnpm test:e2e
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-e2e-report
+          path: |
+            web/dashboard/playwright-report/
+            web/dashboard/test-results/
+          if-no-files-found: ignore
+
   compose-smoke:
     # US-064: build the bundled Dockerfile and bring the full docker-compose
     # stack (postgres + bootstrap + api + scheduler) up against `pytest -m

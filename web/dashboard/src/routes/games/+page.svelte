@@ -57,23 +57,41 @@
   onMount(load);
 </script>
 
-<h1 class="mb-4 text-2xl font-semibold">Games</h1>
+<h1 class="mb-4 text-2xl font-semibold" data-testid="games-title">Games</h1>
 
-<div class="mb-4 flex gap-2">
-  <Button variant={statusFilter === '' ? 'default' : 'outline'} onclick={() => applyFilter('')}>All</Button>
-  <Button variant={statusFilter === 'RUNNING' ? 'default' : 'outline'} onclick={() => applyFilter('RUNNING')}>In flight</Button>
-  <Button variant={statusFilter === 'COMPLETED' ? 'default' : 'outline'} onclick={() => applyFilter('COMPLETED')}>Completed</Button>
+<div class="mb-4 flex gap-2" data-testid="games-filters">
+  <Button
+    testid="games-filter-all"
+    variant={statusFilter === '' ? 'default' : 'outline'}
+    onclick={() => applyFilter('')}
+  >
+    All
+  </Button>
+  <Button
+    testid="games-filter-running"
+    variant={statusFilter === 'RUNNING' ? 'default' : 'outline'}
+    onclick={() => applyFilter('RUNNING')}
+  >
+    In flight
+  </Button>
+  <Button
+    testid="games-filter-completed"
+    variant={statusFilter === 'COMPLETED' ? 'default' : 'outline'}
+    onclick={() => applyFilter('COMPLETED')}
+  >
+    Completed
+  </Button>
 </div>
 
 <Card>
   {#if loading}
-    <p>Loading…</p>
+    <p data-testid="games-loading">Loading…</p>
   {:else if error}
-    <p class="text-sm text-red-500">{error}</p>
+    <p class="text-sm text-red-500" data-testid="games-error">{error}</p>
   {:else if items.length === 0}
-    <p class="text-sm text-muted-foreground">No games yet.</p>
+    <p class="text-sm text-muted-foreground" data-testid="games-empty">No games yet.</p>
   {:else}
-    <table class="w-full text-sm">
+    <table class="w-full text-sm" data-testid="games-table" data-status={statusFilter}>
       <thead class="text-left text-xs uppercase tracking-wider text-muted-foreground">
         <tr>
           <th class="pb-2">Game</th>
@@ -85,15 +103,21 @@
       </thead>
       <tbody>
         {#each items as game (game.id)}
-          <tr class="border-t border-border">
+          <tr class="border-t border-border" data-testid="games-row" data-game-id={game.id}>
             <td class="py-2 font-mono text-xs">{shortenHash(game.id)}</td>
-            <td class="py-2">{game.status}</td>
+            <td class="py-2" data-testid="games-row-status">{game.status}</td>
             <td class="py-2">{game.current_phase ?? '—'}</td>
             <td class="py-2">
               {game.terminal_result ? `${game.terminal_result.winner} — ${game.terminal_result.reason}` : '—'}
             </td>
             <td class="py-2 text-right">
-              <a href={`/games/${game.id}`} class="text-sm underline">Open</a>
+              <a
+                href={`/games/${game.id}`}
+                class="text-sm underline"
+                data-testid="games-open-link"
+              >
+                Open
+              </a>
             </td>
           </tr>
         {/each}
@@ -102,7 +126,21 @@
   {/if}
 
   <div class="mt-4 flex justify-end gap-2">
-    <Button variant="outline" disabled={prevCursors.length === 0} onclick={prevPage}>← Previous</Button>
-    <Button variant="outline" disabled={!nextCursor} onclick={nextPage}>Next →</Button>
+    <Button
+      testid="games-prev"
+      variant="outline"
+      disabled={prevCursors.length === 0}
+      onclick={prevPage}
+    >
+      ← Previous
+    </Button>
+    <Button
+      testid="games-next"
+      variant="outline"
+      disabled={!nextCursor}
+      onclick={nextPage}
+    >
+      Next →
+    </Button>
   </div>
 </Card>

@@ -9,6 +9,12 @@ coverage/
 .env.*
 !.env.example
 
+# Playwright (US-070)
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
 # Re-include the SvelteKit `$lib` directory — the root `.gitignore` excludes
 # `lib/` (Python venv directory), which collides with the frontend layout.
 !src/lib/

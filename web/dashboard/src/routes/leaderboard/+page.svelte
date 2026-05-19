@@ -89,23 +89,41 @@
   onMount(load);
 </script>
 
-<h1 class="mb-4 text-2xl font-semibold">Model leaderboard</h1>
+<h1 class="mb-4 text-2xl font-semibold" data-testid="leaderboard-title">Model leaderboard</h1>
 
-<div class="mb-4 flex gap-2">
-  <Button variant={tab === 'global' ? 'default' : 'outline'} onclick={() => selectTab('global')}>Global</Button>
-  <Button variant={tab === 'town' ? 'default' : 'outline'} onclick={() => selectTab('town')}>Town</Button>
-  <Button variant={tab === 'mafia' ? 'default' : 'outline'} onclick={() => selectTab('mafia')}>Mafia</Button>
+<div class="mb-4 flex gap-2" data-testid="leaderboard-tabs">
+  <Button
+    testid="leaderboard-tab-global"
+    variant={tab === 'global' ? 'default' : 'outline'}
+    onclick={() => selectTab('global')}
+  >
+    Global
+  </Button>
+  <Button
+    testid="leaderboard-tab-town"
+    variant={tab === 'town' ? 'default' : 'outline'}
+    onclick={() => selectTab('town')}
+  >
+    Town
+  </Button>
+  <Button
+    testid="leaderboard-tab-mafia"
+    variant={tab === 'mafia' ? 'default' : 'outline'}
+    onclick={() => selectTab('mafia')}
+  >
+    Mafia
+  </Button>
 </div>
 
 <Card>
   {#if loading}
-    <p>Loading…</p>
+    <p data-testid="leaderboard-loading">Loading…</p>
   {:else if error}
-    <p class="text-sm text-red-500">{error}</p>
+    <p class="text-sm text-red-500" data-testid="leaderboard-error">{error}</p>
   {:else if entries.length === 0}
-    <p class="text-sm text-muted-foreground">No entries yet.</p>
+    <p class="text-sm text-muted-foreground" data-testid="leaderboard-empty">No entries yet.</p>
   {:else}
-    <table class="w-full text-sm">
+    <table class="w-full text-sm" data-testid="leaderboard-table" data-tab={tab}>
       <thead class="text-left text-xs uppercase tracking-wider text-muted-foreground">
         <tr>
           <th class="pb-2">Rank</th>
@@ -120,9 +138,11 @@
       <tbody>
         {#each entries as entry, i (entry.model_key)}
           {@const facet = tab === 'town' ? entry.town : tab === 'mafia' ? entry.mafia : null}
-          <tr class="border-t border-border">
+          <tr class="border-t border-border" data-testid="leaderboard-row">
             <td class="py-2">{i + 1}</td>
-            <td class="py-2 font-medium">{entry.display_name}</td>
+            <td class="py-2 font-medium" data-testid="leaderboard-row-name">
+              {entry.display_name}
+            </td>
             <td class="py-2 text-right">
               {(facet ?? entry).conservative_score.toFixed(2)}
             </td>
@@ -139,7 +159,21 @@
   {/if}
 
   <div class="mt-4 flex justify-end gap-2">
-    <Button variant="outline" disabled={prevCursors.length === 0} onclick={prevPage}>← Previous</Button>
-    <Button variant="outline" disabled={!nextCursor} onclick={nextPage}>Next →</Button>
+    <Button
+      testid="leaderboard-prev"
+      variant="outline"
+      disabled={prevCursors.length === 0}
+      onclick={prevPage}
+    >
+      ← Previous
+    </Button>
+    <Button
+      testid="leaderboard-next"
+      variant="outline"
+      disabled={!nextCursor}
+      onclick={nextPage}
+    >
+      Next →
+    </Button>
   </div>
 </Card>

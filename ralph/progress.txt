@@ -81,6 +81,9 @@ inherited from wave 1 are NOT duplicated here; read the archive for those.)
 - Per-model rating rollup seam (US-067): `padrino.ratings.model_rollup.rollup_by_model(session, league_id, ruleset_id)` is the single helper that collapses every `agent_build_id` sharing one `(provider.name, model_config.model_name, model_config.model_version)` triple into one `ModelLeaderboardEntry`. Aggregation rule is games-weighted mu (`sum(mu_i * n_i) / sum(n_i)`) + propagation sigma (`sqrt(sum((sigma_i * n_i)^2)) / sum(n_i)`) — `n_i` is the rating row's `games` counter, which counts seat-games (not unique games). Cache key includes `max(ratings.updated_at)` so a fresh write naturally invalidates. Canonical `model_key` format is `'<provider>/<model_name>[@<version>]'`; expose via `model_key_for(provider, model_name, model_version)` rather than hand-formatting. Two endpoints (`/public/models/leaderboard`, `/public/models/{model_key:path}`) share US-063's `require_public_read` dep so the anonymous-flag mirror is automatic — new public surfaces should reuse the same dep instead of rolling their own auth check.
 - Frontend project location (US-069): the SvelteKit dashboard lives at `web/dashboard/` — a sibling of `src/padrino/`, NOT under it. The pure-core firewall + AST tests in `tests/runner/test_game_runner.py` etc only walk `src/padrino/` so they never see the TypeScript subtree. `web/dashboard/.gitignore` lists `node_modules/`, `.svelte-kit/`, `build/`. The frontend has its own four-gate matrix (`pnpm lint`, `pnpm check`, `pnpm test`, `pnpm build`) run only by stories scoped to the dashboard subtree; backend stories ignore it. Future frontend stories that need a new gate (e.g. Playwright in US-070) should add another `pnpm <task>` script and document it in `web/dashboard/README.md`.
 - pnpm 11 build-script approval (US-069): pnpm 11 flipped `strictDepBuilds` to `true` by default, and the `[ERR_PNPM_IGNORED_BUILDS]` failure for esbuild surfaces every `pnpm run X` because pnpm now runs `runDepsStatusCheck` before scripts. The legacy `pnpm.onlyBuiltDependencies` field in `package.json` is no longer read by pnpm 11. The canonical fix is `pnpm-workspace.yaml` (even for a non-workspace project) with `packages: ['.']` + `allowBuilds: {esbuild: true}`. Running `pnpm approve-builds` creates this file with a templated `set this to true or false` line — replace that with the literal value `true`. After that no `.npmrc` overrides are needed and every `pnpm <script>` call succeeds.
+- CORS seam (US-070): `padrino.api.app.create_app(... cors_allow_origins=...)` is the one place Starlette's `CORSMiddleware` is wired. Defaults to the comma-separated list parsed from `Settings.padrino_cors_allow_origins` (env var `PADRINO_CORS_ALLOW_ORIGINS`); empty leaves CORS off and wave-1 deployments behave unchanged. `*` is allowed but disables `allow_credentials` per Starlette semantics. Methods are pinned to `GET / HEAD / OPTIONS` (the dashboard is read-only) and headers to `Authorization / Content-Type / Accept`. Any future browser-side route that needs credentialed POSTs should widen the methods list here, not stitch on a second middleware.
+- Smoke `--keep-running` stderr cleanup (US-070): `padrino.smoke._StderrTail.stop()` now `os.close()`s the underlying subprocess stderr fd to unblock the worker thread's blocking `readline()`. Calling `stream.close()` on the `BufferedReader` instead would deadlock — the close path waits for any in-flight read to complete, and with `keep_running=True` the children stay alive and never close their stderr write-end. Take this approach (raw `os.close(fd)` rather than `stream.close()`) any time a future helper needs to interrupt a worker thread blocked inside a stdlib `io.BufferedReader`.
+- Playwright e2e seam (US-070): `pnpm -C web/dashboard test:e2e` is a single-command harness that boots `padrino smoke localhost --keep-running --port 8123` (US-068), builds the static SPA with `VITE_PADRINO_API_BASE_URL` baked in, runs Chromium via Playwright's `webServer` + `globalSetup`, then SIGTERMs the detached smoke process group on teardown. Selectors are `data-testid` only — `Button.svelte` threads a `testid` prop through to `data-testid` on the underlying `<button>` so call sites can opt in per usage. Visual-regression snapshots live under `tests/e2e/__snapshots__/{testFilePath}/{arg}-{projectName}{ext}` and are opt-in via `PADRINO_E2E_VISUAL=1` so CI green doesn't depend on environment-specific baselines until a reviewer explicitly seeds them.
 
 ---
 
@@ -95,6 +98,88 @@ inherited from wave 1 are NOT duplicated here; read the archive for those.)
 ---
 ```
 )
+
+## 2026-05-18T18:10 - US-070
+- New Playwright suite under `web/dashboard/tests/e2e/` (TypeScript) with
+  three functional specs: `home.spec.ts` (KPIs render, top-3 row links to
+  /leaderboard), `leaderboard.spec.ts` (≥1 row, Town/Mafia tab switch,
+  prev/next paginate when more pages exist), `games.spec.ts` (filter to
+  COMPLETED, open the first completed game, scrub forward through every
+  phase + jump-to-pill). Plus three opt-in visual-regression specs gated
+  on `PADRINO_E2E_VISUAL=1`. `Button.svelte` grew a `testid` prop that
+  threads to `data-testid` on the underlying `<button>` — every call site
+  in the four routes uses it (and every other interactive / state-bearing
+  element gained a `data-testid` attribute).
+- Single-command driver: `pnpm -C web/dashboard test:e2e` →
+  `node tests/e2e/run.mjs` builds the SPA with `VITE_PADRINO_API_BASE_URL=
+  http://127.0.0.1:8123`, then runs `playwright test`. Playwright's
+  `globalSetup` spawns `uv run padrino smoke localhost --keep-running
+  --port 8123` (US-068) in a detached process group, polls `/healthz`,
+  and writes state to a tmp file; `globalTeardown` SIGTERMs the whole
+  group, falling back to SIGKILL after 5 s. The `webServer` block runs
+  `vite preview` against the static build. End-to-end run takes ~16 s on
+  Apple Silicon once the smoke gauntlet finishes (~60–90 s).
+- Backend wiring: `padrino.api.app.create_app(... cors_allow_origins=...)`
+  conditionally adds Starlette's `CORSMiddleware`; defaults come from a
+  new `Settings.padrino_cors_allow_origins` env-var (comma-separated). The
+  smoke globalSetup injects `PADRINO_CORS_ALLOW_ORIGINS=
+  http://127.0.0.1:5173` into the smoke harness's child env so the dev
+  origin is allowed without any production deployment having to flip it.
+- Bug fix: `_StderrTail.stop()` now `os.close()`s the raw fd instead of
+  calling `stream.close()` — closing the `BufferedReader` would wait for
+  the in-flight `readline()` to finish, which deadlocks the smoke parent
+  process under `--keep-running` because the children never close their
+  stderr write-end. Caught while running the e2e harness; manual smoke
+  without `--keep-running` was unaffected.
+- New CI job `dashboard-e2e` in `.github/workflows/ci.yml`: `uv sync`,
+  `pnpm install --frozen-lockfile`, `playwright install --with-deps
+  chromium`, then `pnpm -C web/dashboard test:e2e`. Artifact upload on
+  failure includes `playwright-report/` and `test-results/` (traces +
+  screenshots).
+- Files changed: `web/dashboard/playwright.config.ts` (new),
+  `web/dashboard/tests/e2e/{run.mjs,global-setup.ts,global-teardown.ts,
+  home.spec.ts,leaderboard.spec.ts,games.spec.ts}` (new),
+  `web/dashboard/package.json` (test:e2e scripts, @playwright/test dep),
+  `web/dashboard/pnpm-lock.yaml`, `web/dashboard/.gitignore`,
+  `web/dashboard/README.md`, `web/dashboard/src/lib/components/Button.svelte`
+  (testid prop), `web/dashboard/src/routes/{+page,leaderboard/+page,
+  games/+page,games/[id]/+page}.svelte` (data-testid attributes),
+  `src/padrino/api/app.py` (CORS wiring), `src/padrino/settings.py`
+  (padrino_cors_allow_origins), `src/padrino/smoke.py` (fd-close fix),
+  `tests/api/test_health.py` (CORS tests), `.github/workflows/ci.yml`
+  (dashboard-e2e job), `ralph/prd.json`, `ralph/progress.txt`.
+- **Learnings for future iterations:**
+  - Playwright's `webServer` config block starts a server in parallel
+    with `globalSetup`. The dashboard webServer needs the SPA built ahead
+    of time because `VITE_PADRINO_API_BASE_URL` is inlined at build time.
+    The right pattern is a tiny Node driver (`run.mjs`) that runs
+    `vite build` first, then hands off to `playwright test` — composing
+    the two into the same script in `package.json` would break on
+    Windows due to env-var syntax.
+  - macOS `subprocess.Popen(stderr=PIPE)` + `asyncio.to_thread(stream.
+    readline)` makes the readline thread hold the BufferedReader's
+    internal lock. If the parent later calls `stream.close()` to unblock,
+    it queues behind that lock and deadlocks. Force-close the fd with
+    `os.close(stream.fileno())` to interrupt the syscall directly. This
+    affects any future helper that wraps a subprocess pipe in an asyncio
+    task with cancellable semantics.
+  - Detached subprocess management on POSIX: Node's
+    `spawn(cmd, {detached: true})` creates a new process group; descendants
+    inherit that group unless they explicitly call `setsid` again. To kill
+    the whole tree on teardown, `process.kill(-pid, 'SIGTERM')` (negative
+    pid signals the group). `child.unref()` is NOT needed because we want
+    to await the parent's exit before declaring setup done.
+  - CORS for read-only browser clients: `allow_methods=['GET','HEAD',
+    'OPTIONS']` + `allow_headers=['Authorization','Content-Type','Accept']`
+    is the minimum surface to make `fetch()` work with a Bearer token.
+    Don't blanket-allow `*` for methods — once a future POST is added,
+    we want to be deliberate about widening the surface.
+  - `pnpm-lock.yaml` and `@playwright/test` are committed as a normal dev
+    dep. The CI uses `pnpm install --frozen-lockfile` to keep the version
+    pinned; chromium itself is installed via `pnpm exec playwright install
+    --with-deps chromium` so the matching browser version follows the
+    lockfile-pinned package.
+---
 
 ## 2026-05-18T17:32 - US-069
 - New sibling project at `web/dashboard/` — SvelteKit 2 + TypeScript +

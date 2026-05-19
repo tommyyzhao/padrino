@@ -729,8 +729,11 @@ class _StderrTail:
         self.name = name
         self._buf: deque[str] = deque(maxlen=maxlen)
         self._task: asyncio.Task[None] | None = None
+        self._stream: Any = None
 
     def start(self, stream: Any) -> None:
+        self._stream = stream
+
         async def _pump() -> None:
             try:
                 while True:
@@ -739,7 +742,7 @@ class _StderrTail:
                         return
                     text = line.decode("utf-8", errors="replace").rstrip("\n")
                     self._buf.append(f"[{self.name}] {text}")
-            except (asyncio.CancelledError, OSError):
+            except (asyncio.CancelledError, OSError, ValueError):
                 return
 
         self._task = asyncio.create_task(_pump(), name=f"smoke-stderr-{self.name}")
@@ -747,10 +750,24 @@ class _StderrTail:
     async def stop(self) -> None:
         if self._task is None:
             return
+        # Force-close the underlying OS fd so the worker thread's blocking
+        # ``readline()`` returns immediately. Calling ``stream.close()`` on
+        # a ``BufferedReader`` would instead wait for the in-flight read to
+        # finish, which deadlocks under ``--keep-running`` because the
+        # children stay alive and never close their stderr write-end.
+        if self._stream is not None:
+            try:
+                fd = self._stream.fileno()
+            except (OSError, ValueError):
+                fd = None
+            if fd is not None and fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+        self._stream = None
 
     def lines(self) -> list[str]:
         return list(self._buf)

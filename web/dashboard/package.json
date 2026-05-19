@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "node tests/e2e/run.mjs",
+    "test:e2e:update": "node tests/e2e/run.mjs --update-snapshots",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint ."
   },
@@ -25,6 +27,7 @@
   "devDependencies": {
     "@tailwindcss/forms": "^0.5.9",
     "@tailwindcss/typography": "^0.5.15",
+    "@playwright/test": "^1.48.0",
     "@eslint/js": "^9.12.0",
     "@types/node": "^22.7.5",
     "autoprefixer": "^10.4.20",

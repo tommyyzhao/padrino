@@ -38,6 +38,33 @@ pnpm build
 The unit tests cover the `PadrinoClient` API helper and the replay scrubber's
 phase grouping / navigation / role-redaction logic.
 
+## End-to-end (Playwright)
+
+The Playwright suite under `tests/e2e/` boots a real backend via
+`padrino smoke localhost --keep-running --port 8123` (US-068), builds and
+previews the dashboard, then drives Chromium through the three primary
+flows:
+
+```bash
+pnpm test:e2e                       # functional specs (home / leaderboard / games)
+pnpm test:e2e -- -g leaderboard     # filter by name
+PADRINO_E2E_VISUAL=1 pnpm test:e2e  # also runs visual-regression snapshots
+pnpm test:e2e:update                # refresh snapshots (reviewer ack required)
+```
+
+Selectors live on `data-testid` attributes — never raw CSS — so refactors
+can move classnames around without silently breaking the suite. Visual
+snapshots are stored under `tests/e2e/__snapshots__/` and only generated
+when `--update-snapshots` is passed, gated behind `PADRINO_E2E_VISUAL=1`.
+
+Environment overrides:
+
+- `PADRINO_E2E_API_PORT` — port for the spawned API child (default `8123`).
+- `PADRINO_E2E_DASHBOARD_PORT` — port for the vite preview server (default `5173`).
+- `PADRINO_E2E_SKIP_BACKEND=1` — assume an already-running backend; useful
+  for iterating on specs without re-booting smoke each run.
+- `PADRINO_E2E_VISUAL=1` — opt-in for visual-regression assertions.
+
 ## Pointing at a remote backend
 
 Set `VITE_PADRINO_API_BASE_URL` at build or dev time:

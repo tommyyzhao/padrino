@@ -112,6 +112,49 @@ def test_serve_command_invokes_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
     assert kwargs.get("port") == 9999
 
 
+async def test_cors_disabled_by_default() -> None:
+    app = create_app()
+    client = await _http_client(app)
+    async with client:
+        response = await client.get(
+            "/healthz",
+            headers={"Origin": "http://dashboard.example"},
+        )
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in {k.lower() for k in response.headers}
+
+
+async def test_cors_enabled_when_origins_passed() -> None:
+    app = create_app(cors_allow_origins=["http://dashboard.example"])
+    client = await _http_client(app)
+    async with client:
+        response = await client.get(
+            "/healthz",
+            headers={"Origin": "http://dashboard.example"},
+        )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "http://dashboard.example"
+
+
+async def test_cors_enabled_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from padrino import settings as settings_mod
+
+    settings_mod.get_settings.cache_clear()
+    monkeypatch.setenv("PADRINO_CORS_ALLOW_ORIGINS", "http://a.example, http://b.example")
+    try:
+        app = create_app()
+        client = await _http_client(app)
+        async with client:
+            response = await client.get(
+                "/healthz",
+                headers={"Origin": "http://b.example"},
+            )
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == "http://b.example"
+    finally:
+        settings_mod.get_settings.cache_clear()
+
+
 async def test_readyz_handles_factory_exception() -> None:
     class BrokenFactory:
         def __call__(self) -> object:
