@@ -18,6 +18,8 @@ nothing. Bundles larger than ``MAX_BUNDLE_BYTES`` are rejected with 413.
 
 from __future__ import annotations
 
+from typing import Final
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -30,10 +32,12 @@ from padrino.api.auth import (
     require_scopes,
 )
 from padrino.api.deps import get_session
+from padrino.core.rulesets import mini7_v1
 from padrino.db.repositories import api_keys as api_keys_repo
 from padrino.db.repositories import ingested_games as ingested_games_repo
 from padrino.export.bundle import (
     BundlePayloadUnsafeError,
+    EventEnvelope,
     GameBundle,
     ReplayHashMismatchError,
     assert_bundle_payload_safe,
@@ -43,8 +47,58 @@ from padrino.export.bundle import (
 
 MAX_BUNDLE_BYTES: int = 10 * 1024 * 1024
 
+KNOWN_RULESET_IDS: Final[frozenset[str]] = frozenset({mini7_v1.RULESET_ID})
+
 router = APIRouter()
 require_submit = require_scopes(SCOPE_ADMIN, SCOPE_SUBMITTER)
+
+
+async def _read_bounded_body(request: Request) -> bytes:
+    """Stream the request body, raising 413 as soon as the cap is exceeded.
+
+    Honors a too-large ``Content-Length`` header up front so a lying client
+    that claims a small body but streams a large one is cut off mid-stream
+    rather than buffered in full.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_int = int(declared)
+        except ValueError:
+            declared_int = -1
+        if declared_int > MAX_BUNDLE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="bundle_too_large",
+            )
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_BUNDLE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="bundle_too_large",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _claimed_winner_matches_events(
+    terminal_result: dict[str, object] | None,
+    events: list[EventEnvelope],
+) -> bool:
+    """Return False iff the bundle claims a winner the event log doesn't record."""
+    if terminal_result is None:
+        return True
+    claimed = terminal_result.get("winner")
+    if claimed is None:
+        return True
+    for event in events:
+        if event.event_type == "GameTerminated":
+            return event.payload.get("winner") == claimed
+    return False
 
 
 @router.post("/ingest/game")
@@ -53,12 +107,7 @@ async def ingest_game(
     ctx: ApiKeyContext = Depends(require_submit),
     session: AsyncSession = Depends(get_session),
 ) -> JSONResponse:
-    raw_body = await request.body()
-    if len(raw_body) > MAX_BUNDLE_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="bundle_too_large",
-        )
+    raw_body = await _read_bounded_body(request)
 
     try:
         bundle = GameBundle.model_validate_json(raw_body)
@@ -79,6 +128,18 @@ async def ingest_game(
             },
         )
 
+    if bundle.ruleset_id not in KNOWN_RULESET_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "unknown_ruleset",
+                "message": (
+                    f"ruleset_id {bundle.ruleset_id!r} is not in the central node's "
+                    f"whitelist {sorted(KNOWN_RULESET_IDS)}"
+                ),
+            },
+        )
+
     try:
         assert_bundle_payload_safe(bundle.events)
     except BundlePayloadUnsafeError as exc:
@@ -86,6 +147,18 @@ async def ingest_game(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"error": "unsafe_payload", "message": str(exc)},
         ) from exc
+
+    if not _claimed_winner_matches_events(bundle.terminal_result, bundle.events):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "inconsistent_terminal",
+                "message": (
+                    "bundle.terminal_result.winner does not match any GameTerminated "
+                    "event in bundle.events"
+                ),
+            },
+        )
 
     try:
         recomputed_tip = verify_chain(bundle.events)
@@ -159,4 +232,4 @@ async def ingest_game(
     )
 
 
-__all__ = ["MAX_BUNDLE_BYTES", "router"]
+__all__ = ["KNOWN_RULESET_IDS", "MAX_BUNDLE_BYTES", "router"]

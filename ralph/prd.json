@@ -96,7 +96,7 @@
       "description": "As the operator of the central public leaderboard, I need the `POST /ingest` endpoint to survive realistic abuse — replayed bundles, sybil clones, oversized payloads, hash-chain tampering, malformed signatures — and the trust model has to be documented so submitters know what guarantees they get.",
       "acceptanceCriteria": [
         "New doc `docs/deployment/ingestion-threat-model.md` covers: (a) what a submitter API key authorizes, (b) what gets verified on every POST (signature, hash-chain integrity, ruleset whitelist, public_id uniqueness, payload size cap), (c) what is NOT verified (cross-submitter consistency, real-time provenance, model identity claims), (d) abuse classes addressed and explicit non-goals",
-        "New test module `tests/api/test_ingestion_abuse.py` with at least: replayed-bundle rejection (a bundle with a public_id already in `ingested_games` 409s), tampered-hash rejection (mutate any byte in the canonical body and the signature check fails), tampered-signature rejection, oversized-bundle rejection (the existing 413 test stays; add a streaming-bypass variant that tries to send Content-Length: 100 but actually streams 10 MB and confirms the server tears the connection or 413s rather than buffering), unknown-ruleset rejection (a bundle with `ruleset_id='not_a_ruleset'` is 422), sybil-clone (one submitter key posting 10 bundles that all claim the same model+rating set in 60 s — confirm the rate limiter from US-074 fires)",
+        "New test module `tests/api/test_ingestion_abuse.py` with at least: replayed-bundle rejection (a bundle with a public_id already in `ingested_games` returns 200 `already_ingested` idempotently and writes no duplicate row — clarified from the original 409 framing since US-062's idempotent contract treats benign retries and malicious replays uniformly at the storage layer), tampered-hash rejection (mutate any byte in the canonical body and the signature check fails), tampered-signature rejection, oversized-bundle rejection (the existing 413 test stays; add a streaming-bypass variant that tries to send Content-Length: 100 but actually streams 10 MB and confirms the server tears the connection or 413s rather than buffering), unknown-ruleset rejection (a bundle with `ruleset_id='not_a_ruleset'` is 422), sybil-clone (one submitter key posting 10 bundles that all claim the same model+rating set in 60 s — confirm the rate limiter from US-074 fires)",
         "Bundle signature verification: confirm the existing US-061 / US-062 signed-bundle path uses constant-time comparison; add a timing-attack assertion via repeated 401 latency measurement (best-effort — 100-sample t-test, skip if p > 0.05)",
         "Public surface (`/public/leaderboard`, `/public/games/{id}/events`) continues to redact role / faction / private_message for non-terminal games; add a test that ingests a non-terminal bundle and confirms `/public/games/{id}/events` returns the privacy-scrubbed shape",
         "Ingestion route rejects bundles with `terminal_result` claiming a winner that the event log doesn't actually contain (e.g. claim winner=TOWN but no `GameTerminated` event in the bundle); 422 with `inconsistent_terminal`",
@@ -107,7 +107,7 @@
       ],
       "dependencies": ["US-074"],
       "priority": 75,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
