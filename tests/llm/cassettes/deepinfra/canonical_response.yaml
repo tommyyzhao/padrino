@@ -1,21 +1,232 @@
 interactions:
 - request:
-    method: POST
-    uri: https://api.deepinfra.com/v1/openai/chat/completions
-    body: ''
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"deepseek-ai/DeepSeek-V4-Flash"}'
     headers:
-      authorization:
-      - SCRUBBED
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1642'
       content-type:
       - application/json
+      host:
+      - api.deepinfra.com
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.deepinfra.com/v1/openai/chat/completions
   response:
+    body:
+      string: '{"id":"chatcmpl-RdeoVTwXXjiFf03N1sFqMZL1","object":"chat.completion","created":1779311858,"model":"deepseek-ai/DeepSeek-V4-Flash","choices":[{"index":0,"message":{"role":"assistant","content":"{\"public_message\":
+        \"I think we should vote out someone who seems suspicious early on, but I''m
+        not sure who yet. Let''s discuss.\", \"private_message\": \"Hey P02, we need
+        to coordinate our vote to stay safe. I''m thinking we vote for someone who
+        won''t be too obvious, maybe P04? What do you think?\", \"action\": {\"type\":
+        \"ABSTAIN\", \"target\": null}, \"memory_update\": \"Day 1 vote: coordinating
+        with teammate P02 to avoid suspicion. Abstained to not commit yet.\", \"rationale_summary\":
+        \"Attempting to appear neutral and gather information while coordinating with
+        mafia teammate.\"}","reasoning_content":null,"name":null,"tool_calls":[]},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":390,"total_tokens":528,"completion_tokens":138,"estimated_cost":9.324e-05,"prompt_tokens_details":null}}'
+    headers:
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '1011'
+      Content-Type:
+      - application/json
+      Date:
+      - Wed, 20 May 2026 21:17:51 GMT
+      Server:
+      - uvicorn
+      x-request-id:
+      - RdeoVTwXXjiFf03N1sFqMZL1
+      x-robots-tag:
+      - noindex
     status:
       code: 200
       message: OK
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"deepseek-ai/DeepSeek-V4-Flash"}'
     headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1642'
       content-type:
       - application/json
+      host:
+      - api.deepinfra.com
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.deepinfra.com/v1/openai/chat/completions
+  response:
     body:
-      string: |
-        {"id":"chatcmpl-test-deepinfra-001","object":"chat.completion","created":1700000020,"model":"deepseek-ai/DeepSeek-V4-Flash","choices":[{"index":0,"message":{"role":"assistant","content":"{\"public_message\":\"Watching the room carefully.\",\"private_message\":null,\"action\":{\"type\":\"ABSTAIN\",\"target\":null},\"memory_update\":\"d1 - waiting for a tell\",\"rationale_summary\":\"low info\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":108,"completion_tokens":40,"total_tokens":148}}
+      string: '{"id":"chatcmpl-Rj5kDqrjMuHx4Xw7YA5aWok3","object":"chat.completion","created":1779311872,"model":"deepseek-ai/DeepSeek-V4-Flash","choices":[{"index":0,"message":{"role":"assistant","content":"{\n  \"public_message\":
+        \"I think we need to vote out someone who seems quiet and hasn''t contributed
+        much. P05 hasn''t said anything during the discussion. I will vote for P05
+        to get things moving.\",\n  \"private_message\": null,\n  \"action\": {\n    \"type\":
+        \"VOTE\",\n    \"target\": \"P05\"\n  },\n  \"memory_update\": \"Day 1 vote
+        phase. I voted for P05 to blend in and misdirect. My teammate is P02. Need
+        to avoid suspicion.\",\n  \"rationale_summary\": \"Voted for a quiet player
+        to appear pro-town and avoid attention, as mafia goon.\"\n}","reasoning_content":null,"name":null,"tool_calls":[]},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":390,"total_tokens":530,"completion_tokens":140,"estimated_cost":6.5128e-05,"prompt_tokens_details":{"cached_tokens":256,"cache_write_tokens":null}}}'
+    headers:
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '1012'
+      Content-Type:
+      - application/json
+      Date:
+      - Wed, 20 May 2026 21:17:58 GMT
+      Server:
+      - uvicorn
+      x-request-id:
+      - Rj5kDqrjMuHx4Xw7YA5aWok3
+      x-robots-tag:
+      - noindex
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"deepseek-ai/DeepSeek-V4-Flash"}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1642'
+      content-type:
+      - application/json
+      host:
+      - api.deepinfra.com
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.deepinfra.com/v1/openai/chat/completions
+  response:
+    body:
+      string: '{"id":"chatcmpl-RbFafbPlGbtqFfftgen4jPCq","object":"chat.completion","created":1779311879,"model":"deepseek-ai/DeepSeek-V4-Flash","choices":[{"index":0,"message":{"role":"assistant","content":"{\n  \"public_message\":
+        \"I think P03''s silence is suspicious. Let''s vote them out to see what happens.\",\n  \"private_message\":
+        null,\n  \"action\": {\n    \"type\": \"VOTE\",\n    \"target\": \"P03\"\n  },\n  \"memory_update\":
+        \"Day 1 vote: P03 accused as suspicious due to silence; voted for P03.\",\n  \"rationale_summary\":
+        \"As Mafia, I want to eliminate a town player early. P03 is quiet and a convenient
+        target to shift suspicion away from my teammate P02.\"\n}","reasoning_content":null,"name":null,"tool_calls":[]},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":390,"total_tokens":512,"completion_tokens":122,"estimated_cost":6.0088e-05,"prompt_tokens_details":{"cached_tokens":256,"cache_write_tokens":null}}}'
+    headers:
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '936'
+      Content-Type:
+      - application/json
+      Date:
+      - Wed, 20 May 2026 21:18:06 GMT
+      Server:
+      - uvicorn
+      x-request-id:
+      - RbFafbPlGbtqFfftgen4jPCq
+      x-robots-tag:
+      - noindex
+    status:
+      code: 200
+      message: OK
 version: 1

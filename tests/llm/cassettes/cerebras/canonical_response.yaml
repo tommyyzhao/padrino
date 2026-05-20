@@ -1,21 +1,407 @@
 interactions:
 - request:
-    method: POST
-    uri: https://api.cerebras.ai/v1/chat/completions
-    body: ''
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"zai-glm-4.7"}'
     headers:
-      authorization:
-      - SCRUBBED
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1624'
       content-type:
       - application/json
+      host:
+      - api.cerebras.ai
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '5.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.cerebras.ai/v1/chat/completions
   response:
+    body:
+      string: !!binary |
+        H4sIAAAAAAAA/+1TTa+UMBT9K03XQPgsA251rTHmbcTwSrnM9AkttuUpTvjvXhhm8j7UrRszyYTc
+        c+65Xz1nKltaUnHiTgxj77csb4HHjZ8UYeenbdP5POsSP+YiaRgwlnWCesjXUoCl5ecz7aSS9lQb
+        4FYr1LJOj0iRqoUftAw9OoC1/Ai0PFOhlQPlkHV/f/+A/EqdK0VIRcep6aWod25FS6Kmvvd20MhH
+        7uAPKBdOohIGN6015OZxY1X07v2ndxX1bgA3R3AX6EOYVHQFll1ogEGbuZ7GFotdOG/5TCJypx2U
+        679UR4JpxHDV6qGfidOEjyN+jAZ7mwwQRIgFICf9nWh3AmPJI6YHmBcTaYkDPgyoH+xdVdTwtX/e
+        Q20nhMx8Kf1xq7Elvy7zZmsD5bgi3DTSGcwjl+lWtsVPR1ppxWQtqgfrpEulcO14m8utcJj/h/jH
+        h9A9+oJyhJCIxliWL+guvI8D9GWU50USRXmyuki30CP3J5f+sR/8NMhRwM7WwVCjB49g8Dqbt7qx
+        5kkiwjRmhwIKVmQsD8MD0nXzAMLthg+ERsvDOjNC09WjTjve105/BYUGz9IcG7oRb/GoiH8Tr1tw
+        XPZ21eFCwIhj1LiqVopn2eH6BtdW/gLvT/QWLNji4QPEku4WS7LsRexpB4KLExa4kuOMLSjh5AC1
+        VJ3eKK9XHRxYfMjig0e/TTBBvfKxOoaLCPzwScENCIMwilL8MfZ8ITsaFWGaJmlUeNfN7kAcJliH
+        FWkUx0mUptmy/AJI67a5jgUAAA==
+    headers:
+      CF-RAY:
+      - 9fee5b6d5fcd6c97-SJC
+      Connection:
+      - keep-alive
+      Content-Encoding:
+      - gzip
+      Content-Type:
+      - application/json
+      Date:
+      - Wed, 20 May 2026 21:15:31 GMT
+      Server:
+      - cloudflare
+      Set-Cookie:
+      - SCRUBBED
+      Transfer-Encoding:
+      - chunked
+      alt-svc:
+      - h3=":443"; ma=86400
+      cf-cache-status:
+      - DYNAMIC
+      inference-id:
+      - chatcmpl-d67dea2b-390f-4dbf-a5f3-2ac3b6e665fc
+      referrer-policy:
+      - strict-origin-when-cross-origin
+      strict-transport-security:
+      - max-age=15552000; includeSubDomains; preload
+      x-content-type-options:
+      - nosniff
+      x-ratelimit-limit-requests-day:
+      - '72000'
+      x-ratelimit-limit-requests-hour:
+      - '3000'
+      x-ratelimit-limit-requests-minute:
+      - '50'
+      x-ratelimit-limit-tokens-day:
+      - '24000000'
+      x-ratelimit-limit-tokens-hour:
+      - '24000000'
+      x-ratelimit-limit-tokens-minute:
+      - '1000000'
+      x-ratelimit-remaining-requests-day:
+      - '71999'
+      x-ratelimit-remaining-requests-hour:
+      - '2999'
+      x-ratelimit-remaining-requests-minute:
+      - '49'
+      x-ratelimit-remaining-tokens-day:
+      - '23983263'
+      x-ratelimit-remaining-tokens-hour:
+      - '23983263'
+      x-ratelimit-remaining-tokens-minute:
+      - '983263'
+      x-request-id:
+      - 9fee5b6d5fcd6c97-SJC
     status:
       code: 200
       message: OK
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"zai-glm-4.7"}'
     headers:
+      Cookie:
+      - __cf_bm=4kpIboB5oo17GG4SBU34QzlkzveZQSDT5xtJ02ZuM4o-1779311730.7713876-1.0.1.1-OlHZidAFGKkVcBKtSKCoFesd2yglRE72EyoByKt8RSAWW.nl_WYqA_y0BGesVtvflupMdOqqsQ06BlM1UDS4ObGlzg100q91vqUy1YoYEs5f5j.Jdh13G5Qw2oE6HQ4I
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1624'
       content-type:
       - application/json
+      host:
+      - api.cerebras.ai
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '5.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.cerebras.ai/v1/chat/completions
+  response:
     body:
-      string: |
-        {"id":"chatcmpl-test-cerebras-001","object":"chat.completion","created":1700000010,"model":"zai-glm-4.7","choices":[{"index":0,"message":{"role":"assistant","content":"{\"public_message\":\"Let me lay out my read.\",\"private_message\":null,\"action\":{\"type\":\"ABSTAIN\",\"target\":null},\"memory_update\":\"d1 baseline read\",\"rationale_summary\":\"low info\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":110,"completion_tokens":42,"total_tokens":152}}
+      string: !!binary |
+        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
+    headers:
+      CF-RAY:
+      - 9fee5b72ce136c97-SJC
+      Connection:
+      - keep-alive
+      Content-Encoding:
+      - gzip
+      Content-Type:
+      - application/json
+      Date:
+      - Wed, 20 May 2026 21:15:34 GMT
+      Server:
+      - cloudflare
+      Transfer-Encoding:
+      - chunked
+      alt-svc:
+      - h3=":443"; ma=86400
+      cf-cache-status:
+      - DYNAMIC
+      inference-id:
+      - chatcmpl-8dcfb856-4c87-4de5-894c-8d2d0a3d4573
+      referrer-policy:
+      - strict-origin-when-cross-origin
+      strict-transport-security:
+      - max-age=15552000; includeSubDomains; preload
+      x-content-type-options:
+      - nosniff
+      x-ratelimit-limit-requests-day:
+      - '72000'
+      x-ratelimit-limit-requests-hour:
+      - '3000'
+      x-ratelimit-limit-requests-minute:
+      - '50'
+      x-ratelimit-limit-tokens-day:
+      - '24000000'
+      x-ratelimit-limit-tokens-hour:
+      - '24000000'
+      x-ratelimit-limit-tokens-minute:
+      - '1000000'
+      x-ratelimit-remaining-requests-day:
+      - '71998'
+      x-ratelimit-remaining-requests-hour:
+      - '2998'
+      x-ratelimit-remaining-requests-minute:
+      - '48'
+      x-ratelimit-remaining-tokens-day:
+      - '23982716'
+      x-ratelimit-remaining-tokens-hour:
+      - '23982716'
+      x-ratelimit-remaining-tokens-minute:
+      - '982716'
+      x-request-id:
+      - 9fee5b72ce136c97-SJC
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"zai-glm-4.7"}'
+    headers:
+      Cookie:
+      - __cf_bm=4kpIboB5oo17GG4SBU34QzlkzveZQSDT5xtJ02ZuM4o-1779311730.7713876-1.0.1.1-OlHZidAFGKkVcBKtSKCoFesd2yglRE72EyoByKt8RSAWW.nl_WYqA_y0BGesVtvflupMdOqqsQ06BlM1UDS4ObGlzg100q91vqUy1YoYEs5f5j.Jdh13G5Qw2oE6HQ4I
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1624'
+      content-type:
+      - application/json
+      host:
+      - api.cerebras.ai
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '5.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.cerebras.ai/v1/chat/completions
+  response:
+    body:
+      string: !!binary |
+        H4sIAAAAAAAA/7VUTW/jNhD9KwNd0gK2IUWy/HFLscBiDy0CZNEe6kKhpZHNDUVqSSquGvi/91GW
+        7SRdbHvpyTI5nHnz5s17iWQVraNyL3zZtGqalpmol3k8XaWrfJrlLKbLRbyYcr3MalGWVZzH0QTx
+        RpbsovXvL1EttXT7wrJwRiOX86ZFiNQV/xmt40nUsHNix9H6JSqN9qw9oh4fH78gfqNfNppoE7Xd
+        VsmyGGM30Rpnn24a0sZTaZraWC+2iunZeKl3JHRvNJPpPB2k34ffxlgmqWszo8/GkJXuqSe/l45Y
+        WNXPNtFkLGXls/D8upbulBpvReklcOFwQBaOfN+OiO5+evh89+mXMdVwJ+yO/TlHOD2OiRoGor7o
+        2grFxoZINPSzqKWgj8ZoAGXRNLgmoLyPb2f0QfSU0K/G84yGaLF1XoBh9OwN4bsnzZ23QoGDisSz
+        kRW5zrWyBGw67CVI8rYfH8gKdMsaRJiDptYc2JI1it2VDitCw0Jx4TqAsf3Y6rUwwAlS5jBtralD
+        /sY8M2EkI1wP9ZyQOCqhg2FCrLmR7AhRA/9XkCi90ceNhgSgk5Nu8OI/iuI3BgFcheZ2wu/Rz2Xw
+        thlamdEdWZBjGlK9LvfQ0IH2rFoHpHxiYngD3Jo6911lbKJ7Yb1GmR8woB8npNjfuMBwQABFYggS
+        JT8YfeNp2zlqmDoNhh1wliGR7WfDRAfGxFBfMiaFcTI3jr52kn3g6czQa0j/pxw/CmB9wBM/iu1b
+        0nTrkzLv98Lx+o1AHyBDz7t+TXelJyWfGO0FoutOjW1O3it0gm02tpI6qD6sbsiOSVjT7fYI23ro
+        q1WoAkKCLf27UN0J9wQ9HIT2YS6nolsOQhw0wBVUcVX0SQ2nqMqKw2ApPlhTWKKTXvEBCKPf4A8m
+        d97WbU/wwmG3wBy0rxxqti0eOnKm4UPYiFJ0PgwTqvB0kvlgYZfFebcIWEvsgHBOAidM8nj8A04b
+        9onh0clisUqTZJFmcFRTsULsX0JOd6qZZrMFErjeeW4K+PGOLaQ8+GzdFiJNyzi7zZcrXuWreb6I
+        4yXCzfYLl340/xk8toW00T6uurNfe+OFKrx5Yg2zz/MlAF0CL+dpkn7jvKgYdCsX8oAtbtFG0Vqu
+        ZPnmdRw8IED5zvVoEZfDZLk4TrCuqOmvMObzd2evIZQiqOASfDvPj0jhZcNF8I4h5J9cz1ZxOk/n
+        +ST62nHHRYgHplkcx0m8StNrwfNFEufLOMkWbxkZb/M0T1e3Id3I7Pk8W84TFEzSLF5lt9nx+DfY
+        9hsgmQcAAA==
+    headers:
+      CF-RAY:
+      - 9fee5b869d116c97-SJC
+      Connection:
+      - keep-alive
+      Content-Encoding:
+      - gzip
+      Content-Type:
+      - application/json
+      Date:
+      - Wed, 20 May 2026 21:15:35 GMT
+      Server:
+      - cloudflare
+      Transfer-Encoding:
+      - chunked
+      alt-svc:
+      - h3=":443"; ma=86400
+      cf-cache-status:
+      - DYNAMIC
+      inference-id:
+      - chatcmpl-3c4af860-9396-46ea-8707-ef84faccd060
+      referrer-policy:
+      - strict-origin-when-cross-origin
+      strict-transport-security:
+      - max-age=15552000; includeSubDomains; preload
+      x-content-type-options:
+      - nosniff
+      x-ratelimit-limit-requests-day:
+      - '72000'
+      x-ratelimit-limit-requests-hour:
+      - '3000'
+      x-ratelimit-limit-requests-minute:
+      - '50'
+      x-ratelimit-limit-tokens-day:
+      - '24000000'
+      x-ratelimit-limit-tokens-hour:
+      - '24000000'
+      x-ratelimit-limit-tokens-minute:
+      - '1000000'
+      x-ratelimit-remaining-requests-day:
+      - '71999'
+      x-ratelimit-remaining-requests-hour:
+      - '2999'
+      x-ratelimit-remaining-requests-minute:
+      - '49'
+      x-ratelimit-remaining-tokens-day:
+      - '23982056'
+      x-ratelimit-remaining-tokens-hour:
+      - '23983263'
+      x-ratelimit-remaining-tokens-minute:
+      - '983263'
+      x-request-id:
+      - 9fee5b869d116c97-SJC
+    status:
+      code: 200
+      message: OK
 version: 1

@@ -114,31 +114,87 @@ upstreams disagree about whether to use OpenAI-compat `/chat/completions`
 vs. their native chat format), set `base_url` on the `ModelProvider`
 row to pin the override.
 
-## Recording cassettes (US-051)
+## Recording cassettes (US-051, US-072)
 
 The contract suite under `tests/llm/test_litellm_contract.py` parses
-recorded HTTP cassettes for every supported provider. Adding a new
-provider means either:
+recorded HTTP cassettes for every supported provider. Per US-072 the
+goal is for every `canonical_response.yaml` to be a REAL recorded
+provider response — synthetic envelopes confirm only that our parser
+handles what we wrote, not what the provider actually emits. The
+`ProviderCase.synthetic_canonical` flag tracks which providers still
+need a real recording; the `test_canonical_response_parses` test skips
+those providers so the `live_llm` collection count reflects only
+provider-recorded contracts.
 
-1. Hand-author two YAML cassettes (canonical + malformed response) per
-   the existing pattern under `tests/llm/cassettes/<provider>/`. The
-   audit test `test_cassettes_have_no_secret_shaped_substrings` scans
-   committed files for `sk-`, `sk-ant-`, and `Bearer <token>` patterns;
-   never embed a real key.
-2. Re-record with a real key by exporting `PADRINO_RECORD_LLM=1` and
-   running the contract test once:
+### Re-record one provider
 
-   ```
-   PADRINO_RECORD_LLM=1 OPENAI_API_KEY=sk-... \
-       uv run pytest -m live_llm --live-llm tests/llm/test_litellm_contract.py
-   ```
+Export `PADRINO_RECORD_LLM=1` together with the provider's API-key env
+var, delete the existing `canonical_response.yaml` (vcrpy's
+`record_mode="once"` only writes when the file is missing), then run the
+contract test for that provider:
 
-   The vcrpy fixture is configured with `record_mode="once"` while the
-   env var is set, so cassettes are written if they don't exist and
-   replayed thereafter. Scrub the resulting YAML before committing —
-   `before_record_request` / `before_record_response` strip auth-shaped
-   headers and `api_key` JSON fields, but the audit test is the safety
-   net you should not rely on bypassing.
+```
+# Cerebras (primary)
+rm tests/llm/cassettes/cerebras/canonical_response.yaml
+PADRINO_RECORD_LLM=1 CEREBRAS_API_KEY=csk-... \
+    uv run pytest tests/llm/test_litellm_contract.py --live-llm \
+    -m live_llm -k 'cerebras and canonical'
+
+# DeepInfra (fallback) — DeepSeek-V4-Flash often takes 15+ s on first
+# contact, so the fixture extends the adapter timeout to 60 s when
+# PADRINO_RECORD_LLM=1; you do not need to bump anything by hand.
+rm tests/llm/cassettes/deepinfra/canonical_response.yaml
+PADRINO_RECORD_LLM=1 DEEPINFRA_API_KEY=lw... \
+    uv run pytest tests/llm/test_litellm_contract.py --live-llm \
+    -m live_llm -k 'deepinfra and canonical'
+
+# OpenAI
+rm tests/llm/cassettes/openai/canonical_response.yaml
+PADRINO_RECORD_LLM=1 OPENAI_API_KEY=sk-... \
+    uv run pytest tests/llm/test_litellm_contract.py --live-llm \
+    -m live_llm -k 'openai and canonical'
+```
+
+Then flip `synthetic_canonical=False` on the matching `ProviderCase`
+row in `tests/llm/test_litellm_contract.py` and re-run the suite to
+confirm the recorded cassette replays cleanly:
+
+```
+uv run pytest tests/llm/test_litellm_contract.py --live-llm
+```
+
+### Verify secrets were scrubbed
+
+The vcrpy hooks `before_record_request` / `before_record_response`
+strip `authorization`, `x-api-key`, `api-key`, `cookie`, `set-cookie`,
+`openai-organization`, `openai-project`, `anthropic-organization-id`,
+and any JSON `api_key` field. After re-recording, grep the cassette
+directory for credential-shaped substrings; the audit must return
+nothing:
+
+```
+grep -rE 'sk-|pk-|csk-|^lw|Bearer\s' tests/llm/cassettes/ && echo LEAK || echo clean
+```
+
+The `test_cassettes_have_no_secret_shaped_substrings` test is the same
+audit run inside pytest, and `test_audit_catches_deliberately_leaky_probe`
+plants a sentinel `sk-...` / `sk-ant-...` / `Bearer ...` string in a tmp
+cassette to prove the audit's regex set has not silently gone stale.
+
+### Malformed cassettes
+
+`malformed_response.yaml` for every provider is intentionally synthetic.
+Real providers do not emit malformed JSON on demand, so the cassette
+asserts our `coerce_response_failure` path against a small wrapper
+envelope. The test stays in the parametrize set for every provider.
+
+### When a provider key is unavailable
+
+Per US-072: leave the existing synthetic cassette in place, leave the
+`synthetic_canonical=True` flag set with a `TODO(US-072)` comment naming
+the missing env var, and the test stays in the parametrize set but
+skips so the `live_llm` collection count reflects only provider-recorded
+contracts.
 
 The `live_llm` marker is default-skipped (see `tests/conftest.py`); CI
 will not run live recordings, so the cassettes you commit are the only

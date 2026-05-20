@@ -59,8 +59,10 @@ _SCRUB_HEADER_NAMES: frozenset[str] = frozenset(
         "authorization",
         "x-api-key",
         "api-key",
+        "cookie",
         "set-cookie",
         "openai-organization",
+        "openai-project",
         "anthropic-organization-id",
     }
 )
@@ -77,18 +79,33 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 @dataclass(frozen=True)
 class ProviderCase:
-    """One row of the contract-test parametrization grid."""
+    """One row of the contract-test parametrization grid.
+
+    ``synthetic_canonical`` is True when the committed
+    ``canonical_response.yaml`` was NOT recorded against a real provider — i.e.
+    it is a hand-authored synthetic envelope that asserts the parser handles a
+    shape we made up, not the shape the provider actually emits. Re-record
+    with ``PADRINO_RECORD_LLM=1`` and the matching API key to flip this flag
+    to False (US-072).
+    """
 
     name: str
     model: str
+    synthetic_canonical: bool = False
 
 
 PROVIDER_CASES: tuple[ProviderCase, ...] = (
-    ProviderCase("openai", "openai/gpt-4o-mini"),
-    ProviderCase("anthropic", "anthropic/claude-haiku-4-5"),
+    # TODO(US-072): re-record once an OPENAI_API_KEY is provisioned for the
+    # maintainer; current cassette is synthetic.
+    ProviderCase("openai", "openai/gpt-4o-mini", synthetic_canonical=True),
+    # TODO(US-072): re-record once an ANTHROPIC_API_KEY is provisioned for
+    # the maintainer; current cassette is synthetic.
+    ProviderCase("anthropic", "anthropic/claude-haiku-4-5", synthetic_canonical=True),
     ProviderCase("cerebras", "cerebras/zai-glm-4.7"),
     ProviderCase("deepinfra", "deepinfra/deepseek-ai/DeepSeek-V4-Flash"),
-    ProviderCase("ollama", "ollama/llama3"),
+    # TODO(US-072): re-record once a local Ollama instance is reachable from
+    # the maintainer's recording shell; current cassette is synthetic.
+    ProviderCase("ollama", "ollama/llama3", synthetic_canonical=True),
 )
 
 
@@ -172,6 +189,13 @@ def _build_vcr() -> vcr.VCR:
 
 
 def _build_adapter(case: ProviderCase) -> LiteLlmAdapter:
+    # Replay against committed cassettes is instant, so the default 5 s
+    # timeout is plenty. While recording (``PADRINO_RECORD_LLM=1``) a real
+    # provider's cold-start latency can spike above that — DeepInfra's
+    # DeepSeek-V4-Flash regularly takes 15+ s on first contact — so we
+    # extend the timeout to 60 s during record runs. The env var is a
+    # recording-only knob and is not consulted in CI.
+    timeout_s = 60.0 if os.environ.get("PADRINO_RECORD_LLM") == "1" else 5.0
     return LiteLlmAdapter(
         routing_policy=RoutingPolicy(primary_model=case.model, fallback_model=None),
         agent_build=AgentBuild(
@@ -181,7 +205,7 @@ def _build_adapter(case: ProviderCase) -> LiteLlmAdapter:
             inference_params={},
             adapter_version="litellm-cassette-1",
         ),
-        timeout_s=5.0,
+        timeout_s=timeout_s,
         auth_secret_ref="env:PADRINO_CONTRACT_AUTH_SECRET",
     )
 
@@ -221,6 +245,13 @@ def _cassette_or_skip(case: ProviderCase, name: str) -> Path:
 )
 async def test_canonical_response_parses(case: ProviderCase) -> None:
     """Each provider's canonical wire-format response must validate against AgentResponse."""
+    if case.synthetic_canonical:
+        pytest.skip(
+            f"{case.name}: canonical_response.yaml is synthetic (US-072 — "
+            "re-record with PADRINO_RECORD_LLM=1 once the provider key is "
+            "provisioned). Skipping so the live_llm collection count reflects "
+            "only provider-recorded contracts."
+        )
     cassette_path = _cassette_or_skip(case, "canonical_response")
     adapter = _build_adapter(case)
     obs = _canonical_observation()
@@ -276,15 +307,58 @@ def test_cassettes_have_no_secret_shaped_substrings() -> None:
     """
     cassette_files = sorted(_CASSETTE_DIR.rglob("*.yaml"))
     assert cassette_files, "no cassettes found — provider contract suite needs at least one"
-    offenders: list[str] = []
-    for path in cassette_files:
-        text = path.read_text(encoding="utf-8")
-        for pattern in _SECRET_PATTERNS:
-            for match in pattern.findall(text):
-                offenders.append(f"{path.relative_to(_CASSETTE_DIR.parent.parent)}: {match!r}")
+    offenders = _scan_for_secret_patterns(cassette_files)
     assert not offenders, "secret-shaped substring(s) found in cassettes:\n  " + "\n  ".join(
         offenders
     )
+
+
+def _scan_for_secret_patterns(paths: list[Path]) -> list[str]:
+    offenders: list[str] = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        try:
+            label = str(path.relative_to(_CASSETTE_DIR.parent.parent))
+        except ValueError:
+            label = str(path)
+        for pattern in _SECRET_PATTERNS:
+            for match in pattern.findall(text):
+                offenders.append(f"{label}: {match!r}")
+    return offenders
+
+
+def test_audit_catches_deliberately_leaky_probe(tmp_path: Path) -> None:
+    """The cassette audit must flag a deliberately-leaky probe response.
+
+    US-072 acceptance: scrubbing hooks are belt-and-suspenders only; the
+    post-write audit must independently detect a credential-shaped substring
+    in a written cassette. This test plants three probe patterns (one per
+    member of ``_SECRET_PATTERNS``) in a tmp cassette and asserts the audit
+    flags all three — never trust the regex set silently going stale.
+    """
+    probes: tuple[tuple[str, str], ...] = (
+        ("openai_probe", "sk-1234567890ABCDEFGHIJ0987654321ZYXWvutsrq"),
+        ("anthropic_probe", "sk-ant-api03-deadBeef1234567890_-ZyXwVuTsRq"),
+        ("bearer_probe", "Bearer abcdef0123456789ABCDEF0123456789xyzwvu"),
+    )
+    leaky_path = tmp_path / "leaky_probe.yaml"
+    leaky_path.write_text(
+        "interactions:\n"
+        "- response:\n"
+        "    body:\n      string: |\n"
+        + "".join(f"        {name}={value}\n" for name, value in probes)
+        + "version: 1\n",
+        encoding="utf-8",
+    )
+
+    offenders = _scan_for_secret_patterns([leaky_path])
+
+    leaked_substrings = {offender.split(": ", 1)[1].strip("'") for offender in offenders}
+    for _name, value in probes:
+        assert value in leaked_substrings, (
+            f"audit failed to flag probe {value!r} — _SECRET_PATTERNS has drifted "
+            f"out of sync with the patterns it claims to detect. Offenders: {offenders!r}"
+        )
 
 
 def test_every_provider_case_has_cassettes() -> None:
