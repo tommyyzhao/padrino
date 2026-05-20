@@ -145,6 +145,31 @@ jobs:
             web/dashboard/test-results/
           if-no-files-found: ignore
 
+  secret-audit:
+    # US-076: scan git history across all refs for credential-shaped strings
+    # (csk-, lw, sk-, sk-ant-, ghp_, gho_, populated *_API_KEY=...). Runs on
+    # every push to main and on PRs that touch any file under `.env*` /
+    # `scripts/` / the audit machinery itself or its tests. The audit log
+    # under `.padrino_audit/` is gitignored — the job only ever surfaces
+    # `<sha>\t<file-path>` pairs to the workflow log, never the matched
+    # secret value.
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' ||
+      contains(toJson(github.event.pull_request.changed_files), '.env') ||
+      contains(toJson(github.event.pull_request.changed_files), 'scripts/') ||
+      contains(toJson(github.event.pull_request.changed_files), 'audit_git_history_for_secrets.sh') ||
+      contains(toJson(github.event.pull_request.changed_files), '.github/workflows/ci.yml')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The audit walks every ref, so a shallow clone would miss
+          # historical commits on side branches.
+          fetch-depth: 0
+
+      - name: Scan git history for secret-shaped strings
+        run: bash scripts/audit_git_history_for_secrets.sh
+
   compose-smoke:
     # US-064: build the bundled Dockerfile and bring the full docker-compose
     # stack (postgres + bootstrap + api + scheduler) up against `pytest -m

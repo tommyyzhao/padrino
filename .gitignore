@@ -229,6 +229,9 @@ padrino.db
 .env
 .env.local
 
+# US-076 secret-audit findings log
+.padrino_audit/
+
 # Editor / OS
 .DS_Store
 .idea/
