@@ -44,3 +44,17 @@ Wave 3 scope (8 stories, US-071..US-078):
 Dependencies: US-073 -> US-071; US-075 -> US-074; US-077 -> US-073; US-078 -> US-071.
 
 Branch: `ralph/padrino-v3` (branched from `main` after fast-forward merge of `ralph/padrino-v2`).
+
+---
+
+## 2026-05-20T21:11 - US-071
+- Added `tests/integration/test_real_providers_full_game.py::test_real_providers_full_game`: runs the unmodified `mini7_v1` ruleset (MAX_DAYS=5, DISCUSSION_ROUNDS_PER_DAY=3) end-to-end against real Cerebras (primary) + DeepInfra (fallback) providers via `LiteLlmAdapter`. Gated by `@pytest.mark.integration` and `CEREBRAS_API_KEY` so default CI skips it.
+- Assertions: (a) the final event is exactly one `GameTerminated`, (b) `outcome.final_state.terminal_result in {"TOWN","MAFIA"}` — not DRAW, (c) parse-rate >= 70% (carries forward the post-Wave-2 gate), (d) hash-chain replays bit-for-bit clean (event_hash + prev_event_hash + sequence equal), (e) every seat in `outcome.final_state.seats` produced at least one non-NOOP / non-ABSTAIN submission event (real VOTE, MAFIA_KILL, PROTECT, or INVESTIGATE).
+- Cost cap $2.00 with the actual cost printed on success via `capsys.disabled()` so the cap can be tuned without re-running. Test does not mark `pytest.mark.flaky` (the dep isn't installed); the docstring notes real-LLM variance and asks the operator to re-run once on the rare provider-induced DRAW.
+- Files changed: `tests/integration/test_real_providers_full_game.py` (new), `ralph/prd.json` (US-071 passes -> true), `ralph/progress.txt` (this entry).
+- **Learnings for future iterations:**
+  - The runner's `GameOutcome` exposes `final_state`, `event_log`, `llm_calls` — there is NO `outcome.terminal_result` shortcut despite what the US-071 acceptance text says. Reach through `outcome.final_state.terminal_result` (a `str | None`) and `outcome.final_state.terminal_reason`. Mirror this access pattern in US-073 / US-077 / US-078.
+  - The submission-event shape in `runner.game_runner._submission_events_for` is the canonical source for "what counts as an action": NOOP emits NO event at all, ABSTAIN emits `VoteSubmitted` with `payload.is_abstain=True`, and the four real action event types are `VoteSubmitted` (is_abstain=False), `MafiaKillVoteSubmitted`, `ProtectSubmitted`, `InvestigateSubmitted`. Re-use this set in US-078's privacy audit and the US-077 evaluation report.
+  - `LiteLlmAdapter`'s constructor takes only ONE `auth_secret_ref` (Cerebras) — litellm picks up DeepInfra's key directly from `DEEPINFRA_API_KEY` in the env. If a future story needs the fallback to use a non-env secret (e.g. `file:/path/to/key`), the adapter constructor will need a second secret ref.
+  - `pytest.CaptureFixture` is the typed alias for the capsys fixture. `with capsys.disabled(): print(...)` is the idiomatic way to surface a status line from an integration test without breaking pytest's capture for the rest of the run — useful for cost reporting and future US-073 gauntlet summaries.
+---
