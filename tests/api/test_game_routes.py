@@ -60,7 +60,11 @@ async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
 async def client(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[AsyncClient]:
-    app = create_app(session_factory=session_factory, admin_token=_ADMIN_TOKEN)
+    app = create_app(
+        session_factory=session_factory,
+        admin_token=_ADMIN_TOKEN,
+        auth_required=False,
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
@@ -70,7 +74,11 @@ async def client(
 async def no_token_client(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[AsyncClient]:
-    app = create_app(session_factory=session_factory, admin_token=None)
+    app = create_app(
+        session_factory=session_factory,
+        admin_token=None,
+        auth_required=False,
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac

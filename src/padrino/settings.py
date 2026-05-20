@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     # API
     padrino_admin_token: str | None = None
 
+    # Worker count of the deployed uvicorn process (US-074). When > 1 the
+    # API factory auto-selects the Postgres-backed shared rate-limit store
+    # so per-key ceilings stay accurate across replicas. SQLite deployments
+    # always stick with the in-memory store regardless of this value
+    # because a single SQLite file is single-writer anyway.
+    padrino_api_workers: int = 1
+
     # API-key auth (US-056). When the app is built with ``auth_required=True``
     # every request must carry a valid Bearer token (or the back-compat
     # ``X-Padrino-Admin-Token`` header). Rate limits are per-key sliding

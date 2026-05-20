@@ -1,14 +1,15 @@
-"""Scoped API-key authentication with per-key rate limiting (US-056).
+"""Scoped API-key authentication with per-key rate limiting (US-056, US-074).
 
 This module centralizes the auth model the rest of ``padrino.api.*`` depends
 on. Three scopes exist: ``admin`` (full read+write), ``submitter`` (POST
 ``/ingest`` only — wired in by US-062), and ``spectator`` (read-only). The
 ``admin`` scope satisfies any required scope.
 
-Authentication is opt-in via ``create_app(auth_required=True)``. When the
-flag is off, requests pass through with a synthetic admin context so that
-existing test suites and unauthenticated dev environments keep working
-unchanged.
+Authentication is required by default (``create_app(auth_required=True)``).
+Tests and unauthenticated dev environments can opt out by passing
+``auth_required=False``, in which case requests synthesize an admin
+context. Flipping the production default to ``True`` (US-074) closes the
+last "rely on the operator to remember" footgun before public launch.
 
 Two header schemes are accepted:
 
@@ -19,10 +20,12 @@ Two header schemes are accepted:
   that have this header set the ``Deprecation`` + ``Sunset`` response
   headers via :class:`AdminTokenDeprecationMiddleware`.
 
-Rate limiting uses an in-process sliding-window counter (a deque of timestamps
-per key). The window is one minute; per-scope ceilings come from
-:class:`padrino.settings.Settings`. The clock is injectable via
-``RateLimiter(clock=...)`` so tests can pin time without sleeping.
+Rate limiting is now factored behind a :class:`RateLimitStore`
+(:mod:`padrino.api.rate_limit_store`) so the counter can be shared across
+uvicorn workers via the ``rate_limit_buckets`` table. The default store
+is in-memory and suitable for single-process / tests; multi-worker
+Postgres deployments select :class:`DatabaseRateLimitStore` automatically
+when ``Settings.padrino_api_workers > 1``.
 """
 
 from __future__ import annotations
@@ -31,7 +34,6 @@ import hmac
 import secrets
 import time
 import uuid
-from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -41,6 +43,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.deps import get_session
+from padrino.api.rate_limit_store import InMemoryRateLimitStore, RateLimitStore
 from padrino.db.repositories import api_keys as api_keys_repo
 from padrino.settings import Settings, get_settings
 
@@ -82,33 +85,34 @@ class ApiKeyContext:
 
 @dataclass
 class RateLimiter:
-    """In-process sliding-window rate limiter."""
+    """Fixed-window rate limiter wrapping an injected :class:`RateLimitStore`.
+
+    The store is the source of truth for the per-key counter; the limiter
+    contributes the wall-clock seam and the per-minute ceiling. Tests pin
+    the clock with ``RateLimiter(clock=fake_clock)``; production wires the
+    auto-selected store via :func:`padrino.api.app.create_app`.
+    """
 
     clock: Callable[[], float] = time.monotonic
     window_seconds: float = 60.0
-    _events: dict[uuid.UUID, deque[float]] = field(default_factory=dict)
+    store: RateLimitStore = field(default_factory=InMemoryRateLimitStore)
 
-    def hit(self, key_id: uuid.UUID, *, limit_per_minute: int) -> tuple[bool, float]:
-        """Record one hit. Return ``(allowed, retry_after_seconds)``.
-
-        ``retry_after_seconds`` is ``0.0`` when the request is allowed; it is
-        the number of seconds until the oldest event drops out of the window
-        when the limit is exhausted.
-        """
+    async def hit(self, key_hash: str, *, limit_per_minute: int) -> tuple[bool, float]:
+        """Record one hit. Return ``(allowed, retry_after_seconds)``."""
         now = self.clock()
-        window_start = now - self.window_seconds
-        bucket = self._events.setdefault(key_id, deque())
-        while bucket and bucket[0] <= window_start:
-            bucket.popleft()
-        if len(bucket) >= limit_per_minute:
-            oldest = bucket[0]
-            retry_after = max(0.0, oldest + self.window_seconds - now)
-            return False, retry_after
-        bucket.append(now)
-        return True, 0.0
+        decision = await self.store.record_request(
+            key_hash,
+            now=now,
+            limit_per_minute=limit_per_minute,
+            window_seconds=self.window_seconds,
+        )
+        return decision.allowed, decision.retry_after_seconds
 
     def reset(self) -> None:
-        self._events.clear()
+        """Clear any in-memory state (no-op for non-memory stores)."""
+        reset = getattr(self.store, "reset", None)
+        if callable(reset):
+            reset()
 
 
 def _limit_for_scopes(scopes: frozenset[str], settings: Settings) -> int:
@@ -200,7 +204,7 @@ async def get_auth_context(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="no_valid_scope",
             )
-        allowed, retry_after = limiter.hit(record.id, limit_per_minute=ceiling)
+        allowed, retry_after = await limiter.hit(record.key_hash, limit_per_minute=ceiling)
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,

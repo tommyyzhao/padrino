@@ -305,6 +305,14 @@ class SchedulerHeartbeat(Base):
     beat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class RateLimitBucket(Base):
+    __tablename__ = "rate_limit_buckets"
+
+    key_hash: Mapped[str] = mapped_column(String, primary_key=True)
+    window_start: Mapped[int] = mapped_column(Integer, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class RatingEvent(Base):
     __tablename__ = "rating_events"
 
@@ -339,6 +347,7 @@ __all__ = [
     "ModelConfig",
     "ModelProvider",
     "PromptVersion",
+    "RateLimitBucket",
     "Rating",
     "RatingEvent",
     "SchedulerHeartbeat",

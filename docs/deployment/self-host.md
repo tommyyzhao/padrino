@@ -147,6 +147,35 @@ The scheduler service talks to the api container by service name
 (`http://api:8000`), so the remap only affects the host-facing port —
 no internal config changes needed.
 
+## API authentication and rate limits
+
+As of US-074 the API factory defaults to `auth_required=True` — every
+request to a scoped route needs a valid `Authorization: Bearer pk_…`
+header. The legacy `X-Padrino-Admin-Token` shim still works and stamps a
+`Deprecation` + `Sunset` header on responses. Unauthenticated routes
+(`/healthz`, `/readyz`, `/metrics` when `padrino_metrics_require_auth=False`)
+are unaffected.
+
+To opt out for a single-user laptop deployment, run with
+`auth_required=False` by editing your launcher (or stick with the bare
+`uv run padrino serve` path and mint an admin key via `padrino bootstrap
+--with-admin-key`).
+
+Per-key rate limiting (US-056) is backed by a `RateLimitStore` that
+auto-selects based on your deployment topology:
+
+| Topology                                  | Store                       |
+|-------------------------------------------|-----------------------------|
+| SQLite, any worker count                  | `InMemoryRateLimitStore`    |
+| Postgres + `PADRINO_API_WORKERS == 1`     | `InMemoryRateLimitStore`    |
+| Postgres + `PADRINO_API_WORKERS > 1`      | `DatabaseRateLimitStore`    |
+
+`DatabaseRateLimitStore` persists per-window counters to the
+`rate_limit_buckets` table (migration 0012) so multiple uvicorn workers
+share a single ceiling per key. If you scale `uvicorn --workers` past
+one, set `PADRINO_API_WORKERS` to match so the auto-selection picks the
+shared store.
+
 ## Running without Docker
 
 Padrino works fine with bare `uv run padrino` against SQLite, which is

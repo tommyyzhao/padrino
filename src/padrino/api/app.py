@@ -18,6 +18,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.auth import RateLimiter, admin_token_deprecation_middleware, require_read
+from padrino.api.rate_limit_store import (
+    DatabaseRateLimitStore,
+    InMemoryRateLimitStore,
+    RateLimitStore,
+)
 from padrino.api.routes.admin import router as admin_router
 from padrino.api.routes.admin_keys import router as admin_keys_router
 from padrino.api.routes.games import router as games_router
@@ -31,7 +36,7 @@ from padrino.observability.metrics import (
     api_requests_total,
     render_prometheus_text,
 )
-from padrino.settings import get_settings
+from padrino.settings import Settings, get_settings
 
 _UNSET: Any = object()
 
@@ -59,12 +64,33 @@ async def metrics_middleware(
     return response
 
 
+def _select_rate_limit_store(
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    settings: Settings,
+) -> RateLimitStore:
+    """Auto-select the per-key rate-limit store backing.
+
+    Multi-worker Postgres deployments need a shared counter so per-key
+    ceilings stay accurate across replicas; everything else (single-worker,
+    SQLite, tests) keeps the in-process default.
+    """
+    if (
+        session_factory is not None
+        and settings.padrino_api_workers > 1
+        and settings.padrino_db_url.startswith("postgresql")
+    ):
+        return DatabaseRateLimitStore(session_factory=session_factory)
+    return InMemoryRateLimitStore()
+
+
 def create_app(
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     admin_token: str | None | Any = _UNSET,
-    auth_required: bool = False,
+    auth_required: bool = True,
     rate_limiter: RateLimiter | None = None,
+    rate_limit_store: RateLimitStore | None = None,
     metrics_require_auth: bool | None = None,
     cors_allow_origins: Sequence[str] | None = None,
 ) -> FastAPI:
@@ -79,13 +105,20 @@ def create_app(
     legacy ``X-Padrino-Admin-Token`` back-compat shim (US-056). Defaults
     (when omitted) to the value from :func:`padrino.settings.get_settings`.
 
-    ``auth_required`` (US-056) gates whether requests without a valid Bearer
-    token are rejected with 401. Existing dev deployments and the legacy
-    test suites run with ``False`` (the default) so unauthenticated
-    requests synthesize an admin context. New deployments flip the bit on.
+    ``auth_required`` (US-056, US-074) gates whether requests without a
+    valid Bearer token are rejected with 401. ``True`` is the default as
+    of US-074; tests and unauthenticated dev environments opt out by
+    passing ``False`` (in which case requests synthesize an admin
+    context).
 
     ``rate_limiter`` injects a custom :class:`padrino.api.auth.RateLimiter`
     so tests can pin the clock without sleeping.
+
+    ``rate_limit_store`` (US-074) injects a custom backing store for the
+    per-key counter; when omitted the factory auto-selects
+    :class:`DatabaseRateLimitStore` for multi-worker Postgres deployments
+    (``Settings.padrino_api_workers > 1`` and the DB URL is Postgres) and
+    :class:`InMemoryRateLimitStore` everywhere else.
 
     ``metrics_require_auth`` (US-059) gates the ``GET /metrics`` endpoint
     behind the spectator scope. Defaults to
@@ -111,7 +144,18 @@ def create_app(
         app.state.admin_token = admin_token
     app.state.auth_required = auth_required
     app.state.auth_settings = settings
-    app.state.rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter()
+    if rate_limiter is not None:
+        app.state.rate_limiter = rate_limiter
+    else:
+        store = (
+            rate_limit_store
+            if rate_limit_store is not None
+            else _select_rate_limit_store(
+                session_factory=session_factory,
+                settings=settings,
+            )
+        )
+        app.state.rate_limiter = RateLimiter(store=store)
     require_metrics_auth = (
         settings.padrino_metrics_require_auth
         if metrics_require_auth is None

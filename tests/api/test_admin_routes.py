@@ -46,7 +46,7 @@ async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
 async def client(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[AsyncClient]:
-    app = create_app(session_factory=session_factory)
+    app = create_app(session_factory=session_factory, auth_required=False)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac

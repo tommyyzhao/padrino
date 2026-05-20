@@ -40,6 +40,7 @@ EXPECTED_TABLES = {
     "api_keys",
     "scheduler_heartbeats",
     "ingested_games",
+    "rate_limit_buckets",
 }
 
 

@@ -347,6 +347,37 @@ async def test_auth_disabled_grants_synthetic_admin(
     assert response.status_code == 200
 
 
+async def test_auth_required_is_default_on_every_protected_route(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """US-074: ``create_app(...)`` defaults to ``auth_required=True``.
+
+    Anonymous requests to admin write routes and spectator read routes
+    must both 401 with the canonical ``authentication_required`` detail,
+    not just the write surface. Public unauthenticated routes
+    (``/healthz``, ``/readyz``, ``/metrics``) stay open.
+    """
+    app = create_app(session_factory=session_factory)
+    assert app.state.auth_required is True
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        protected_paths = (
+            ("GET", "/model-providers"),
+            ("GET", "/model-configs"),
+            ("GET", "/prompt-versions"),
+            ("GET", "/agent-builds"),
+            ("GET", "/gauntlets"),
+            ("GET", "/admin/keys"),
+        )
+        for method, path in protected_paths:
+            response = await ac.request(method, path)
+            assert response.status_code == 401, (method, path, response.text)
+            assert response.json()["detail"] == "authentication_required"
+        # ``/healthz`` stays anonymous for liveness probes.
+        healthz = await ac.get("/healthz")
+        assert healthz.status_code == 200
+
+
 async def test_hashed_comparison_uses_constant_time(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -368,12 +399,12 @@ async def test_hashed_comparison_uses_constant_time(
 async def test_rate_limiter_unit_behaviour() -> None:
     clock = _FakeClock()
     limiter = RateLimiter(clock=clock)
-    key = uuid.uuid4()
-    allowed1, _ = limiter.hit(key, limit_per_minute=2)
-    allowed2, _ = limiter.hit(key, limit_per_minute=2)
-    allowed3, retry_after = limiter.hit(key, limit_per_minute=2)
+    key_hash = "abcd" * 16
+    allowed1, _ = await limiter.hit(key_hash, limit_per_minute=2)
+    allowed2, _ = await limiter.hit(key_hash, limit_per_minute=2)
+    allowed3, retry_after = await limiter.hit(key_hash, limit_per_minute=2)
     assert (allowed1, allowed2, allowed3) == (True, True, False)
     assert 0 < retry_after <= 60
     clock.now += 61.0
-    allowed4, _ = limiter.hit(key, limit_per_minute=2)
+    allowed4, _ = await limiter.hit(key_hash, limit_per_minute=2)
     assert allowed4 is True

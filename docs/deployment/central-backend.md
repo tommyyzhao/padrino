@@ -94,6 +94,35 @@ With the flag off (the default), public reads still require a spectator-
 or admin-scope api key — appropriate for an "early access" hosted backend
 where you want to gate by invitation.
 
+### Step 3.5 — pick the rate-limit store for your replica count
+
+As of US-074, `padrino.api.app.create_app(...)` ships with
+`auth_required=True` by default — anonymous submitters are 401'd instead of
+silently authenticating as admin. The per-key rate limiter (US-056) now
+factors its counter behind a `RateLimitStore`:
+
+| Topology                                  | Auto-selected store           |
+|-------------------------------------------|-------------------------------|
+| Postgres + `PADRINO_API_WORKERS == 1`     | `InMemoryRateLimitStore`      |
+| Postgres + `PADRINO_API_WORKERS > 1`      | `DatabaseRateLimitStore`      |
+| Any SQLite deployment                     | `InMemoryRateLimitStore`      |
+
+The `DatabaseRateLimitStore` writes to the `rate_limit_buckets` table
+(migration 0012) so multiple uvicorn workers / replicas share a single
+ceiling per key. **Set `PADRINO_API_WORKERS` to match your replica
+count** (across all containers, not just per-container workers) when you
+scale past one — otherwise each replica enforces its own ceiling and the
+effective limit silently multiplies.
+
+```
+# Two-replica deployment, default uvicorn workers (1) per replica.
+PADRINO_API_WORKERS=2
+```
+
+The shared bucket eviction runs on every write, so the table stays
+bounded to one row per active key per window. If you need to flush
+manually, `TRUNCATE rate_limit_buckets` is safe.
+
 ### Step 4 — start the API container
 
 The official Padrino image (built from the repo `Dockerfile`, US-064) runs
