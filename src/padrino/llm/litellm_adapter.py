@@ -267,8 +267,31 @@ def _extract_text(response: Any) -> str:
         return ""
     content = getattr(message, "content", None)
     if isinstance(content, str):
-        return content
+        return _strip_code_fence(content)
     return ""
+
+
+def _strip_code_fence(text: str) -> str:
+    """Strip a leading/trailing markdown code fence around a JSON payload.
+
+    Many chat-tuned models wrap JSON output in ```json ... ``` (or plain
+    ``` ... ```). The pure parser expects raw JSON, so the impure adapter
+    layer normalizes here before handing text on. If no fence is present
+    the input is returned unchanged.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return text
+    # Drop opening fence (``` or ```json / ```JSON etc.) up to the first newline.
+    newline = stripped.find("\n")
+    if newline == -1:
+        return text
+    body = stripped[newline + 1 :]
+    # Drop trailing fence.
+    end = body.rfind("```")
+    if end == -1:
+        return text
+    return body[:end].strip()
 
 
 def _extract_input_tokens(response: Any) -> int | None:

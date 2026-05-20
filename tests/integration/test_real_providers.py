@@ -40,7 +40,11 @@ from padrino.runner.game_runner import GameConfig, run_game
 from padrino.settings import Settings
 
 _DAY1_RULESET_ID = "mini7_v1_day1_test"
-_COST_CAP_USD = 0.10
+# Cap sized for ~25 calls at ~$0.005 each with valid-JSON responses
+# (longer completions than the truncated fallback path). Bumped from
+# $0.10 after the markdown-fence-stripping fix unblocked full-length
+# completions.
+_COST_CAP_USD = 0.20
 _FAILURE_STATUSES: frozenset[AdapterStatus] = frozenset(
     {"provider_error", "primary_failed", "both_failed", "fallback_ok"}
 )
@@ -117,6 +121,24 @@ async def test_real_providers_one_game_day(monkeypatch: pytest.MonkeyPatch) -> N
             f"call #{index} must have a non-empty raw_response or a failure-indicating "
             f"status; got status={call.status!r} raw_len={len(call.raw_response)}"
         )
+
+    # Real gameplay quality gate: at least 70% of provider responses must parse
+    # cleanly into a valid AgentResponse. Falling below this threshold means
+    # the runner is silently coercing most calls to safe-fallback (NOOP /
+    # ABSTAIN) and the gauntlet stops measuring model behavior. The bug this
+    # gate prevents was a markdown ```json ... ``` wrap that caused 100% of
+    # Cerebras responses to fail parse_agent_response while the rest of this
+    # test still passed.
+    statuses = [call.status for call in outcome.llm_calls]
+    ok_count = sum(1 for s in statuses if s == "ok")
+    invalid_json_count = sum(1 for s in statuses if s == "invalid_json")
+    parse_rate = ok_count / len(outcome.llm_calls)
+    assert parse_rate >= 0.7, (
+        f"only {ok_count}/{len(outcome.llm_calls)} ({parse_rate:.0%}) provider "
+        f"responses parsed as valid AgentResponse — the rest fell through to "
+        f"safe-fallback coercion. invalid_json={invalid_json_count}. "
+        f"Status histogram: {sorted(set(statuses))}"
+    )
 
     events = outcome.event_log.events
     replayed = replay_event_log(events)

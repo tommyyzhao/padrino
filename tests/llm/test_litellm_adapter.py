@@ -279,6 +279,48 @@ def test_invalid_json_does_not_trigger_fallback() -> None:
     assert result.raw_response == "this is not JSON"
 
 
+@pytest.mark.parametrize(
+    "fenced_prefix,fenced_suffix",
+    [
+        ("```json\n", "\n```"),
+        ("```JSON\n", "\n```"),
+        ("```\n", "\n```"),
+        ("  ```json\n", "\n```  "),  # surrounding whitespace
+    ],
+)
+def test_markdown_code_fence_is_stripped_before_parse(
+    fenced_prefix: str, fenced_suffix: str
+) -> None:
+    canned_action = Action(type=ActionType.NOOP)
+    inner = _valid_response_json(canned_action)
+    fenced = f"{fenced_prefix}{inner}{fenced_suffix}"
+    response = _fake_completion(content=fenced)
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.NIGHT_0_MAFIA_INTRO, day=0, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
+        adapter = _build_adapter()
+        result = asyncio.run(adapter.complete(obs))
+
+    assert result.status == "ok", (
+        f"expected fenced JSON to parse cleanly; got status={result.status} "
+        f"raw={result.raw_response!r}"
+    )
+    assert isinstance(result.parsed_response, AgentResponse)
+    assert result.parsed_response.action == canned_action
+
+
+def test_unfenced_text_is_passed_through_unchanged() -> None:
+    response = _fake_completion(content="this is not JSON")
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
+        adapter = _build_adapter()
+        result = asyncio.run(adapter.complete(obs))
+
+    assert result.status == "invalid_json"
+    assert result.raw_response == "this is not JSON"
+
+
 def test_schema_violation_does_not_trigger_fallback() -> None:
     bad = json.dumps({"public_message": "hi"})  # missing required fields
     response = _fake_completion(content=bad)
