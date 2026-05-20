@@ -136,3 +136,54 @@ export interface PublicLeaderboardResponse {
 }
 
 export type FactionTab = 'global' | 'town' | 'mafia';
+
+// Mirrors padrino.gauntlets.evaluation.CIBand.
+export interface CIBand {
+  point: number;
+  lower: number;
+  upper: number;
+}
+
+export interface FactionWinRate {
+  faction: string;
+  wins: number;
+  games: number;
+  rate: CIBand;
+}
+
+export interface RoleFamilyBreakdown {
+  role_family: string;
+  games: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  win_rate: CIBand;
+}
+
+export interface RatingDelta {
+  agent_build_id: string;
+  scope_type: string;
+  scope_value: string;
+  games_in_gauntlet: number;
+  pre_mu: number;
+  pre_sigma: number;
+  post_mu: number;
+  post_sigma: number;
+  delta_mu: number;
+  delta_sigma: number;
+}
+
+export interface GauntletReport {
+  gauntlet_id: string;
+  status: string;
+  ruleset_id: string;
+  clone_count: number;
+  games_total: number;
+  games_completed: number;
+  faction_win_counts: Record<string, number>;
+  faction_win_rates: FactionWinRate[];
+  role_family_breakdown: RoleFamilyBreakdown[];
+  average_days_to_terminal: number;
+  average_actions_per_seat: number;
+  rating_deltas: RatingDelta[];
+}

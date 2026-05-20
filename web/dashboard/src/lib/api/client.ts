@@ -3,6 +3,7 @@ import type {
   GameDetailResponse,
   GameListEntry,
   GauntletListEntry,
+  GauntletReport,
   PublicEventsResponse,
   PublicGameResponse,
   PublicLeaderboardResponse,
@@ -106,6 +107,14 @@ export class PadrinoClient {
     params: { limit?: number; cursor?: string | null } = {}
   ): Promise<PublicEventsResponse> {
     return this.request(`/public/games/${encodeURIComponent(gameId)}/events`, params);
+  }
+
+  publicGauntletReport(gauntletId: string): Promise<GauntletReport> {
+    return this.request(`/public/gauntlets/${encodeURIComponent(gauntletId)}/report`);
+  }
+
+  getGauntletReport(gauntletId: string): Promise<GauntletReport> {
+    return this.request(`/gauntlets/${encodeURIComponent(gauntletId)}/report`);
   }
 
   // ---- admin / read-scoped surface (requires `auth_required=False` or a spectator key)

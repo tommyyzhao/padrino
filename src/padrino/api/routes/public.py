@@ -50,6 +50,7 @@ from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
 from padrino.db.models import ApiKey, IngestedGame
 from padrino.db.repositories import ingested_games as ingested_games_repo
 from padrino.db.repositories import leagues as leagues_repo
+from padrino.gauntlets.evaluation import evaluate_gauntlet, redact_for_public
 from padrino.ratings.model_rollup import (
     detail_for_model,
     rollup_by_model,
@@ -636,6 +637,28 @@ async def public_model_detail(
         ],
         recent_game_ids=list(detail.recent_game_ids),
     )
+
+
+@router.get("/public/gauntlets/{gauntlet_id}/report")
+async def public_gauntlet_report(
+    gauntlet_id: uuid.UUID,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Return a gauntlet evaluation report with model-identity columns scrubbed.
+
+    Matches the privacy posture of the model-identity-free public leaderboard:
+    agent performance keyed only by ``agent_build_id``, never by provider /
+    model_name / display_name. The full identity-bearing report is available
+    on the admin-scoped ``GET /gauntlets/{id}/report`` route.
+    """
+    report = await evaluate_gauntlet(gauntlet_id, session)
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"gauntlet {gauntlet_id} not found",
+        )
+    return redact_for_public(report)
 
 
 __all__ = [

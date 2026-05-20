@@ -48,6 +48,7 @@ from padrino.db.repositories import (
     prompt_versions as prompt_versions_repo,
 )
 from padrino.gauntlets.completion import diagnostics_for_games
+from padrino.gauntlets.evaluation import GauntletReport, evaluate_gauntlet
 from padrino.gauntlets.scheduler import (
     MAX_CLONE_COUNT,
     MIN_CLONE_COUNT,
@@ -308,6 +309,25 @@ async def get_gauntlet(
             average_public_message_chars=diagnostics.average_public_message_chars,
         ),
     )
+
+
+@router.get(
+    "/gauntlets/{gauntlet_id}/report",
+    response_model=GauntletReport,
+    dependencies=[Depends(require_admin)],
+)
+async def get_gauntlet_report(
+    gauntlet_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> GauntletReport:
+    """Return the evaluation report for a gauntlet (admin-scoped, full identity)."""
+    report = await evaluate_gauntlet(gauntlet_id, session)
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"gauntlet {gauntlet_id} not found",
+        )
+    return report
 
 
 __all__ = [

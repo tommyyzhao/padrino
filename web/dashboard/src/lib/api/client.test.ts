@@ -90,6 +90,22 @@ describe('PadrinoClient', () => {
     await client.getGame('with/slash');
     expect(fetchImpl.mock.calls[0][0]).toBe('http://api/games/with%2Fslash');
   });
+
+  it('publicGauntletReport hits the redacted public endpoint', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ gauntlet_id: 'g1' }));
+    const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
+    await client.publicGauntletReport('g1');
+    const parsed = new URL(fetchImpl.mock.calls[0][0]);
+    expect(parsed.pathname).toBe('/public/gauntlets/g1/report');
+  });
+
+  it('getGauntletReport hits the admin-scoped endpoint', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ gauntlet_id: 'g1' }));
+    const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
+    await client.getGauntletReport('g1');
+    const parsed = new URL(fetchImpl.mock.calls[0][0]);
+    expect(parsed.pathname).toBe('/gauntlets/g1/report');
+  });
 });
 
 describe('session storage', () => {

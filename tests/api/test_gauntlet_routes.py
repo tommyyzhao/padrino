@@ -371,3 +371,84 @@ async def test_get_gauntlet_returns_status_games_and_diagnostics(client: AsyncCl
 async def test_get_gauntlet_not_found(client: AsyncClient) -> None:
     response = await client.get(f"/gauntlets/{uuid.uuid4()}")
     assert response.status_code == 404
+
+
+async def test_get_gauntlet_report_admin_route_returns_shape(client: AsyncClient) -> None:
+    """The admin report route returns the structured GauntletReport for a known gauntlet."""
+    prompt_id, roster = await _seed_world(client)
+    league_id = await _create_league(client)
+    created = await client.post(
+        "/gauntlets",
+        json={
+            "league_id": league_id,
+            "ruleset_id": mini7_v1.RULESET_ID,
+            "prompt_version_id": prompt_id,
+            "clone_count": 2,
+            "gauntlet_seed": "report" * 10 + "abcd",
+            "roster": roster,
+        },
+    )
+    assert created.status_code == 202, created.text
+    gauntlet_id = created.json()["gauntlet_id"]
+
+    response = await client.get(f"/gauntlets/{gauntlet_id}/report")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Fresh gauntlet — no games completed yet, but the shape is still well-formed.
+    assert body["gauntlet_id"] == gauntlet_id
+    assert body["games_total"] == 2
+    assert body["games_completed"] == 0
+    assert body["clone_count"] == 2
+    assert body["ruleset_id"] == mini7_v1.RULESET_ID
+    assert body["faction_win_counts"] == {"TOWN": 0, "MAFIA": 0, "DRAW": 0}
+    # Faction win rates always emit three entries (TOWN, MAFIA, DRAW).
+    factions = {entry["faction"] for entry in body["faction_win_rates"]}
+    assert factions == {"TOWN", "MAFIA", "DRAW"}
+    # With zero games the Wilson CI degenerates to the full simplex [0, 1].
+    for entry in body["faction_win_rates"]:
+        assert entry["rate"]["lower"] == 0.0
+        assert entry["rate"]["upper"] == 1.0
+    assert body["average_days_to_terminal"] == 0.0
+    assert body["average_actions_per_seat"] == 0.0
+    assert body["rating_deltas"] == []
+
+
+async def test_get_gauntlet_report_admin_route_404_unknown(client: AsyncClient) -> None:
+    response = await client.get(f"/gauntlets/{uuid.uuid4()}/report")
+    assert response.status_code == 404
+
+
+async def test_public_gauntlet_report_route_redacts_identity(client: AsyncClient) -> None:
+    """The public report route never surfaces model_provider / model_name / display_name."""
+    prompt_id, roster = await _seed_world(client)
+    league_id = await _create_league(client)
+    created = await client.post(
+        "/gauntlets",
+        json={
+            "league_id": league_id,
+            "ruleset_id": mini7_v1.RULESET_ID,
+            "prompt_version_id": prompt_id,
+            "clone_count": 2,
+            "gauntlet_seed": "public" * 10 + "abcd",
+            "roster": roster,
+        },
+    )
+    assert created.status_code == 202, created.text
+    gauntlet_id = created.json()["gauntlet_id"]
+
+    response = await client.get(f"/public/gauntlets/{gauntlet_id}/report")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["gauntlet_id"] == gauntlet_id
+    # No rating events yet, so the deltas list is empty — but the redaction
+    # still applies: confirm no model-identity keys exist anywhere in the
+    # serialized payload.
+    forbidden = {"model_provider", "model_name", "model_version", "display_name", "provider"}
+    serialized = response.text
+    for key in forbidden:
+        assert f'"{key}"' not in serialized
+
+
+async def test_public_gauntlet_report_route_404_unknown(client: AsyncClient) -> None:
+    response = await client.get(f"/public/gauntlets/{uuid.uuid4()}/report")
+    assert response.status_code == 404
