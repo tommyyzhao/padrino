@@ -26,6 +26,8 @@ EVENT_SCHEDULER_GAUNTLET_COMPLETED: Final[str] = "scheduler.gauntlet.completed"
 EVENT_SCHEDULER_HEARTBEAT: Final[str] = "scheduler.heartbeat"
 EVENT_SCHEDULER_STALE_RESET: Final[str] = "scheduler.stale_reset"
 EVENT_SCHEDULER_WORKER_HEARTBEAT: Final[str] = "scheduler.worker.heartbeat"
+EVENT_PRIVACY_AUDIT_COMPLETED: Final[str] = "privacy.audit.completed"
+EVENT_PRIVACY_AUDIT_LEAK_DETECTED: Final[str] = "privacy.audit.leak_detected"
 
 
 __all__ = [
@@ -39,6 +41,8 @@ __all__ = [
     "EVENT_LLM_CALL_TIMEOUT",
     "EVENT_PHASE_RESOLVED",
     "EVENT_PHASE_STARTED",
+    "EVENT_PRIVACY_AUDIT_COMPLETED",
+    "EVENT_PRIVACY_AUDIT_LEAK_DETECTED",
     "EVENT_RATING_UPDATED",
     "EVENT_SCHEDULER_GAUNTLET_COMPLETED",
     "EVENT_SCHEDULER_GAUNTLET_STARTED",

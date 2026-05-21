@@ -24,6 +24,7 @@ from padrino.core.engine.replay import replay_event_log
 from padrino.core.rulesets import mini7_v1
 from padrino.llm.adapter import AdapterStatus, AgentBuild, RoutingPolicy
 from padrino.llm.litellm_adapter import LiteLlmAdapter
+from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.runner.game_runner import GameConfig, run_game
 from padrino.settings import Settings
 
@@ -166,6 +167,18 @@ async def test_real_providers_full_game(capsys: pytest.CaptureFixture[str]) -> N
     assert not missing, (
         f"every seat must produce at least one non-NOOP / non-ABSTAIN action "
         f"somewhere in the log; missing seats: {sorted(missing)}"
+    )
+
+    # (f) US-078 privacy audit on the realized event log: every per-seat
+    # observation must be free of cross-seat role / faction / model-identity /
+    # ratings / clone-index leaks. ANY finding fails the test with the field
+    # path so the regression is traceable without re-leaking the value.
+    audit_report = audit_ranked_observations(outcome.event_log, outcome.seat_assignments)
+    assert audit_report.finding_count == 0, (
+        "ranked-mode privacy audit found cross-seat leaks: "
+        + ", ".join(
+            f"{f.field_path}(observed_by={f.seat_observed_by})" for f in audit_report.findings
+        )
     )
 
     # Cost cap: print actual cost on success so the cap can be tuned.

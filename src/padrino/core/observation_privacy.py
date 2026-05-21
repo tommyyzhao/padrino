@@ -33,13 +33,32 @@ Pure function. No DB / LLM / clock / network access.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Final
+
+from pydantic import BaseModel, ConfigDict
 
 from padrino.core.observations import Observation
 
 
 class RankedPrivacyViolation(ValueError):
     """Raised when a ranked observation contains forbidden information."""
+
+
+class LeakFinding(BaseModel):
+    """One privacy-audit finding from :func:`audit_observation_log_for_seat`.
+
+    ``leaked_value_redacted`` carries a short type / shape label (never the
+    raw value) so the audit log can be safely shipped to operators without
+    re-leaking the very secret the audit is trying to detect.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    field_path: str
+    leaked_value_redacted: str
+    seat_observed_by: str
+    seat_owning_the_leak: str | None
 
 
 FORBIDDEN_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
@@ -113,10 +132,118 @@ def _check_text(text: str, path: str) -> None:
             raise RankedPrivacyViolation(f"forbidden ranked token {token!r} found in {path}")
 
 
+def audit_observation_log_for_seat(
+    observations: Sequence[Observation],
+    seat_id: str,
+) -> list[LeakFinding]:
+    """Audit every observation rendered to ``seat_id`` and return all findings.
+
+    Mirrors :func:`assert_ranked_observation_safe` semantically but collects
+    every violation instead of raising on the first. The two functions share
+    :data:`FORBIDDEN_PAYLOAD_KEYS`, :data:`FORBIDDEN_MEMORY_TOKENS`, and
+    :data:`GAME_ID_KEYS` so the runtime guard and the offline auditor can
+    never drift out of sync.
+
+    Each :class:`LeakFinding` carries a ``field_path`` (the dotted access path
+    into the observation), a ``leaked_value_redacted`` shape label (type name
+    + length, never the raw value), the seat that received the leak
+    (``seat_observed_by`` = ``seat_id``), and — when the leak lives inside an
+    event payload — the ``actor_player_id`` of that event as
+    ``seat_owning_the_leak`` (``None`` for memory leaks).
+
+    Pure function. Returns an empty list on a clean observation log.
+    """
+    findings: list[LeakFinding] = []
+    for obs in observations:
+        own_game_id = obs.game_public_id
+        for entry in obs.public_events:
+            _collect_payload(
+                entry.payload,
+                own_game_id,
+                f"public_events[seq={entry.sequence}].payload",
+                seat_id,
+                entry.actor_player_id,
+                findings,
+            )
+        for entry in obs.private_events:
+            _collect_payload(
+                entry.payload,
+                own_game_id,
+                f"private_events[seq={entry.sequence}].payload",
+                seat_id,
+                entry.actor_player_id,
+                findings,
+            )
+        _collect_memory(obs.your_private_memory, seat_id, findings)
+    return findings
+
+
+def _collect_payload(
+    value: Any,
+    own_game_id: str,
+    path: str,
+    seat_observed_by: str,
+    actor_player_id: str | None,
+    findings: list[LeakFinding],
+) -> None:
+    if isinstance(value, dict):
+        for key, sub_value in value.items():
+            sub_path = f"{path}.{key}"
+            is_forbidden_key = key in FORBIDDEN_PAYLOAD_KEYS
+            is_foreign_game_ref = (
+                key in GAME_ID_KEYS and isinstance(sub_value, str) and sub_value != own_game_id
+            )
+            if is_forbidden_key or is_foreign_game_ref:
+                findings.append(
+                    LeakFinding(
+                        field_path=sub_path,
+                        leaked_value_redacted=_redact(sub_value),
+                        seat_observed_by=seat_observed_by,
+                        seat_owning_the_leak=actor_player_id,
+                    )
+                )
+            _collect_payload(
+                sub_value, own_game_id, sub_path, seat_observed_by, actor_player_id, findings
+            )
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            _collect_payload(
+                item,
+                own_game_id,
+                f"{path}[{index}]",
+                seat_observed_by,
+                actor_player_id,
+                findings,
+            )
+
+
+def _collect_memory(text: str, seat_id: str, findings: list[LeakFinding]) -> None:
+    lowered = text.lower()
+    for token in FORBIDDEN_MEMORY_TOKENS:
+        if token in lowered:
+            findings.append(
+                LeakFinding(
+                    field_path="your_private_memory",
+                    leaked_value_redacted=f"<str:contains:{token}>",
+                    seat_observed_by=seat_id,
+                    seat_owning_the_leak=None,
+                )
+            )
+
+
+def _redact(value: Any) -> str:
+    type_name = type(value).__name__
+    if isinstance(value, str | list | tuple | dict | bytes):
+        return f"<{type_name}:len={len(value)}>"
+    return f"<{type_name}>"
+
+
 __all__ = [
     "FORBIDDEN_MEMORY_TOKENS",
     "FORBIDDEN_PAYLOAD_KEYS",
     "GAME_ID_KEYS",
+    "LeakFinding",
     "RankedPrivacyViolation",
     "assert_ranked_observation_safe",
+    "audit_observation_log_for_seat",
 ]

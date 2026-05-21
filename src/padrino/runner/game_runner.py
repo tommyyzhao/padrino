@@ -59,9 +59,12 @@ from padrino.observability.events import (
     EVENT_GAME_STARTED,
     EVENT_PHASE_RESOLVED,
     EVENT_PHASE_STARTED,
+    EVENT_PRIVACY_AUDIT_COMPLETED,
+    EVENT_PRIVACY_AUDIT_LEAK_DETECTED,
     EVENT_RATING_UPDATED,
 )
 from padrino.observability.metrics import record_game_completed
+from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
 from padrino.ratings.openskill_service import GameResult, update_ratings_for_game
 from padrino.runner.tick import run_tick
@@ -120,6 +123,16 @@ class GameOutcome:
     final_state: GameState
     event_log: EventLog
     llm_calls: tuple[AdapterResult, ...]
+
+    @property
+    def seat_assignments(self) -> tuple[Seat, ...]:
+        """Convenience alias for ``final_state.seats`` — the post-replay seat roster.
+
+        Useful for callers that want to pass the seat assignments into the
+        US-078 privacy auditor (``audit_ranked_observations``) without
+        reaching through ``final_state``.
+        """
+        return self.final_state.seats
 
 
 class _RecordingAdapter:
@@ -774,6 +787,17 @@ async def run_game(
             outcome=state.terminal_result or "UNKNOWN",
             ruleset=config.ruleset_id,
         )
+
+        audit_report = audit_ranked_observations(event_log, state.seats)
+        _logger.info(
+            EVENT_PRIVACY_AUDIT_COMPLETED,
+            finding_count=audit_report.finding_count,
+        )
+        if audit_report.finding_count > 0:
+            _logger.info(
+                EVENT_PRIVACY_AUDIT_LEAK_DETECTED,
+                finding_count=audit_report.finding_count,
+            )
     finally:
         structlog.contextvars.unbind_contextvars(*game_ctx_keys, "phase_id")
 

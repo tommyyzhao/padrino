@@ -28,6 +28,8 @@ from padrino.observability.events import (
     EVENT_LLM_CALL_STARTED,
     EVENT_PHASE_RESOLVED,
     EVENT_PHASE_STARTED,
+    EVENT_PRIVACY_AUDIT_COMPLETED,
+    EVENT_PRIVACY_AUDIT_LEAK_DETECTED,
 )
 from padrino.runner.game_runner import GameConfig, run_game
 
@@ -113,6 +115,15 @@ async def test_runner_emits_correlated_lifecycle_events(
     assert len(game_completed) == 1
     assert game_completed[0]["game_id"] == "G-OBS-1"
     assert game_completed[0]["winner"] in {"TOWN", "MAFIA", "DRAW"}
+
+    # US-078: every game emits a privacy.audit.completed event with the
+    # offline auditor's finding count. The NoopMockAdapter produces a clean
+    # event log, so no leak_detected event is emitted.
+    audit_completed = _events_named(captured_logs, EVENT_PRIVACY_AUDIT_COMPLETED)
+    assert len(audit_completed) == 1
+    assert audit_completed[0]["game_id"] == "G-OBS-1"
+    assert audit_completed[0]["finding_count"] == 0
+    assert _events_named(captured_logs, EVENT_PRIVACY_AUDIT_LEAK_DETECTED) == []
 
 
 async def test_runner_clears_contextvars_on_completion(
