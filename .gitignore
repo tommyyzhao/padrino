@@ -232,6 +232,10 @@ padrino.db
 # US-076 secret-audit findings log
 .padrino_audit/
 
+# Ralph runtime state (last-branch sentinel used by the archive-on-branch-
+# change logic in ralph.sh / ralph-codex.sh; mutated on every run).
+ralph/.last-branch
+
 # Editor / OS
 .DS_Store
 .idea/

@@ -1,0 +1,385 @@
+{
+  "project": "Padrino",
+  "branchName": "ralph/padrino-v2",
+  "description": "Wave 2 — production seams and open-source readiness. v1 shipped a deterministic core engine, event-sourced replay, async runner, OpenSkill ratings, and a FastAPI admin surface against SQLite + mocked LLMs. Wave 2 closes the gaps that block self-hosting and a shared central backend: runner writes ground-truth seats / game status, provider secrets resolve from env or files, LiteLLM is exercised against recorded cassettes from real providers (OpenAI, Anthropic, Cerebras, DeepInfra, Ollama), per-role canonical prompts replace the demo placeholder, an async scheduler drains pending gauntlets with backpressure and retries, API gets pagination + scoped API-key auth + rate limiting, Postgres becomes a first-class target with a passing Alembic suite, a `padrino bootstrap` CLI brings a fresh deployment to ready in one command, Prometheus metrics + scheduler health endpoints make ops observable, signed game-export bundles plus a hash-chain-verifying ingestion endpoint enable a federated public leaderboard, a docker-compose stack runs the whole thing locally, and release CI publishes versioned images. Quality gates from v1 remain unchanged (ruff, ruff format, mypy strict, pytest, 85% core-engine coverage, AST purity + no-wallclock firewalls); a new `live_llm` pytest marker gates the recorded-provider contract job. Hard rules from v1 are inherited verbatim: nothing under src/padrino/core/ may import db/llm/api/runner or call wall-clock / network / random; mafia chat is parsed only via the `action` field; ranked observations never leak role, faction, model identity, ratings, clone index, or other games' transcripts.",
+  "userStories": [
+    {
+      "id": "US-049",
+      "title": "Runner persists game_seats and Game.status atomically",
+      "description": "As an operator, I need every game run — demo, API, scheduler — to write canonical seat assignments and a terminal status into the DB so leaderboards, transcripts, and downstream tooling never have to fall back to scanning game_events for GameTerminated.",
+      "acceptanceCriteria": [
+        "Move the seat-backfill logic out of `padrino.demo_gauntlet._backfill_seats` into `padrino.runner.game_runner.GamePersistence`; on every `RolesAssigned` event, write one `game_seats` row per seat with role/faction sourced from the event payload",
+        "On `GameTerminated`, in the same `session.begin()` that already writes the event row + rating updates (US-039 pattern), set `Game.status='completed'` and `Game.terminal_result` (JSON: winner, reason, day_terminated) so a single txn covers event + ratings + game-row finalization",
+        "Replace every `event_type='GameTerminated'` lookup under `padrino.api` and `padrino.gauntlets` with a `Game.status='completed'` filter; `padrino.gauntlets.diagnostics_for_games` should accept already-terminal game IDs from the new path",
+        "Remove `_backfill_seats` from `demo_gauntlet.py` once the runner does it; `tests/cli/test_demo_gauntlet.py` and `tests/api/test_leaderboard_routes.py` must still pass without that helper",
+        "`tests/runner/test_game_persistence_seats.py` runs a full game and asserts game_seats matches `RolesAssigned.payload.assignments` exactly (role + faction + public_player_id)",
+        "`tests/runner/test_game_persistence_terminal.py` asserts Game.status + terminal_result are committed atomically with the GameTerminated row (kill the rating-update call mid-txn and assert nothing is persisted)",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run coverage report --include='src/padrino/core/*' --fail-under=85 passes"
+      ],
+      "dependencies": [],
+      "priority": 49,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-050",
+      "title": "Provider secret resolution with env and file schemes",
+      "description": "As a self-hosting developer, I need `ModelProvider.auth_secret_ref` to actually resolve to a credential at adapter-construction time so I can rotate keys via env vars or mounted secret files without code changes.",
+      "acceptanceCriteria": [
+        "New module `padrino.llm.secrets` with `resolve_secret(ref: str) -> str` supporting `env:VAR_NAME` (read os.environ, error if unset) and `file:/abs/path` (read file, strip trailing whitespace, error if missing or world-readable on POSIX)",
+        "`padrino.llm.litellm_adapter.LiteLlmAdapter.__init__` calls `resolve_secret(provider.auth_secret_ref)` once and stores the resolved value; never re-reads per request",
+        "Invalid `auth_secret_ref` (unknown scheme, missing env var, unreadable file) raises `SecretResolutionError` at construction, never at request time — server boot fails loudly rather than silently 401-ing later",
+        "`tests/llm/test_secrets.py` covers: env hit, env miss, file hit, file miss, file with bad permissions, unknown scheme, empty value, and tilde / relative-path rejection",
+        "`tests/api/test_admin_routes.py` is updated so any provider creation in tests uses a valid `env:` ref or is monkeypatched to skip resolution",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 50,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-051",
+      "title": "LiteLLM contract tests against recorded provider cassettes",
+      "description": "As a developer adding a new model, I need a recorded-cassette test that proves the real LiteLLM adapter parses each provider's response shape so I learn about schema drift in CI rather than during a live gauntlet.",
+      "acceptanceCriteria": [
+        "Add `pytest-recording` (or `vcrpy` directly) as a dev dependency; cassettes live under `tests/llm/cassettes/<provider>/<test_name>.yaml`",
+        "New marker `live_llm` registered in `pyproject.toml`; default `pytest` invocation deselects it, only the recorded-cassette path runs",
+        "`tests/llm/test_litellm_contract.py` parametrizes over OpenAI (gpt-4o-mini), Anthropic (claude-haiku-4.5), Cerebras (zai-glm-4.7), DeepInfra (DeepSeek-V4-Flash), and Ollama (llama3) — each test sends one canonical mini7 observation and asserts the returned object validates against `LlmResponse` and round-trips through `coerce_response_failure` cleanly when intentionally malformed",
+        "Re-recording flow documented inline: setting `PADRINO_RECORD_LLM=1` plus the provider env var re-records cassettes with secrets scrubbed; CI never records",
+        "Cassettes scrub `authorization`, `x-api-key`, and any `api_key` JSON fields before write — enforced by a `before_record_response` hook and an audit assertion in the test that scans for known secret-shaped substrings",
+        "CI workflow gains a separate job `live-llm-cassettes` that runs `uv run pytest -m live_llm` with no network access (cassettes only); the main job continues to skip the marker",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-050"],
+      "priority": 51,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-052",
+      "title": "Per-role canonical prompts and resolution at game start",
+      "description": "As a benchmark consumer, I need each seat to receive a prompt tailored to its role family so leaderboard role-family breakdowns reflect actual prompt-quality differences and not the shared `demo-prompt-v1` placeholder.",
+      "acceptanceCriteria": [
+        "Author canonical mini7 prompts under `src/padrino/llm/prompts/mini7_v1/<role_family>.md` for each RoleFamily (TOWN_INVESTIGATOR, TOWN_PROTECTOR, TOWN_CITIZEN, MAFIA) — prompts cover phase rules, action schema, win conditions, and explicit \"never reveal your role unless strategically chosen\" wording",
+        "New helper `padrino.llm.prompts.load_canonical(ruleset_id, role_family) -> PromptTemplate` reads the bundled markdown via `importlib.resources`; never touches disk at request time after first load",
+        "`AgentBuild` resolution at game start picks the prompt by `(ruleset_id, role_family)` after `RolesAssigned`; if a build pins a specific `prompt_id` that one wins, otherwise canonical is used",
+        "Seed migration `src/padrino/db/migrations/versions/<rev>_seed_canonical_prompts.py` inserts one Prompt row per role family with `version='canonical_mini7_v1'`",
+        "`tests/llm/test_prompt_resolution.py` asserts (a) every role family resolves to a distinct prompt, (b) explicit AgentBuild.prompt_id overrides canonical, (c) ranked-observation safety: prompts never include role-leak forbidden keys when concatenated with the observation projection",
+        "`tests/llm/test_canonical_prompts.py` lints every bundled prompt: non-empty, < 4 KB, no forbidden tokens (\"detective\", \"doctor\", \"mafia\") in TOWN_CITIZEN prompt, etc.",
+        "Update `padrino.demo_gauntlet` to use canonical prompts; leaderboard JSON now has non-empty `role_family_breakdown`",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run coverage report --include='src/padrino/core/*' --fail-under=85 passes"
+      ],
+      "dependencies": ["US-049"],
+      "priority": 52,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-053",
+      "title": "LLM retry / backoff with bounded attempts and dead-letter",
+      "description": "As an operator running real-provider games, I need transient LLM failures (rate limit, 5xx, connection reset) to retry with bounded exponential backoff and a dead-letter outcome on exhaustion so a flaky provider doesn't deterministically lose a clone.",
+      "acceptanceCriteria": [
+        "New module `padrino.llm.retry` with `RetryPolicy(max_attempts: int, base_delay_s: float, max_delay_s: float, retry_on: tuple[type[BaseException], ...])` and an async `with_retry(call, policy, sleeper)` helper; `sleeper` is injected (defaults to `asyncio.sleep`) so tests can pin time",
+        "Default policy retries on `litellm.RateLimitError`, `litellm.APIConnectionError`, `litellm.InternalServerError`, and `asyncio.TimeoutError`; never retries on `litellm.BadRequestError` or `AuthenticationError`",
+        "Backoff is deterministic given the SeededRng on the per-call context — jitter draws from `SeededRng(call_id)` not `random` — so replay still reproduces the exact retry schedule",
+        "On exhaustion, the adapter returns a structured `LlmCallFailed` outcome that the runner converts to `ActionTimedOut` with `reason='llm_exhausted'`; the original error chain is captured in `llm_calls.error_kind` + `error_message`",
+        "Per-call structured log line `llm.call.retry` with attempt_number, delay_ms, error_kind binds the existing contextvars (US-048)",
+        "`tests/llm/test_retry.py` covers: success on first attempt, success on retry, exhaustion, non-retryable error short-circuits, deterministic jitter given seed, structlog event emission, and that `tick.py` records exactly one `ActionTimedOut` per exhausted call (not one per attempt)",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-050", "US-051"],
+      "priority": 53,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-054",
+      "title": "Async scheduler loop for pending gauntlets",
+      "description": "As an API caller, I need POST /gauntlets to return immediately while a background worker actually runs the games so the request path stays sub-second and a long-running gauntlet survives an API restart.",
+      "acceptanceCriteria": [
+        "New module `padrino.runner.scheduler` exposing `async def run_scheduler(session_factory, concurrency: int, stop_event: asyncio.Event) -> None`; loop pulls `Gauntlet.status='pending'` rows ordered by created_at, transitions to `running`, schedules child games under an `asyncio.Semaphore(concurrency)`, and on completion sets `Gauntlet.status='completed'` plus a `completed_at` timestamp",
+        "Crash recovery: on startup, any `Gauntlet.status='running'` row whose `heartbeat_at` is older than 2 × the heartbeat interval is reset to `pending` and re-enqueued; heartbeat is written every 5 s while a gauntlet is in flight",
+        "New CLI: `padrino scheduler` (Typer command) runs the loop with `--concurrency`, `--db-url`, graceful shutdown on SIGTERM via the stop_event",
+        "POST /gauntlets in `padrino.api.gauntlet_routes` no longer runs games inline — it inserts the pending row and returns 202 with `Location: /gauntlets/{id}`; existing inline-execution test is replaced with an integration test that spins up the scheduler in-process",
+        "Observability events `scheduler.tick`, `scheduler.gauntlet.started`, `scheduler.gauntlet.completed`, `scheduler.heartbeat` are emitted via the US-048 seam; canonical names registered in `padrino.observability.events`",
+        "`tests/runner/test_scheduler.py` covers: pending → running → completed happy path, concurrency cap honored (asserted via an injected semaphore observer), crash recovery resets stale running rows, SIGTERM completes in-flight games before shutdown (mocked via stop_event)",
+        "`tests/api/test_gauntlet_routes.py` updated: POST returns 202, GET reflects scheduler-driven state transitions",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-049"],
+      "priority": 54,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-055",
+      "title": "API pagination, filtering, and cursor-stable ordering",
+      "description": "As an API consumer, I need every list endpoint to paginate with stable cursors and accept basic filters so a deployment with thousands of games stays usable.",
+      "acceptanceCriteria": [
+        "`padrino.api.pagination.CursorPage[T]` Pydantic model with `items: list[T]`, `next_cursor: str | None`, `total_estimate: int | None`; cursor is an opaque base64-encoded `(created_at, id)` tuple",
+        "Every list endpoint under `padrino.api.*_routes` (games, gauntlets, leaderboards, agent-builds, providers, prompts, model-configs) accepts `?limit=<1..200, default 50>&cursor=<opaque>` and returns `CursorPage`",
+        "Filter params per route: games `?status=&gauntlet_id=&ruleset_id=`, gauntlets `?status=&league_id=`, leaderboards `?gauntlet_id=&provisional=`; unknown params 422 (Pydantic strict)",
+        "Cursor is opaque and deployment-stable across schema migrations that don't drop `created_at` or `id`; tampered cursors return 400 with `invalid_cursor`",
+        "`tests/api/test_pagination.py` covers: page-through 250 rows with limit=50 yields all rows in stable order, filter narrows results, invalid cursor 400s, limit above bound 422s, and that two concurrent inserts during pagination don't produce duplicates or skips",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 55,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-056",
+      "title": "Scoped API-key authentication with per-key rate limiting",
+      "description": "As a self-hosting operator, I need a real auth model with scoped API keys and per-key rate limits so an admin key, a submitter key, and a public spectator key can coexist without leaking write access.",
+      "acceptanceCriteria": [
+        "New table `api_keys (id, key_hash, scopes JSON, label, created_at, last_used_at, disabled_at)`; raw keys are never stored, only `sha256(key)` hashed and a 6-char prefix for display",
+        "Scopes are `admin` (full read+write), `submitter` (POST /ingest only), `spectator` (read-only); `auth_dep(required_scopes)` FastAPI dep validates the `Authorization: Bearer pk_...` header and enforces scope intersection",
+        "Existing US-044 `X-Admin-Token` path is preserved as a back-compat shim behind a deprecation header `Deprecation: true; sunset=2027-01-01`; new deployments use API keys exclusively",
+        "Per-key sliding-window rate limit (in-process token bucket, configurable via `Settings.padrino_rate_limit_per_minute`; default 600 for admin, 60 for submitter, 1200 for spectator); 429 with `Retry-After` header on exhaustion",
+        "Admin endpoints to create / list / disable keys: `POST /admin/keys`, `GET /admin/keys`, `DELETE /admin/keys/{id}`; the POST response is the only place the raw key is ever returned",
+        "`tests/api/test_auth.py` covers: scope enforcement (admin key can write, submitter can't write to /admin/*, spectator can't write at all), key disabled → 401, rate limit returns 429 then resets after the window, raw key never appears in any GET response, hashed comparison is constant-time",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 56,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-057",
+      "title": "Postgres as a first-class target with passing Alembic suite",
+      "description": "As an operator running shared infrastructure, I need Padrino to run identically on Postgres so I can scale beyond SQLite's single-writer limit and use managed-database backups.",
+      "acceptanceCriteria": [
+        "Add `asyncpg` to runtime dependencies; `padrino.db.base.create_engine` auto-selects the driver from the URL scheme (`postgresql+asyncpg://` and `sqlite+aiosqlite://` both supported)",
+        "Replace every `sqlite_json.JSON` with `sqlalchemy.JSON` (driver-portable); on Postgres this maps to `JSONB`, on SQLite to `JSON` text — confirmed via `Column.type.python_type` assertions in `tests/db/test_dialect_portability.py`",
+        "FK enforcement: the existing SQLite `PRAGMA foreign_keys=ON` connect listener stays; Postgres has FKs on by default — no driver-specific code paths beyond engine construction",
+        "Alembic migrations run cleanly on a fresh Postgres database: `tests/db/test_migrations_postgres.py` spins up `postgres:17-alpine` via `testcontainers`, runs `alembic upgrade head` then `alembic downgrade base` then `alembic upgrade head` again, asserts table schemas match expected",
+        "Same migration test runs on SQLite (existing path) so we don't regress; both are parametrized in `tests/db/test_migrations_all_dialects.py`",
+        "`tests/db/test_dialect_portability.py` runs the full repo CRUD against both SQLite and Postgres (via testcontainers, marked `@pytest.mark.postgres` so devs without docker can skip it locally; CI always runs it)",
+        "Settings gains `padrino_db_pool_size: int = 5` and `padrino_db_pool_max_overflow: int = 10`; both wired to `create_async_engine` only when the URL is Postgres",
+        "Documentation comment in `padrino.db.base.create_engine` explains the dialect branch; no separate Postgres-only module",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run pytest -m postgres passes (CI only; documented as skipped locally without docker)"
+      ],
+      "dependencies": [],
+      "priority": 57,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-058",
+      "title": "`padrino bootstrap` CLI for one-command deployment readiness",
+      "description": "As a developer setting up Padrino for the first time, I need a single CLI command that takes me from a fresh database to a ready-to-serve deployment so the README quickstart fits on one screen.",
+      "acceptanceCriteria": [
+        "New Typer command `padrino bootstrap` runs (in order, idempotent at each step): (1) `alembic upgrade head`, (2) seed canonical prompts if missing, (3) seed default mini7_v1 ruleset row, (4) optionally create an admin API key (`--with-admin-key` prints the raw key to stdout once), (5) optionally register providers from a YAML file (`--providers path.yaml`)",
+        "Providers YAML schema documented in-code and validated with Pydantic: `providers: [{name, base_url, auth_secret_ref, default_model, timeout_s}]`; unknown keys 422",
+        "Each step prints a single structured log line; the command is safe to re-run — already-seeded rows are skipped, not duplicated",
+        "Exit code 0 on full success, 1 on any step failure with the failing step name surfaced; partial-success scenarios document which steps completed",
+        "`tests/cli/test_bootstrap.py` covers: fresh DB end-to-end, re-run is a no-op, provider YAML happy path, provider YAML with invalid secret ref fails fast (US-050 integration), `--with-admin-key` prints exactly one key and stores its hash",
+        "README's quickstart is updated to reference `padrino bootstrap`",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-050", "US-052", "US-056", "US-057"],
+      "priority": 58,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-059",
+      "title": "Prometheus /metrics endpoint with canonical counters and histograms",
+      "description": "As an operator wiring dashboards and alerts, I need Padrino to expose metrics in Prometheus text format so I can scrape latency, throughput, and error rates without parsing JSON logs.",
+      "acceptanceCriteria": [
+        "Add `prometheus-client` as a runtime dep; new module `padrino.observability.metrics` defining Counter/Histogram/Gauge instances: `padrino_llm_calls_total{provider,model,status}`, `padrino_llm_latency_seconds{provider,model}` (histogram), `padrino_phase_duration_seconds{ruleset,phase_kind}` (histogram), `padrino_games_total{outcome,ruleset}`, `padrino_invalid_action_total{reason}`, `padrino_scheduler_inflight_gauntlets` (gauge), `padrino_api_requests_total{route,method,status}` (Counter via FastAPI middleware)",
+        "Metrics are updated at the same observability seams that emit US-048 structured logs — single call site, both outputs",
+        "`GET /metrics` returns text/plain; no auth required by default (Prometheus scrape pattern); a `Settings.padrino_metrics_require_auth: bool = False` flag gates it behind the spectator scope when set",
+        "`tests/observability/test_metrics_endpoint.py` covers: counters increment on simulated calls, histograms record observations, endpoint output parses with `prometheus_client.parser.text_string_to_metric_families`, auth flag works both ways",
+        "Existing `padrino metrics` CLI subcommand (US-048) continues to work — it reads from the DB as before; the endpoint is the live in-process view",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 59,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-060",
+      "title": "Scheduler health endpoint and worker lag visibility",
+      "description": "As an operator, I need a health endpoint that surfaces scheduler liveness and queue lag so I can alert on a stuck or wedged worker.",
+      "acceptanceCriteria": [
+        "`GET /healthz/scheduler` returns 200 with `{status: 'ok'|'degraded'|'down', last_heartbeat_at, pending_gauntlets, running_gauntlets, oldest_pending_age_s}`; `degraded` if `oldest_pending_age_s > 60`, `down` if `last_heartbeat_at` is null or older than 30 s",
+        "`GET /healthz` (existing, US-041) is left alone — still a cheap liveness check; the new endpoint is the scheduler-specific readiness probe",
+        "Scheduler writes heartbeat to a new `scheduler_heartbeats (worker_id, beat_at)` table on each tick (US-054 heartbeat is per-gauntlet; this is per-worker); a worker_id is generated at startup from `socket.gethostname() + os.getpid()`",
+        "`padrino_scheduler_inflight_gauntlets` gauge (from US-059) is updated from the same heartbeat path",
+        "`tests/api/test_healthz_scheduler.py` covers: ok / degraded / down states by injecting heartbeats and pending rows, multiple workers reflected in the response",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-054", "US-059"],
+      "priority": 60,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-061",
+      "title": "Signed game-export bundle with hash-chain attestation",
+      "description": "As a developer who ran a benchmark locally, I need to export a single signed artifact containing the full event log and metadata so I can publish results to a central backend or share them with a colleague and prove they weren't tampered with.",
+      "acceptanceCriteria": [
+        "New module `padrino.export.bundle` with `export_game(session, game_id) -> GameBundle` returning a Pydantic model containing: ruleset_id, gauntlet_id, game_id, league_id, seed, agent_builds (resolved to display_name + prompt_version, no secrets), events (full event log in canonical order), game_seats, terminal_result, and `tip_hash` (the final event_hash in the chain)",
+        "Canonical serialization via `padrino.core.engine.canonical_json` (already byte-stable) so two exports of the same game are byte-identical",
+        "Optional Ed25519 signing: `export_game(..., signer=Ed25519Signer.from_env('PADRINO_EXPORT_PRIVATE_KEY'))` produces a `bundle.sig` over the canonical bytes; verification key fingerprint is embedded in the bundle as `signer_fingerprint`",
+        "CLI: `padrino export game <game_id> [--out path.json] [--sign]`; bundle is JSON with embedded base64 signature, never a binary format",
+        "`tests/export/test_bundle.py` covers: byte-identical re-export, hash-chain integrity (tampering any event invalidates `tip_hash` recomputation), signature verifies, signature over tampered bundle fails, secrets (auth_secret_ref) never appear, ranked-observation safety guard runs over every event payload",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run coverage report --include='src/padrino/core/*' --fail-under=85 passes"
+      ],
+      "dependencies": ["US-049"],
+      "priority": 61,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-062",
+      "title": "Public ingestion endpoint with hash-chain verification",
+      "description": "As an operator of a central Padrino backend, I need a public submission endpoint that accepts signed game bundles, verifies the hash chain, and stores results so the community leaderboard reflects contributions without granting submitters write access to existing data.",
+      "acceptanceCriteria": [
+        "`POST /ingest/game` accepts a `GameBundle` (US-061 shape) and requires the `submitter` scope (US-056); admin scope also accepted",
+        "Verification pipeline: (1) signature check if `bundle.sig` present and the submitter has a registered Ed25519 public key, (2) hash-chain replay via `padrino.core.engine.replay.replay_event_log` recomputes every event_hash from the prior, (3) the recomputed tip must equal `bundle.tip_hash`, (4) the bundle's `game_id` must be globally unique (idempotent on retry returns 200 with `already_ingested: true`)",
+        "Stored rows: a new `ingested_games` table (separate from `games` so local runs and shared runs don't mix); rows reference the submitter API key id, the original gauntlet/league are stored as opaque strings (not FKs into local tables)",
+        "Submitter-key registration: `POST /admin/keys` (US-056) gains an optional `submission_public_key` field; a key without a registered pubkey can still submit but the bundle must be unsigned and is tagged `unverified` in storage",
+        "Rate limit (US-056) defaults to 30 submissions per minute per key; large bundles bounded at 10 MB JSON, rejected with 413 otherwise",
+        "`tests/api/test_ingestion.py` covers: signed happy path, unsigned + unverified storage, tampered event → 422 with `hash_chain_mismatch`, duplicate game_id idempotent, wrong scope → 403, oversized bundle → 413",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-056", "US-061"],
+      "priority": 62,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-063",
+      "title": "Public read-only API for ingested results and federated leaderboard",
+      "description": "As a community member or dashboard consumer, I need read-only endpoints that aggregate ingested game bundles into a public leaderboard so anyone can compare model performance without an admin key.",
+      "acceptanceCriteria": [
+        "`GET /public/leaderboard` requires only `spectator` scope (or no auth if `Settings.padrino_public_leaderboard_anonymous=True`); returns paginated entries (US-055 cursor) ordered by conservative_score desc, computed across ingested_games filtered by `ruleset_id` and optional `gauntlet_id`",
+        "`GET /public/games/{id}` returns the full ingested bundle minus any submitter PII; `GET /public/games/{id}/events` paginates the event log; `GET /public/games/{id}/transcript` returns the ranked-observation-safe transcript projection (US-039 guard reused)",
+        "`GET /public/submitters` lists registered submitter labels + pubkey fingerprints + game count; never reveals raw keys or contact info",
+        "Aggregation is recomputed on read via a cached helper `padrino.ratings.public_leaderboard(session, ruleset_id, gauntlet_id, cursor, limit)`; cache key includes `max(ingested_games.created_at)` so new submissions invalidate naturally",
+        "`tests/api/test_public_routes.py` covers: leaderboard sorting + cursor stability, transcript projection drops forbidden keys (`role`, `faction`, model identity, ratings), anonymous-access flag toggles auth requirement, submitter listing excludes raw keys",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-055", "US-056", "US-062"],
+      "priority": 63,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-064",
+      "title": "Docker image and docker-compose dev stack",
+      "description": "As a self-hosting developer, I need a single `docker compose up` to launch the API, scheduler, and Postgres so trying Padrino doesn't require setting up a Python environment.",
+      "acceptanceCriteria": [
+        "`Dockerfile` (multi-stage: `uv` install layer → slim runtime) builds an image that contains `padrino`, `padrino scheduler`, `padrino bootstrap`; entrypoint is `padrino` so the same image serves API and scheduler via different commands",
+        "`docker-compose.yml` at repo root defines services `api`, `scheduler`, `postgres` (postgres:17-alpine with a volume), wires `PADRINO_DB_URL` to the postgres service, runs `padrino bootstrap` as a one-shot init container before `api` and `scheduler` come up",
+        "`.env.example` documents every required env var with safe defaults; `docker-compose.override.yml.example` shows how to bind-mount a `providers.yaml` and a host secret file (US-050 `file:` scheme)",
+        "Image is < 250 MB compressed, runs as a non-root user `padrino:padrino`, healthchecks via `GET /healthz` and `GET /healthz/scheduler`",
+        "`tests/docker/test_compose_smoke.py` (marked `@pytest.mark.docker`, skipped without docker) brings up the stack, hits `/healthz` and `/metrics`, runs a demo gauntlet via the API, and tears down; CI runs this on push to main",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-057", "US-058", "US-059"],
+      "priority": 64,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-065",
+      "title": "Central-backend deployment recipe and shared-leaderboard docs",
+      "description": "As an operator wanting to host the canonical Padrino leaderboard, I need a documented recipe for deploying the public surface so submitters know where to point and the threat model is explicit.",
+      "acceptanceCriteria": [
+        "New `docs/deployment/central-backend.md` (the one new doc file the wave explicitly authorizes) covering: minimum viable deployment (managed Postgres + container host), DNS + TLS, admin key bootstrap, public-leaderboard flag, submitter onboarding (key generation + pubkey registration), backup and restore via `pg_dump`",
+        "New `docs/deployment/self-host.md` covering: local docker-compose, BYO-model via providers.yaml, secret file mounts, troubleshooting the most common boot failures (bad secret ref, migration drift, port conflict)",
+        "New `docs/deployment/byo-model.md` covering: adding a new provider, recording cassettes (US-051), prompt customization, and the role of `AgentBuild` vs `ModelConfig`",
+        "Each doc ends with a verified runbook (commands actually run in `tests/docs/test_runbooks.py` against a docker-compose harness where feasible; bash blocks tagged `# verified` are extracted and asserted to exit 0)",
+        "README's top-level overview gains a short \"deployment options\" table linking to the three guides; everything in README beyond quickstart moves to these docs",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-058", "US-062", "US-063", "US-064"],
+      "priority": 65,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-066",
+      "title": "Release CI: cross-platform smoke, image publish, and version bumping",
+      "description": "As a maintainer cutting an open-source release, I need CI to run the full gauntlet on supported platforms and publish a versioned container image so each tag is a known-good artifact.",
+      "acceptanceCriteria": [
+        "GitHub Actions workflow `.github/workflows/release.yml` triggers on `v*` tags: runs the existing test matrix on `ubuntu-latest` + `macos-latest` for Python 3.12 and 3.13, builds the Dockerfile, publishes to GHCR as `ghcr.io/<owner>/padrino:<version>` and `:latest`",
+        "Workflow `.github/workflows/ci.yml` (existing or new) runs on every push/PR: ruff check + format, mypy, pytest, core-coverage gate, AST firewalls, `live-llm-cassettes` job (US-051), `postgres` job via testcontainers (US-057), `compose-smoke` job (US-064)",
+        "Semantic version source-of-truth in `pyproject.toml`; `padrino version` (existing) reads it via `importlib.metadata`; a release-checklist script `scripts/release.sh` runs `uv lock --frozen`, `uv run pytest`, builds, and prompts for tag push",
+        "Image is signed with cosign keyless OIDC; the public verification key fingerprint is documented in `docs/deployment/central-backend.md` so operators can pin",
+        "`CHANGELOG.md` follows Keep-a-Changelog; the release workflow refuses to publish if `## [Unreleased]` is empty for the version being cut",
+        "`tests/release/test_metadata.py` asserts `padrino version` matches `pyproject.toml`, the entry-points are stable, and that no test file imports a private (underscore-prefixed) module from another package boundary",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-051", "US-057", "US-064", "US-065"],
+      "priority": 66,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
