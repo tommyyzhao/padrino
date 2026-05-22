@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import functools
+from typing import TYPE_CHECKING
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from padrino.llm.adapter import RoutingPolicy
 
 
 class Settings(BaseSettings):
@@ -19,6 +23,7 @@ class Settings(BaseSettings):
     # LLM provider credentials (optional so the engine works without real keys)
     cerebras_api_key: str | None = None
     deepinfra_api_key: str | None = None
+    zai_api_key: str | None = None
 
     # Database
     padrino_db_url: str = "sqlite+aiosqlite:///./padrino.db"
@@ -39,6 +44,23 @@ class Settings(BaseSettings):
     # Model routing
     padrino_primary_model: str = "cerebras/zai-glm-4.7"
     padrino_fallback_model: str = "deepinfra/deepseek-ai/DeepSeek-V4-Flash"
+
+    # Same-model multi-host fallback (US-079). When true AND ``ZAI_API_KEY``
+    # resolves, ``build_routing_policy`` injects Z.AI's GLM-4.7 endpoint as
+    # an alternate host for any Cerebras GLM-4.7 primary. The name reads like
+    # a sentence: "Cerebras zai-glm-4.7 falls back to Z.AI". Disabling this
+    # collapses behaviour to the wave-3 single-primary-plus-different-fallback
+    # routing.
+    padrino_cerebras_zai_glm47_zai_fallback: bool = True
+
+    # Z.AI exposes two OpenAI-compatible endpoints:
+    #  - the General API  ``https://api.z.ai/api/paas/v4``
+    #  - the Coding-Plan API ``https://api.z.ai/api/coding/paas/v4`` (only
+    #    callable while subscribed to the GLM Coding Plan).
+    # The Coding Plan is what our paid subscription serves, so the default
+    # points there. Override via ``PADRINO_ZAI_API_BASE`` if you're on the
+    # General API.
+    padrino_zai_api_base: str = "https://api.z.ai/api/coding/paas/v4"
 
     # API
     padrino_admin_token: str | None = None
@@ -80,6 +102,49 @@ class Settings(BaseSettings):
     # the credentialed-origin echo (matches Starlette's CORSMiddleware
     # semantics).
     padrino_cors_allow_origins: str = ""
+
+    def build_routing_policy(
+        self,
+        *,
+        primary_model: str | None = None,
+        fallback_model: str | None = None,
+    ) -> RoutingPolicy:
+        """Compose a :class:`RoutingPolicy` honoring the same-model fallback flags.
+
+        Defaults to ``padrino_primary_model`` / ``padrino_fallback_model``.
+        When ``padrino_cerebras_zai_glm47_zai_fallback`` is enabled, the primary
+        is ``cerebras/zai-glm-4.7``, and ``zai_api_key`` is set, the returned
+        policy carries a single :class:`SameModelHost` pointing at Z.AI's
+        ``openai/glm-4.7`` endpoint. When any of those conditions is false the
+        returned policy's ``same_model_hosts`` tuple is empty — behaviour is
+        identical to the wave-3 routing.
+        """
+        # Local import keeps ``settings`` out of the import graph rooted at
+        # ``padrino.llm.adapter`` callers that don't need it.
+        from padrino.llm.adapter import RoutingPolicy, SameModelHost
+
+        primary = primary_model if primary_model is not None else self.padrino_primary_model
+        fallback = fallback_model if fallback_model is not None else self.padrino_fallback_model
+
+        same_model_hosts: tuple[SameModelHost, ...] = ()
+        if (
+            self.padrino_cerebras_zai_glm47_zai_fallback
+            and self.zai_api_key
+            and primary == "cerebras/zai-glm-4.7"
+        ):
+            same_model_hosts = (
+                SameModelHost(
+                    provider="zai",
+                    litellm_model_id="openai/glm-4.7",
+                    api_base=self.padrino_zai_api_base,
+                    auth_secret_ref="env:ZAI_API_KEY",
+                ),
+            )
+        return RoutingPolicy(
+            primary_model=primary,
+            fallback_model=fallback,
+            same_model_hosts=same_model_hosts,
+        )
 
 
 @functools.lru_cache(maxsize=1)

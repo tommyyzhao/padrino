@@ -24,8 +24,8 @@
       ],
       "dependencies": [],
       "priority": 79,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Landed 2026-05-22. RoutingPolicy now carries `same_model_hosts: tuple[SameModelHost, ...]`; LiteLlmAdapter iterates primary → same-model hosts → different-model fallback with per-host retry budgets and per-host api_base/api_key forwarding. New status `same_model_fallback_ok` distinguishes the cross-host success path. Settings gained `padrino_zai_api_base` (defaulting to the Z.AI Coding Plan endpoint `https://api.z.ai/api/coding/paas/v4` — the General API is also supported via env override) plus `padrino_cerebras_zai_glm47_zai_fallback` and `Settings.build_routing_policy()` that injects the Z.AI same-model host when the env + flag conditions are met. Verified end-to-end against real providers: forced-fallback integration test passed (Cerebras 429 → Z.AI GLM-4.7 served the call) after switching to the Coding Plan base URL. Leaderboard non-bifurcation invariant explicitly asserted in `tests/api/test_public_models.py`."
     },
     {
       "id": "US-080",

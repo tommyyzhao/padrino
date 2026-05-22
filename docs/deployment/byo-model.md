@@ -114,6 +114,70 @@ upstreams disagree about whether to use OpenAI-compat `/chat/completions`
 vs. their native chat format), set `base_url` on the `ModelProvider`
 row to pin the override.
 
+## Same-model multi-host fallback (US-079)
+
+A single model identity can be served by multiple provider endpoints.
+GLM-4.7 is hosted by Cerebras *and* by Z.AI (and a handful of others)
+loading the same upstream weights. When the primary host hits a 429,
+times out, or returns a 5xx, the adapter can route the call to an
+alternate host **serving the same model** before falling through to
+the regular different-model fallback. The leaderboard keeps a single
+row per `(provider, model_name, model_version)` of the *AgentBuild* —
+which host actually served any given call is observable only in
+`llm_calls.status` (`same_model_fallback_ok` vs. `ok`).
+
+`RoutingPolicy` carries an optional `same_model_hosts: tuple[SameModelHost, ...]`
+that the adapter iterates between the primary attempts and the
+different-model `fallback_model`. Each host has its own retry budget
+(same-host retries never consume cross-host attempts) and its own
+credential resolved at adapter construction time, so a misconfigured
+`auth_secret_ref` fails loudly at boot rather than silently on a 401.
+
+The canonical built-in pairing routes Cerebras `zai-glm-4.7` to Z.AI's
+`openai/glm-4.7` endpoint. It is enabled by default and engaged
+automatically by `Settings.build_routing_policy()` whenever:
+
+1. `padrino_cerebras_zai_glm47_zai_fallback` is `True` (default), and
+2. `ZAI_API_KEY` resolves in the environment, and
+3. The primary model is `cerebras/zai-glm-4.7`.
+
+The Z.AI base URL defaults to the **Coding Plan** endpoint
+(`https://api.z.ai/api/coding/paas/v4`) since that's our paid
+subscription tier. If you are on the General API plan instead, override
+via `PADRINO_ZAI_API_BASE=https://api.z.ai/api/paas/v4`.
+
+To disable the fallback (e.g. while debugging a Z.AI outage):
+
+```
+PADRINO_CEREBRAS_ZAI_GLM47_ZAI_FALLBACK=false uv run padrino ...
+```
+
+To wire a same-model fallback for another model identity, build the
+`RoutingPolicy` explicitly:
+
+```python
+from padrino.llm.adapter import RoutingPolicy, SameModelHost
+
+policy = RoutingPolicy(
+    primary_model="cerebras/zai-glm-4.7",
+    fallback_model="deepinfra/deepseek-ai/DeepSeek-V4-Flash",
+    same_model_hosts=(
+        SameModelHost(
+            provider="zai",
+            litellm_model_id="openai/glm-4.7",
+            api_base="https://api.z.ai/api/coding/paas/v4",
+            auth_secret_ref="env:ZAI_API_KEY",
+        ),
+    ),
+)
+```
+
+Order matters: hosts are tried left-to-right. The integration test
+`tests/integration/test_same_model_fallback.py` exercises the full
+path against the real Cerebras + Z.AI endpoints — it monkeypatches the
+primary call to raise `litellm.exceptions.RateLimitError` and asserts
+the result lands with `status == 'same_model_fallback_ok'`.
+
 ## Recording cassettes (US-051, US-072)
 
 The contract suite under `tests/llm/test_litellm_contract.py` parses

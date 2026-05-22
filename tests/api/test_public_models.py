@@ -505,3 +505,76 @@ async def test_initial_mu_when_no_ratings_yet(
     body = response.json()
     assert body["entries"] == []
     assert body["total_estimate"] == 0
+
+
+# ---------------------------------------------------------------------------
+# US-079: same-model multi-host fallback does not bifurcate the leaderboard row
+# ---------------------------------------------------------------------------
+
+
+async def test_same_model_fallback_does_not_bifurcate_leaderboard_row(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An AgentBuild served by ``same_model_fallback_ok`` rows still rolls up to one entry.
+
+    The per-model leaderboard rollup keys by the AgentBuild's
+    ``(provider, model_name, model_version)`` — never by the host that
+    actually served any given LLM call. US-079's same-model multi-host
+    fallback routes a Cerebras failure to Z.AI's GLM-4.7 endpoint, both
+    serving the same upstream weights; the rating credit (and thus the
+    leaderboard row) must stay attached to the single AgentBuild identity.
+    """
+    from padrino.db.repositories import llm_calls as llm_calls_repo
+
+    raw = await _seed_spectator_key(session_factory)
+    league_id, key_strong, _ = await _seed_two_models_one_league(session_factory)
+
+    # Find one strong-model AgentBuild and inject an llm_call with the new
+    # ``same_model_fallback_ok`` status. The rollup ignores llm_calls but the
+    # row exercises the persistence path end-to-end and documents the new
+    # status reaching the DB layer.
+    from sqlalchemy import select as _select
+
+    from padrino.db.models import AgentBuild as AgentBuildRow
+    from padrino.db.models import Game as GameRow
+
+    async with session_factory() as session, session.begin():
+        strong_build = (
+            await session.execute(
+                _select(AgentBuildRow).where(AgentBuildRow.display_name == "strong-a")
+            )
+        ).scalar_one()
+        game_row = (await session.execute(_select(GameRow))).scalars().first()
+        assert game_row is not None
+        await llm_calls_repo.record_call(
+            session,
+            game_id=game_row.id,
+            agent_build_id=strong_build.id,
+            public_player_id="P01",
+            phase="NIGHT_1_ACTIONS",
+            request_json={"obs": "stub"},
+            request_prompt_hash="prompthash",
+            status="same_model_fallback_ok",
+            raw_response="{}",
+            parsed_response={"action": {"type": "NOOP", "target": None}},
+            latency_ms=123,
+        )
+
+    response = await client.get(
+        "/public/models/leaderboard",
+        params={"ruleset_id": _RULESET, "league_id": str(league_id)},
+        headers=_auth(raw),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    matching = [e for e in body["entries"] if e["model_key"] == key_strong]
+    assert len(matching) == 1, (
+        f"expected exactly one leaderboard row for the strong model identity, "
+        f"got {len(matching)}: {matching!r}"
+    )
+    # The single row aggregates BOTH AgentBuilds that share the strong model
+    # identity (strong-a + strong-b) — that's the existing aggregation
+    # invariant; here we are only proving same_model_fallback_ok does not
+    # split it further.
+    assert matching[0]["agent_build_count"] == 2

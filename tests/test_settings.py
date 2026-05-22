@@ -74,6 +74,56 @@ def test_get_settings_returns_same_instance() -> None:
 def test_api_keys_optional(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
     monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
     s = _fresh()
     assert s.cerebras_api_key is None
     assert s.deepinfra_api_key is None
+    assert s.zai_api_key is None
+
+
+# ---------------------------------------------------------------------------
+# US-079: Settings.build_routing_policy()
+# ---------------------------------------------------------------------------
+
+
+def test_build_routing_policy_injects_zai_glm47_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZAI_API_KEY", "zai-test-key")
+    monkeypatch.setenv("PADRINO_CEREBRAS_ZAI_GLM47_ZAI_FALLBACK", "true")
+    policy = _fresh().build_routing_policy()
+    assert policy.primary_model == "cerebras/zai-glm-4.7"
+    assert policy.fallback_model == "deepinfra/deepseek-ai/DeepSeek-V4-Flash"
+    assert len(policy.same_model_hosts) == 1
+    host = policy.same_model_hosts[0]
+    assert host.provider == "zai"
+    assert host.litellm_model_id == "openai/glm-4.7"
+    assert host.api_base == "https://api.z.ai/api/coding/paas/v4"
+    assert host.auth_secret_ref == "env:ZAI_API_KEY"
+
+
+def test_build_routing_policy_omits_same_model_hosts_when_flag_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZAI_API_KEY", "zai-test-key")
+    monkeypatch.setenv("PADRINO_CEREBRAS_ZAI_GLM47_ZAI_FALLBACK", "false")
+    policy = _fresh().build_routing_policy()
+    assert policy.same_model_hosts == ()
+
+
+def test_build_routing_policy_omits_same_model_hosts_when_zai_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.setenv("PADRINO_CEREBRAS_ZAI_GLM47_ZAI_FALLBACK", "true")
+    policy = _fresh().build_routing_policy()
+    assert policy.same_model_hosts == ()
+
+
+def test_build_routing_policy_omits_same_model_hosts_when_primary_not_cerebras_glm47(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZAI_API_KEY", "zai-test-key")
+    monkeypatch.setenv("PADRINO_CEREBRAS_ZAI_GLM47_ZAI_FALLBACK", "true")
+    policy = _fresh().build_routing_policy(primary_model="openai/gpt-4")
+    assert policy.same_model_hosts == ()

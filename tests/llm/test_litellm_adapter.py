@@ -25,7 +25,13 @@ from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role
 from padrino.core.observations import Observation, build_observation
 from padrino.core.rulesets import mini7_v1
-from padrino.llm.adapter import AdapterResult, AgentBuild, LlmAdapter, RoutingPolicy
+from padrino.llm.adapter import (
+    AdapterResult,
+    AgentBuild,
+    LlmAdapter,
+    RoutingPolicy,
+    SameModelHost,
+)
 from padrino.llm.litellm_adapter import LiteLlmAdapter, build_messages
 from padrino.llm.secrets import SecretResolutionError
 
@@ -112,13 +118,18 @@ def _fake_completion(
     return response
 
 
+_SAME_MODEL_HOST_ENV = "PADRINO_TEST_ZAI_KEY"
+
+
 def _build_adapter(
     *,
     fallback: str | None = "deepinfra/deepseek-ai/DeepSeek-V4-Flash",
+    same_model_hosts: tuple[SameModelHost, ...] = (),
 ) -> LiteLlmAdapter:
     policy = RoutingPolicy(
         primary_model="cerebras/zai-glm-4.7",
         fallback_model=fallback,
+        same_model_hosts=same_model_hosts,
     )
     build = AgentBuild(
         provider="cerebras",
@@ -528,3 +539,138 @@ def test_non_vote_phases_coerce_to_noop_on_both_failures(phase: Phase) -> None:
     assert result.status == "both_failed"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.parsed_response.action.type is ActionType.NOOP
+
+
+# ---------------------------------------------------------------------------
+# US-079: same-model multi-host fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _set_same_model_host_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(_SAME_MODEL_HOST_ENV, "zai-key-value")
+
+
+def _zai_glm47_host() -> SameModelHost:
+    return SameModelHost(
+        provider="zai",
+        litellm_model_id="openai/glm-4.7",
+        api_base="https://api.z.ai/api/paas/v4/",
+        auth_secret_ref=f"env:{_SAME_MODEL_HOST_ENV}",
+    )
+
+
+def _rate_limit_error(model: str = "cerebras/zai-glm-4.7") -> Exception:
+    from litellm.exceptions import RateLimitError
+
+    return RateLimitError(message="429 from primary", llm_provider="cerebras", model=model)
+
+
+def test_same_model_fallback_routes_to_alternate_host(
+    _set_same_model_host_env: None,
+) -> None:
+    """Primary 429 routes to the same-model alternate host; different-model fallback untouched."""
+    fallback_response = _fake_completion(
+        content=_valid_response_json(Action(type=ActionType.ABSTAIN)),
+        response_id="resp-zai",
+    )
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    # Primary raises three times (the default retry policy yields three
+    # attempts, so RateLimitError exhausts the primary retries) before the
+    # same-model host wins on its first attempt.
+    side_effects: list[Any] = [_rate_limit_error() for _ in range(3)]
+    side_effects.append(fallback_response)
+
+    mock = AsyncMock(side_effect=side_effects)
+    with patch(ACOMPLETION_PATH, new=mock):
+        adapter = _build_adapter(same_model_hosts=(_zai_glm47_host(),))
+        result = asyncio.run(adapter.complete(obs))
+
+    # Three primary attempts + one same-model host attempt; NEVER touches the
+    # different-model fallback ("deepinfra/...").
+    assert mock.call_count == 4
+    models_called = [c.kwargs["model"] for c in mock.call_args_list]
+    assert models_called[:3] == ["cerebras/zai-glm-4.7"] * 3
+    assert models_called[3] == "openai/glm-4.7"
+    # The same-model attempt receives the Z.AI api_base and credential
+    # explicitly (the primary call sent neither — its provider defaults apply).
+    primary_call_kwargs = mock.call_args_list[0].kwargs
+    assert "api_base" not in primary_call_kwargs
+    assert "api_key" not in primary_call_kwargs
+    same_model_kwargs = mock.call_args_list[3].kwargs
+    assert same_model_kwargs["api_base"] == "https://api.z.ai/api/paas/v4/"
+    assert same_model_kwargs["api_key"] == "zai-key-value"
+
+    assert result.status == "same_model_fallback_ok"
+    assert isinstance(result.parsed_response, AgentResponse)
+    assert result.provider_response_id == "resp-zai"
+    # last_attempts: primary attempt (demoted to primary_failed) + the
+    # successful same-model attempt.
+    assert len(adapter.last_attempts) == 2
+    assert adapter.last_attempts[0].status == "primary_failed"
+    assert adapter.last_attempts[1].status == "same_model_fallback_ok"
+
+
+def test_same_model_exhaustion_still_triggers_different_model_fallback(
+    _set_same_model_host_env: None,
+) -> None:
+    """Primary + every same-model host fail; fall through to the different-model fallback."""
+    fallback_response = _fake_completion(
+        content=_valid_response_json(Action(type=ActionType.ABSTAIN)),
+        response_id="resp-deepinfra",
+    )
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    side_effects: list[Any] = []
+    side_effects.extend(_rate_limit_error() for _ in range(3))  # primary exhausts
+    side_effects.extend(_rate_limit_error("openai/glm-4.7") for _ in range(3))  # zai exhausts
+    side_effects.append(fallback_response)
+
+    mock = AsyncMock(side_effect=side_effects)
+    with patch(ACOMPLETION_PATH, new=mock):
+        adapter = _build_adapter(same_model_hosts=(_zai_glm47_host(),))
+        result = asyncio.run(adapter.complete(obs))
+
+    assert mock.call_count == 7
+    models_called = [c.kwargs["model"] for c in mock.call_args_list]
+    assert models_called[:3] == ["cerebras/zai-glm-4.7"] * 3
+    assert models_called[3:6] == ["openai/glm-4.7"] * 3
+    assert models_called[6] == "deepinfra/deepseek-ai/DeepSeek-V4-Flash"
+
+    assert result.status == "fallback_ok"
+    assert isinstance(result.parsed_response, AgentResponse)
+    assert result.provider_response_id == "resp-deepinfra"
+    statuses = [a.status for a in adapter.last_attempts]
+    assert statuses == ["primary_failed", "primary_failed", "fallback_ok"]
+
+
+def test_same_model_host_resolves_secret_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A misconfigured same-model host fails loudly at boot, not on first call."""
+    monkeypatch.delenv(_SAME_MODEL_HOST_ENV, raising=False)
+    with pytest.raises(SecretResolutionError):
+        _build_adapter(same_model_hosts=(_zai_glm47_host(),))
+
+
+def test_same_model_fallback_without_different_model_fallback_coerces(
+    _set_same_model_host_env: None,
+) -> None:
+    """No different-model fallback; same-model exhaustion coerces to a safe action."""
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    side_effects: list[Any] = []
+    side_effects.extend(_rate_limit_error() for _ in range(3))
+    side_effects.extend(_rate_limit_error("openai/glm-4.7") for _ in range(3))
+    mock = AsyncMock(side_effect=side_effects)
+    with patch(ACOMPLETION_PATH, new=mock):
+        adapter = _build_adapter(
+            fallback=None,
+            same_model_hosts=(_zai_glm47_host(),),
+        )
+        result = asyncio.run(adapter.complete(obs))
+
+    assert mock.call_count == 6
+    assert result.status == "exhausted"
+    assert isinstance(result.parsed_response, AgentResponse)
+    assert result.parsed_response.action.type is ActionType.ABSTAIN

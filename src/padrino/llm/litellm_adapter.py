@@ -2,12 +2,15 @@
 
 `LiteLlmAdapter` issues a single :func:`litellm.acompletion` call against the
 :attr:`RoutingPolicy.primary_model`. If that call raises (network error, rate
-limit, timeout, etc.) and a fallback model is configured, the adapter retries
-exactly once against :attr:`RoutingPolicy.fallback_model`. The final
+limit, timeout, etc.), the adapter iterates
+:attr:`RoutingPolicy.same_model_hosts` (US-079) — alternate provider endpoints
+serving the SAME upstream weights — before falling through to a configured
+:attr:`RoutingPolicy.fallback_model` (different model). The final
 :class:`AdapterResult` returned to the caller carries the synthesized routing
-status (``ok``, ``fallback_ok``, ``primary_failed``, ``both_failed``); per-call
-attempt records are exposed on :attr:`LiteLlmAdapter.last_attempts` for the
-recording layer to mirror as separate ``llm_calls`` rows.
+status (``ok``, ``same_model_fallback_ok``, ``fallback_ok``, ``primary_failed``,
+``both_failed``); per-call attempt records are exposed on
+:attr:`LiteLlmAdapter.last_attempts` for the recording layer to mirror as
+separate ``llm_calls`` rows.
 
 Parse failures (invalid JSON, schema violations) are NOT retried — they are not
 provider-side errors, and the runner already coerces them to a safe action via
@@ -40,6 +43,7 @@ from padrino.llm.adapter import (
     AdapterStatus,
     AgentBuild,
     RoutingPolicy,
+    SameModelHost,
 )
 from padrino.llm.retry import (
     LlmCallFailed,
@@ -86,6 +90,7 @@ class LiteLlmAdapter:
         "_build",
         "_policy",
         "_retry_policy",
+        "_same_model_hosts",
         "_sleeper",
         "_system_prompt",
         "_system_prompts_by_role",
@@ -110,6 +115,13 @@ class LiteLlmAdapter:
         self._auth_secret = resolve_secret(auth_secret_ref)
         self._policy = routing_policy
         self._build = agent_build
+        # Resolve each same-model host's credential at construction too, so a
+        # misconfigured Z.AI key surfaces at boot rather than only when the
+        # primary host happens to fail. The resolved value is cached alongside
+        # the host descriptor to keep _call_model's per-call path allocation-free.
+        self._same_model_hosts: tuple[tuple[SameModelHost, str], ...] = tuple(
+            (host, resolve_secret(host.auth_secret_ref)) for host in routing_policy.same_model_hosts
+        )
         self._system_prompt = system_prompt
         # When ``system_prompts_by_role`` is provided (canonical-prompt path,
         # US-052) the per-call prompt is looked up by ``observation.you.role``.
@@ -129,6 +141,7 @@ class LiteLlmAdapter:
 
     async def complete(self, observation: Observation) -> AdapterResult:
         attempts: list[AdapterResult] = []
+        any_exhausted = False
 
         primary = await self._call_model(observation, self._policy.primary_model)
         attempts.append(primary)
@@ -137,16 +150,44 @@ class LiteLlmAdapter:
             self.last_attempts = tuple(attempts)
             return primary
 
-        if self._policy.fallback_model is None:
-            terminal_status: AdapterStatus = (
-                "exhausted" if primary.failure is not None else "primary_failed"
+        any_exhausted = any_exhausted or primary.failure is not None
+        # Demote the primary attempt to ``primary_failed`` so per-attempt rows
+        # record the routing decision. The terminal status below may overwrite
+        # the LAST attempt only.
+        attempts[-1] = primary.model_copy(update={"status": "primary_failed"})
+
+        # Iterate same-model alternate hosts (US-079). Each host gets its own
+        # retry budget (see ``_call_model``); same-host retries do not consume
+        # cross-host attempts. The leaderboard still credits the AgentBuild's
+        # canonical model identity, so a successful alternate-host call
+        # produces ``same_model_fallback_ok`` rather than ``fallback_ok``.
+        last_same_model: AdapterResult | None = None
+        for host, secret in self._same_model_hosts:
+            attempt = await self._call_model(
+                observation,
+                host.litellm_model_id,
+                api_base=host.api_base,
+                auth_secret=secret,
             )
-            failed = primary.model_copy(update={"status": terminal_status})
+            if attempt.error is None:
+                promoted = attempt.model_copy(update={"status": "same_model_fallback_ok"})
+                attempts.append(promoted)
+                self.last_attempts = tuple(attempts)
+                return promoted
+            any_exhausted = any_exhausted or attempt.failure is not None
+            attempts.append(attempt.model_copy(update={"status": "primary_failed"}))
+            last_same_model = attempt
+
+        if self._policy.fallback_model is None:
+            # No different-model fallback configured. Synthesize a terminal
+            # result from whichever host attempted last (primary or final
+            # same-model host) and coerce to a safe response.
+            terminal_source = last_same_model if last_same_model is not None else primary
+            terminal_status: AdapterStatus = "exhausted" if any_exhausted else "primary_failed"
+            failed = terminal_source.model_copy(update={"status": terminal_status})
             attempts[-1] = failed
             self.last_attempts = tuple(attempts)
             return _with_coerced_response(failed, observation)
-
-        attempts[-1] = primary.model_copy(update={"status": "primary_failed"})
 
         fallback = await self._call_model(observation, self._policy.fallback_model)
         if fallback.error is None:
@@ -159,8 +200,8 @@ class LiteLlmAdapter:
         # ``exhausted`` so ``tick.py`` emits a single ``ActionTimedOut`` with
         # ``reason='llm_exhausted'``. Non-retryable failures keep the legacy
         # ``both_failed`` shape (parsed_response is coerced to a safe action).
-        is_exhausted = fallback.failure is not None or primary.failure is not None
-        synthesized_status: AdapterStatus = "exhausted" if is_exhausted else "both_failed"
+        any_exhausted = any_exhausted or fallback.failure is not None
+        synthesized_status: AdapterStatus = "exhausted" if any_exhausted else "both_failed"
         synthesized = _with_coerced_response(
             fallback.model_copy(update={"status": synthesized_status}),
             observation,
@@ -174,7 +215,14 @@ class LiteLlmAdapter:
             return self._system_prompt
         return self._system_prompts_by_role.get(observation.you.role, self._system_prompt)
 
-    async def _call_model(self, observation: Observation, model_id: str) -> AdapterResult:
+    async def _call_model(
+        self,
+        observation: Observation,
+        model_id: str,
+        *,
+        api_base: str | None = None,
+        auth_secret: str | None = None,
+    ) -> AdapterResult:
         messages = build_messages(observation, system_prompt=self._system_prompt_for(observation))
         kwargs: dict[str, Any] = {
             "model": model_id,
@@ -182,6 +230,15 @@ class LiteLlmAdapter:
             "timeout": self._timeout_s,
             **self._build.inference_params,
         }
+        # Per-host overrides (US-079 / US-082): same-model alternate hosts
+        # supply their own ``api_base`` and credential. The primary host runs
+        # with its built-in litellm provider defaults and the constructor-cached
+        # secret resolved from ``auth_secret_ref`` — so passing nothing here
+        # preserves the pre-US-079 behavior bit-for-bit.
+        if api_base is not None:
+            kwargs["api_base"] = api_base
+        if auth_secret is not None:
+            kwargs["api_key"] = auth_secret
         start = time.monotonic()
         # Deterministic jitter seed: bind to the observation contents so a
         # replay of the same observation produces an identical backoff schedule.

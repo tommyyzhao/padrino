@@ -49,7 +49,9 @@ _COST_CAP_USD = 0.20
 # from ANY host: primary directly (`ok`), or the configured fallback host
 # after the primary errored (`fallback_ok`). Counting `ok` alone would
 # treat a healthy fallback path as a parse failure.
-_PARSED_OK_STATUSES: frozenset[AdapterStatus] = frozenset({"ok", "fallback_ok"})
+_PARSED_OK_STATUSES: frozenset[AdapterStatus] = frozenset(
+    {"ok", "fallback_ok", "same_model_fallback_ok"}
+)
 _FAILURE_STATUSES: frozenset[AdapterStatus] = frozenset(
     {"provider_error", "primary_failed", "both_failed", "fallback_ok"}
 )

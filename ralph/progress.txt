@@ -92,3 +92,56 @@ fix required — documenting so they don't surprise the next maintainer):
   run; another run was clean. Variance is high, likely free-tier rate
   limiting. The wave-4 same-model multi-host fallback (US-079) is the
   primary mitigation.
+
+---
+
+## 2026-05-22 — US-079 (same-model multi-host fallback)
+
+Landed by maintainer (not Ralph). The architectural slice that makes the
+rest of wave-4 possible.
+
+What shipped:
+- `RoutingPolicy.same_model_hosts: tuple[SameModelHost, ...]` — alternate
+  provider endpoints serving the SAME upstream weights. Each carries
+  `provider`, `litellm_model_id`, `auth_secret_ref`, and optional
+  `api_base`.
+- `LiteLlmAdapter` now iterates primary → same_model_hosts → fallback.
+  Per-host retry budgets are isolated (a primary exhausting its 3
+  attempts does NOT consume any same-model host's budget). Per-host
+  `api_base` and `api_key` are forwarded to `litellm.acompletion` only
+  when set, so the primary call keeps its pre-US-079 kwargs bit-for-bit.
+- New `AdapterStatus` literal `same_model_fallback_ok`. Added to
+  `_PARSED_OK_STATUSES` in all three real-provider integration tests.
+- `Settings.build_routing_policy()` injects the canonical Z.AI GLM-4.7
+  same-model host whenever (`padrino_cerebras_zai_glm47_zai_fallback`
+  AND `zai_api_key` AND `primary_model == "cerebras/zai-glm-4.7"`).
+- `padrino_zai_api_base` defaults to the Z.AI **Coding Plan** endpoint
+  `https://api.z.ai/api/coding/paas/v4` (NOT the General API
+  `https://api.z.ai/api/paas/v4`). The Coding Plan is what our paid
+  subscription serves; using the General API while on the Coding Plan
+  returns a 429 dressed up as "Insufficient balance or no resource
+  package".
+- Leaderboard non-bifurcation invariant asserted at
+  `tests/api/test_public_models.py::test_same_model_fallback_does_not_bifurcate_leaderboard_row`:
+  even when llm_calls carry the new status, `rollup_by_model` returns
+  exactly one row per `(provider, model_name, model_version)` of the
+  AgentBuild.
+
+Real-provider verification:
+- `tests/integration/test_same_model_fallback.py` — BOTH tests passed:
+  * Primary healthy: Cerebras GLM-4.7 served cleanly; Z.AI never touched.
+  * Forced fallback: monkeypatched primary to raise RateLimitError; Z.AI
+    GLM-4.7 (Coding Plan endpoint) served the same-model attempt with
+    valid JSON. Final status: `same_model_fallback_ok`.
+
+Gates: ruff clean, ruff format clean, mypy strict clean, 1212 unit
+tests pass, core coverage 99%.
+
+Carry-forward discipline for the rest of wave-4:
+- US-080's GLM-5.1 cassette recording will hit the **Coding Plan**
+  endpoint; ensure the cassette records `https://api.z.ai/api/coding/paas/v4`
+  in the request URL. The secret scrub should still catch the ZAI key
+  prefix per US-080 AC.
+- The "insufficient balance" -> RateLimitError shape from Z.AI is
+  surfacing as a real signal — when iterating, this likely indicates
+  the wrong base_url, not the wrong key.

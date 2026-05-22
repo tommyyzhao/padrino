@@ -38,6 +38,7 @@ AdapterStatus = Literal[
     "provider_error",
     "primary_failed",
     "fallback_ok",
+    "same_model_fallback_ok",
     "both_failed",
     "exhausted",
 ]
@@ -60,6 +61,26 @@ class AdapterResult(BaseModel):
     failure: LlmCallFailed | None = None
 
 
+class SameModelHost(BaseModel):
+    """One alternate host that serves the SAME model identity as the primary.
+
+    A same-model host is a different provider endpoint (and possibly a
+    different ``litellm_model_id`` prefix) that loads the same upstream
+    weights as :attr:`RoutingPolicy.primary_model` — e.g. Z.AI's
+    ``openai/glm-4.7`` endpoint as a fallback for Cerebras's
+    ``cerebras/zai-glm-4.7``. The leaderboard keeps a single row for the
+    AgentBuild regardless of which host actually served a given call;
+    the per-host distinction is observable only in ``llm_calls`` rows.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: str
+    litellm_model_id: str
+    auth_secret_ref: str
+    api_base: str | None = None
+
+
 class RoutingPolicy(BaseModel):
     """How an adapter should route a single completion across primary/fallback."""
 
@@ -67,6 +88,7 @@ class RoutingPolicy(BaseModel):
 
     primary_model: str
     fallback_model: str | None = None
+    same_model_hosts: tuple[SameModelHost, ...] = ()
     max_retries: int = 0
     retry_on_error_classes: list[str] = Field(default_factory=list)
 
@@ -108,4 +130,5 @@ __all__ = [
     "AgentBuild",
     "LlmAdapter",
     "RoutingPolicy",
+    "SameModelHost",
 ]
