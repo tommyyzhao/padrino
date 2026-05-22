@@ -53,6 +53,12 @@ _COST_CAP_USD = 6.00
 _CLONE_COUNT = 3
 _PARSE_RATE_GATE = 0.70
 _TERMINAL_RESULTS = frozenset({"TOWN", "MAFIA", "DRAW"})
+# A "parsed-OK" call is one where the runner received a valid AgentResponse
+# from ANY host: primary directly (`ok`), or the configured fallback host
+# after the primary errored (`fallback_ok`). Both are real gameplay; only
+# the failure / coercion paths are excluded. Counting `ok` alone would
+# treat a healthy fallback path as a parse failure.
+_PARSED_OK_STATUSES: frozenset[AdapterStatus] = frozenset({"ok", "fallback_ok"})
 _FAILURE_STATUSES: frozenset[AdapterStatus] = frozenset(
     {"provider_error", "primary_failed", "both_failed", "fallback_ok"}
 )
@@ -166,10 +172,10 @@ async def test_real_providers_minigauntlet(
                 f"call #{index} must have a non-empty raw_response or a failure-indicating "
                 f"status; got status={call.status!r} raw_len={len(call.raw_response)}"
             )
-        ok_count = sum(1 for c in all_llm_calls if c.status == "ok")
-        parse_rate = ok_count / len(all_llm_calls)
+        parsed_ok_count = sum(1 for c in all_llm_calls if c.status in _PARSED_OK_STATUSES)
+        parse_rate = parsed_ok_count / len(all_llm_calls)
         assert parse_rate >= _PARSE_RATE_GATE, (
-            f"only {ok_count}/{len(all_llm_calls)} ({parse_rate:.0%}) provider "
+            f"only {parsed_ok_count}/{len(all_llm_calls)} ({parse_rate:.0%}) provider "
             f"responses parsed across the gauntlet — the rest fell through to "
             f"safe-fallback coercion. Status histogram: "
             f"{sorted({c.status for c in all_llm_calls})}"

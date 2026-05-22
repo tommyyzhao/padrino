@@ -45,6 +45,11 @@ _DAY1_RULESET_ID = "mini7_v1_day1_test"
 # $0.10 after the markdown-fence-stripping fix unblocked full-length
 # completions.
 _COST_CAP_USD = 0.20
+# A "parsed-OK" call is one where the runner received a valid AgentResponse
+# from ANY host: primary directly (`ok`), or the configured fallback host
+# after the primary errored (`fallback_ok`). Counting `ok` alone would
+# treat a healthy fallback path as a parse failure.
+_PARSED_OK_STATUSES: frozenset[AdapterStatus] = frozenset({"ok", "fallback_ok"})
 _FAILURE_STATUSES: frozenset[AdapterStatus] = frozenset(
     {"provider_error", "primary_failed", "both_failed", "fallback_ok"}
 )
@@ -130,11 +135,11 @@ async def test_real_providers_one_game_day(monkeypatch: pytest.MonkeyPatch) -> N
     # Cerebras responses to fail parse_agent_response while the rest of this
     # test still passed.
     statuses = [call.status for call in outcome.llm_calls]
-    ok_count = sum(1 for s in statuses if s == "ok")
+    parsed_ok_count = sum(1 for s in statuses if s in _PARSED_OK_STATUSES)
     invalid_json_count = sum(1 for s in statuses if s == "invalid_json")
-    parse_rate = ok_count / len(outcome.llm_calls)
+    parse_rate = parsed_ok_count / len(outcome.llm_calls)
     assert parse_rate >= 0.7, (
-        f"only {ok_count}/{len(outcome.llm_calls)} ({parse_rate:.0%}) provider "
+        f"only {parsed_ok_count}/{len(outcome.llm_calls)} ({parse_rate:.0%}) provider "
         f"responses parsed as valid AgentResponse — the rest fell through to "
         f"safe-fallback coercion. invalid_json={invalid_json_count}. "
         f"Status histogram: {sorted(set(statuses))}"
