@@ -1,0 +1,182 @@
+{
+  "project": "Padrino",
+  "branchName": "ralph/padrino-v3",
+  "description": "Wave 3 — pre-launch quality and real-LLM evaluation. Wave 2 closed the production seams (auth, scheduler, Postgres, dashboard, docker, release CI) and shipped a localhost smoke harness that runs against the deterministic mock adapter. A post-Wave-2 audit then ran the gated `test_real_providers_one_game_day` integration test for the first time, found that 100% of Cerebras `zai-glm-4.7` responses were wrapped in markdown ```json ... ``` fences and silently coerced to NOOP / ABSTAIN by the runner, fixed `_extract_text` to strip the fence, and added a >=70% parse-rate gate so the regression cannot recur (commit 4e4ed22 on main). Wave 3 closes the remaining gaps that block a real public launch: extending real-LLM verification from one Day-1 game to a full 5-day game and then a multi-clone mini-gauntlet, re-recording the synthetic US-051 LiteLLM cassettes against actual provider responses with scrubbed secrets, hardening the public surface (auth-required-by-default, shared rate limiter, federated-ingestion abuse tests), rotating the keys currently in `.env` and writing a git-history secret audit, and adding the two evaluation gates that turn the engine into a benchmark people can trust: faction-balance / win-rate statistics over a real mini-gauntlet, and a privacy audit that scans real transcripts for role / faction / model-identity / clone-index leakage. Quality gates from Wave 2 carry forward unchanged (ruff, ruff format, mypy strict, pytest, 85% core-engine coverage, AST purity firewall, no-wallclock firewall, `live_llm` cassette job). The `integration` marker continues to gate any test that needs a real provider key. Hard rules from Waves 1 and 2 are inherited verbatim: nothing under `src/padrino/core/` may import db / llm / api / runner or call wall-clock / network / random; mafia chat is parsed only via the `action` field; ranked observations never leak role, faction, model identity, ratings, clone index, or other games' transcripts.",
+  "userStories": [
+    {
+      "id": "US-071",
+      "title": "Full 5-day real-LLM integration test with terminal win condition",
+      "description": "As a benchmark consumer, I need at least one real-provider integration test that drives a complete mini7_v1 game to a non-DRAW terminal so I have evidence the engine, adapters, retry policy, ratings, and event log all survive an end-to-end live LLM run — not just the Day-1 sanity test that the post-Wave-2 audit added.",
+      "acceptanceCriteria": [
+        "New test `tests/integration/test_real_providers_full_game.py::test_real_providers_full_game` runs `padrino.runner.game_runner.run_game` against the real Cerebras (primary) + DeepInfra (fallback) providers with the unmodified `mini7_v1` ruleset (`MAX_DAYS=5`, `DISCUSSION_ROUNDS_PER_DAY` as shipped) — no Day-1 stub",
+        "Test is marked `@pytest.mark.integration` and `skip(reason='CEREBRAS_API_KEY not set')` when the env var is missing so default CI continues to skip it; the live-provider CI job will be opt-in via a separate workflow gated on a repository secret",
+        "Assertions: (a) `outcome.event_log` ends with exactly one `GameTerminated` event, (b) `outcome.terminal_result['winner']` is `TOWN` or `MAFIA` (not `DRAW` — a DRAW means MAX_DAYS_REACHED, which is acceptable for the Day-1 sanity test but indicates real-LLM gameplay didn't actually resolve here), (c) parse-rate >=70% (carry forward the US-070-era quality gate), (d) hash-chain replays bit-for-bit clean across every event, (e) every seat has at least one non-NOOP / non-ABSTAIN action somewhere in the log",
+        "Cost cap: total `cost_usd` across the run stays under $2.00 (sized for ~7 seats × 5 days × ~10 phases × $0.005/call with realistic completion lengths); test prints the actual cost on success so the cap can be tuned",
+        "Determinism note: real LLMs are non-deterministic, so the test does NOT assert a specific winner; only that some terminal win condition was reached. A `pytest.mark.flaky(reruns=2)` is acceptable IF the underlying flake is provider variance, not a code bug — document the reason in a one-line comment",
+        "Update `padrino.llm.litellm_adapter.LiteLlmAdapter` if any new fence / coercion / schema-drift pattern is discovered during the full-game run; every new normalization layer needs a unit test in `tests/llm/test_litellm_adapter.py` so the integration path stays the safety net, not the only catcher",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run coverage report --include='src/padrino/core/*' --fail-under=85 passes"
+      ],
+      "dependencies": [],
+      "priority": 71,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-072",
+      "title": "Re-record live-LLM cassettes against actual provider responses",
+      "description": "As a developer adding a new model, I need the US-051 LiteLLM contract cassettes to contain ACTUAL recorded provider responses with secrets scrubbed — not hand-authored synthetic responses — so the cassette job genuinely detects upstream schema drift instead of merely confirming LiteLLM parses our own guesses.",
+      "acceptanceCriteria": [
+        "Audit `tests/llm/cassettes/<provider>/*.yaml` for every provider in US-051's parametrize set (openai, anthropic, cerebras, deepinfra, ollama); replace any hand-authored response body with one obtained by setting `PADRINO_RECORD_LLM=1` and the relevant API key, running the test, and capturing the real response with secrets scrubbed",
+        "The `before_record_response` / `before_record_request` vcrpy hooks must scrub `authorization`, `x-api-key`, any `api_key` JSON field, and any provider-organization / project header before a cassette is written; assert the post-write audit (already present in `tests/llm/test_litellm_contract.py`) catches a deliberately-leaky probe response",
+        "Cassettes must capture the markdown ```json ... ``` fence pattern observed on Cerebras GLM-4.7 in the post-Wave-2 audit, so the fence-stripping unit test in `tests/llm/test_litellm_adapter.py` and the contract test exercise the same shape",
+        "If a provider key is unavailable at re-record time, leave the existing synthetic cassette in place AND add a TODO comment with the provider name and `# synthetic — re-record with PADRINO_RECORD_LLM=1 once key is provisioned`; the test for that provider stays in the parametrize set but is `pytest.mark.skip(reason=...)` so the marker `live_llm` collection count is still meaningful",
+        "Document the re-record flow in `docs/deployment/byo-model.md` (already exists) with exact commands per provider, including which env var seeds the key and how to verify the secret was scrubbed (`grep -E 'sk-|pk-|csk-|lw' tests/llm/cassettes/` must return nothing)",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run pytest -m live_llm --live-llm passes against the re-recorded cassettes"
+      ],
+      "dependencies": [],
+      "priority": 72,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-073",
+      "title": "Real-LLM mini-gauntlet smoke with rating updates",
+      "description": "As an operator measuring model strength, I need a smoke test that runs at least three full games (one mini-gauntlet) against real providers and produces a valid leaderboard with rating updates — otherwise the OpenSkill rating math has never been exercised under live conditions.",
+      "acceptanceCriteria": [
+        "New test `tests/integration/test_real_providers_minigauntlet.py::test_real_providers_minigauntlet` runs `padrino.gauntlets.run_clone_gauntlet` (or equivalent runner entry point) with `clones=3` and the real Cerebras + DeepInfra adapters; ruleset is unmodified `mini7_v1`",
+        "All three games complete to a terminal (`TOWN`, `MAFIA`, or `DRAW=MAX_DAYS_REACHED`); the gauntlet row reaches `Gauntlet.status='COMPLETED'`",
+        "Rating assertions: (a) at least one rating row is written per participating agent_build, (b) every rating row has non-default `mu` and `sigma` after the gauntlet (i.e. they actually moved from the OpenSkill defaults), (c) faction-stratified ratings (TOWN / MAFIA) are populated where applicable",
+        "Leaderboard assertion: `compute_leaderboard(...)` (or the public route equivalent) returns at least one non-empty entry with provisional flag set per US-045 rules",
+        "Cost cap: total cost across all three games <= $6.00; test prints actual cost on success",
+        "Test is marked `@pytest.mark.integration` and skipped on missing CEREBRAS_API_KEY; expected runtime <5 minutes on a developer laptop",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-071"],
+      "priority": 73,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-074",
+      "title": "Auth-required-by-default and shared rate limiter",
+      "description": "As a self-hosting operator preparing for public launch, I need `auth_required=True` to be the FastAPI default and the per-key rate limiter to use shared state (DB or Redis-backed) so multiple uvicorn workers / replicas can't all serve N requests/min each, multiplying the effective ceiling.",
+      "acceptanceCriteria": [
+        "`padrino.api.app.create_app(auth_required: bool = True, ...)` — flip the default from False to True; every existing test that constructs the app without the flag continues to work by explicitly passing `auth_required=False` where appropriate, or by attaching an autouse fixture that injects an admin API key",
+        "New module `padrino.api.rate_limit_store` with a `RateLimitStore` Protocol exposing `record_request(key_hash, now) -> bool` (returns True if the request is allowed, False if rate-limited); ship two implementations: `InMemoryRateLimitStore` (current behavior, default for tests + single-process dev) and `DatabaseRateLimitStore` (uses a new `rate_limit_buckets` table for cross-process consistency)",
+        "Migration 0010 adds `rate_limit_buckets (key_hash, window_start, count, PRIMARY KEY (key_hash, window_start))`; eviction of stale windows happens on every write via a `WHERE window_start < now - interval`",
+        "`padrino.api.auth.RateLimiter` accepts an injected `RateLimitStore`; `create_app(...)` auto-selects DatabaseRateLimitStore when the configured DB URL is Postgres and the deployment is multi-worker (detected via `Settings.padrino_api_workers > 1`), else InMemoryRateLimitStore",
+        "Behavior preserved: per-scope ceilings from US-056 still apply (admin / submitter / spectator); 429 with Retry-After header on exhaustion; raw key never logged or returned outside the POST /admin/keys response",
+        "New test `tests/api/test_rate_limit_store.py` covers: in-memory ceiling enforcement, DatabaseRateLimitStore ceiling across two simulated workers (two concurrent `record_request` calls in separate sessions land under the same bucket), stale-window eviction, key disabled mid-window returns 401 immediately not 429",
+        "`tests/api/test_auth.py` adds: auth_required=True is the default and a missing Authorization header now 401s on every protected route, not just write routes",
+        "Update `docs/deployment/self-host.md` and `docs/deployment/central-backend.md` to reflect the new default and the auto-selection rule",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 74,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-075",
+      "title": "Federated ingestion abuse tests and threat-model doc",
+      "description": "As the operator of the central public leaderboard, I need the `POST /ingest` endpoint to survive realistic abuse — replayed bundles, sybil clones, oversized payloads, hash-chain tampering, malformed signatures — and the trust model has to be documented so submitters know what guarantees they get.",
+      "acceptanceCriteria": [
+        "New doc `docs/deployment/ingestion-threat-model.md` covers: (a) what a submitter API key authorizes, (b) what gets verified on every POST (signature, hash-chain integrity, ruleset whitelist, public_id uniqueness, payload size cap), (c) what is NOT verified (cross-submitter consistency, real-time provenance, model identity claims), (d) abuse classes addressed and explicit non-goals",
+        "New test module `tests/api/test_ingestion_abuse.py` with at least: replayed-bundle rejection (a bundle with a public_id already in `ingested_games` returns 200 `already_ingested` idempotently and writes no duplicate row — clarified from the original 409 framing since US-062's idempotent contract treats benign retries and malicious replays uniformly at the storage layer), tampered-hash rejection (mutate any byte in the canonical body and the signature check fails), tampered-signature rejection, oversized-bundle rejection (the existing 413 test stays; add a streaming-bypass variant that tries to send Content-Length: 100 but actually streams 10 MB and confirms the server tears the connection or 413s rather than buffering), unknown-ruleset rejection (a bundle with `ruleset_id='not_a_ruleset'` is 422), sybil-clone (one submitter key posting 10 bundles that all claim the same model+rating set in 60 s — confirm the rate limiter from US-074 fires)",
+        "Bundle signature verification: confirm the existing US-061 / US-062 signed-bundle path uses constant-time comparison; add a timing-attack assertion via repeated 401 latency measurement (best-effort — 100-sample t-test, skip if p > 0.05)",
+        "Public surface (`/public/leaderboard`, `/public/games/{id}/events`) continues to redact role / faction / private_message for non-terminal games; add a test that ingests a non-terminal bundle and confirms `/public/games/{id}/events` returns the privacy-scrubbed shape",
+        "Ingestion route rejects bundles with `terminal_result` claiming a winner that the event log doesn't actually contain (e.g. claim winner=TOWN but no `GameTerminated` event in the bundle); 422 with `inconsistent_terminal`",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-074"],
+      "priority": 75,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-076",
+      "title": "Rotate .env credentials and add a git-history secret audit",
+      "description": "As the maintainer preparing the repo for public visibility, I need every credential currently in `.env` (Cerebras + DeepInfra keys at minimum) rotated, the rotation documented as a one-shot operational story, and a recurring secret-audit script that scans the git history for accidentally-committed secrets so the next maintainer can verify nothing leaked.",
+      "acceptanceCriteria": [
+        "New script `scripts/audit_git_history_for_secrets.sh` runs `git log -p --all` piped through a regex set covering: Cerebras `csk-...`, DeepInfra `lw...`, OpenAI `sk-...`, Anthropic `sk-ant-...`, GitHub PATs `ghp_...` / `gho_...`, and any `_API_KEY=` lines from `.env.example`-shaped contexts; exits non-zero if any match is found in any commit reachable from any ref",
+        "The script must NOT print the matched secret value to stdout (only the commit SHA and file path); the matched line goes to a gitignored audit log under `.padrino_audit/`",
+        "`scripts/audit_git_history_for_secrets.sh` is wired into a new CI job `secret-audit` that runs on every push to main and on PRs touching `.env*`, `scripts/`, or any file in the historical hit list; job fails the build on any match",
+        "Operational checklist `docs/deployment/credential-rotation.md` documents: which env vars need rotation, where their current values live (`.env` in the project root, gitignored), how to revoke each provider's old key, how to update `.env`, how to re-run `uv run pytest -m integration` to confirm the new key works, and a sign-off line for the maintainer",
+        "Run the new audit against the current repo head; if any secret is found in history, the story is NOT complete until either (a) the secret has been documented as rotated AND the audit's allowlist explicitly notes the historical exposure with rotation date, or (b) a `git filter-repo` / BFG plan is documented (NOT executed by the autonomous agent — that requires the maintainer's explicit go-ahead since it rewrites history)",
+        "`tests/release/test_audit_script.py` covers: a fake repo with a Cerebras-shaped key in HEAD fails the script; a fake repo with the same key in `.env.example` (which is documented as safe) passes; the script never prints the matched secret to stdout (captured via subprocess.PIPE)",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 76,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-077",
+      "title": "Mini-gauntlet evaluation report with faction-balance and win-rate stats",
+      "description": "As a benchmark publisher, I need every completed real-LLM mini-gauntlet to produce a structured evaluation report (faction win rates, role-family win rates, average game length, rating deltas) so the leaderboard claims are backed by reproducible statistics — not a single anecdotal game.",
+      "acceptanceCriteria": [
+        "New module `padrino.gauntlets.evaluation` exposing `evaluate_gauntlet(gauntlet_id, session) -> GauntletReport`; `GauntletReport` is a frozen Pydantic model containing: games_total, games_completed, faction_win_counts (`{TOWN: int, MAFIA: int, DRAW: int}`), faction_win_rate_with_ci (95% Wilson interval), role_family_breakdown (per role family: games, wins, draws, losses, win_rate_with_ci), average_days_to_terminal, average_actions_per_seat, rating_deltas (per agent_build: pre/post mu, pre/post sigma, delta_mu)",
+        "Pure-core helpers live under `padrino.core.statistics`: Wilson CI implementation (no scipy dependency — closed-form), bootstrap helper for the rating-delta significance test; AST purity firewall still passes (no random / wallclock / network)",
+        "New route `GET /gauntlets/{id}/report` (admin-scoped) returns the `GauntletReport` JSON; `/public/gauntlets/{id}/report` exposes the same payload with model-identity columns redacted to `agent_build_id` only (no provider, no model_name) for public consumers — matches the existing privacy posture from US-067",
+        "New unit test `tests/gauntlets/test_evaluation.py` runs `evaluate_gauntlet(...)` against a fixture gauntlet with three scripted games (TOWN/MAFIA/DRAW outcomes) and asserts the report shape, the Wilson CI math against hand-computed values, and the redaction in the public payload",
+        "Dashboard integration: a new `/gauntlets/[id]/report` route in `web/dashboard/src/routes/` renders the report (faction win-rate bar, role-family table, rating-delta chart); minimal Playwright spec asserts the page renders against the smoke-harness backend",
+        "Continue post-Wave-2 audit follow-up: assert `GauntletReport.faction_win_rate_with_ci` has non-degenerate confidence intervals for any gauntlet with >= 3 completed games (i.e. the CI math doesn't collapse to 0..1 at low N)",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run coverage report --include='src/padrino/core/*' --fail-under=85 passes",
+        "pnpm -C web/dashboard lint passes",
+        "pnpm -C web/dashboard check passes",
+        "pnpm -C web/dashboard test passes"
+      ],
+      "dependencies": ["US-073"],
+      "priority": 77,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-078",
+      "title": "Privacy audit: scan real transcripts for role / faction / model-identity leakage",
+      "description": "As the maintainer of a benchmark whose ranked observations must NEVER leak role, faction, model identity, ratings, or clone index across seats, I need a privacy audit that runs against real-LLM transcripts (not just unit-test fixtures) and asserts no leaked field ever appears in a place it shouldn't.",
+      "acceptanceCriteria": [
+        "New module `padrino.observability.privacy_audit` exposing `audit_ranked_observations(event_log, seat_assignments) -> AuditReport`; checks that, for every ranked observation rendered to each seat during the game, the observation's projection contains: NO other seat's role, NO other seat's faction (except mafia teammates listed in `mafia_teammates`), NO model identity / provider name / agent_build_id of any other seat, NO ratings (mu / sigma / leaderboard rank) for any seat, NO clone_index field for any seat",
+        "Pure-core: the audit lives under `padrino.core.observation_privacy` (existing module) as a sibling to `assert_ranked_observation_safe`; new function `audit_observation_log_for_seat(observations, seat_id)` returns a list of `LeakFinding(field_path, leaked_value_redacted, seat_observed_by, seat_owning_the_leak)` records — never raises, never logs the actual value, only the field path",
+        "Integration assertion: extend `tests/integration/test_real_providers_full_game.py` (US-071) to call `audit_ranked_observations(outcome.event_log, outcome.seat_assignments)` and assert the report is empty; ANY finding fails the test with the leaked field path",
+        "New unit test `tests/core/test_observation_privacy_audit.py` covers: a hand-crafted observation log with a deliberate role leak in a public event yields exactly one finding; a hand-crafted log with the mafia-teammates exception (mafia seat A sees mafia seat B's role in `mafia_teammates`) yields zero findings; an empty observation log yields zero findings",
+        "Add a property-based test via hypothesis: generate random observation logs that obey the privacy invariants and assert the audit returns no findings (no false positives) for any input shape produced by the generator",
+        "Wire the audit into `padrino.observability.events`: emit a `privacy.audit.completed` event with the finding count at the end of every game; if findings > 0, also emit `privacy.audit.leak_detected` with the finding count (NEVER the leaked value)",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
+        "uv run coverage report --include='src/padrino/core/*' --fail-under=85 passes"
+      ],
+      "dependencies": ["US-071"],
+      "priority": 78,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}
