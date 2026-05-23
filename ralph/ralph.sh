@@ -53,28 +53,37 @@ PROGRESS_FILE="$SCRIPT_DIR/progress.txt"
 ARCHIVE_DIR="$SCRIPT_DIR/archive"
 LAST_BRANCH_FILE="$SCRIPT_DIR/.last-branch"
 
-# Archive previous run if branch changed
+# Archive previous run if branch changed.
+#
+# IMPORTANT: only fires when the destination folder is brand new. If the
+# maintainer already archived prd.json / progress.txt manually (the
+# wave-3 -> wave-4 transition did this), `.last-branch` lagging behind a
+# manual branchName edit previously caused the script to OVERWRITE the
+# manual archive AND nuke ralph/progress.txt into an empty stub. Skip
+# the copy + reset when the archive folder already has content.
 if [ -f "$PRD_FILE" ] && [ -f "$LAST_BRANCH_FILE" ]; then
   CURRENT_BRANCH=$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || echo "")
   LAST_BRANCH=$(cat "$LAST_BRANCH_FILE" 2>/dev/null || echo "")
-  
+
   if [ -n "$CURRENT_BRANCH" ] && [ -n "$LAST_BRANCH" ] && [ "$CURRENT_BRANCH" != "$LAST_BRANCH" ]; then
-    # Archive the previous run
     DATE=$(date +%Y-%m-%d)
-    # Strip "ralph/" prefix from branch name for folder
     FOLDER_NAME=$(echo "$LAST_BRANCH" | sed 's|^ralph/||')
     ARCHIVE_FOLDER="$ARCHIVE_DIR/$DATE-$FOLDER_NAME"
-    
-    echo "Archiving previous run: $LAST_BRANCH"
-    mkdir -p "$ARCHIVE_FOLDER"
-    [ -f "$PRD_FILE" ] && cp "$PRD_FILE" "$ARCHIVE_FOLDER/"
-    [ -f "$PROGRESS_FILE" ] && cp "$PROGRESS_FILE" "$ARCHIVE_FOLDER/"
-    echo "   Archived to: $ARCHIVE_FOLDER"
-    
-    # Reset progress file for new run
-    echo "# Ralph Progress Log" > "$PROGRESS_FILE"
-    echo "Started: $(date)" >> "$PROGRESS_FILE"
-    echo "---" >> "$PROGRESS_FILE"
+
+    if [ -e "$ARCHIVE_FOLDER/prd.json" ] || [ -e "$ARCHIVE_FOLDER/progress.txt" ]; then
+      echo "Skipping archive: $ARCHIVE_FOLDER already populated (manual archive)."
+      echo "   The current ralph/progress.txt stays intact."
+    else
+      echo "Archiving previous run: $LAST_BRANCH"
+      mkdir -p "$ARCHIVE_FOLDER"
+      [ -f "$PRD_FILE" ] && cp "$PRD_FILE" "$ARCHIVE_FOLDER/"
+      [ -f "$PROGRESS_FILE" ] && cp "$PROGRESS_FILE" "$ARCHIVE_FOLDER/"
+      echo "   Archived to: $ARCHIVE_FOLDER"
+
+      echo "# Ralph Progress Log" > "$PROGRESS_FILE"
+      echo "Started: $(date)" >> "$PROGRESS_FILE"
+      echo "---" >> "$PROGRESS_FILE"
+    fi
   fi
 fi
 

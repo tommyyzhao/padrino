@@ -68,6 +68,14 @@ surgical, keep commits clean, and stay green.
   constructor.
 - **Hash chain** spec excludes `event_hash`, `prev_event_hash`, AND
   `created_at` from the hash input. See AGENTS.md.
+- **Provider HTTP endpoint** is stored on `ModelProvider.base_url`
+  (preexisting column). Wave-4 US-082 chose to reuse `base_url` rather
+  than add a separate `api_base` column, and `LiteLlmAdapter` accepts
+  it as the `api_base` kwarg at construction time. When US-080 etc. say
+  "ModelProvider api_base=..." in their AC text, they mean **set
+  `ModelProvider.base_url`** — do NOT introduce a parallel column.
+  Per-model dispatch identifier overrides live on
+  `ModelConfig.litellm_model_id` (US-082, migration 0013).
 
 ## Implementation loop (one story per iteration)
 
@@ -141,15 +149,25 @@ surgical, keep commits clean, and stay green.
 
 ## Stop condition
 
-After committing your story and updating `prd.json` / `progress.txt`, count
-remaining `passes: false` stories. If **zero remain**, end your reply with
-exactly:
+After committing your story and updating `prd.json` / `progress.txt`,
+**you MUST run this exact command and quote its output in your reply**:
 
 ```
-<promise>COMPLETE</promise>
+jq '[.userStories[] | select(.passes==false)] | length' ralph/prd.json
 ```
 
-Otherwise end normally — the next iteration will pick up the next story.
+Then:
+
+- If the command printed `0` (and only then): end your reply with exactly
+  `<promise>COMPLETE</promise>` on its own line.
+- If the command printed any non-zero number (`1`, `2`, `3`, ...): end
+  normally — the next iteration will pick up the next story. **Do NOT
+  emit `<promise>COMPLETE</promise>` while any story is `passes: false`,
+  no matter how confident you are about the story you just shipped.**
+
+This guardrail exists because earlier iterations have emitted COMPLETE
+after a single story while several `passes: false` stories remained —
+that exits the harness prematurely and the wave doesn't finish.
 
 ## If you get blocked
 

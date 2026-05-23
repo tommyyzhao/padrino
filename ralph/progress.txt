@@ -177,3 +177,71 @@ Carry-forward discipline for the rest of wave-4:
   - Xiaomi Mimo canonical responses were clean unfenced JSON. The raw provider envelope includes `reasoning_content`, but the adapter only parses `choices[0].message.content`, so no normalizer change was needed.
   - VCR record mode can hand compressed OpenAI-compatible responses back to LiteLLM in a shape the client rejects while still writing a valid cassette. The contract helper now immediately replays the just-recorded cassette when that record-time parse quirk appears.
 ---
+
+---
+
+## 2026-05-22T17:23 — US-082 (Xiaomi token-plan provider)
+
+Codex (gpt-5.5/xhigh) landed US-082 in a single Ralph-Codex iteration as
+commit `e5be892`. Real-money budget used: ~$0 (Xiaomi probe + cassette
+recording session, no integration test yet).
+
+What shipped:
+- `ModelConfig.litellm_model_id` column (migration `0013`) — lets a
+  per-model dispatch identifier override LiteLLM's default
+  `<provider>/<model>` shape. The pre-existing
+  `ModelProvider.base_url` column is reused as LiteLLM's `api_base` kwarg
+  (Codex correctly identified the AC's request to "add api_base column"
+  as redundant; base_url already served this role).
+- `LiteLlmAdapter` now accepts `api_base: str | None = None` as a
+  constructor kwarg and forwards it to `litellm.acompletion` for the
+  PRIMARY call site too (US-079 had already wired it for same-model
+  hosts). Per-host `api_key` is forwarded only when `api_base` is set.
+- `Settings.xiaomi_api_key` + `Settings.xiaomi_base_url` plus
+  `ProviderSpec.models: list[ProviderModelSpec]` so a providers.yaml
+  bootstrap can declare its model_configs inline.
+- Real cassettes recorded against the Xiaomi token-plan endpoint
+  (`https://token-plan-sgp.xiaomimimo.com/v1`): 4 yaml files under
+  `tests/llm/cassettes/xiaomi/` for canonical + malformed × mimo-v2.5
+  + mimo-v2.5-pro. Secret-scrub audit returns 0 with the new `tp-`
+  pattern added.
+- `tests/llm/test_litellm_contract.py` parametrize set extended with
+  two Xiaomi entries; both passed live_llm contract tests at record
+  time.
+- `scripts/probe_xiaomi_mimo.py` — parametrized canonical probe for
+  manual quirks inspection.
+- `docs/deployment/byo-model.md` — new "Xiaomi token-plan (US-082)"
+  section + cassette re-record commands.
+
+Gates: ruff clean, ruff format clean, mypy strict clean, 1216 unit
+tests pass, audit script returns 0.
+
+### Learnings for future iterations
+
+- **`ModelProvider.base_url` is the api_base column.** Wave-4 stories
+  US-079 / US-080's AC text says "api_base=..." in places — that means
+  set `ModelProvider.base_url`. Do NOT introduce a parallel `api_base`
+  column. Per-model dispatch identifier overrides go on
+  `ModelConfig.litellm_model_id` (US-082, migration 0013).
+- **`<promise>COMPLETE</promise>` is a hair-trigger.** Codex's first
+  Ralph-Codex iteration emitted COMPLETE after US-082 while three
+  stories (US-080, US-081, US-083) were still `passes: false`. The
+  prompt was unambiguous about the stop condition but Codex skipped
+  the `passes:false` count. Prompt patched: the iteration MUST now
+  run `jq '[.userStories[] | select(.passes==false)] | length' \
+  ralph/prd.json`, quote the output in its reply, and only emit
+  COMPLETE when that output is `0`.
+- **`./ralph/ralph-codex.sh` archive logic is destructive when
+  `.last-branch` lags behind a manual `branchName` edit.** Today's
+  symptom: the script copied the current wave-4 `prd.json` /
+  `progress.txt` ON TOP OF the already-populated
+  `ralph/archive/2026-05-22-padrino-v3/` folder (overwriting the
+  archived wave-3 content) and reset `ralph/progress.txt` to an
+  empty stub. Both `ralph.sh` and `ralph-codex.sh` patched: the
+  archive copy + reset is now skipped when the destination folder
+  already has `prd.json` or `progress.txt` (manual archive wins).
+- **Bootstrap YAML now supports inline model_configs.** The
+  `ProviderSpec.models: list[ProviderModelSpec]` field lets a single
+  bootstrap step seed both `model_providers` and `model_configs`
+  rows. US-080 (Z.AI GLM-5.1) should use this shape rather than
+  bootstrap-then-manual-INSERT for model_configs.
