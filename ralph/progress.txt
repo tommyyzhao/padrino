@@ -245,3 +245,44 @@ tests pass, audit script returns 0.
   bootstrap step seed both `model_providers` and `model_configs`
   rows. US-080 (Z.AI GLM-5.1) should use this shape rather than
   bootstrap-then-manual-INSERT for model_configs.
+
+---
+
+## 2026-05-23 — Wave 4 plan extension (US-084 + US-085)
+
+After US-079 + US-082 landed and the audit found US-082's work clean, the
+wave-4 plan was extended with two follow-on stories so the wave actually
+produces a citable public benchmark instead of stopping at the
+"survives one game" line:
+
+- **US-084: Multi-game heterogeneous tournament with Wilson-CI gate.**
+  Extends the gauntlet runner with `n_games: int` and deterministic
+  seat-permutation shuffling so the same heterogeneous roster plays N
+  games (default 10). Computes per-(model, faction) Wilson CIs and
+  asserts the overall faction CI width drops below 0.40 — the tightness
+  threshold below which the leaderboard rankings carry signal rather
+  than noise. Depends on US-083.
+- **US-085: Scheduled recurring heterogeneous gauntlet.** Wave-2's
+  async scheduler currently runs only heartbeats. US-085 is its first
+  real job: a cron-driven recurring gauntlet that fires the US-084
+  N-game tournament on a schedule, persists results, and exposes a
+  scrubbed `/public/scheduled-gauntlets` view of the live cadence.
+  Also adds a pure-core `next_run_at(cron_expr, *, after)` helper
+  (no wallclock reads — `after` is injected) and the admin CRUD
+  routes. Depends on US-084.
+
+Wave-4 narrative arc now reads in three movements: operational
+reliability + diversity (US-079..US-082, done for the most part) ->
+statistical credibility (US-083..US-084) -> liveness (US-085).
+
+### In-progress US-081 work
+
+Codex's interrupted iteration left ~150 lines of partial US-081
+(DeepInfra Gemma) work in the working tree, NOT YET committed:
+- `tests/cli/test_bootstrap.py` — new bootstrap test for Gemma
+- `tests/llm/test_litellm_contract.py` — new `deepinfra-gemma` case
+- `scripts/probe_deepinfra_gemma.py` — quirks probe (83 lines)
+
+The next Ralph iteration that picks US-081 should fold this work in
+(it's correctly shaped and follows the US-082 patterns) rather than
+re-writing from scratch.
