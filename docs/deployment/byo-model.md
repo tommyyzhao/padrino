@@ -96,8 +96,10 @@ so you can chain.
 
 ## LiteLLM model identifiers
 
-The `default_model` field is forwarded to LiteLLM. The full model id
-that the adapter actually sends is `<provider>/<model>`:
+For native LiteLLM providers, the full model id the adapter sends is
+usually `<provider>/<model>`. For OpenAI-compatible providers hosted at a
+custom endpoint, set `ModelProvider.base_url` and store the exact
+LiteLLM dispatch id on `ModelConfig.litellm_model_id`:
 
 | Provider     | Example identifier                                |
 |--------------|---------------------------------------------------|
@@ -105,6 +107,7 @@ that the adapter actually sends is `<provider>/<model>`:
 | Anthropic    | `anthropic/claude-haiku-4-5`                      |
 | Cerebras     | `cerebras/zai-glm-4.7`                            |
 | DeepInfra    | `deepinfra/deepseek-ai/DeepSeek-V4-Flash`         |
+| Xiaomi       | `openai/mimo-v2.5` with `base_url=https://token-plan-sgp.xiaomimimo.com/v1` |
 | Groq         | `groq/llama-3.1-70b-versatile`                    |
 | Mistral      | `mistral/mistral-large-latest`                    |
 | Ollama       | `ollama/llama3` (note: dispatches to `/api/generate`, not `/api/chat`) |
@@ -178,6 +181,39 @@ path against the real Cerebras + Z.AI endpoints — it monkeypatches the
 primary call to raise `litellm.exceptions.RateLimitError` and asserts
 the result lands with `status == 'same_model_fallback_ok'`.
 
+## Xiaomi token-plan (US-082)
+
+Xiaomi's token-plan endpoint is OpenAI-compatible, but it is not served
+from OpenAI. Register the provider with `base_url`; the adapter forwards
+that value to LiteLLM as `api_base` and passes the credential resolved
+from `auth_secret_ref` as `api_key`.
+
+```yaml
+providers:
+  - name: xiaomi
+    auth_secret_ref: env:XIAOMI_API_KEY
+    base_url: https://token-plan-sgp.xiaomimimo.com/v1
+    models:
+      - model_name: mimo-v2.5
+        litellm_model_id: openai/mimo-v2.5
+      - model_name: mimo-v2.5-pro
+        litellm_model_id: openai/mimo-v2.5-pro
+```
+
+The probe script uses the canonical mini7 observation and prints the raw
+provider text:
+
+```
+XIAOMI_API_KEY=tp-... uv run python scripts/probe_xiaomi_mimo.py mimo-v2.5
+XIAOMI_API_KEY=tp-... uv run python scripts/probe_xiaomi_mimo.py mimo-v2.5-pro
+```
+
+Observed 2026-05-22: both Mimo models emitted clean unfenced JSON for the
+canonical probe. No Chinese preamble, `</think>`, `<start_of_turn>`, or
+`<end_of_turn>` normalizer was needed. The raw response envelope does
+include a provider `reasoning_content` field, but the adapter parses only
+`choices[0].message.content`.
+
 ## Recording cassettes (US-051, US-072)
 
 The contract suite under `tests/llm/test_litellm_contract.py` parses
@@ -217,6 +253,15 @@ rm tests/llm/cassettes/openai/canonical_response.yaml
 PADRINO_RECORD_LLM=1 OPENAI_API_KEY=sk-... \
     uv run pytest tests/llm/test_litellm_contract.py --live-llm \
     -m live_llm -k 'openai and canonical'
+
+# Xiaomi token-plan (records both Mimo models and their malformed probes)
+rm tests/llm/cassettes/xiaomi/mimo_v25_canonical_response.yaml
+rm tests/llm/cassettes/xiaomi/mimo_v25_malformed_response.yaml
+rm tests/llm/cassettes/xiaomi/mimo_v25_pro_canonical_response.yaml
+rm tests/llm/cassettes/xiaomi/mimo_v25_pro_malformed_response.yaml
+PADRINO_RECORD_LLM=1 XIAOMI_API_KEY=tp-... \
+    uv run pytest tests/llm/test_litellm_contract.py --live-llm \
+    -m live_llm -k xiaomi
 ```
 
 Then flip `synthetic_canonical=False` on the matching `ProviderCase`
@@ -237,20 +282,23 @@ directory for credential-shaped substrings; the audit must return
 nothing:
 
 ```
-grep -rE 'sk-|pk-|csk-|^lw|Bearer\s' tests/llm/cassettes/ && echo LEAK || echo clean
+grep -rE 'sk-|pk-|csk-|^lw|tp-|Bearer\s' tests/llm/cassettes/ && echo LEAK || echo clean
 ```
 
 The `test_cassettes_have_no_secret_shaped_substrings` test is the same
 audit run inside pytest, and `test_audit_catches_deliberately_leaky_probe`
-plants a sentinel `sk-...` / `sk-ant-...` / `Bearer ...` string in a tmp
-cassette to prove the audit's regex set has not silently gone stale.
+plants sentinel `sk-...` / `sk-ant-...` / `tp-...` / `Bearer ...`
+strings in a tmp cassette to prove the audit's regex set has not silently
+gone stale.
 
 ### Malformed cassettes
 
-`malformed_response.yaml` for every provider is intentionally synthetic.
-Real providers do not emit malformed JSON on demand, so the cassette
-asserts our `coerce_response_failure` path against a small wrapper
-envelope. The test stays in the parametrize set for every provider.
+Legacy `malformed_response.yaml` cassettes are intentionally synthetic
+where a provider cannot be coaxed into malformed JSON on demand. Xiaomi's
+malformed cassettes are real recordings: the provider case uses a
+record-only system prompt asking for `oops not json {`, then the replayed
+cassette asserts our `coerce_response_failure` path. The test stays in
+the parametrize set for every provider.
 
 ### When a provider key is unavailable
 

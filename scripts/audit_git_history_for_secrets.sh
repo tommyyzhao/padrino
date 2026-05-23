@@ -20,7 +20,7 @@
 #   .padrino_audit/**                — the script's own output
 #
 # The pattern set is intentionally narrow: it favours specific provider
-# prefixes (csk-, lw, sk-, sk-ant-, ghp_, gho_) plus the populated
+# prefixes (csk-, lw, sk-, sk-ant-, tp-, ghp_, gho_) plus the populated
 # `*_API_KEY=<value>` shape over generic high-entropy heuristics, because
 # false positives in CI are noisy and erode trust in the audit.
 
@@ -62,7 +62,7 @@ mkdir -p "${AUDIT_DIR}"
 # placeholder text. The `_API_KEY=` pattern requires a value of >= 20
 # alphanumeric / `-` / `_` characters, so `.env.example`-shaped empty
 # templates and `...` placeholders never match.
-PATTERN='(csk-[A-Za-z0-9_-]{20,}|lw[A-Za-z0-9_-]{30,}|sk-ant-[A-Za-z0-9_-]{32,}|sk-[A-Za-z0-9_-]{32,}|ghp_[A-Za-z0-9]{36,}|gho_[A-Za-z0-9]{36,}|[A-Z][A-Z0-9_]*_API_KEY=[A-Za-z0-9_-]{20,})'
+PATTERN='(csk-[A-Za-z0-9_-]{20,}|lw[A-Za-z0-9_-]{30,}|sk-ant-[A-Za-z0-9_-]{32,}|sk-[A-Za-z0-9_-]{32,}|tp-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{36,}|gho_[A-Za-z0-9]{36,}|[A-Z][A-Z0-9_]*_API_KEY=[A-Za-z0-9_-]{20,})'
 
 # Stream the full history through awk. The `__COMMIT__` sentinel is unlikely
 # to collide with any natural diff content; if a future commit literally

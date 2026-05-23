@@ -125,6 +125,7 @@ def _build_adapter(
     *,
     fallback: str | None = "deepinfra/deepseek-ai/DeepSeek-V4-Flash",
     same_model_hosts: tuple[SameModelHost, ...] = (),
+    api_base: str | None = None,
 ) -> LiteLlmAdapter:
     policy = RoutingPolicy(
         primary_model="cerebras/zai-glm-4.7",
@@ -143,6 +144,7 @@ def _build_adapter(
         agent_build=build,
         timeout_s=5.0,
         auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
+        api_base=api_base,
     )
 
 
@@ -172,6 +174,21 @@ def test_success_returns_ok_status() -> None:
     assert result.cost_usd == 0.0001
     assert result.provider_response_id == "resp-1"
     assert result.error is None
+
+
+def test_primary_api_base_forwards_endpoint_and_cached_secret() -> None:
+    canned_action = Action(type=ActionType.ABSTAIN, target=None)
+    response = _fake_completion(content=_valid_response_json(canned_action))
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)) as mock_acomp:
+        adapter = _build_adapter(api_base="https://token-plan-sgp.xiaomimimo.com/v1")
+        result = asyncio.run(adapter.complete(obs))
+
+    assert result.status == "ok"
+    call_kwargs = mock_acomp.call_args.kwargs
+    assert call_kwargs["api_base"] == "https://token-plan-sgp.xiaomimimo.com/v1"
+    assert call_kwargs["api_key"] == "test-key-value"
 
 
 def test_success_path_records_single_attempt() -> None:

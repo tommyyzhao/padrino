@@ -1,0 +1,85 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"Return exactly this text, with
+      no JSON and no code fence: oops not json {"},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"mimo-v2.5"}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '888'
+      content-type:
+      - application/json
+      host:
+      - token-plan-sgp.xiaomimimo.com
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://token-plan-sgp.xiaomimimo.com/v1/chat/completions
+  response:
+    body:
+      string: "{\"id\":\"dde1dac420964d00826d7c13752d84af\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"I
+        will abstain from voting during this first day. This is a cautious approach
+        to avoid drawing attention while I observe the other players' interactions
+        and voting patterns. Since there's no clear information about who might be
+        Town or another faction, abstaining helps me blend in and prevents me from
+        accidentally voting for my Mafia teammate or creating suspicious voting trends.\",\"role\":\"assistant\",\"tool_calls\":null,\"reasoning_content\":\"Hmm,
+        the user has provided a detailed game state in JSON format, clearly outlining
+        the current situation in a mafia-style game. The ruleset is mini7_v1, the
+        game is at DAY_1_VOTE phase with 7 players alive, and I'm playing as MAFIA_GOON
+        (P01) with teammate P02. The legal actions are VOTE or ABSTAIN, with targets
+        excluding myself and dead players.\\n\\nSince this is the first day vote,
+        there's no prior context or suspicions to base my vote on. As mafia, I should
+        avoid drawing attention early on. Voting randomly or against my teammate could
+        raise suspicion. The safest move seems to be ABSTAIN to observe how others
+        vote and potentially gauge alliances. This also avoids leaving a trail of
+        voting patterns that could be analyzed later. \\n\\nThe user didn't ask a
+        direct question but shared the game state, so I should acknowledge the situation
+        and explain my strategic choice clearly. No need for extra commentary\u2014just
+        state my action and reasoning concisely.\"}}],\"created\":1779495288,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":282,\"prompt_tokens\":233,\"total_tokens\":515,\"completion_tokens_details\":{\"reasoning_tokens\":210},\"prompt_tokens_details\":{\"cached_tokens\":192}}}"
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - application/json
+      Date:
+      - Sat, 23 May 2026 00:14:49 GMT
+      Server:
+      - MiFE/3.4.29
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Origin
+      - Access-Control-Request-Method
+      - Access-Control-Request-Headers
+      X-MiFE-Upstream-Status:
+      - '200'
+      content-length:
+      - '1757'
+    status:
+      code: 200
+      message: OK
+version: 1

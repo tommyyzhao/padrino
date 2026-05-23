@@ -34,7 +34,7 @@ from padrino.bootstrap import (
 from padrino.cli import app
 from padrino.core.rulesets import mini7_v1
 from padrino.db.base import create_engine, create_session_factory
-from padrino.db.models import ApiKey, League, ModelProvider, PromptVersion
+from padrino.db.models import ApiKey, League, ModelConfig, ModelProvider, PromptVersion
 
 
 def _db_url(tmp_path: Path) -> str:
@@ -71,6 +71,17 @@ async def _query(
     finally:
         await engine.dispose()
     return prompts, leagues, keys, providers
+
+
+async def _query_model_configs(db_url: str) -> list[ModelConfig]:
+    engine = create_engine(db_url)
+    try:
+        sf = create_session_factory(engine)
+        async with sf() as session:
+            models = list((await session.execute(select(ModelConfig))).scalars())
+    finally:
+        await engine.dispose()
+    return models
 
 
 def test_bootstrap_fresh_db_runs_every_step(tmp_path: Path) -> None:
@@ -225,6 +236,84 @@ def test_bootstrap_with_valid_providers_yaml(
     assert sorted(providers_step_2["detail"]["skipped"]) == [
         "test-cerebras",
         "test-deepinfra",
+    ]
+
+
+def test_bootstrap_with_xiaomi_models_yaml_seeds_model_configs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XIAOMI_API_KEY", "tp-not-real-but-resolves")
+    providers_path = tmp_path / "providers.yaml"
+    providers_path.write_text(
+        textwrap.dedent(
+            """
+            providers:
+              - name: xiaomi
+                auth_secret_ref: env:XIAOMI_API_KEY
+                base_url: https://token-plan-sgp.xiaomimimo.com/v1
+                models:
+                  - model_name: mimo-v2.5
+                    litellm_model_id: openai/mimo-v2.5
+                  - model_name: mimo-v2.5-pro
+                    litellm_model_id: openai/mimo-v2.5-pro
+            """
+        ).strip()
+    )
+
+    runner = CliRunner()
+    db_url = _db_url(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "--db-url",
+            db_url,
+            "--providers",
+            str(providers_path),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    payload = json.loads(result.stdout)
+    providers_step = _step(payload["steps"], STEP_PROVIDERS)
+    assert providers_step["detail"]["inserted"] == ["xiaomi"]
+    assert sorted(providers_step["detail"]["models_inserted"]) == [
+        "xiaomi/mimo-v2.5",
+        "xiaomi/mimo-v2.5-pro",
+    ]
+
+    _, _, _, providers = asyncio.run(_query(db_url))
+    assert len(providers) == 1
+    assert providers[0].name == "xiaomi"
+    assert providers[0].base_url == "https://token-plan-sgp.xiaomimimo.com/v1"
+
+    models = asyncio.run(_query_model_configs(db_url))
+    by_name = {m.model_name: m for m in models}
+    assert set(by_name) == {"mimo-v2.5", "mimo-v2.5-pro"}
+    assert by_name["mimo-v2.5"].litellm_model_id == "openai/mimo-v2.5"
+    assert by_name["mimo-v2.5-pro"].litellm_model_id == "openai/mimo-v2.5-pro"
+    assert all(m.default_temperature == pytest.approx(0.7) for m in models)
+    assert all(m.default_top_p == pytest.approx(1.0) for m in models)
+    assert all(m.default_max_output_tokens == 4096 for m in models)
+
+    second = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "--db-url",
+            db_url,
+            "--providers",
+            str(providers_path),
+        ],
+    )
+    assert second.exit_code == 0, second.stdout
+    payload_2 = json.loads(second.stdout)
+    providers_step_2 = _step(payload_2["steps"], STEP_PROVIDERS)
+    assert providers_step_2["status"] == "skipped"
+    assert providers_step_2["detail"]["models_inserted"] == []
+    assert sorted(providers_step_2["detail"]["models_skipped"]) == [
+        "xiaomi/mimo-v2.5",
+        "xiaomi/mimo-v2.5-pro",
     ]
 
 

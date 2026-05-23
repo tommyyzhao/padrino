@@ -40,6 +40,7 @@ from padrino.db.base import create_engine, create_session_factory
 from padrino.db.models import League, PromptVersion
 from padrino.db.repositories import api_keys as api_keys_repo
 from padrino.db.repositories import leagues as leagues_repo
+from padrino.db.repositories import model_configs as model_configs_repo
 from padrino.db.repositories import providers as providers_repo
 from padrino.llm.prompts import (
     CANONICAL_RESPONSE_SCHEMA,
@@ -69,6 +70,20 @@ class BootstrapError(RuntimeError):
         self.message = message
 
 
+class ProviderModelSpec(BaseModel):
+    """One model config to seed under a provider entry."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    model_name: str = Field(min_length=1)
+    litellm_model_id: str | None = None
+    model_version: str | None = None
+    default_temperature: float = 0.7
+    default_top_p: float = 1.0
+    default_max_output_tokens: int = Field(default=4096, gt=0)
+    supports_structured_outputs: bool = True
+
+
 class ProviderSpec(BaseModel):
     """One provider entry in the bootstrap YAML."""
 
@@ -79,6 +94,7 @@ class ProviderSpec(BaseModel):
     base_url: str | None = None
     default_model: str | None = None
     timeout_s: float | None = Field(default=None, gt=0)
+    models: list[ProviderModelSpec] = Field(default_factory=list)
 
 
 class ProvidersFile(BaseModel):
@@ -255,6 +271,8 @@ def _load_providers_file(path: Path) -> ProvidersFile:
 async def _seed_providers(session: AsyncSession, specs: Sequence[ProviderSpec]) -> StepReport:
     inserted: list[str] = []
     skipped: list[str] = []
+    models_inserted: list[str] = []
+    models_skipped: list[str] = []
     for spec in specs:
         # Resolve the secret eagerly so a bad ref fails the bootstrap
         # before any provider row is persisted (matches the POST
@@ -266,29 +284,60 @@ async def _seed_providers(session: AsyncSession, specs: Sequence[ProviderSpec]) 
                 STEP_PROVIDERS,
                 f"provider {spec.name!r}: {exc}",
             ) from exc
-        existing = await providers_repo.list_(session, name=spec.name)
-        if existing:
+        existing_providers = await providers_repo.list_(session, name=spec.name)
+        if existing_providers:
             skipped.append(spec.name)
-            continue
-        await providers_repo.create(
-            session,
-            name=spec.name,
-            auth_secret_ref=spec.auth_secret_ref,
-            base_url=spec.base_url,
-        )
-        inserted.append(spec.name)
+            provider = existing_providers[0]
+        else:
+            provider = await providers_repo.create(
+                session,
+                name=spec.name,
+                auth_secret_ref=spec.auth_secret_ref,
+                base_url=spec.base_url,
+            )
+            inserted.append(spec.name)
+        existing_models = {
+            (model.model_name, model.model_version)
+            for model in await model_configs_repo.list_(session, provider_id=provider.id)
+        }
+        for model_spec in spec.models:
+            label = f"{spec.name}/{model_spec.model_name}"
+            key = (model_spec.model_name, model_spec.model_version)
+            if key in existing_models:
+                models_skipped.append(label)
+                continue
+            await model_configs_repo.create(
+                session,
+                provider_id=provider.id,
+                model_name=model_spec.model_name,
+                litellm_model_id=model_spec.litellm_model_id,
+                model_version=model_spec.model_version,
+                default_temperature=model_spec.default_temperature,
+                default_top_p=model_spec.default_top_p,
+                default_max_output_tokens=model_spec.default_max_output_tokens,
+                supports_structured_outputs=model_spec.supports_structured_outputs,
+            )
+            existing_models.add(key)
+            models_inserted.append(label)
     await session.flush()
-    status = "ok" if inserted else "skipped"
+    status = "ok" if inserted or models_inserted else "skipped"
     _LOG.info(
-        "bootstrap.step.ok" if inserted else "bootstrap.step.skipped",
+        "bootstrap.step.ok" if inserted or models_inserted else "bootstrap.step.skipped",
         step=STEP_PROVIDERS,
         inserted=inserted,
         skipped=skipped,
+        models_inserted=models_inserted,
+        models_skipped=models_skipped,
     )
     return StepReport(
         name=STEP_PROVIDERS,
         status=status,
-        detail={"inserted": inserted, "skipped": skipped},
+        detail={
+            "inserted": inserted,
+            "skipped": skipped,
+            "models_inserted": models_inserted,
+            "models_skipped": models_skipped,
+        },
     )
 
 
@@ -385,6 +434,7 @@ __all__ = [
     "STEP_PROVIDERS",
     "BootstrapError",
     "BootstrapResult",
+    "ProviderModelSpec",
     "ProviderSpec",
     "ProvidersFile",
     "StepReport",

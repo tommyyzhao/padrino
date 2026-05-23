@@ -19,11 +19,13 @@ async def create(
     default_top_p: float,
     default_max_output_tokens: int,
     supports_structured_outputs: bool,
+    litellm_model_id: str | None = None,
     model_version: str | None = None,
 ) -> ModelConfig:
     obj = ModelConfig(
         provider_id=provider_id,
         model_name=model_name,
+        litellm_model_id=litellm_model_id,
         model_version=model_version,
         default_temperature=default_temperature,
         default_top_p=default_top_p,

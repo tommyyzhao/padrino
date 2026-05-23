@@ -1,0 +1,178 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"mimo-v2.5-pro"}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1626'
+      content-type:
+      - application/json
+      host:
+      - token-plan-sgp.xiaomimimo.com
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://token-plan-sgp.xiaomimimo.com/v1/chat/completions
+  response:
+    body:
+      string: "{\"id\":\"cf157dcc706f44a7be312d0eae297589\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"{\\n
+        \ \\\"public_message\\\": \\\"I'm voting for P03 based on gut feeling. We
+        need to start eliminating suspects to gather information.\\\",\\n  \\\"private_message\\\":
+        null,\\n  \\\"action\\\": {\\n    \\\"type\\\": \\\"VOTE\\\",\\n    \\\"target\\\":
+        \\\"P03\\\"\\n  },\\n  \\\"memory_update\\\": \\\"Day 1 Vote: As Mafia, I
+        voted for P03 to avoid suspicion on teammate P02 and to help eliminate a town
+        player. No prior events or information to guide decision.\\\",\\n  \\\"rationale_summary\\\":
+        \\\"Voted for a non-teammate to blend in with town and push towards eliminating
+        a town player on Day 1, aligning with Mafia faction goals.\\\"\\n}\",\"role\":\"assistant\",\"tool_calls\":null,\"reasoning_content\":\"First,
+        I am P01, role is MAFIA_GOON, faction is MAFIA. My teammate is P02. It's Day
+        1, and we're in the DAY_1_VOTE phase. I need to vote or abstain. My legal
+        actions are VOTE or ABSTAIN, with legal targets: P02, P03, P04, P05, P06,
+        P07. I must not vote for myself since I'm not in the legal targets.\\n\\nSince
+        I'm Mafia, I want to protect my teammate P02 and avoid suspicion. In a 7-player
+        game, with one Mafia teammate (P02), and me as Mafia, there are two Mafia
+        members. That means there are five town players among the alive players.\\n\\nIn
+        Day 1 voting, it's common to vote based on suspicion or to avoid voting for
+        teammates. I should vote for someone who isn't my teammate to avoid drawing
+        attention. But I also need to think about strategy. If I vote for P02, that
+        might be suspicious if I'm seen as protecting them, but voting for a teammate
+        could be a way to deflect suspicion, though it's risky as it could get them
+        voted out.\\n\\nMy teammate is P02, so if I vote for P02, that might seem
+        like I'm not Mafia, but if P02 is voted out, I lose a teammate, which is bad.
+        So, I should probably vote for someone else to keep P02 alive.\\n\\nIn social
+        deduction games, Mafia often try to avoid voting for each other unless necessary
+        to blend in. Since it's Day 1, there might not be much information, so voting
+        randomly or based on gut feeling is common.\\n\\nI should also consider public
+        messages. I can send a public message to influence others. As Mafia, I might
+        want to cast suspicion on town players or defend myself subtly.\\n\\nMy goal
+        is to make my faction win, which means eliminating town players. So, I need
+        to vote in a way that helps eliminate a town player today.\\n\\nLooking at
+        the legal targets: P02 is my teammate, P03, P04, P05, P06, P07 are others.
+        I don't know their roles, but since P02 is Mafia, the others are likely town,
+        unless there are more Mafia, but based on the setup, it seems like two Mafia
+        in a 7-player game, which is standard.\\n\\nI should vote for one of the town
+        players to get them voted out. But I need to decide who. Since it's Day 1,
+        no information, so I might vote for someone randomly or based on the name
+        order.\\n\\nI could also abstain, but voting is generally better to avoid
+        suspicion or to participate.\\n\\nFor public message, I might say something
+        like \\\"Let's vote carefully\\\" or accuse someone without being too specific.\\n\\nFor
+        private message, since it's Day 1 vote phase, I have a private channel? The
+        observation doesn't list a private channel for this phase. Looking back: \\\"private_message\\\":
+        str|null, and in the schema, it's allowed, but in the phase description, it
+        says \\\"Private messages are visible only when the observation lists a private
+        channel for this phase.\\\" The observation here doesn't list any private
+        channels, so I probably can't send private messages, or it might be ignored.
+        To be safe, I'll set private_message to null.\\n\\nMemory update: I should
+        update my private memory with my actions and reasoning. Since it's the first
+        phase, I can note who I voted for and why.\\n\\nRationale summary: I need
+        to provide a rationale for my actions.\\n\\nNow, for the action: I need to
+        choose between VOTE and ABSTAIN. I think VOTE is better. Target: I should
+        vote for someone who isn't my teammate. Let's choose P03 as an example, or
+        perhaps based on the list, but no information.\\n\\nI could vote for P07 to
+        make it seem random. But I want to be strategic. Since P02 is my teammate,
+        I should avoid voting for them, so target one of P03-P07.\\n\\nIn public message,
+        I might say something like \\\"I think P04 has been suspicious\\\" to cast
+        doubt, but since it's Day 1 and no public events, it might be forced. Better
+        to keep it vague.\\n\\nTo minimize risk, I'll vote for P03, and in public
+        message, say something neutral.\\n\\nMemory update: I'll record that I voted
+        for P03 to avoid suspicion on P02 and to help eliminate a town player.\\n\\nRationale
+        summary: As Mafia, I voted for a non-teammate to blend in and push towards
+        eliminating a town player.\\n\\nNow, for the JSON response. I must respond
+        with a single JSON object matching the schema.\\n\\nSchema: {\\\"public_message\\\":
+        str|null, \\\"private_message\\\": str|null, \\\"action\\\": {\\\"type\\\":
+        str, \\\"target\\\": str|null}, \\\"memory_update\\\": str, \\\"rationale_summary\\\":
+        str|null}\\n\\nI need to ensure all fields are present.\\n\\nLet me set:\\n\\n-
+        public_message: A string or null. I'll send a message to influence. Perhaps:
+        \\\"I'm leaning towards voting for P03, but let's hear more thoughts.\\\"
+        But in Day 1 vote, we might not have much discussion. Since it's vote phase,
+        messages might be sent before voting.\\n\\nActually, in this phase, I can
+        send a public message and then vote. The message can be used to sway votes.\\n\\nBut
+        to be concise, I'll say something simple.\\n\\n- private_message: null, since
+        no private channel listed.\\n\\n- action: {\\\"type\\\": \\\"VOTE\\\", \\\"target\\\":
+        \\\"P03\\\"} \u2013 I choose P03 arbitrarily.\\n\\n- memory_update: \\\"Day
+        1: Voted for P03 to avoid voting for teammate P02 and to target a town player.
+        No information yet.\\\"\\n\\n- rationale_summary: \\\"As Mafia, I voted for
+        a non-teammate to blend in and help eliminate a town player on Day 1.\\\"\\n\\nI
+        could also consider abstaining, but voting is better for participation.\\n\\nAnother
+        thought: In some strategies, Mafia might vote for a teammate to make them
+        seem innocent, but it's risky. Since it's Day 1, and we have two Mafia, if
+        I vote for P02 and P02 gets voted out, I'm alone, which is bad. So, better
+        to vote for someone else.\\n\\nI should coordinate with P02, but I can't send
+        private messages as there's no channel listed. In the game, there might be
+        a private channel for Mafia, but in this observation, it's not mentioned.
+        Looking back at the input: \\\"private_events\\\":[], and no private channels
+        listed. So, I assume no private communication for now. In some games, Mafia
+        have a private chat, but here it might not be available in this phase.\\n\\nThe
+        rules say: \\\"Private messages are visible only when the observation lists
+        a private channel for this phase.\\\" Since it doesn't list, I should not
+        rely on private messages.\\n\\nSo, I'll proceed without private message.\\n\\nFor
+        public message, I want to appear town-like. I could say: \\\"Let's all vote
+        to avoid abstaining, as it might help Mafia.\\\" But that's ironic since I'm
+        Mafia. Better to say something like: \\\"I think we should focus on voting
+        today to gather information.\\\"\\n\\nTo keep it short, I'll set public_message
+        to a brief statement.\\n\\nFinal decision:\\n\\n- public_message: \\\"I'm
+        voting for P03 based on gut feeling. We need to start eliminating suspects.\\\"\\n\\n-
+        private_message: null\\n\\n- action: {\\\"type\\\": \\\"VOTE\\\", \\\"target\\\":
+        \\\"P03\\\"}\\n\\n- memory_update: \\\"In Day 1 vote, I voted for P03 to avoid
+        targeting teammate P02 and to push for a town elimination. No additional information
+        yet.\\\"\\n\\n- rationale_summary: \\\"Chose to vote for a non-teammate to
+        maintain cover and contribute to eliminating town players.\\\"\\n\\nEnsure
+        character limits: public_message max 600 chars, memory_update max 1200 chars.
+        My messages are well within limits.\\n\\nNow, write the JSON.\"}}],\"created\":1779495280,\"model\":\"mimo-v2.5-pro\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":1850,\"prompt_tokens\":381,\"total_tokens\":2231,\"completion_tokens_details\":{\"reasoning_tokens\":1702},\"prompt_tokens_details\":{\"cached_tokens\":320}}}"
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - application/json
+      Date:
+      - Sat, 23 May 2026 00:14:41 GMT
+      Server:
+      - MiFE/3.4.29
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Origin
+      - Access-Control-Request-Method
+      - Access-Control-Request-Headers
+      X-MiFE-Upstream-Status:
+      - '200'
+      content-length:
+      - '8098'
+    status:
+      code: 200
+      message: OK
+version: 1

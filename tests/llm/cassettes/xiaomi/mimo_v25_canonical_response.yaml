@@ -1,0 +1,180 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"mimo-v2.5"}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1622'
+      content-type:
+      - application/json
+      host:
+      - token-plan-sgp.xiaomimimo.com
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://token-plan-sgp.xiaomimimo.com/v1/chat/completions
+  response:
+    body:
+      string: '{"id":"a318e5dc6ebd4c539054f1e3aec24a83","choices":[{"finish_reason":"stop","index":0,"message":{"content":"{\n  \"public_message\":
+        \"I''m voting for P04 today. I don''t have a strong read, but I think P04
+        might be a good candidate to pressure. Let''s see how they respond.\",\n  \"private_message\":
+        null,\n  \"action\": {\n    \"type\": \"VOTE\",\n    \"target\": \"P04\"\n  },\n  \"memory_update\":
+        \"As Mafia, I need to blend in. I voted for P04 without a strong reason, but
+        I''ll try to appear Town-like in my messages. I''ll keep an eye on P02, my
+        teammate, and try not to draw attention to our connection.\",\n  \"rationale_summary\":
+        \"Voting for P04 to appear active without revealing my role. Choosing a target
+        to avoid suspicion while participating in the vote.\"\n}","role":"assistant","tool_calls":null,"reasoning_content":"We
+        are playing as a Mafia Goon (part of the Mafia faction). Our teammate is P02.
+        The phase is DAY_1_VOTE. We are allowed to VOTE or ABSTAIN, and we can vote
+        for any player except ourselves (P02, P03, P04, P05, P06, P07).\n\nAs Mafia,
+        we typically want to blend in and not draw suspicion. On Day 1, there is often
+        no strong information to go by. The goal is to avoid being voted out while
+        possibly pushing votes towards a Town player. However, we don''t want to vote
+        too aggressively for a Town player early on because that might reveal our
+        role.\n\nSince we have a teammate (P02), we might consider coordinating with
+        them, but we only have public messages and private messages (if any). However,
+        the game does not explicitly state that we have a private channel with our
+        teammate. In some Mafia games, Mafia can communicate privately during the
+        day, but here we only have public and private messages as per the observation.
+        The observation says \"private_message\" can be sent, but it doesn''t specify
+        if it can be sent to a specific player or to the game host. Given the ruleset,
+        we might not have a private channel with our teammate during the day. Typically
+        in these setups, Mafia communication is only during the night. So during the
+        day, we are on our own.\n\nWe need to decide our vote. Since it''s Day 1,
+        we might consider voting for a player who is likely to be Town and might be
+        a good mislynch. Alternatively, we could abstain to avoid committing, but
+        abstaining might look suspicious.\n\nLet''s think about the player list: P02
+        (teammate), P03, P04, P05, P06, P07. We want to avoid voting for P02. We might
+        consider voting for a player who is likely to be active or might draw attention.
+        But we don''t have any information.\n\nSometimes Mafia will vote for a player
+        randomly but consistently to avoid being caught. We might also consider voting
+        for a player who is not online or less active, but we don''t have that information.\n\nGiven
+        the lack of information, a common strategy is to vote for a player who is
+        likely to be Town and might be a candidate for lynching. Alternatively, we
+        could vote for a player who we think others might also vote for.\n\nSince
+        this is a simulation, we might consider that the other players are also AI
+        or following some logic. We could look at the previous events? There are none.\n\nWe
+        also have to consider our public message and private message. We can send
+        a public message to influence others. We might say something like \"I''m not
+        sure who to vote for, but I''m leaning towards X because of Y reason.\" But
+        we need to make up a reason.\n\nAlternatively, we could abstain and say we
+        don''t want to vote without more information.\n\nLet''s check the message
+        limits: public_message_max_chars 600, so we can send a decent message.\n\nWe
+        need to output a JSON with public_message, private_message, action, memory_update,
+        and rationale_summary.\n\nFor the action, we choose either VOTE with a target
+        or ABSTAIN.\n\nWe also have to update our memory. Our memory is private and
+        we can use it to note down thoughts. Since this is Day 1, we might note down
+        our strategy and who we voted for.\n\nGiven that we are Mafia, we might want
+        to avoid voting for our teammate. Also, we might want to try to steer the
+        vote towards a particular player.\n\nLet''s decide on a target. Without any
+        information, I might pick a player arbitrarily, but I should avoid being too
+        random. Perhaps I can say I''m voting for a player who I think is suspicious
+        based on their behavior? But we have no behavior yet. Alternatively, I can
+        say I''m voting for a player because I think they are likely to be Town and
+        I want to see how they react. Or I can say I''m following my gut.\n\nTo blend
+        in, I should vote for someone and give a reason that seems plausible.\n\nI''ll
+        choose to vote for P05, for example. I''ll say in my public message that I''m
+        voting for P05 because I have a weak suspicion based on something vague, like
+        \"P05''s lack of activity\" or \"I think P05 might be scum trying to fly under
+        the radar.\"\n\nBut since it''s Day 1 and no one has said anything, it''s
+        weak. Alternatively, I could say I''m voting for P05 because I''m going with
+        the crowd? But no crowd yet.\n\nMaybe I should abstain? Abstaining might be
+        seen as Town-like because a Town player might want more information. But it
+        might also be seen as Mafia trying to avoid committing. It''s a toss-up.\n\nConsidering
+        that we want to blend in, I''ll vote for a player. I''ll choose P04. I''ll
+        say something like: \"I''m voting for P04 because I don''t like their name.\"
+        That''s a joke, but it might be too flippant. Better to say something like:
+        \"I''m going with P04 as my initial suspicion because I want to see how they
+        defend themselves.\"\n\nI''ll also send a private message to my teammate?
+        But the rules might not allow private messages during the day. In many setups,
+        Mafia can''t privately message during the day. The observation says we can
+        send a private_message, but it doesn''t specify if it goes to a specific player
+        or to the game master. In some implementations, private messages are only
+        to the game host for actions. Given that the action is expressed through JSON,
+        and the private_message is separate, it might be that private_message is also
+        public? Actually, the description says: \"Private messages are visible only
+        when the observation lists a private channel for this phase.\" In this observation,
+        we are not given a private channel, so any private message we send might not
+        be delivered to anyone? Or it might be stored privately? I think in this context,
+        private_message is likely to be sent to the game host only and not to other
+        players. So we probably cannot send a private message to our teammate. Therefore,
+        we''ll skip private_message.\n\nWe''ll set action: {\"type\": \"VOTE\", \"target\":
+        \"P04\"}.\n\nFor memory_update, we''ll note our strategy: \"As Mafia, I need
+        to blend in. I voted for P04 without a strong reason, but I''ll try to appear
+        Town-like in my messages. I''ll keep an eye on P02, my teammate, and try not
+        to draw attention to our connection.\"\n\nRationale_summary: I''ll explain
+        why I voted for P04.\n\nLet''s craft the public message: \"I''m voting for
+        P04 today. I don''t have a strong read, but I think P04 might be a good candidate
+        to pressure. Let''s see how they respond.\"\n\nThat sounds okay.\n\nNow, we
+        need to output JSON exactly.\n\nNote: The JSON must be valid. We''ll output:\n\n{\n  \"public_message\":
+        \"I''m voting for P04 today. I don''t have a strong read, but I think P04
+        might be a good candidate to pressure. Let''s see how they respond.\",\n  \"private_message\":
+        null,\n  \"action\": {\"type\": \"VOTE\", \"target\": \"P04\"},\n  \"memory_update\":
+        \"As Mafia, I need to blend in. I voted for P04 without a strong reason, but
+        I''ll try to appear Town-like in my messages. I''ll keep an eye on P02, my
+        teammate, and try not to draw attention to our connection.\",\n  \"rationale_summary\":
+        \"Voting for P04 to appear active without revealing my role. Choosing a random
+        target to avoid suspicion.\"\n}\n\nBut note: The rationale_summary is a string,
+        so it''s fine.\n\nWe must ensure the public_message is within 600 chars, which
+        it is.\n\nLet''s double-check: The action target must be a legal target: P02,
+        P03, P04, P05, P06, P07. P04 is legal.\n\nWe are not voting for our teammate
+        P02, which is good.\n\nAlternatively, we could vote for P05 or P06. But it
+        doesn''t matter much.\n\nI''ll stick with P04."}}],"created":1779495252,"model":"mimo-v2.5","object":"chat.completion","usage":{"completion_tokens":1931,"prompt_tokens":381,"total_tokens":2312,"completion_tokens_details":{"reasoning_tokens":1757},"prompt_tokens_details":{"cached_tokens":320}}}'
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - application/json
+      Date:
+      - Sat, 23 May 2026 00:14:13 GMT
+      Server:
+      - MiFE/3.4.29
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Origin
+      - Access-Control-Request-Method
+      - Access-Control-Request-Headers
+      X-MiFE-Upstream-Status:
+      - '200'
+      content-length:
+      - '8502'
+    status:
+      code: 200
+      message: OK
+version: 1

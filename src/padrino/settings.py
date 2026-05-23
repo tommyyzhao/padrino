@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     cerebras_api_key: str | None = None
     deepinfra_api_key: str | None = None
     zai_api_key: str | None = None
+    xiaomi_api_key: str | None = None
 
     # Database
     padrino_db_url: str = "sqlite+aiosqlite:///./padrino.db"
@@ -61,6 +62,11 @@ class Settings(BaseSettings):
     # points there. Override via ``PADRINO_ZAI_API_BASE`` if you're on the
     # General API.
     padrino_zai_api_base: str = "https://api.z.ai/api/coding/paas/v4"
+
+    # Xiaomi token-plan serves OpenAI-compatible chat completions from a
+    # custom base URL. ``LiteLlmAdapter`` forwards this to LiteLLM as
+    # ``api_base`` while resolving credentials from ``XIAOMI_API_KEY``.
+    xiaomi_base_url: str = "https://token-plan-sgp.xiaomimimo.com/v1"
 
     # API
     padrino_admin_token: str | None = None

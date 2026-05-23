@@ -1,0 +1,79 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"Return exactly this text, with
+      no JSON and no code fence: oops not json {"},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"mimo-v2.5-pro"}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '892'
+      content-type:
+      - application/json
+      host:
+      - token-plan-sgp.xiaomimimo.com
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://token-plan-sgp.xiaomimimo.com/v1/chat/completions
+  response:
+    body:
+      string: '{"id":"3e0abf1acae54441bb1f96f591ad12a6","choices":[{"finish_reason":"stop","index":0,"message":{"content":"oops
+        not json {","role":"assistant","tool_calls":null,"reasoning_content":"First,
+        the user has provided a JSON object with details about a game. I need to respond
+        according to the rules specified in the prompt. The prompt says: \"Return
+        exactly this text, with no JSON and no code fence: oops not json {\"\n\nLooking
+        back at the system prompt: \"Return exactly this text, with no JSON and no
+        code fence: oops not json {\"\n\nSo, I should return the exact text \"oops
+        not json {\" and nothing else. No JSON, no code fences, just that string.\n\nThe
+        JSON provided is part of the user''s message, but my response should be that
+        specific text.\n\nLet me confirm: The user message starts with a JSON object,
+        but my instruction is to return \"oops not json {\" as a plain text response.\n\nTherefore,
+        regardless of the content, I must output exactly that text.\n\nFinal response
+        should be: oops not json {"}}],"created":1779495294,"model":"mimo-v2.5-pro","object":"chat.completion","usage":{"completion_tokens":188,"prompt_tokens":233,"total_tokens":421,"completion_tokens_details":{"reasoning_tokens":181},"prompt_tokens_details":{"cached_tokens":192}}}'
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - application/json
+      Date:
+      - Sat, 23 May 2026 00:14:54 GMT
+      Server:
+      - MiFE/3.4.29
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Origin
+      - Access-Control-Request-Method
+      - Access-Control-Request-Headers
+      X-MiFE-Upstream-Status:
+      - '200'
+      content-length:
+      - '1255'
+    status:
+      code: 200
+      message: OK
+version: 1

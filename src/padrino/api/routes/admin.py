@@ -73,6 +73,7 @@ class ModelConfigCreate(_StrictModel):
     default_top_p: float
     default_max_output_tokens: int = Field(gt=0)
     supports_structured_outputs: bool
+    litellm_model_id: str | None = None
     model_version: str | None = None
 
 
@@ -80,6 +81,7 @@ class ModelConfigResponse(BaseModel):
     id: uuid.UUID
     provider_id: uuid.UUID
     model_name: str
+    litellm_model_id: str | None
     model_version: str | None
     default_temperature: float
     default_top_p: float
@@ -187,12 +189,14 @@ async def create_model_config(
         default_top_p=body.default_top_p,
         default_max_output_tokens=body.default_max_output_tokens,
         supports_structured_outputs=body.supports_structured_outputs,
+        litellm_model_id=body.litellm_model_id,
         model_version=body.model_version,
     )
     return ModelConfigResponse(
         id=obj.id,
         provider_id=obj.provider_id,
         model_name=obj.model_name,
+        litellm_model_id=obj.litellm_model_id,
         model_version=obj.model_version,
         default_temperature=obj.default_temperature,
         default_top_p=obj.default_top_p,
@@ -352,6 +356,7 @@ async def list_model_configs(
             id=r.id,
             provider_id=r.provider_id,
             model_name=r.model_name,
+            litellm_model_id=r.litellm_model_id,
             model_version=r.model_version,
             default_temperature=r.default_temperature,
             default_top_p=r.default_top_p,

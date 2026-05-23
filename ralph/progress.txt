@@ -145,3 +145,35 @@ Carry-forward discipline for the rest of wave-4:
 - The "insufficient balance" -> RateLimitError shape from Z.AI is
   surfacing as a real signal — when iterating, this likely indicates
   the wrong base_url, not the wrong key.
+
+## 2026-05-22T17:21 - US-082
+- Implemented Xiaomi token-plan provider support: primary `LiteLlmAdapter` calls now accept `api_base`, pass the cached provider secret as `api_key` for custom OpenAI-compatible endpoints, and Settings exposes `xiaomi_api_key` / `xiaomi_base_url`.
+- Added optional `ModelConfig.litellm_model_id` plus migration 0013 and bootstrap YAML model seeding so Xiaomi can register `mimo-v2.5` and `mimo-v2.5-pro` under the `xiaomi` provider while dispatching via `openai/<model>`.
+- Recorded real Xiaomi cassettes for both Mimo models, added the probe script, `tp-` secret-audit coverage, and BYO-model docs with the re-record and grep verification flow.
+- Files changed:
+  docs/deployment/byo-model.md
+  ralph/prd.json
+  ralph/progress.txt
+  scripts/audit_git_history_for_secrets.sh
+  scripts/probe_xiaomi_mimo.py
+  src/padrino/api/routes/admin.py
+  src/padrino/bootstrap.py
+  src/padrino/db/migrations/versions/0013_model_config_litellm_model_id.py
+  src/padrino/db/models.py
+  src/padrino/db/repositories/model_configs.py
+  src/padrino/llm/litellm_adapter.py
+  src/padrino/settings.py
+  tests/cli/test_bootstrap.py
+  tests/llm/cassettes/xiaomi/mimo_v25_canonical_response.yaml
+  tests/llm/cassettes/xiaomi/mimo_v25_malformed_response.yaml
+  tests/llm/cassettes/xiaomi/mimo_v25_pro_canonical_response.yaml
+  tests/llm/cassettes/xiaomi/mimo_v25_pro_malformed_response.yaml
+  tests/llm/test_litellm_adapter.py
+  tests/llm/test_litellm_contract.py
+  tests/release/test_audit_script.py
+  tests/test_settings.py
+- **Learnings for future iterations:**
+  - The existing `ModelProvider.base_url` is the DB-side endpoint field; it maps to LiteLLM's `api_base`. Do not add a parallel `api_base` provider column unless the schema is intentionally renamed.
+  - Xiaomi Mimo canonical responses were clean unfenced JSON. The raw provider envelope includes `reasoning_content`, but the adapter only parses `choices[0].message.content`, so no normalizer change was needed.
+  - VCR record mode can hand compressed OpenAI-compatible responses back to LiteLLM in a shape the client rejects while still writing a valid cassette. The contract helper now immediately replays the just-recorded cassette when that record-time parse quirk appears.
+---

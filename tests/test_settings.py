@@ -75,10 +75,22 @@ def test_api_keys_optional(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
     monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.delenv("XIAOMI_API_KEY", raising=False)
     s = _fresh()
     assert s.cerebras_api_key is None
     assert s.deepinfra_api_key is None
     assert s.zai_api_key is None
+    assert s.xiaomi_api_key is None
+
+
+def test_default_xiaomi_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("XIAOMI_BASE_URL", raising=False)
+    assert _fresh().xiaomi_base_url == "https://token-plan-sgp.xiaomimimo.com/v1"
+
+
+def test_env_override_xiaomi_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XIAOMI_BASE_URL", "https://xiaomi.example.test/v1")
+    assert _fresh().xiaomi_base_url == "https://xiaomi.example.test/v1"
 
 
 # ---------------------------------------------------------------------------

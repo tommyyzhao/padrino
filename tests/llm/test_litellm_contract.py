@@ -50,9 +50,16 @@ from padrino.core.observations import Observation, build_observation
 from padrino.core.rulesets import mini7_v1
 from padrino.llm.adapter import AdapterResult, AgentBuild, RoutingPolicy
 from padrino.llm.litellm_adapter import LiteLlmAdapter
+from padrino.llm.retry import DEFAULT_RETRY_ON, RetryPolicy
 
 _CASSETTE_DIR: Path = Path(__file__).parent / "cassettes"
 _CANONICAL_PHASE: Phase = Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0)
+_CONTRACT_RETRY_POLICY = RetryPolicy(
+    max_attempts=1,
+    base_delay_s=0.0,
+    max_delay_s=0.0,
+    retry_on=DEFAULT_RETRY_ON,
+)
 
 _SCRUB_HEADER_NAMES: frozenset[str] = frozenset(
     {
@@ -73,6 +80,7 @@ _SCRUB_HEADER_NAMES: frozenset[str] = frozenset(
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"tp-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"Bearer\s+[A-Za-z0-9_\-]{20,}", re.IGNORECASE),
 )
 
@@ -91,7 +99,22 @@ class ProviderCase:
 
     name: str
     model: str
+    provider: str | None = None
+    cassette_dir: str | None = None
+    canonical_cassette: str = "canonical_response"
+    malformed_cassette: str = "malformed_response"
+    auth_secret_ref: str = "env:PADRINO_CONTRACT_AUTH_SECRET"
+    api_base: str | None = None
+    malformed_system_prompt: str | None = None
     synthetic_canonical: bool = False
+
+    @property
+    def provider_name(self) -> str:
+        return self.provider if self.provider is not None else self.name
+
+    @property
+    def cassette_subdir(self) -> str:
+        return self.cassette_dir if self.cassette_dir is not None else self.name
 
 
 PROVIDER_CASES: tuple[ProviderCase, ...] = (
@@ -103,6 +126,32 @@ PROVIDER_CASES: tuple[ProviderCase, ...] = (
     ProviderCase("anthropic", "anthropic/claude-haiku-4-5", synthetic_canonical=True),
     ProviderCase("cerebras", "cerebras/zai-glm-4.7"),
     ProviderCase("deepinfra", "deepinfra/deepseek-ai/DeepSeek-V4-Flash"),
+    ProviderCase(
+        "xiaomi-mimo-v25",
+        "openai/mimo-v2.5",
+        provider="xiaomi",
+        cassette_dir="xiaomi",
+        canonical_cassette="mimo_v25_canonical_response",
+        malformed_cassette="mimo_v25_malformed_response",
+        auth_secret_ref="env:XIAOMI_API_KEY",
+        api_base="https://token-plan-sgp.xiaomimimo.com/v1",
+        malformed_system_prompt=(
+            "Return exactly this text, with no JSON and no code fence: oops not json {"
+        ),
+    ),
+    ProviderCase(
+        "xiaomi-mimo-v25-pro",
+        "openai/mimo-v2.5-pro",
+        provider="xiaomi",
+        cassette_dir="xiaomi",
+        canonical_cassette="mimo_v25_pro_canonical_response",
+        malformed_cassette="mimo_v25_pro_malformed_response",
+        auth_secret_ref="env:XIAOMI_API_KEY",
+        api_base="https://token-plan-sgp.xiaomimimo.com/v1",
+        malformed_system_prompt=(
+            "Return exactly this text, with no JSON and no code fence: oops not json {"
+        ),
+    ),
     # TODO(US-072): re-record once a local Ollama instance is reachable from
     # the maintainer's recording shell; current cassette is synthetic.
     ProviderCase("ollama", "ollama/llama3", synthetic_canonical=True),
@@ -176,12 +225,19 @@ def _scrub_response(response: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def _build_vcr() -> vcr.VCR:
-    record_mode = "once" if os.environ.get("PADRINO_RECORD_LLM") == "1" else "none"
+def _recording_enabled() -> bool:
+    return os.environ.get("PADRINO_RECORD_LLM") == "1"
+
+
+def _build_vcr(*, record_mode: str | None = None) -> vcr.VCR:
+    selected_record_mode = record_mode
+    if selected_record_mode is None:
+        selected_record_mode = "once" if _recording_enabled() else "none"
     return vcr.VCR(
         cassette_library_dir=str(_CASSETTE_DIR),
-        record_mode=record_mode,
+        record_mode=selected_record_mode,
         match_on=("method", "scheme", "host", "path"),
+        decode_compressed_response=True,
         filter_headers=tuple(_SCRUB_HEADER_NAMES),
         before_record_request=_scrub_request,
         before_record_response=_scrub_response,
@@ -195,18 +251,20 @@ def _build_adapter(case: ProviderCase) -> LiteLlmAdapter:
     # DeepSeek-V4-Flash regularly takes 15+ s on first contact — so we
     # extend the timeout to 60 s during record runs. The env var is a
     # recording-only knob and is not consulted in CI.
-    timeout_s = 60.0 if os.environ.get("PADRINO_RECORD_LLM") == "1" else 5.0
+    timeout_s = 60.0 if _recording_enabled() else 5.0
     return LiteLlmAdapter(
         routing_policy=RoutingPolicy(primary_model=case.model, fallback_model=None),
         agent_build=AgentBuild(
-            provider=case.name,
+            provider=case.provider_name,
             model_id=case.model,
             prompt_version="contract_v1",
             inference_params={},
             adapter_version="litellm-cassette-1",
         ),
         timeout_s=timeout_s,
-        auth_secret_ref="env:PADRINO_CONTRACT_AUTH_SECRET",
+        auth_secret_ref=case.auth_secret_ref,
+        api_base=case.api_base,
+        retry_policy=_CONTRACT_RETRY_POLICY,
     )
 
 
@@ -219,22 +277,39 @@ def _stub_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     re-record run can authenticate against the real provider.
     """
     monkeypatch.setenv("PADRINO_CONTRACT_AUTH_SECRET", "cassette-replay-stub")
-    if os.environ.get("PADRINO_RECORD_LLM") == "1":
+    if _recording_enabled():
         return
     monkeypatch.setenv("OPENAI_API_KEY", "sk-cassette-replay-stub")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-cassette-replay-stub")
     monkeypatch.setenv("CEREBRAS_API_KEY", "cassette-replay-stub")
     monkeypatch.setenv("DEEPINFRA_API_KEY", "cassette-replay-stub")
+    monkeypatch.setenv("XIAOMI_API_KEY", "tp-cassette-replay-stub")
 
 
 def _cassette_or_skip(case: ProviderCase, name: str) -> Path:
-    path = _CASSETTE_DIR / case.name / f"{name}.yaml"
+    path = _CASSETTE_DIR / case.cassette_subdir / f"{name}.yaml"
     if not path.exists() and os.environ.get("PADRINO_RECORD_LLM") != "1":
         pytest.skip(
             f"missing cassette {path.relative_to(_CASSETTE_DIR.parent.parent)}; "
             "set PADRINO_RECORD_LLM=1 and the provider credential to record"
         )
     return path
+
+
+async def _complete_with_cassette(
+    adapter: LiteLlmAdapter,
+    obs: Observation,
+    cassette_path: Path,
+) -> AdapterResult:
+    """Complete once under VCR; replay immediately after record-time parse quirks."""
+    my_vcr = _build_vcr()
+    with my_vcr.use_cassette(str(cassette_path)):
+        result = await adapter.complete(obs)
+    if _recording_enabled() and result.status == "exhausted" and cassette_path.exists():
+        replay_vcr = _build_vcr(record_mode="none")
+        with replay_vcr.use_cassette(str(cassette_path)):
+            result = await adapter.complete(obs)
+    return result
 
 
 @pytest.mark.live_llm
@@ -252,12 +327,10 @@ async def test_canonical_response_parses(case: ProviderCase) -> None:
             "provisioned). Skipping so the live_llm collection count reflects "
             "only provider-recorded contracts."
         )
-    cassette_path = _cassette_or_skip(case, "canonical_response")
+    cassette_path = _cassette_or_skip(case, case.canonical_cassette)
     adapter = _build_adapter(case)
     obs = _canonical_observation()
-    my_vcr = _build_vcr()
-    with my_vcr.use_cassette(str(cassette_path)):
-        result = await adapter.complete(obs)
+    result = await _complete_with_cassette(adapter, obs, cassette_path)
 
     assert isinstance(result, AdapterResult)
     assert result.status == "ok", (
@@ -278,12 +351,26 @@ async def test_canonical_response_parses(case: ProviderCase) -> None:
 )
 async def test_malformed_response_coerces(case: ProviderCase) -> None:
     """A malformed wire-format response must surface as ResponseError, coercible to a safe action."""
-    cassette_path = _cassette_or_skip(case, "malformed_response")
+    cassette_path = _cassette_or_skip(case, case.malformed_cassette)
     adapter = _build_adapter(case)
     obs = _canonical_observation()
-    my_vcr = _build_vcr()
-    with my_vcr.use_cassette(str(cassette_path)):
-        result = await adapter.complete(obs)
+    if case.malformed_system_prompt is not None:
+        adapter = LiteLlmAdapter(
+            routing_policy=RoutingPolicy(primary_model=case.model, fallback_model=None),
+            agent_build=AgentBuild(
+                provider=case.provider_name,
+                model_id=case.model,
+                prompt_version="contract_v1",
+                inference_params={},
+                adapter_version="litellm-cassette-1",
+            ),
+            timeout_s=60.0 if _recording_enabled() else 5.0,
+            auth_secret_ref=case.auth_secret_ref,
+            api_base=case.api_base,
+            system_prompt=case.malformed_system_prompt,
+            retry_policy=_CONTRACT_RETRY_POLICY,
+        )
+    result = await _complete_with_cassette(adapter, obs, cassette_path)
 
     assert isinstance(result, AdapterResult)
     assert isinstance(result.parsed_response, ResponseError), (
@@ -339,6 +426,7 @@ def test_audit_catches_deliberately_leaky_probe(tmp_path: Path) -> None:
     probes: tuple[tuple[str, str], ...] = (
         ("openai_probe", "sk-1234567890ABCDEFGHIJ0987654321ZYXWvutsrq"),
         ("anthropic_probe", "sk-ant-api03-deadBeef1234567890_-ZyXwVuTsRq"),
+        ("xiaomi_probe", "tp-1234567890ABCDEFGHIJ0987654321ZYXWvutsrq"),
         ("bearer_probe", "Bearer abcdef0123456789ABCDEF0123456789xyzwvu"),
     )
     leaky_path = tmp_path / "leaky_probe.yaml"
@@ -365,8 +453,8 @@ def test_every_provider_case_has_cassettes() -> None:
     """Each parametrized provider must ship both a canonical and a malformed cassette."""
     missing: list[str] = []
     for case in PROVIDER_CASES:
-        for name in ("canonical_response", "malformed_response"):
-            path = _CASSETTE_DIR / case.name / f"{name}.yaml"
+        for name in (case.canonical_cassette, case.malformed_cassette):
+            path = _CASSETTE_DIR / case.cassette_subdir / f"{name}.yaml"
             if not path.exists():
                 missing.append(str(path.relative_to(_CASSETTE_DIR.parent.parent)))
     assert not missing, "missing cassettes:\n  " + "\n  ".join(missing)

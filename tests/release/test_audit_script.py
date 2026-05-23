@@ -32,6 +32,7 @@ _CEREBRAS_DECOY = "csk-AUDITSCRIPTTESTDECOYAAAAAAAAAAAAAAAAAA"
 _DEEPINFRA_DECOY = "lwAUDITSCRIPTTESTDECOYAAAAAAAAAAAAAAAAAAAAAAAAA"
 _OPENAI_DECOY = "sk-AUDITSCRIPTTESTDECOYBBBBBBBBBBBBBBBBBBBBBBBB"
 _ANTHROPIC_DECOY = "sk-ant-AUDITSCRIPTTESTDECOYCCCCCCCCCCCCCCCCCC"
+_XIAOMI_DECOY = "tp-AUDITSCRIPTTESTDECOYDDDDDDDDDDDDDDDDDDDD"
 
 
 def _run_git(args: list[str], cwd: Path) -> None:
@@ -140,6 +141,7 @@ def test_secret_value_never_appears_on_stdout(fake_repo: Path) -> None:
                 f'DEEPINFRA = "{_DEEPINFRA_DECOY}"',
                 f'OPENAI = "{_OPENAI_DECOY}"',
                 f'ANTHROPIC = "{_ANTHROPIC_DECOY}"',
+                f'XIAOMI = "{_XIAOMI_DECOY}"',
             ]
         )
         + "\n",
@@ -151,7 +153,13 @@ def test_secret_value_never_appears_on_stdout(fake_repo: Path) -> None:
 
     assert result.returncode == 1
     stdout = result.stdout.decode("utf-8")
-    for decoy in (_CEREBRAS_DECOY, _DEEPINFRA_DECOY, _OPENAI_DECOY, _ANTHROPIC_DECOY):
+    for decoy in (
+        _CEREBRAS_DECOY,
+        _DEEPINFRA_DECOY,
+        _OPENAI_DECOY,
+        _ANTHROPIC_DECOY,
+        _XIAOMI_DECOY,
+    ):
         assert decoy not in stdout, (
             f"audit script leaked {decoy!r} to stdout — stdout must only "
             "carry `<sha>\\t<file-path>` pairs"

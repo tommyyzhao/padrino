@@ -52,6 +52,7 @@ class ModelConfig(Base):
         Uuid, ForeignKey("model_providers.id"), nullable=False
     )
     model_name: Mapped[str] = mapped_column(String, nullable=False)
+    litellm_model_id: Mapped[str | None] = mapped_column(String, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String, nullable=True)
     default_temperature: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     default_top_p: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)

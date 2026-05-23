@@ -86,6 +86,7 @@ class LiteLlmAdapter:
     """LiteLLM-backed adapter with primary→fallback routing."""
 
     __slots__ = (
+        "_api_base",
         "_auth_secret",
         "_build",
         "_policy",
@@ -105,6 +106,7 @@ class LiteLlmAdapter:
         agent_build: AgentBuild,
         timeout_s: float,
         auth_secret_ref: str,
+        api_base: str | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         system_prompts_by_role: Mapping[Role, str] | None = None,
         retry_policy: RetryPolicy | None = None,
@@ -113,6 +115,7 @@ class LiteLlmAdapter:
         # Resolve credentials once at construction so a misconfigured provider
         # fails loudly at boot instead of silently 401-ing on first call.
         self._auth_secret = resolve_secret(auth_secret_ref)
+        self._api_base = api_base
         self._policy = routing_policy
         self._build = agent_build
         # Resolve each same-model host's credential at construction too, so a
@@ -143,7 +146,12 @@ class LiteLlmAdapter:
         attempts: list[AdapterResult] = []
         any_exhausted = False
 
-        primary = await self._call_model(observation, self._policy.primary_model)
+        primary = await self._call_model(
+            observation,
+            self._policy.primary_model,
+            api_base=self._api_base,
+            auth_secret=self._auth_secret if self._api_base is not None else None,
+        )
         attempts.append(primary)
 
         if primary.error is None:
@@ -230,11 +238,10 @@ class LiteLlmAdapter:
             "timeout": self._timeout_s,
             **self._build.inference_params,
         }
-        # Per-host overrides (US-079 / US-082): same-model alternate hosts
-        # supply their own ``api_base`` and credential. The primary host runs
-        # with its built-in litellm provider defaults and the constructor-cached
-        # secret resolved from ``auth_secret_ref`` — so passing nothing here
-        # preserves the pre-US-079 behavior bit-for-bit.
+        # Per-host overrides (US-079 / US-082): same-model alternate hosts and
+        # OpenAI-compatible primary providers may supply ``api_base`` plus an
+        # explicit credential. Primary calls without ``api_base`` keep using
+        # LiteLLM's provider-specific env var defaults.
         if api_base is not None:
             kwargs["api_base"] = api_base
         if auth_secret is not None:
