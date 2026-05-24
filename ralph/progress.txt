@@ -326,3 +326,56 @@ re-writing from scratch.
     to keep the shared workspace testable, but it remains part of the
     uncommitted US-081 work rather than this US-080 commit.
 ---
+
+---
+
+## 2026-05-24 — US-080 (Z.AI GLM-5.1) + Ralph script COMPLETE-detection bug fix
+
+Codex landed US-080 in commit `4d742ff`:
+- Real Z.AI cassettes recorded against the Coding Plan endpoint
+  (`https://api.z.ai/api/coding/paas/v4`) for canonical + malformed
+  responses.
+- New `zai` ProviderCase in `tests/llm/test_litellm_contract.py` —
+  contract test passes against the recorded cassette.
+- New `tests/cli/test_bootstrap.py::test_bootstrap_with_zai_glm51_yaml_seeds_model_config`
+  exercises the providers.yaml inline-models seam.
+- New `scripts/probe_zai_glm51.py` quirks probe.
+- `scripts/audit_git_history_for_secrets.sh` extended with a Z.AI key
+  pattern (`32-hex.16-alnum`); audit returns 0.
+- `docs/deployment/byo-model.md` Z.AI section expanded with the
+  Coding-Plan endpoint and re-record commands.
+
+1218 unit tests pass, ruff/format/mypy clean, live_llm cassettes
+pass (15 + 3 skipped).
+
+### Script bug: COMPLETE-sentinel false positive
+
+The patched prompt's `<promise>COMPLETE</promise>` rule fired correctly
+— Codex ran `jq '[.userStories[] | select(.passes==false)] | length'
+ralph/prd.json`, saw `4`, and DID NOT emit the sentinel. Despite that,
+the script printed "Ralph completed all tasks!" and exited.
+
+Root cause: `grep -q "<promise>COMPLETE</promise>"` in
+`ralph/ralph-codex.sh` (and `ralph/ralph.sh`) matches the LITERAL
+string anywhere in stdout, including inside the prompt text itself
+where the sentinel is mentioned as part of the stop-condition
+instruction. The prompt echoes through stdout on every Codex
+invocation, so the false positive is structural.
+
+Fix: tighten the pattern to require the sentinel on its OWN LINE:
+`grep -qE '^[[:space:]]*<promise>COMPLETE</promise>[[:space:]]*$'`.
+Patched in both scripts. The next Ralph fire should now pick US-081
+(partial work already in working tree from this run + the previous
+run) and continue without exiting after one iteration.
+
+### Working tree state (left for the next iteration)
+
+Codex left US-081 (DeepInfra Gemma) groundwork uncommitted:
+- `tests/cli/test_bootstrap.py` — Gemma seed test (from previous run)
+- `tests/llm/test_litellm_contract.py` — `deepinfra-gemma` ProviderCase
+- `scripts/probe_deepinfra_gemma.py` — probe (from previous run)
+- `tests/llm/cassettes/deepinfra/gemma_canonical_response.yaml` — NEW,
+  freshly recorded by today's Codex run
+
+The next iteration picking US-081 should fold these in rather than
+re-recording the cassette.

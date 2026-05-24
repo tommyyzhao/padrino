@@ -119,7 +119,12 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   fi
   
   # Check for completion signal
-  if echo "$OUTPUT" | grep -q "<promise>COMPLETE</promise>"; then
+  # MUST require the sentinel on its OWN LINE; a plain `grep -q` matches
+  # the prompt's instructional mention of the tag that echoes back via
+  # stdout, false-positively exiting the loop after iteration 1. See
+  # ralph-codex.sh for the matching fix + 2026-05-22 / 2026-05-24
+  # incidents.
+  if echo "$OUTPUT" | grep -qE '^[[:space:]]*<promise>COMPLETE</promise>[[:space:]]*$'; then
     echo ""
     echo "Ralph completed all tasks!"
     echo "Completed at iteration $i of $MAX_ITERATIONS"

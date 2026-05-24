@@ -121,7 +121,16 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   OUTPUT=$(cat "$SCRIPT_DIR/prompt.md" | codex "${CODEX_ARGS[@]}" 2>&1 | tee /dev/stderr) || true
 
   # Check for completion signal.
-  if echo "$OUTPUT" | grep -q "<promise>COMPLETE</promise>"; then
+  #
+  # MUST require the sentinel to be on its OWN LINE (no surrounding text)
+  # to avoid matching the prompt text that echoes back through stdout —
+  # the prompt itself mentions `<promise>COMPLETE</promise>` in its
+  # stop-condition instructions, and a plain `grep -q` produced false
+  # positives that exited the loop after iteration 1 with several
+  # passes:false stories still pending (incident on 2026-05-22 and again
+  # on 2026-05-24). Codex's actual emission per the prompt is the tag
+  # ALONE on its own line.
+  if echo "$OUTPUT" | grep -qE '^[[:space:]]*<promise>COMPLETE</promise>[[:space:]]*$'; then
     echo ""
     echo "Ralph completed all tasks!"
     echo "Completed at iteration $i of $MAX_ITERATIONS"
