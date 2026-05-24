@@ -10,7 +10,9 @@ Older v1-era learnings live in `ralph/archive/2026-05-14-padrino-v1/`.
 and general — story-specific notes live in the iteration entries below. Patterns
 inherited from waves 1-3 are NOT duplicated here; read the archive for those.)
 
-(No wave-4 patterns yet — populate as iterations land.)
+- OpenAI-compatible non-OpenAI providers should use `ModelProvider.base_url`
+  for the endpoint and `ModelConfig.litellm_model_id` for the LiteLLM dispatch
+  id; do not add a parallel `api_base` column.
 
 ---
 
@@ -286,3 +288,41 @@ Codex's interrupted iteration left ~150 lines of partial US-081
 The next Ralph iteration that picks US-081 should fold this work in
 (it's correctly shaped and follows the US-082 patterns) rather than
 re-writing from scratch.
+
+---
+
+## 2026-05-24T10:37 - US-080
+- Added Z.AI GLM-5.1 registration through the existing bootstrap YAML model
+  seeding path, using provider `zai`, `ModelProvider.base_url`, and
+  `ModelConfig.litellm_model_id=openai/glm-5.1`.
+- Added the GLM-5.1 probe script, real Z.AI canonical + malformed VCR
+  cassettes, live-contract provider coverage, and Z.AI hex-dot key detection
+  in cassette/history secret audits.
+- Updated the BYO-model runbook with the Z.AI YAML, probe, re-record command,
+  and grep verification line.
+- Files changed:
+  docs/deployment/byo-model.md
+  ralph/prd.json
+  ralph/progress.txt
+  scripts/audit_git_history_for_secrets.sh
+  scripts/probe_zai_glm51.py
+  tests/cli/test_bootstrap.py
+  tests/llm/cassettes/zai/canonical_response.yaml
+  tests/llm/cassettes/zai/malformed_response.yaml
+  tests/llm/test_litellm_contract.py
+  tests/release/test_audit_script.py
+- **Learnings for future iterations:**
+  - The live Z.AI key shape is `32 hex chars + "." + 16 alnum chars`; both
+    cassette and history audits now cover that shape.
+  - GLM-5.1's manual probe emitted unfenced JSON, but the recorded canonical
+    contract response used a standard markdown `json` code fence. The existing
+    `_strip_code_fence` normalizer handled it without changes.
+  - The Coding Plan endpoint (`https://api.z.ai/api/coding/paas/v4`) is the
+    working endpoint for the local subscription; keep using
+    `ModelProvider.base_url` for it.
+  - A pre-existing partial US-081 workspace edit added the DeepInfra Gemma
+    provider case before its cassette existed. The missing
+    `tests/llm/cassettes/deepinfra/gemma_canonical_response.yaml` was recorded
+    to keep the shared workspace testable, but it remains part of the
+    uncommitted US-081 work rather than this US-080 commit.
+---

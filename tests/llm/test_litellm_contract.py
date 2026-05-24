@@ -81,6 +81,7 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"tp-[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"\b[A-Fa-f0-9]{32}\.[A-Za-z0-9]{16}\b"),
     re.compile(r"Bearer\s+[A-Za-z0-9_\-]{20,}", re.IGNORECASE),
 )
 
@@ -126,6 +127,15 @@ PROVIDER_CASES: tuple[ProviderCase, ...] = (
     ProviderCase("anthropic", "anthropic/claude-haiku-4-5", synthetic_canonical=True),
     ProviderCase("cerebras", "cerebras/zai-glm-4.7"),
     ProviderCase("deepinfra", "deepinfra/deepseek-ai/DeepSeek-V4-Flash"),
+    ProviderCase(
+        "zai",
+        "openai/glm-5.1",
+        auth_secret_ref="env:ZAI_API_KEY",
+        api_base="https://api.z.ai/api/coding/paas/v4",
+        malformed_system_prompt=(
+            "Return exactly this text, with no JSON and no code fence: oops not json {"
+        ),
+    ),
     ProviderCase(
         "xiaomi-mimo-v25",
         "openai/mimo-v2.5",
@@ -283,6 +293,7 @@ def _stub_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-cassette-replay-stub")
     monkeypatch.setenv("CEREBRAS_API_KEY", "cassette-replay-stub")
     monkeypatch.setenv("DEEPINFRA_API_KEY", "cassette-replay-stub")
+    monkeypatch.setenv("ZAI_API_KEY", "0123456789abcdef0123456789abcdef.ABCDEFGHIJKLMNO1")
     monkeypatch.setenv("XIAOMI_API_KEY", "tp-cassette-replay-stub")
 
 
@@ -418,15 +429,16 @@ def test_audit_catches_deliberately_leaky_probe(tmp_path: Path) -> None:
     """The cassette audit must flag a deliberately-leaky probe response.
 
     US-072 acceptance: scrubbing hooks are belt-and-suspenders only; the
-    post-write audit must independently detect a credential-shaped substring
-    in a written cassette. This test plants three probe patterns (one per
-    member of ``_SECRET_PATTERNS``) in a tmp cassette and asserts the audit
-    flags all three — never trust the regex set silently going stale.
+    post-write audit must independently detect credential-shaped substrings
+    in a written cassette. This test plants one probe per member of
+    ``_SECRET_PATTERNS`` in a tmp cassette and asserts the audit flags all
+    of them — never trust the regex set silently going stale.
     """
     probes: tuple[tuple[str, str], ...] = (
         ("openai_probe", "sk-1234567890ABCDEFGHIJ0987654321ZYXWvutsrq"),
         ("anthropic_probe", "sk-ant-api03-deadBeef1234567890_-ZyXwVuTsRq"),
         ("xiaomi_probe", "tp-1234567890ABCDEFGHIJ0987654321ZYXWvutsrq"),
+        ("zai_probe", "0123456789abcdef0123456789abcdef.ABCDEFGHIJKLMNO1"),
         ("bearer_probe", "Bearer abcdef0123456789ABCDEF0123456789xyzwvu"),
     )
     leaky_path = tmp_path / "leaky_probe.yaml"

@@ -33,6 +33,7 @@ _DEEPINFRA_DECOY = "lwAUDITSCRIPTTESTDECOYAAAAAAAAAAAAAAAAAAAAAAAAA"
 _OPENAI_DECOY = "sk-AUDITSCRIPTTESTDECOYBBBBBBBBBBBBBBBBBBBBBBBB"
 _ANTHROPIC_DECOY = "sk-ant-AUDITSCRIPTTESTDECOYCCCCCCCCCCCCCCCCCC"
 _XIAOMI_DECOY = "tp-AUDITSCRIPTTESTDECOYDDDDDDDDDDDDDDDDDDDD"
+_ZAI_DECOY = "0123456789abcdef0123456789abcdef.ABCDEFGHIJKLMNO1"
 
 
 def _run_git(args: list[str], cwd: Path) -> None:
@@ -142,6 +143,7 @@ def test_secret_value_never_appears_on_stdout(fake_repo: Path) -> None:
                 f'OPENAI = "{_OPENAI_DECOY}"',
                 f'ANTHROPIC = "{_ANTHROPIC_DECOY}"',
                 f'XIAOMI = "{_XIAOMI_DECOY}"',
+                f'ZAI = "{_ZAI_DECOY}"',
             ]
         )
         + "\n",
@@ -159,6 +161,7 @@ def test_secret_value_never_appears_on_stdout(fake_repo: Path) -> None:
         _OPENAI_DECOY,
         _ANTHROPIC_DECOY,
         _XIAOMI_DECOY,
+        _ZAI_DECOY,
     ):
         assert decoy not in stdout, (
             f"audit script leaked {decoy!r} to stdout — stdout must only "

@@ -1,0 +1,77 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"Return exactly this text, with
+      no JSON and no code fence: oops not json {"},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"glm-5.1"}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '886'
+      content-type:
+      - application/json
+      host:
+      - api.z.ai
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.z.ai/api/coding/paas/v4/chat/completions
+  response:
+    body:
+      string: '{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"oops
+        not json {","reasoning_content":"The human has sent what appears to be a JSON
+        game state for a Mafia game, but they want me to return exactly this text:
+        \"oops not json {\" with no JSON and no code fence.\n\nLet me just return
+        exactly what they asked for.","role":"assistant"}}],"created":1779643919,"id":"202605250131566444641bd28b4e1b","model":"glm-5.1","object":"chat.completion","request_id":"202605250131566444641bd28b4e1b","usage":{"completion_tokens":56,"completion_tokens_details":{"reasoning_tokens":50},"prompt_tokens":207,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":263}}'
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - application/json; charset=UTF-8
+      Date:
+      - Sun, 24 May 2026 17:31:59 GMT
+      Server:
+      - ZenZGA/2.4
+      Strict-Transport-Security:
+      - max-age=31536000; includeSubDomains
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      - Origin
+      - Access-Control-Request-Method
+      - Access-Control-Request-Headers
+      - Origin
+      - Access-Control-Request-Method
+      - Access-Control-Request-Headers
+      X-LOG-ID:
+      - 202605250131566444641bd28b4e1b
+      content-length:
+      - '670'
+    status:
+      code: 200
+      message: OK
+version: 1

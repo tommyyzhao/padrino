@@ -1,0 +1,106 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"glm-5.1"}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1620'
+      content-type:
+      - application/json
+      host:
+      - api.z.ai
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.z.ai/api/coding/paas/v4/chat/completions
+  response:
+    body:
+      string: '{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"```json\n{\"public_message\":\"Hi
+        everyone! First day, no information to go on yet. I''m going to place a vote
+        to get discussion started. Does anyone have any initial thoughts or suspicions?
+        I''m open to changing my vote if someone makes a good case.\",\"private_message\":\"Hey
+        partner, I''m going to vote for P04 to start. Let''s not coordinate too obviously
+        in the public chat. If you want to vote someone else to spread suspicion around,
+        that could work. Or if there''s someone you''d rather we both push, let me
+        know.\",\"action\":{\"type\":\"VOTE\",\"target\":\"P04\"},\"memory_update\":\"Day
+        1: I am Mafia Goon P01 with teammate P02. Voted for P04 to appear engaged
+        while targeting town. 5 town players remain: P03, P05, P06, P07, and P04 (my
+        vote target). No prior events or inspections to work with. Encouraged P02
+        not to coordinate too obviously.\",\"rationale_summary\":\"Voting for P04
+        as a reasonable Day 1 target. Trying to appear town-like by engaging in discussion
+        while working to eliminate a town member. Coordinated privately with P02 teammate.\"}\n```","reasoning_content":"Let
+        me analyze this situation:\n\n1. I''m P01, a Mafia Goon. My teammate is P02.\n2.
+        We''re in Day 1 voting phase with 7 players alive.\n3. I need to vote to eliminate
+        a town member while not drawing suspicion to myself or my teammate P02.\n\nStrategy
+        considerations:\n- There are 5 town members (P03, P04, P05, P06, P07) and
+        2 mafia (P01, P02)\n- I should vote for a town member to help eliminate them\n-
+        I shouldn''t be too eager or obvious about targeting someone\n- I should try
+        to blend in and appear helpful to town\n\nFor the vote, I should:\n- Vote
+        for someone who seems suspicious or hasn''t contributed much\n- Since this
+        is Day 1 with no prior events, I''ll need to pick somewhat arbitrarily but
+        justify it\n- I shouldn''t defend P02 too obviously\n\nLet me cast a vote
+        and make a public message that looks reasonable for a town member.","role":"assistant"}}],"created":1779643916,"id":"20260525013142cda817fcb5444694","model":"glm-5.1","object":"chat.completion","request_id":"20260525013142cda817fcb5444694","usage":{"completion_tokens":460,"completion_tokens_details":{"reasoning_tokens":210},"prompt_tokens":355,"prompt_tokens_details":{"cached_tokens":128},"total_tokens":815}}'
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - application/json; charset=UTF-8
+      Date:
+      - Sun, 24 May 2026 17:31:56 GMT
+      Server:
+      - ZenZGA/2.4
+      Strict-Transport-Security:
+      - max-age=31536000; includeSubDomains
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      - Origin
+      - Access-Control-Request-Method
+      - Access-Control-Request-Headers
+      - Origin
+      - Access-Control-Request-Method
+      - Access-Control-Request-Headers
+      X-LOG-ID:
+      - 20260525013142cda817fcb5444694
+      content-length:
+      - '2343'
+    status:
+      code: 200
+      message: OK
+version: 1

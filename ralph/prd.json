@@ -48,8 +48,8 @@
       ],
       "dependencies": ["US-079"],
       "priority": 80,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Landed 2026-05-24. Z.AI GLM-5.1 is registerable through the existing providers.yaml bootstrap path as provider `zai` with `ModelProvider.base_url=https://api.z.ai/api/coding/paas/v4`, `auth_secret_ref=env:ZAI_API_KEY`, and `ModelConfig.litellm_model_id=openai/glm-5.1`. Added `scripts/probe_zai_glm51.py`, recorded real Z.AI canonical + malformed VCR cassettes, extended the live_llm contract grid, and added Z.AI hex-dot key detection to cassette and history secret audits. Manual probe emitted unfenced JSON; the recorded canonical cassette used a normal markdown `json` code fence already handled by `_strip_code_fence`, so no adapter normalizer change was needed. Verified with ruff, ruff format, mypy, pytest -m 'not integration', and pytest -m live_llm --live-llm."
     },
     {
       "id": "US-081",

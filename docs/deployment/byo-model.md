@@ -106,6 +106,7 @@ LiteLLM dispatch id on `ModelConfig.litellm_model_id`:
 | OpenAI       | `openai/gpt-4o-mini`                              |
 | Anthropic    | `anthropic/claude-haiku-4-5`                      |
 | Cerebras     | `cerebras/zai-glm-4.7`                            |
+| Z.AI         | `openai/glm-5.1` with `base_url=https://api.z.ai/api/coding/paas/v4` |
 | DeepInfra    | `deepinfra/deepseek-ai/DeepSeek-V4-Flash`         |
 | Xiaomi       | `openai/mimo-v2.5` with `base_url=https://token-plan-sgp.xiaomimimo.com/v1` |
 | Groq         | `groq/llama-3.1-70b-versatile`                    |
@@ -116,6 +117,34 @@ If LiteLLM picks the wrong endpoint shape for your provider (some
 upstreams disagree about whether to use OpenAI-compat `/chat/completions`
 vs. their native chat format), set `base_url` on the `ModelProvider`
 row to pin the override.
+
+## Z.AI GLM-5.1 (US-080)
+
+GLM-5.1 is a distinct rated model identity from the GLM-4.7 same-model
+fallback. Register it as a normal OpenAI-compatible provider/model pair:
+
+```yaml
+providers:
+  - name: zai
+    auth_secret_ref: env:ZAI_API_KEY
+    base_url: https://api.z.ai/api/coding/paas/v4
+    models:
+      - model_name: glm-5.1
+        litellm_model_id: openai/glm-5.1
+```
+
+The probe script uses the canonical mini7 observation and prints the raw
+provider text:
+
+```
+ZAI_API_KEY=<32-hex>.<16-alnum> uv run python scripts/probe_zai_glm51.py
+```
+
+Observed 2026-05-24: GLM-5.1 emitted clean unfenced JSON during the
+manual probe, while the recorded contract cassette wrapped its JSON in
+a normal markdown `json` code fence. The existing `_strip_code_fence` adapter
+normalizer already handles that shape; no extra preamble, trailing text,
+or chat-template tag normalizer was needed.
 
 ## Same-model multi-host fallback (US-079)
 
@@ -262,6 +291,13 @@ rm tests/llm/cassettes/xiaomi/mimo_v25_pro_malformed_response.yaml
 PADRINO_RECORD_LLM=1 XIAOMI_API_KEY=tp-... \
     uv run pytest tests/llm/test_litellm_contract.py --live-llm \
     -m live_llm -k xiaomi
+
+# Z.AI GLM-5.1 (records canonical + malformed probes)
+rm tests/llm/cassettes/zai/canonical_response.yaml
+rm tests/llm/cassettes/zai/malformed_response.yaml
+PADRINO_RECORD_LLM=1 ZAI_API_KEY=<32-hex>.<16-alnum> \
+    uv run pytest tests/llm/test_litellm_contract.py --live-llm \
+    -m live_llm -k zai
 ```
 
 Then flip `synthetic_canonical=False` on the matching `ProviderCase`
@@ -282,14 +318,14 @@ directory for credential-shaped substrings; the audit must return
 nothing:
 
 ```
-grep -rE 'sk-|pk-|csk-|^lw|tp-|Bearer\s' tests/llm/cassettes/ && echo LEAK || echo clean
+grep -rE 'sk-|pk-|csk-|^lw|tp-|[A-Fa-f0-9]{32}\.[A-Za-z0-9]{16}|Bearer\s' tests/llm/cassettes/ && echo LEAK || echo clean
 ```
 
 The `test_cassettes_have_no_secret_shaped_substrings` test is the same
 audit run inside pytest, and `test_audit_catches_deliberately_leaky_probe`
-plants sentinel `sk-...` / `sk-ant-...` / `tp-...` / `Bearer ...`
-strings in a tmp cassette to prove the audit's regex set has not silently
-gone stale.
+plants sentinel `sk-...` / `sk-ant-...` / `tp-...` / Z.AI hex-dot /
+`Bearer ...` strings in a tmp cassette to prove the audit's regex set
+has not silently gone stale.
 
 ### Malformed cassettes
 

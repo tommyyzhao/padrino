@@ -317,6 +317,59 @@ def test_bootstrap_with_xiaomi_models_yaml_seeds_model_configs(
     ]
 
 
+def test_bootstrap_with_zai_glm51_yaml_seeds_model_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ZAI_API_KEY", "0123456789abcdef0123456789abcdef.ABCDEFGHIJKLMNO1")
+    providers_path = tmp_path / "providers.yaml"
+    providers_path.write_text(
+        textwrap.dedent(
+            """
+            providers:
+              - name: zai
+                auth_secret_ref: env:ZAI_API_KEY
+                base_url: https://api.z.ai/api/coding/paas/v4
+                models:
+                  - model_name: glm-5.1
+                    litellm_model_id: openai/glm-5.1
+            """
+        ).strip()
+    )
+
+    runner = CliRunner()
+    db_url = _db_url(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "--db-url",
+            db_url,
+            "--providers",
+            str(providers_path),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    payload = json.loads(result.stdout)
+    providers_step = _step(payload["steps"], STEP_PROVIDERS)
+    assert providers_step["detail"]["inserted"] == ["zai"]
+    assert providers_step["detail"]["models_inserted"] == ["zai/glm-5.1"]
+
+    _, _, _, providers = asyncio.run(_query(db_url))
+    assert len(providers) == 1
+    assert providers[0].name == "zai"
+    assert providers[0].base_url == "https://api.z.ai/api/coding/paas/v4"
+    assert providers[0].auth_secret_ref == "env:ZAI_API_KEY"
+
+    models = asyncio.run(_query_model_configs(db_url))
+    assert len(models) == 1
+    assert models[0].model_name == "glm-5.1"
+    assert models[0].litellm_model_id == "openai/glm-5.1"
+    assert models[0].default_temperature == pytest.approx(0.7)
+    assert models[0].default_top_p == pytest.approx(1.0)
+    assert models[0].default_max_output_tokens == 4096
+
+
 def test_bootstrap_with_invalid_secret_ref_fails_fast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
