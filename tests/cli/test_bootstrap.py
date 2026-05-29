@@ -98,9 +98,9 @@ def test_bootstrap_fresh_db_runs_every_step(tmp_path: Path) -> None:
     names = {s["name"] for s in payload["steps"]}
     assert names == {STEP_MIGRATIONS, STEP_CANONICAL_PROMPTS, STEP_DEFAULT_LEAGUE}
     assert _step(payload["steps"], STEP_MIGRATIONS)["status"] == "ok"
-    # Migration 0005 already seeded the four canonical rows, so the safety-net
-    # step reports "skipped" on a fresh DB.
-    assert _step(payload["steps"], STEP_CANONICAL_PROMPTS)["status"] == "skipped"
+    # Migration 0005 already seeded the four canonical mini7_v1 rows, but we now seed bench10_v1 rows on fresh boot, so the safety-net
+    # step reports "ok" on a fresh DB.
+    assert _step(payload["steps"], STEP_CANONICAL_PROMPTS)["status"] == "ok"
     assert _step(payload["steps"], STEP_DEFAULT_LEAGUE)["status"] == "ok"
     assert "admin_raw_key" not in payload
 

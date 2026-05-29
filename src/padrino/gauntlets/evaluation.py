@@ -24,14 +24,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable, Mapping
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction, Role, RoleFamily
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import get_ruleset
 from padrino.core.statistics import ConfidenceInterval, wilson_score_interval
 from padrino.db.models import (
     Game,
@@ -172,20 +172,20 @@ _PUBLIC_RATING_DELTA_FORBIDDEN_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
-def _role_family(role_str: str) -> RoleFamily | None:
+def _role_family(role_str: str, ruleset: Any) -> RoleFamily | None:
     try:
         role = Role(role_str)
     except ValueError:
         return None
-    return mini7_v1.role_family_for(role)
+    return cast(RoleFamily, ruleset.role_family_for(role))
 
 
-def _faction_for_role(role_str: str) -> Faction | None:
+def _faction_for_role(role_str: str, ruleset: Any) -> Faction | None:
     try:
         role = Role(role_str)
     except ValueError:
         return None
-    return mini7_v1.faction_for(role)
+    return cast(Faction, ruleset.faction_for(role))
 
 
 def _winner_from_terminal(terminal_result: Any) -> str | None:
@@ -328,6 +328,8 @@ async def evaluate_gauntlet(
     games_completed = len(completed_games)
     completed_ids = [g.id for g in completed_games]
 
+    ruleset = get_ruleset(gauntlet.ruleset_id)
+
     seats_by_game = await _seats_by_game(session, completed_ids)
     total_seat_rows = sum(len(seats) for seats in seats_by_game.values())
 
@@ -360,8 +362,8 @@ async def evaluate_gauntlet(
             days_sample_size += 1
 
         for seat in seats_by_game.get(game.id, []):
-            rf = _role_family(seat.role)
-            faction = _faction_for_role(seat.role)
+            rf = _role_family(seat.role, ruleset)
+            faction = _faction_for_role(seat.role, ruleset)
             if rf is None or faction is None:
                 continue
             counter = role_family_counters[rf]

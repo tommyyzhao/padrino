@@ -42,6 +42,7 @@ EXPECTED_TABLES = {
     "ingested_games",
     "rate_limit_buckets",
     "scheduled_gauntlets",
+    "behavioral_evaluations",
 }
 
 

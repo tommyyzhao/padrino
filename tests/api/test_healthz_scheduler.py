@@ -9,36 +9,17 @@ each ok / degraded / down branch is asserted in isolation.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
-import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.core.rulesets import mini7_v1
-from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import prompt_versions as prompt_versions_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
-
-
-@pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield eng
-    finally:
-        await eng.dispose()
-
-
-@pytest.fixture
-async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return create_session_factory(engine)
 
 
 async def _http_client(app: object) -> AsyncClient:

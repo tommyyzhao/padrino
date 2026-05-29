@@ -8,11 +8,10 @@ from typing import Any
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.core.rulesets import mini7_v1
-from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import model_configs as model_configs_repo
@@ -21,22 +20,6 @@ from padrino.db.repositories import providers as providers_repo
 from padrino.llm.prompts import CANONICAL_RESPONSE_SCHEMA, iter_canonical_prompts
 
 _SEATS = [f"P{i + 1:02d}" for i in range(mini7_v1.PLAYER_COUNT)]
-
-
-@pytest_asyncio.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield eng
-    finally:
-        await eng.dispose()
-
-
-@pytest_asyncio.fixture
-async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return create_session_factory(engine)
 
 
 @pytest_asyncio.fixture

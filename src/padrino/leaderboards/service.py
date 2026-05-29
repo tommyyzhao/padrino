@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction, Role
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import get_ruleset
 from padrino.db.models import (
     AgentBuild,
     Game,
@@ -235,6 +235,7 @@ def _per_ab_counters(
 def _per_ab_role_family_breakdown(
     seats: list[GameSeat],
     winners: dict[uuid.UUID, str],
+    ruleset: Any,
 ) -> dict[uuid.UUID, dict[str, dict[str, float]]]:
     """Aggregate per-(agent_build, role_family) seat-game counters.
 
@@ -250,7 +251,7 @@ def _per_ab_role_family_breakdown(
             role = Role(seat.role)
         except ValueError:
             continue
-        family = mini7_v1.role_family_for(role).value
+        family = ruleset.role_family_for(role).value
         ab_bucket = out.setdefault(seat.agent_build_id, {})
         rf_bucket = ab_bucket.setdefault(
             family, {"games": 0.0, "wins": 0.0, "draws": 0.0, "losses": 0.0, "win_rate": 0.0}
@@ -373,9 +374,10 @@ async def compute_leaderboard(
     seat_by_game_actor: dict[tuple[uuid.UUID, str], uuid.UUID] = {
         (seat.game_id, seat.public_player_id): seat.agent_build_id for seat in seats
     }
+    ruleset = get_ruleset(ruleset_id)
     counters = _per_ab_counters(seats, winners)
     metrics = _per_ab_event_metrics(events, seat_by_game_actor)
-    role_family_breakdowns = _per_ab_role_family_breakdown(seats, winners)
+    role_family_breakdowns = _per_ab_role_family_breakdown(seats, winners, ruleset)
 
     ratings = await _ratings_global(session, league_id=league_id, agent_build_ids=counters.keys())
     display_names = await _agent_build_display_names(session, counters.keys())

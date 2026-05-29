@@ -139,6 +139,7 @@ async def test_tournament_runs_all_games_and_aggregates_per_model(tmp_path: Path
         result = await run_heterogeneous_tournament(
             session_factory=session_factory,
             league_id=league_id,
+            ruleset_id=mini7_v1.RULESET_ID,
             gauntlet_seed=seed,
             game_ids=created.game_ids,
             base_agent_builds_by_seat=builds_by_seat,
@@ -218,6 +219,7 @@ async def test_tournament_cost_cap_stops_early(tmp_path: Path) -> None:
         result = await run_heterogeneous_tournament(
             session_factory=session_factory,
             league_id=league_id,
+            ruleset_id=mini7_v1.RULESET_ID,
             gauntlet_seed=seed,
             game_ids=created.game_ids,
             base_agent_builds_by_seat=builds_by_seat,

@@ -32,7 +32,7 @@ from padrino.api.auth import (
     require_scopes,
 )
 from padrino.api.deps import get_session
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import bench10_v1, mini7_v1
 from padrino.db.repositories import api_keys as api_keys_repo
 from padrino.db.repositories import ingested_games as ingested_games_repo
 from padrino.export.bundle import (
@@ -47,7 +47,7 @@ from padrino.export.bundle import (
 
 MAX_BUNDLE_BYTES: int = 10 * 1024 * 1024
 
-KNOWN_RULESET_IDS: Final[frozenset[str]] = frozenset({mini7_v1.RULESET_ID})
+KNOWN_RULESET_IDS: Final[frozenset[str]] = frozenset({mini7_v1.RULESET_ID, bench10_v1.RULESET_ID})
 
 router = APIRouter()
 require_submit = require_scopes(SCOPE_ADMIN, SCOPE_SUBMITTER)

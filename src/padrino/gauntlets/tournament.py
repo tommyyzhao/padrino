@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import get_ruleset
 from padrino.core.seating import seat_permutation
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.scheduler import create_gauntlet, derive_game_seed
@@ -54,6 +54,7 @@ async def run_heterogeneous_tournament(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     league_id: uuid.UUID,
+    ruleset_id: str,
     gauntlet_seed: str,
     game_ids: Sequence[uuid.UUID],
     base_agent_builds_by_seat: Mapping[str, uuid.UUID],
@@ -70,7 +71,8 @@ async def run_heterogeneous_tournament(
     each game permutes both consistently. Stops early — leaving later games
     unplayed — if cumulative cost crosses ``cost_cap_usd``.
     """
-    player_count = mini7_v1.PLAYER_COUNT
+    ruleset = get_ruleset(ruleset_id)
+    player_count = ruleset.PLAYER_COUNT
     seat_ids = _seat_ids(player_count)
     if set(base_agent_builds_by_seat) != set(seat_ids):
         raise ValueError(f"base_agent_builds_by_seat must cover seats {seat_ids}")
@@ -99,7 +101,7 @@ async def run_heterogeneous_tournament(
         config = GameConfig(
             game_id=str(game_id),
             game_seed=derive_game_seed(gauntlet_seed, game_index),
-            ruleset_id=mini7_v1.RULESET_ID,
+            ruleset_id=ruleset_id,
             timeout_s=float(settings.padrino_llm_timeout_seconds),
         )
         persistence = GamePersistence(
@@ -187,7 +189,16 @@ async def run_tournament_from_roster(
     The prompt-version FK for the gauntlet is taken from the first seat's
     agent_build. Returns ``(gauntlet_id, result)``.
     """
-    seat_ids = _seat_ids(mini7_v1.PLAYER_COUNT)
+    from padrino.db.models import League
+
+    async with session_factory() as session:
+        league = await session.get(League, league_id)
+        if league is None:
+            raise ValueError(f"league {league_id} not found")
+        ruleset_id = league.ruleset_id
+
+    ruleset = get_ruleset(ruleset_id)
+    seat_ids = _seat_ids(ruleset.PLAYER_COUNT)
     if set(roster_by_seat) != set(seat_ids):
         raise ValueError(f"roster must cover exactly seats {seat_ids}")
 
@@ -208,7 +219,7 @@ async def run_tournament_from_roster(
         created = await create_gauntlet(
             session,
             league_id=league_id,
-            ruleset_id=mini7_v1.RULESET_ID,
+            ruleset_id=ruleset_id,
             prompt_version_id=prompt_version_id,
             clone_count=n_games,
             gauntlet_seed=gauntlet_seed,
@@ -218,6 +229,7 @@ async def run_tournament_from_roster(
     result = await run_heterogeneous_tournament(
         session_factory=session_factory,
         league_id=league_id,
+        ruleset_id=ruleset_id,
         gauntlet_seed=gauntlet_seed,
         game_ids=created.game_ids,
         base_agent_builds_by_seat=dict(roster_by_seat),

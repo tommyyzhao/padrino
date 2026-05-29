@@ -150,33 +150,38 @@ def _run_migrations(db_url: str) -> StepReport:
 
 
 async def _seed_canonical_prompts(session: AsyncSession) -> StepReport:
-    existing = (
-        (
-            await session.execute(
-                select(PromptVersion.developer_prompt).where(
-                    PromptVersion.version == CANONICAL_VERSION,
-                    PromptVersion.ruleset_id == mini7_v1.RULESET_ID,
+    from padrino.core.rulesets import bench10_v1
+
+    ruleset_ids = [mini7_v1.RULESET_ID, bench10_v1.RULESET_ID]
+    inserted: list[str] = []
+
+    for rid in ruleset_ids:
+        existing = (
+            (
+                await session.execute(
+                    select(PromptVersion.developer_prompt).where(
+                        PromptVersion.version == CANONICAL_VERSION,
+                        PromptVersion.ruleset_id == rid,
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    have = set(existing)
-    inserted: list[str] = []
-    for template in iter_canonical_prompts(mini7_v1.RULESET_ID):
-        if template.role_family.value in have:
-            continue
-        obj = PromptVersion(
-            ruleset_id=template.ruleset_id,
-            version=template.version,
-            system_prompt=template.system_prompt,
-            developer_prompt=template.role_family.value,
-            response_schema=CANONICAL_RESPONSE_SCHEMA,
-            prompt_hash=template.prompt_hash,
-        )
-        session.add(obj)
-        inserted.append(template.role_family.value)
+        have = set(existing)
+        for template in iter_canonical_prompts(rid):
+            if template.role_family.value in have:
+                continue
+            obj = PromptVersion(
+                ruleset_id=template.ruleset_id,
+                version=template.version,
+                system_prompt=template.system_prompt,
+                developer_prompt=template.role_family.value,
+                response_schema=CANONICAL_RESPONSE_SCHEMA,
+                prompt_hash=template.prompt_hash,
+            )
+            session.add(obj)
+            inserted.append(f"{rid}:{template.role_family.value}")
     await session.flush()
     status = "ok" if inserted else "skipped"
     _LOG.info(
@@ -192,37 +197,43 @@ async def _seed_canonical_prompts(session: AsyncSession) -> StepReport:
 
 
 async def _seed_default_league(session: AsyncSession) -> StepReport:
-    stmt = select(League).where(
-        League.name == DEFAULT_LEAGUE_NAME,
-        League.ruleset_id == mini7_v1.RULESET_ID,
-    )
-    existing = (await session.execute(stmt)).scalar_one_or_none()
-    if existing is not None:
-        _LOG.info(
-            "bootstrap.step.skipped",
-            step=STEP_DEFAULT_LEAGUE,
-            league_id=str(existing.id),
+    from padrino.core.rulesets import bench10_v1
+
+    ruleset_ids = [mini7_v1.RULESET_ID, bench10_v1.RULESET_ID]
+    inserted: list[str] = []
+    skipped: list[str] = []
+
+    for rid in ruleset_ids:
+        league_name = (
+            f"{DEFAULT_LEAGUE_NAME} ({rid})" if rid != mini7_v1.RULESET_ID else DEFAULT_LEAGUE_NAME
         )
-        return StepReport(
-            name=STEP_DEFAULT_LEAGUE,
-            status="skipped",
-            detail={"league_id": str(existing.id)},
+        stmt = select(League).where(
+            League.name == league_name,
+            League.ruleset_id == rid,
         )
-    league = await leagues_repo.create(
-        session,
-        name=DEFAULT_LEAGUE_NAME,
-        ruleset_id=mini7_v1.RULESET_ID,
-        ranked=True,
-    )
+        existing = (await session.execute(stmt)).scalar_one_or_none()
+        if existing is not None:
+            skipped.append(league_name)
+            continue
+        await leagues_repo.create(
+            session,
+            name=league_name,
+            ruleset_id=rid,
+            ranked=True,
+        )
+        inserted.append(league_name)
+
+    status = "ok" if inserted else "skipped"
     _LOG.info(
-        "bootstrap.step.ok",
+        "bootstrap.step.ok" if inserted else "bootstrap.step.skipped",
         step=STEP_DEFAULT_LEAGUE,
-        league_id=str(league.id),
+        inserted=inserted,
+        skipped=skipped,
     )
     return StepReport(
         name=STEP_DEFAULT_LEAGUE,
-        status="ok",
-        detail={"league_id": str(league.id)},
+        status=status,
+        detail={"inserted": inserted, "skipped": skipped},
     )
 
 

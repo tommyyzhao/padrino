@@ -35,6 +35,13 @@ def build_scheduled_gauntlet_tick_hook(
             settings=settings,
             adapter_factory=adapter_factory,
         )
+        if settings.padrino_enable_behavioral_evaluation:
+            from padrino.ratings.evaluator import run_pending_behavioral_evaluations
+
+            await run_pending_behavioral_evaluations(
+                session_factory,
+                settings=settings,
+            )
 
     return _hook
 

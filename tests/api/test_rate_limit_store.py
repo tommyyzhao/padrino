@@ -11,13 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
 
 import pytest
-import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.auth import RateLimiter, generate_raw_key
@@ -26,7 +24,6 @@ from padrino.api.rate_limit_store import (
     InMemoryRateLimitStore,
     RateLimitStore,
 )
-from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.models import RateLimitBucket
 from padrino.db.repositories import api_keys as api_keys_repo
 
@@ -34,22 +31,6 @@ from padrino.db.repositories import api_keys as api_keys_repo
 @pytest.fixture(autouse=True)
 def _stub_provider_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CEREBRAS_API_KEY", "test-cerebras-key")
-
-
-@pytest_asyncio.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield eng
-    finally:
-        await eng.dispose()
-
-
-@pytest_asyncio.fixture
-async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return create_session_factory(engine)
 
 
 # --- Protocol ----------------------------------------------------------------

@@ -72,7 +72,7 @@ class PromptTemplate(BaseModel):
 
 
 def _bundled_dir(ruleset_id: str) -> str:
-    if ruleset_id != _mini7_ruleset.RULESET_ID:
+    if ruleset_id not in ("mini7_v1", "bench10_v1"):
         raise UnknownCanonicalPromptError(
             f"no canonical prompts bundled for ruleset_id={ruleset_id!r}"
         )
@@ -139,9 +139,12 @@ def canonical_prompts_by_role(
     Useful for handing the LiteLLM adapter a per-seat prompt without making
     the adapter import a specific ruleset module.
     """
+    from padrino.core.rulesets import get_ruleset
+
+    ruleset = get_ruleset(ruleset_id)
     out: dict[Role, str] = {}
     for role in Role:
-        role_family = _mini7_ruleset.role_family_for(role)
+        role_family = ruleset.role_family_for(role)
         out[role] = load_canonical(ruleset_id, role_family).system_prompt
     return out
 

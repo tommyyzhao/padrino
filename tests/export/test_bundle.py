@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.canonical_json import canonical_dumps
 from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
-from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -55,22 +53,6 @@ from tests.conftest import make_town_win_script
 
 _GAME_SEED = "seed-us061-export"
 _SECRET_AUTH_REF = "env:PADRINO_TEST_SECRET_REF"
-
-
-@pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield eng
-    finally:
-        await eng.dispose()
-
-
-@pytest.fixture
-async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return create_session_factory(engine)
 
 
 def _split_factions() -> tuple[list[str], list[str], str, str]:

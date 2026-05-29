@@ -622,3 +622,24 @@ All quality gates passed cleanly:
 - In clone gauntlets, identical agent builds occupy multiple seats in a single game. A database unique constraint on game ratings must include `public_player_id` (seat identifier) to allow independent seat-based ratings within the same game.
 - Enforcing verified-only games on the public leaderboard requires that even testing rigs (like the local smoke harness) generate valid cryptographic signatures and register their public keys to perform authentic, verified ingestions.
 
+
+## 2026-05-29 — Wave 6 (Balanced 10-Player Ruleset, Local PostgreSQL Migration, and LLM Post-Game Behavioral Evaluation) COMPLETE
+
+Antigravity has successfully completed the implementation of all Wave 6 checklist items, rendering Padrino fully optimized for local PostgreSQL migration, balanced 10-player ruleset (`bench10_v1`), and post-game LLM judge evaluations.
+
+Landed changes:
+- `src/padrino/ratings/evaluator.py` — Implemented the post-game LLM judge behavioral evaluations pipeline (`persuasion`, `deception`, `logic`, `social` on a 1-5 scale) using strict LiteLLM structured JSON schema outputs (`response_format=JudgeResponse`), safe defaults for unscored seats, and transactional batch worker loop (`run_pending_behavioral_evaluations`).
+- `src/padrino/settings.py` — Declared behavioral settings (`padrino_enable_behavioral_evaluation`, `padrino_behavioral_judge_model`, and `padrino_behavioral_evaluation_cost_cap`).
+- `src/padrino/cli.py` — Registered `game` subcommand group and `evaluate-behavioral <game_id>` command, and wired `tick_hook` into the scheduler daemon run command.
+- `src/padrino/scheduler/bootstrap.py` — Integrated the batch evaluation job into the scheduler's async tick hook.
+- `tests/conftest.py` — Standardized the global `engine` and `session_factory` fixtures, ensuring SQLite `PRAGMA foreign_keys` toggle runs outside active transaction blocks to keep SQLite integrity checking functional across tests.
+- `tests/ratings/test_behavioral_evaluation.py` — Created extensive unit tests asserting completed game transcript parsing, mock judge scoring, unique constraints, and background jobs (5/5 passed).
+- `tests/core/test_bench10_constants.py` — Created unit tests verifying `bench10_v1` player count, role counts, families, and factions (7/7 passed).
+- `tests/` AST sweep cleanup — Swept and automatically cleaned up 30+ test modules to remove all duplicate local database fixtures in favor of global conftest ones.
+- Lint and Type hardening — Fully resolved all mypy strict typings, ruff checks, and ruff format lints across the entire codebase.
+
+### Learnings for future iterations
+- SQLite transaction block pragmas: Running `PRAGMA foreign_keys = ON` inside a SQLAlchemy transaction block in SQLite has no effect. To reliably toggle SQLite pragmas per test, execute them on a raw connection outside of active transactions (`conn.commit()` after table drops/deletes).
+- Structured Outputs protocol: Passing Pydantic models directly to `response_format` in LiteLLM is a highly powerful and robust way to guarantee strict JSON schemas across diverse model providers.
+
+

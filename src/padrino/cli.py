@@ -241,10 +241,17 @@ def scheduler(
                     # Windows: signal handlers on loops are not supported.
                     signal.signal(sig, lambda *_a: _request_stop())
 
+            from padrino.scheduler.bootstrap import build_scheduled_gauntlet_tick_hook
+            from padrino.settings import get_settings
+
+            settings = get_settings()
+            tick_hook = build_scheduled_gauntlet_tick_hook(session_factory, settings=settings)
+
             await run_scheduler(
                 session_factory,
                 concurrency=concurrency,
                 stop_event=stop_event,
+                tick_hook=tick_hook,
             )
         finally:
             await engine.dispose()
@@ -369,6 +376,61 @@ def export_game_cmd(
     else:
         out.write_text(rendered, encoding="utf-8")
         typer.echo(str(out))
+
+
+game_app = typer.Typer(
+    name="game",
+    help="Manage and evaluate individual games.",
+    no_args_is_help=True,
+)
+app.add_typer(game_app, name="game")
+
+
+@game_app.command("evaluate-behavioral")
+def game_evaluate_behavioral(
+    game_id: str = typer.Argument(..., help="UUID of the COMPLETED game to evaluate."),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+) -> None:
+    """Run post-game LLM judge behavioral evaluation for a completed game."""
+    import uuid as _uuid
+
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.ratings.evaluator import evaluate_completed_game_behavioral
+
+    try:
+        gid = _uuid.UUID(game_id)
+    except ValueError as exc:
+        typer.echo(f"invalid game_id: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    async def _run() -> int:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            async with session_factory() as session, session.begin():
+                persisted = await evaluate_completed_game_behavioral(session, gid)
+                return len(persisted)
+        finally:
+            await engine.dispose()
+
+    try:
+        count = asyncio.run(_run())
+        typer.echo(
+            json.dumps(
+                {"game_id": game_id, "status": "success", "evaluations_persisted": count}, indent=2
+            )
+        )
+    except Exception as exc:
+        typer.echo(
+            json.dumps({"game_id": game_id, "status": "failed", "error": str(exc)}, indent=2),
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
 
 
 smoke_app = typer.Typer(

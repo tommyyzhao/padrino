@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
@@ -33,6 +34,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         default=False,
         help="run recorded-cassette live LLM contract tests (US-051)",
+    )
+    parser.addoption(
+        "--postgres",
+        action="store_true",
+        default=False,
+        help="run unit/integration tests against real PostgreSQL instead of SQLite in-memory",
     )
 
 
@@ -251,3 +258,116 @@ __all__ = [
     "make_villager_script",
     "mini7_phase_ids",
 ]
+
+
+def _use_postgres(config: pytest.Config) -> bool:
+    import os
+
+    if config.getoption("--postgres"):
+        return True
+    return bool(os.environ.get("PADRINO_TEST_DB_URL"))
+
+
+def _postgres_url(config: pytest.Config) -> str:
+    import os
+
+    url = os.environ.get("PADRINO_TEST_DB_URL")
+    if url:
+        return url
+    return "postgresql+asyncpg://padrino:padrino@localhost:5432/padrino_test"
+
+
+@pytest.fixture(scope="session")
+def use_postgres(pytestconfig: pytest.Config) -> bool:
+    return _use_postgres(pytestconfig)
+
+
+@pytest.fixture(scope="session")
+async def db_engine(pytestconfig: pytest.Config) -> AsyncIterator[AsyncEngine]:
+    import os
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    from padrino.db.base import Base, create_engine
+
+    use_pg = _use_postgres(pytestconfig)
+    if use_pg:
+        pg_url = _postgres_url(pytestconfig)
+
+        # Clear out any existing schema in public schema first to ensure clean state
+        from sqlalchemy import create_engine as sync_create_engine
+
+        sync_url = pg_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+        sync_eng = sync_create_engine(sync_url)
+        try:
+            with sync_eng.connect() as conn:
+                conn.exec_driver_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+                conn.commit()
+        except Exception:
+            pass
+        finally:
+            sync_eng.dispose()
+
+        # Run migrations once via Alembic
+        previous = os.environ.get("PADRINO_DB_URL")
+        os.environ["PADRINO_DB_URL"] = pg_url
+        try:
+            migrations_pkg = (
+                Path(__file__).resolve().parents[1] / "src" / "padrino" / "db" / "migrations"
+            )
+            cfg = AlembicConfig()
+            cfg.set_main_option("script_location", str(migrations_pkg))
+            cfg.set_main_option("sqlalchemy.url", pg_url)
+            command.upgrade(cfg, "head")
+        finally:
+            if previous is None:
+                os.environ.pop("PADRINO_DB_URL", None)
+            else:
+                os.environ["PADRINO_DB_URL"] = previous
+
+        eng = create_engine(pg_url, pool_size=5, max_overflow=10)
+        try:
+            yield eng
+        finally:
+            await eng.dispose()
+    else:
+        eng = create_engine("sqlite+aiosqlite:///:memory:")
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        try:
+            yield eng
+        finally:
+            await eng.dispose()
+
+
+@pytest.fixture
+async def engine(db_engine: AsyncEngine, use_postgres: bool) -> AsyncIterator[AsyncEngine]:
+    import sqlalchemy as sa
+
+    from padrino.db.base import Base
+
+    async with db_engine.connect() as conn:
+        if not use_postgres:
+            await conn.execute(sa.text("PRAGMA foreign_keys = OFF;"))
+
+        for table in reversed(Base.metadata.sorted_tables):
+            if use_postgres:
+                await conn.execute(sa.text(f'DELETE FROM "{table.name}" CASCADE;'))
+            else:
+                await conn.execute(sa.text(f'DELETE FROM "{table.name}";'))
+        await conn.commit()
+
+        if not use_postgres:
+            await conn.execute(sa.text("PRAGMA foreign_keys = ON;"))
+            await conn.commit()
+
+    yield db_engine
+
+
+@pytest.fixture
+async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    from padrino.db.base import create_session_factory
+
+    return create_session_factory(engine)

@@ -2,29 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-import pytest_asyncio
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.repositories import scheduled_gauntlets as repo
 
 _SPEC = {"league_id": "11111111-1111-1111-1111-111111111111", "roster": {"P01": "x"}}
-
-
-@pytest_asyncio.fixture
-async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine: AsyncEngine = create_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield create_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def test_create_get_and_get_by_name(

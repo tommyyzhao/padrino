@@ -368,9 +368,36 @@ class ScheduledGauntlet(Base):
     )
 
 
+class BehavioralEvaluation(Base):
+    """Post-game LLM judge behavioral evaluation for a specific player seat (Wave 6)."""
+
+    __tablename__ = "behavioral_evaluations"
+    __table_args__ = (
+        UniqueConstraint("game_id", "public_player_id", name="uq_behavioral_eval_seat"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id", ondelete="CASCADE"), nullable=False
+    )
+    public_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    persuasion_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    deception_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    logical_consistency_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    social_heuristics_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    written_feedback: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 __all__ = [
     "AgentBuild",
     "ApiKey",
+    "BehavioralEvaluation",
     "Game",
     "GameEvent",
     "GameSeat",

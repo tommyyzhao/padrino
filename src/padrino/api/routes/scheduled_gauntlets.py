@@ -18,14 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.api.auth import ApiKeyContext, require_admin
 from padrino.api.deps import get_session
 from padrino.api.routes.public import require_public_read
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import get_ruleset
 from padrino.core.scheduling import humanize_cron, next_run_at
 from padrino.db.models import AgentBuild, Gauntlet, League
 from padrino.db.repositories import scheduled_gauntlets as scheduled_gauntlets_repo
 
 router = APIRouter()
-
-_SEATS = [f"P{i + 1:02d}" for i in range(mini7_v1.PLAYER_COUNT)]
 
 
 class _StrictModel(BaseModel):
@@ -94,15 +92,24 @@ def _validate_cron(cron_expr: str, *, after: datetime) -> datetime:
 
 
 async def _validate_roster(session: AsyncSession, spec: RosterSpec) -> None:
-    if set(spec.roster) != set(_SEATS):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"roster must cover exactly seats {_SEATS}",
-        )
-    if await session.get(League, spec.league_id) is None:
+    league = await session.get(League, spec.league_id)
+    if league is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"unknown league_id: {spec.league_id}",
+        )
+    try:
+        ruleset = get_ruleset(league.ruleset_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"unsupported ruleset for league: {exc}",
+        ) from exc
+    expected_seats = {f"P{i + 1:02d}" for i in range(ruleset.PLAYER_COUNT)}
+    if set(spec.roster) != expected_seats:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"roster must cover exactly seats {sorted(expected_seats)}",
         )
     build_ids = set(spec.roster.values())
     found = set(

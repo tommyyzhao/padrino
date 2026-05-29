@@ -23,7 +23,7 @@ from typing import Final
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import get_ruleset
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.observability.events import EVENT_GAUNTLET_CREATED
 
@@ -56,14 +56,15 @@ async def create_gauntlet(
 ) -> GauntletCreated:
     """Create a gauntlet + its roster slots + ``clone_count`` child games atomically.
 
-    ``roster`` MUST have length ``mini7_v1.PLAYER_COUNT`` (=7). ``clone_count``
+    ``roster`` MUST have length matching the ruleset's PLAYER_COUNT. ``clone_count``
     is clamped to ``[MIN_CLONE_COUNT, MAX_CLONE_COUNT]``. Per-game seeds are
     derived via :func:`derive_game_seed` so the same gauntlet seed always
     produces the same per-game seeds.
     """
-    if len(roster) != mini7_v1.PLAYER_COUNT:
+    ruleset = get_ruleset(ruleset_id)
+    if len(roster) != ruleset.PLAYER_COUNT:
         raise ValueError(
-            f"roster must have exactly {mini7_v1.PLAYER_COUNT} entries, got {len(roster)}"
+            f"roster must have exactly {ruleset.PLAYER_COUNT} entries, got {len(roster)}"
         )
     if not (MIN_CLONE_COUNT <= clone_count <= MAX_CLONE_COUNT):
         raise ValueError(

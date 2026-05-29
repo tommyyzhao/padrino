@@ -7,16 +7,13 @@ path) or a cost-stamping wrapper (cost-cap-abort path).
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.observations import Observation
 from padrino.core.rulesets import mini7_v1
-from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.models import Gauntlet, ScheduledGauntlet
 from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
@@ -42,17 +39,6 @@ class _CostAdapter:
     async def complete(self, observation: Observation) -> AdapterResult:
         result = await self._inner.complete(observation)
         return result.model_copy(update={"cost_usd": self._cost})
-
-
-@pytest_asyncio.fixture
-async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine: AsyncEngine = create_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield create_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _seed_schedule(

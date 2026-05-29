@@ -28,7 +28,12 @@ EXPECTED_TABLES = {
     "llm_calls",
     "ratings",
     "rating_events",
+    "api_keys",
+    "scheduler_heartbeats",
+    "ingested_games",
+    "rate_limit_buckets",
     "scheduled_gauntlets",
+    "behavioral_evaluations",
 }
 
 

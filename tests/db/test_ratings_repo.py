@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import ast
 import uuid
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.models import AgentBuild, League
 from padrino.db.repositories import (
     agent_builds,
@@ -22,22 +20,6 @@ from padrino.db.repositories import (
     providers,
 )
 from padrino.db.repositories import ratings as ratings_repo
-
-
-@pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield eng
-    finally:
-        await eng.dispose()
-
-
-@pytest.fixture
-async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return create_session_factory(engine)
 
 
 async def _seed_league_and_build(
