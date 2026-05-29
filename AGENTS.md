@@ -48,9 +48,14 @@ In ranked mode, agents NEVER see:
 
 Canonical JSON: UTF-8, sorted keys, no insignificant whitespace, no floats in core game events (encode as strings if needed). Server timestamps and the hash itself are EXCLUDED from the hash input.
 
-### 5. v1 ruleset is `mini7_v1`
+### 5. Rulesets are resolved dynamically by `ruleset_id`
 
-Exactly **7 players**: 2 Mafia, 1 Detective, 1 Doctor, 3 Villagers. `MAX_DAYS = 5`. Do not generalize prematurely — every rating is stamped with `ruleset_id` so variants get their own leaderboards later.
+Two rulesets ship today, resolved via `padrino.core.rulesets.get_ruleset(ruleset_id)`:
+
+- `mini7_v1` — 7 players: 2 Mafia, 1 Detective, 1 Doctor, 3 Villagers.
+- `bench10_v1` — 10 players: 3 Mafia, 1 Detective, 1 Doctor, 5 Villagers.
+
+Both use `MAX_DAYS = 5`. Add a new ruleset as a module under `core/rulesets/` satisfying the `Ruleset` Protocol, then register it in `get_ruleset`; never hardcode a ruleset in routes, scheduler, tournaments, evaluations, or leaderboards. Every rating is stamped with `ruleset_id` so each variant gets its own leaderboard.
 
 ### 6. Backend-only — no browser verification
 
@@ -77,7 +82,7 @@ CI runs the same on Python 3.11 and 3.12. Don't commit broken code. If a check f
 padrino/
 ├── src/padrino/
 │   ├── core/              # PURE deterministic engine (no I/O)
-│   │   ├── rulesets/      # mini7_v1 ruleset module
+│   │   ├── rulesets/      # ruleset modules (mini7_v1, bench10_v1) + get_ruleset resolver
 │   │   ├── engine/        # state, events, reducer, resolver, replay, rng, hashing
 │   │   ├── agents/        # contract, sanitizer, response schema (pure validation)
 │   │   └── observations.py

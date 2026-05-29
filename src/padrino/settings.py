@@ -113,7 +113,6 @@ class Settings(BaseSettings):
     # Post-game behavioral evaluation pipeline (Wave 6)
     padrino_enable_behavioral_evaluation: bool = False
     padrino_behavioral_judge_model: str = "xiaomi/mimo-v2.5-pro"
-    padrino_behavioral_evaluation_cost_cap: float = 10.0
 
     def build_routing_policy(
         self,
