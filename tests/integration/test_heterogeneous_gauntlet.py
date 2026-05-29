@@ -46,6 +46,7 @@ from padrino.gauntlets.completion import finalize_gauntlet_if_done
 from padrino.gauntlets.evaluation import evaluate_gauntlet
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.scheduler import create_gauntlet, derive_game_seed
+from padrino.gauntlets.tournament import run_tournament_from_roster
 from padrino.llm.adapter import AdapterResult, AdapterStatus, AgentBuild
 from padrino.llm.prompts import (
     CANONICAL_RESPONSE_SCHEMA,
@@ -300,6 +301,121 @@ async def test_heterogeneous_gauntlet_runs(
             )
         assert total_cost <= _COST_CAP_USD, (
             f"total cost ${total_cost:.4f} exceeded ${_COST_CAP_USD:.2f} cap"
+        )
+    finally:
+        await engine.dispose()
+
+
+_TOURNAMENT_GAMES = 10
+_TOURNAMENT_COST_CAP_USD = 20.00
+_WILSON_WIDTH_GATE = 0.40
+_MIN_SEATS_PER_MODEL = 5
+
+
+@pytest.mark.integration
+async def test_heterogeneous_10game_tournament(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """10 games of the heterogeneous roster with shuffled seat permutations."""
+    load_dotenv(override=False)
+    missing = [k for k in _REQUIRED_KEYS if not os.environ.get(k)]
+    if missing:
+        pytest.skip(f"missing provider keys {missing}; skipping heterogeneous tournament")
+
+    settings = Settings()
+    db_path = tmp_path / "tournament.sqlite"
+    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = create_session_factory(engine)
+
+        league_id, _pv_id, ab_by_model = await _seed_heterogeneous_admin(session_factory)
+        roster_by_seat = {
+            seat: ab_by_model[litellm_model_id]
+            for seat, (_provider, litellm_model_id, _display) in _ROSTER.items()
+        }
+
+        gauntlet_id, result = await run_tournament_from_roster(
+            session_factory=session_factory,
+            league_id=league_id,
+            gauntlet_seed="integration-heterogeneous-tournament-001",
+            roster_by_seat=roster_by_seat,
+            n_games=_TOURNAMENT_GAMES,
+            settings=settings,
+            cost_cap_usd=_TOURNAMENT_COST_CAP_USD,
+        )
+
+        # (a) all 10 games ran to terminal (no cost-cap abort, no hung games).
+        assert not result.cost_capped, (
+            f"cost cap tripped after {result.games_run} games at ${result.total_cost_usd:.2f}"
+        )
+        assert result.games_run == _TOURNAMENT_GAMES
+        for index, outcome in enumerate(result.outcomes):
+            assert outcome.final_state.terminal_result in _TERMINAL_RESULTS, (
+                f"game #{index} did not reach terminal: {outcome.final_state.terminal_result!r}"
+            )
+
+        # (b) aggregate parse rate across all games.
+        all_llm_calls = [c for o in result.outcomes for c in o.llm_calls]
+        assert all_llm_calls
+        parsed_ok = sum(1 for c in all_llm_calls if c.status in _PARSED_OK_STATUSES)
+        parse_rate = parsed_ok / len(all_llm_calls)
+        assert parse_rate >= _PARSE_RATE_GATE, (
+            f"aggregate parse rate {parse_rate:.0%} below {_PARSE_RATE_GATE:.0%}; "
+            f"status histogram={sorted({c.status for c in all_llm_calls})}"
+        )
+
+        async with session_factory() as session:
+            finalized = await finalize_gauntlet_if_done(session, gauntlet_id)
+            report = await evaluate_gauntlet(gauntlet_id, session)
+        assert finalized is not None and finalized.status == "COMPLETED"
+        assert report is not None
+
+        # (c) every distinct model appears in at least 5 seats.
+        seats_by_build = {m.agent_build_id: m.total_seats for m in report.faction_seat_counts}
+        distinct_build_ids = set(roster_by_seat.values())
+        for build_id in distinct_build_ids:
+            assert seats_by_build.get(build_id, 0) >= _MIN_SEATS_PER_MODEL, (
+                f"agent_build {build_id} seated only "
+                f"{seats_by_build.get(build_id, 0)} times (< {_MIN_SEATS_PER_MODEL})"
+            )
+
+        # (d) Wilson CI width < 0.40 for at least one faction's overall win-rate.
+        faction_widths = {
+            fwr.faction: fwr.rate.upper - fwr.rate.lower
+            for fwr in report.faction_win_rates
+            if fwr.faction in {"TOWN", "MAFIA"}
+        }
+        narrowest = min(faction_widths.values())
+        assert narrowest < _WILSON_WIDTH_GATE, (
+            f"no faction CI narrower than {_WILSON_WIDTH_GATE}; widths={faction_widths}"
+        )
+
+        # (e) per-model rating deltas — print top-3 / bottom-3 (GLOBAL scope).
+        global_deltas = sorted(
+            (d for d in report.rating_deltas if d.scope_type == "GLOBAL"),
+            key=lambda d: d.delta_mu,
+            reverse=True,
+        )
+        total_cost = result.total_cost_usd
+        with capsys.disabled():
+            print(
+                f"\n[US-084] 10-game tournament: games={result.games_run} "
+                f"faction_wins={report.faction_win_counts} "
+                f"parse_rate={parse_rate:.0%} faction_widths={ {k: round(v, 3) for k, v in faction_widths.items()} } "
+                f"cost=${total_cost:.4f} (cap=${_TOURNAMENT_COST_CAP_USD:.2f})"
+            )
+            print("  top-3 by delta_mu:")
+            for d in global_deltas[:3]:
+                print(f"    {d.agent_build_id} delta_mu={d.delta_mu:+.3f} post_mu={d.post_mu:.3f}")
+            print("  bottom-3 by delta_mu:")
+            for d in global_deltas[-3:]:
+                print(f"    {d.agent_build_id} delta_mu={d.delta_mu:+.3f} post_mu={d.post_mu:.3f}")
+
+        assert total_cost <= _TOURNAMENT_COST_CAP_USD, (
+            f"total cost ${total_cost:.4f} exceeded ${_TOURNAMENT_COST_CAP_USD:.2f}"
         )
     finally:
         await engine.dispose()

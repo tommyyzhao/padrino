@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,85 @@ def demo_gauntlet(
 
     response = asyncio.run(run_demo_gauntlet(seed=seed, clones=clones, db_url=db_url, real=real))
     typer.echo(json.dumps(response, indent=2, sort_keys=True))
+
+
+gauntlet_app = typer.Typer(
+    name="gauntlet",
+    help="Run multi-game heterogeneous tournaments.",
+    no_args_is_help=True,
+)
+app.add_typer(gauntlet_app, name="gauntlet")
+
+
+@gauntlet_app.command("run")
+def gauntlet_run(
+    roster: Path = typer.Option(
+        ...,
+        "--roster",
+        help="Roster YAML: a 'roster' mapping of public_player_id (P01..P07) -> agent_build_id.",
+    ),
+    league_id: str = typer.Option(..., "--league-id", help="League UUID to rate under."),
+    n_games: int = typer.Option(1, "--n-games", help="Number of games to play."),
+    cost_cap_usd: float = typer.Option(
+        20.0,
+        "--cost-cap-usd",
+        help="Stop before the next game once cumulative cost exceeds this ceiling.",
+    ),
+    gauntlet_seed: str = typer.Option(
+        "gauntlet-run-001", "--gauntlet-seed", help="Deterministic gauntlet seed."
+    ),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+) -> None:
+    """Run an N-game heterogeneous tournament from a roster YAML; print the report JSON."""
+    import yaml
+
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.gauntlets.evaluation import evaluate_gauntlet
+    from padrino.gauntlets.tournament import run_tournament_from_roster
+    from padrino.settings import get_settings
+
+    raw = yaml.safe_load(roster.read_text(encoding="utf-8")) or {}
+    roster_section = raw.get("roster", raw) if isinstance(raw, dict) else None
+    if not isinstance(roster_section, dict):
+        raise typer.BadParameter(
+            "roster YAML must contain a 'roster' seat -> agent_build_id mapping"
+        )
+    try:
+        roster_by_seat = {str(seat): uuid.UUID(str(bid)) for seat, bid in roster_section.items()}
+    except ValueError as exc:
+        raise typer.BadParameter(f"roster agent_build_id values must be UUIDs: {exc}") from exc
+
+    async def _run() -> dict[str, Any]:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            gauntlet_id, result = await run_tournament_from_roster(
+                session_factory=session_factory,
+                league_id=uuid.UUID(league_id),
+                gauntlet_seed=gauntlet_seed,
+                roster_by_seat=roster_by_seat,
+                n_games=n_games,
+                settings=get_settings(),
+                cost_cap_usd=cost_cap_usd,
+            )
+            async with session_factory() as session:
+                report = await evaluate_gauntlet(gauntlet_id, session)
+        finally:
+            await engine.dispose()
+        return {
+            "gauntlet_id": str(gauntlet_id),
+            "games_run": result.games_run,
+            "total_cost_usd": round(result.total_cost_usd, 4),
+            "cost_capped": result.cost_capped,
+            "report": report.model_dump(mode="json") if report is not None else None,
+        }
+
+    typer.echo(json.dumps(asyncio.run(_run()), indent=2, sort_keys=True))
 
 
 @app.command("scheduler")

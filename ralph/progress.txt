@@ -499,3 +499,49 @@ REAL RUN (2026-05-28, verified locally, not just green):
   `RoutingPolicy` directly — do NOT route through
   `Settings.build_routing_policy()`, which would re-attach the Cerebras->Z.AI
   same-model host whenever `ZAI_API_KEY` is still present in `.env`.
+
+---
+
+## 2026-05-28 — US-084 (Multi-game heterogeneous tournament with Wilson-CI gate)
+
+Extended the heterogeneous gauntlet (US-083) to N games with deterministic
+seat permutations + a statistical gate.
+
+- `src/padrino/core/seating.py` — pure-core `seat_permutation(seed, n)` via
+  `SeededRng.shuffle` (Fisher-Yates). Each game = a full permutation of the
+  7 roster slots, so models rotate through town/mafia roles.
+- `src/padrino/gauntlets/tournament.py` — `run_heterogeneous_tournament`
+  (per-game permuted seat->build + seat->AgentBuild, cost-cap early-stop),
+  `project_agent_build` (DB row -> AgentBuild value object), and
+  `run_tournament_from_roster` (CLI/job entry point).
+- `evaluate_gauntlet` extended with per-model `faction_seat_counts`
+  (ModelSeatCounts) + per-(model,faction) `ModelFactionWinRate` Wilson bands.
+- `padrino gauntlet run --roster path.yaml --n-games N --cost-cap-usd 20`
+  CLI command (roster YAML -> projection -> tournament -> report JSON).
+- Tests: `tests/core/test_seating.py` (permutation invariant),
+  `tests/gauntlets/test_tournament.py` (mock multi-game + cost-cap + projection
+  + new eval fields, all non-integration), `tests/cli/test_gauntlet_cli.py`,
+  and the 10-game `tests/integration/test_heterogeneous_gauntlet.py`.
+- Docs: byo-model.md multi-game section + roster YAML.
+
+REAL RUN (2026-05-28, verified locally, $20 cap, 90s per-call timeout):
+- 10 games: TOWN 1 / MAFIA 9 / DRAW 0 (mini7 mafia dominance).
+- parse-rate 83% (>=70); both faction Wilson widths 0.386 (<0.40 gate).
+- every model seated >=9 times (>=5 gate); per-model rating deltas computed.
+- cost $1.87 of $20 (free Xiaomi seats carry 4/7 of the load).
+- runtime 1h47m — the 90s timeout (chosen to protect parse-rate against slow
+  Mimo-pro) made it slow but the gate held.
+
+### Learnings for future iterations
+
+- **Stale-`.coverage` trap:** plain `uv run pytest` does NOT write coverage
+  (no `--cov` in addopts). `uv run coverage report` then reads a STALE
+  `.coverage` and can show a false-green percentage that omits new files.
+  ALWAYS measure with `uv run coverage run -m pytest -m "not integration"`
+  THEN `uv run coverage report`. (This masked new-module coverage until caught.)
+- The Wilson-CI gate (width <0.40 at n=10) only passes on a lopsided outcome
+  (one faction <=1 or >=9 wins, OR draw-dominated). mini7 mafia dominance makes
+  this reliable, but a balanced ruleset would fail the gate at n=10 — it needs
+  more games, not a code change.
+- Permutation lives in pure-core; the per-game seat->build/seat->AgentBuild
+  mapping is applied at RUN time (DB roster slots stay the canonical order).

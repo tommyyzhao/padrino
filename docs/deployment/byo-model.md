@@ -326,6 +326,47 @@ seats (~40 s latencies, occasionally exceeding the 45 s per-call timeout).
 Each model still produced at least one parsed-OK call in a single game, but
 budget extra wall-clock for Mimo-pro-heavy rosters.
 
+## Multi-game tournaments (US-084)
+
+A single game proves the engine survives a 7-distinct-model lineup, but a
+one-game sample produces uselessly wide Wilson confidence intervals. A
+*tournament* plays the same roster across N games, rotating each roster slot
+through different seats per game so every model is exposed to both town and
+mafia roles. The seat permutation is deterministic and pure-core:
+`padrino.core.seating.seat_permutation(f"{gauntlet_seed}:{game_index}", 7)`.
+
+Run one from a roster YAML — one `agent_build_id` per seat slot:
+
+```yaml
+# roster.yaml
+roster:
+  P01: 11111111-1111-1111-1111-111111111111
+  P02: 22222222-2222-2222-2222-222222222222
+  P03: 33333333-3333-3333-3333-333333333333
+  P04: 44444444-4444-4444-4444-444444444444
+  P05: 55555555-5555-5555-5555-555555555555
+  P06: 44444444-4444-4444-4444-444444444444   # repeats are allowed
+  P07: 55555555-5555-5555-5555-555555555555
+```
+
+```
+padrino gauntlet run \
+    --roster roster.yaml \
+    --league-id <league-uuid> \
+    --n-games 10 \
+    --cost-cap-usd 20.0 \
+    --db-url sqlite+aiosqlite:///./padrino.db
+```
+
+The CLI projects each `agent_build_id` (with its `model_config` and provider)
+into the `AgentBuild` value object via
+`padrino.gauntlets.tournament.project_agent_build`, creates the gauntlet, runs
+the tournament, and prints the `GauntletReport` JSON. `evaluate_gauntlet` now
+also surfaces per-model `faction_seat_counts` (town/mafia seats observed per
+model) and per-`(model, faction)` Wilson `win_rate` bands. Cumulative cost is
+checked between games; crossing `--cost-cap-usd` stops the tournament before
+the next game (leaving later games unplayed).
+
 ## Recording cassettes (US-051, US-072)
 
 The contract suite under `tests/llm/test_litellm_contract.py` parses

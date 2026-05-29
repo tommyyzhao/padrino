@@ -92,6 +92,33 @@ class RoleFamilyBreakdown(BaseModel):
     win_rate: CIBand
 
 
+class ModelSeatCounts(BaseModel):
+    """How many TOWN vs MAFIA seats one model occupied across the gauntlet (US-084)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    agent_build_id: uuid.UUID
+    town_seats: int
+    mafia_seats: int
+    total_seats: int
+
+
+class ModelFactionWinRate(BaseModel):
+    """Per-(model, faction) win rate with a Wilson CI band (US-084).
+
+    ``seats`` is the number of games this model played in ``faction``; ``wins``
+    is how many of those that faction won (draws count as non-wins).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    agent_build_id: uuid.UUID
+    faction: str
+    seats: int
+    wins: int
+    win_rate: CIBand
+
+
 class RatingDelta(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -121,6 +148,8 @@ class GauntletReport(BaseModel):
     faction_win_counts: dict[str, int] = Field(default_factory=dict)
     faction_win_rates: list[FactionWinRate] = Field(default_factory=list)
     role_family_breakdown: list[RoleFamilyBreakdown] = Field(default_factory=list)
+    faction_seat_counts: list[ModelSeatCounts] = Field(default_factory=list)
+    model_faction_breakdown: list[ModelFactionWinRate] = Field(default_factory=list)
     average_days_to_terminal: float
     average_actions_per_seat: float
     rating_deltas: list[RatingDelta] = Field(default_factory=list)
@@ -310,6 +339,9 @@ async def evaluate_gauntlet(
     role_family_counters: dict[RoleFamily, dict[str, int]] = {
         rf: {"games": 0, "wins": 0, "draws": 0, "losses": 0} for rf in RoleFamily
     }
+    # Per-model seat exposure (US-084) and per-(model, faction) win tallies.
+    model_seat_counts: dict[uuid.UUID, dict[str, int]] = {}
+    model_faction_tally: dict[tuple[uuid.UUID, str], dict[str, int]] = {}
 
     days_sum = 0
     days_sample_size = 0
@@ -340,6 +372,17 @@ async def evaluate_gauntlet(
                 counter["wins"] += 1
             else:
                 counter["losses"] += 1
+
+            build_id = seat.agent_build_id
+            if build_id is not None:
+                seat_counts = model_seat_counts.setdefault(build_id, {"TOWN": 0, "MAFIA": 0})
+                seat_counts[faction.value] += 1
+                tally = model_faction_tally.setdefault(
+                    (build_id, faction.value), {"games": 0, "wins": 0}
+                )
+                tally["games"] += 1
+                if winner is not None and winner != _DRAW_KEY and winner == faction.value:
+                    tally["wins"] += 1
 
     faction_win_rates = [
         FactionWinRate(
@@ -378,6 +421,29 @@ async def evaluate_gauntlet(
             )
         )
 
+    faction_seat_counts = [
+        ModelSeatCounts(
+            agent_build_id=bid,
+            town_seats=counts["TOWN"],
+            mafia_seats=counts["MAFIA"],
+            total_seats=counts["TOWN"] + counts["MAFIA"],
+        )
+        for bid, counts in model_seat_counts.items()
+    ]
+    faction_seat_counts.sort(key=lambda m: str(m.agent_build_id))
+
+    model_faction_breakdown = [
+        ModelFactionWinRate(
+            agent_build_id=bid,
+            faction=faction_value,
+            seats=tally["games"],
+            wins=tally["wins"],
+            win_rate=_ci_band(wilson_score_interval(tally["wins"], tally["games"])),
+        )
+        for (bid, faction_value), tally in model_faction_tally.items()
+    ]
+    model_faction_breakdown.sort(key=lambda m: (str(m.agent_build_id), m.faction))
+
     real_action_count = await _real_action_event_count(session, completed_ids)
     average_actions_per_seat = real_action_count / total_seat_rows if total_seat_rows > 0 else 0.0
     average_days = (days_sum / days_sample_size) if days_sample_size > 0 else 0.0
@@ -395,6 +461,8 @@ async def evaluate_gauntlet(
         faction_win_counts=dict(faction_wins),
         faction_win_rates=faction_win_rates,
         role_family_breakdown=role_family_breakdown,
+        faction_seat_counts=faction_seat_counts,
+        model_faction_breakdown=model_faction_breakdown,
         average_days_to_terminal=average_days,
         average_actions_per_seat=average_actions_per_seat,
         rating_deltas=rating_deltas,
@@ -429,6 +497,8 @@ __all__ = [
     "CIBand",
     "FactionWinRate",
     "GauntletReport",
+    "ModelFactionWinRate",
+    "ModelSeatCounts",
     "RatingDelta",
     "RoleFamilyBreakdown",
     "evaluate_gauntlet",
