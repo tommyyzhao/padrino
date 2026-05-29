@@ -38,9 +38,27 @@ FORBIDDEN_PADRINO_PREFIXES: tuple[str, ...] = (
     "padrino.runner",
 )
 
+# Deliberate, narrow exceptions (see module docstring). Keyed by core-relative
+# POSIX path -> the otherwise-forbidden top-level modules that module may import.
+# ``core/scheduling`` (US-085) needs ``datetime`` for pure cron *arithmetic*:
+# the reference moment is injected, never read from the wall clock. The
+# ``test_allowed_datetime_modules_make_no_wallclock_calls`` test below enforces
+# that this exception cannot smuggle in an actual wall-clock read.
+ALLOWED_FORBIDDEN_IMPORTS: dict[str, frozenset[str]] = {
+    "scheduling/__init__.py": frozenset({"datetime"}),
+}
+
+# Attribute names that read the wall clock — banned even in allowlisted modules.
+WALLCLOCK_ATTRS: frozenset[str] = frozenset({"now", "utcnow", "today"})
+
 
 def _iter_core_modules() -> list[Path]:
     return sorted(CORE_ROOT.rglob("*.py"))
+
+
+def _allowed_for(path: Path) -> frozenset[str]:
+    rel = path.relative_to(CORE_ROOT).as_posix()
+    return ALLOWED_FORBIDDEN_IMPORTS.get(rel, frozenset())
 
 
 def _top_level(name: str) -> str:
@@ -62,19 +80,45 @@ def _is_forbidden(module_name: str) -> bool:
     ids=lambda p: str(p.relative_to(CORE_ROOT.parents[2])),
 )
 def test_core_module_has_no_forbidden_imports(path: Path) -> None:
+    allowed = _allowed_for(path)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     offenders: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if _is_forbidden(alias.name):
+                if _is_forbidden(alias.name) and _top_level(alias.name) not in allowed:
                     offenders.append((node.lineno, alias.name))
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if node.level == 0 and module and _is_forbidden(module):
+            if node.level == 0 and module and _is_forbidden(module) and module not in allowed:
                 offenders.append((node.lineno, module))
     assert not offenders, (
         f"{path.relative_to(CORE_ROOT.parents[2])} imports forbidden modules: {offenders}"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [CORE_ROOT / rel for rel in ALLOWED_FORBIDDEN_IMPORTS],
+    ids=list(ALLOWED_FORBIDDEN_IMPORTS),
+)
+def test_allowed_datetime_modules_make_no_wallclock_calls(path: Path) -> None:
+    """A module allowed to import ``datetime`` must still never read the clock.
+
+    Catches ``datetime.now(...)`` / ``.utcnow()`` / ``.today()`` so the narrow
+    import exception cannot become a wall-clock backdoor into pure-core.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    offenders: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in WALLCLOCK_ATTRS
+        ):
+            offenders.append((node.lineno, node.func.attr))
+    assert not offenders, (
+        f"{path.relative_to(CORE_ROOT.parents[2])} makes wall-clock calls: {offenders}"
     )
 
 

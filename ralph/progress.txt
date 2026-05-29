@@ -545,3 +545,52 @@ REAL RUN (2026-05-28, verified locally, $20 cap, 90s per-call timeout):
   more games, not a code change.
 - Permutation lives in pure-core; the per-game seat->build/seat->AgentBuild
   mapping is applied at RUN time (DB roster slots stay the canonical order).
+
+---
+
+## 2026-05-28 — US-085 (Scheduled recurring heterogeneous gauntlet)
+
+Padrino's first real scheduler job: cron-driven recurring tournaments.
+
+- Migration `0014_scheduled_gauntlets.py` + `ScheduledGauntlet` model
+  (name unique, schedule_cron, roster_spec_json, n_games, cost_cap_usd,
+  enabled, last_run_at, last_run_gauntlet_id, next_run_at).
+- `src/padrino/db/repositories/scheduled_gauntlets.py` — CRUD + list_due
+  (enabled AND next_run_at NULL/past, Python-side tz-aware filtering).
+- `src/padrino/core/scheduling/` — HAND-ROLLED pure-core 5-field cron:
+  `next_run_at(cron_expr, *, after)` (deterministic, no wallclock; after
+  injected) + `humanize_cron`. croniter is NOT a dep; the parser supports
+  */n, a-b, a-b/n, lists, and the DOM-or-DOW rule. 10 unit tests
+  (every-Nth-minute/hour, month boundary, leap day, UTC-DST stability,
+  OR semantics, invalid specs, humanize).
+- `src/padrino/scheduler/{gauntlet_job,bootstrap}.py` — the job fires due
+  rows via run_tournament_from_roster, finalizes (or stamps 'cost_capped' on
+  overrun), recomputes next_run_at. `run_scheduler` gained a `tick_hook` seam;
+  bootstrap wires the job in.
+- Admin POST/PATCH/DELETE + scrubbed public GET (`schedule_cron_human`, no
+  raw cron, no cost cap). DELETE = soft-disable (row kept for audit).
+- Docs: docs/deployment/scheduled-gauntlets.md.
+
+Firewall note: `core/scheduling` needs `datetime` for pure cron arithmetic
+(after is injected, never read from the clock). Per `test_purity.py`'s own
+"update this test deliberately" guidance, added a NARROW allowlist
+(scheduling -> {datetime}) AND a new `test_allowed_datetime_modules_make_no_
+wallclock_calls` that AST-bans `.now()/.utcnow()/.today()` — net-strengthening
+the firewall rather than loosening it.
+
+REAL RUN (2026-05-28, verified): seeded the z.ai-free roster + a one-shot
+schedule (cron `* * * * *`, n_games=1, $1 cap), advanced the injected clock by
+60 s -> job fired a real gauntlet, status=COMPLETED, 1 completed game,
+cost $0.09 (<$1). last_run_at + last_run_gauntlet_id updated, next_run_at
+recomputed.
+
+### Learnings for future iterations
+
+- `finalize_gauntlet_if_done` commits internally — do NOT wrap it in
+  `session.begin()` (double-commit). Cost-capped path sets status manually
+  inside its own begin() block.
+- The cron helper's UTC-only contract is deliberate: the scheduler clock is
+  UTC, so civil-DST cron semantics are out of scope (documented). A future
+  per-timezone schedule would need UTC<->local normalization.
+
+--- WAVE 4 COMPLETE: all of US-079..US-085 now pass. ---

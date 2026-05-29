@@ -28,6 +28,7 @@ EXPECTED_TABLES = {
     "llm_calls",
     "ratings",
     "rating_events",
+    "scheduled_gauntlets",
 }
 
 

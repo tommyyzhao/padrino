@@ -67,6 +67,10 @@ AdapterFactory = Callable[[], LlmAdapter]
 GameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter, bool], Awaitable[None]]
 Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
+# Called once per scheduler tick with the current clock time. The US-085
+# scheduled-gauntlet job is wired in here via
+# ``padrino.scheduler.bootstrap.build_scheduled_gauntlet_tick_hook``.
+TickHook = Callable[[datetime], Awaitable[None]]
 
 
 async def _default_game_executor(
@@ -311,6 +315,7 @@ async def run_scheduler(
     clock: Clock | None = None,
     sleeper: Sleeper | None = None,
     worker_id: str | None = None,
+    tick_hook: TickHook | None = None,
 ) -> None:
     """Drain pending gauntlets until ``stop_event`` is set.
 
@@ -353,6 +358,8 @@ async def run_scheduler(
             worker_id=wid,
             beat_at=tick_clock(),
         )
+        if tick_hook is not None:
+            await tick_hook(tick_clock())
         gauntlet_id = await _claim_next_pending(session_factory, clock=tick_clock)
         if gauntlet_id is None:
             with contextlib.suppress(TimeoutError):
@@ -379,6 +386,7 @@ __all__ = [
     "GameExecutor",
     "SchedulerOptions",
     "Sleeper",
+    "TickHook",
     "default_worker_id",
     "run_scheduler",
 ]

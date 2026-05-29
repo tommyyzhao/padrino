@@ -334,6 +334,29 @@ class RatingEvent(Base):
     )
 
 
+class ScheduledGauntlet(Base):
+    """A cron-scheduled recurring heterogeneous tournament (US-085)."""
+
+    __tablename__ = "scheduled_gauntlets"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    schedule_cron: Mapped[str] = mapped_column(String, nullable=False)
+    # Serialized US-084 roster spec: {"league_id": <uuid>, "roster": {"P01": <uuid>, ...}}.
+    roster_spec_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    n_games: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    cost_cap_usd: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_gauntlet_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("gauntlets.id"), nullable=True
+    )
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 __all__ = [
     "AgentBuild",
     "ApiKey",
@@ -351,5 +374,6 @@ __all__ = [
     "RateLimitBucket",
     "Rating",
     "RatingEvent",
+    "ScheduledGauntlet",
     "SchedulerHeartbeat",
 ]

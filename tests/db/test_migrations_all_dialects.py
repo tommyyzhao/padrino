@@ -41,6 +41,7 @@ EXPECTED_TABLES = {
     "scheduler_heartbeats",
     "ingested_games",
     "rate_limit_buckets",
+    "scheduled_gauntlets",
 }
 
 
