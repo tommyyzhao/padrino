@@ -310,7 +310,13 @@ async def db_engine(pytestconfig: pytest.Config) -> AsyncIterator[AsyncEngine]:
         finally:
             sync_eng.dispose()
 
-        # Run migrations once via Alembic
+        # Run migrations once via Alembic. ``command.upgrade`` is synchronous
+        # and Alembic's env.py drives the async engine with ``asyncio.run``,
+        # which cannot be nested inside this already-running event loop (this
+        # fixture is ``async def``). Run it on a worker thread so it gets its
+        # own loop.
+        import asyncio
+
         previous = os.environ.get("PADRINO_DB_URL")
         os.environ["PADRINO_DB_URL"] = pg_url
         try:
@@ -320,14 +326,22 @@ async def db_engine(pytestconfig: pytest.Config) -> AsyncIterator[AsyncEngine]:
             cfg = AlembicConfig()
             cfg.set_main_option("script_location", str(migrations_pkg))
             cfg.set_main_option("sqlalchemy.url", pg_url)
-            command.upgrade(cfg, "head")
+            await asyncio.to_thread(command.upgrade, cfg, "head")
         finally:
             if previous is None:
                 os.environ.pop("PADRINO_DB_URL", None)
             else:
                 os.environ["PADRINO_DB_URL"] = previous
 
-        eng = create_engine(pg_url, pool_size=5, max_overflow=10)
+        # NullPool: this engine is session-scoped but pytest-asyncio runs each
+        # test on a fresh function-scoped event loop. A pooled asyncpg
+        # connection is bound to the loop that created it, so reusing it from a
+        # later test's loop raises "Future attached to a different loop".
+        # NullPool opens a fresh connection per checkout on the current loop.
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        eng = create_async_engine(pg_url, future=True, poolclass=NullPool)
         try:
             yield eng
         finally:
@@ -352,11 +366,10 @@ async def engine(db_engine: AsyncEngine, use_postgres: bool) -> AsyncIterator[As
         if not use_postgres:
             await conn.execute(sa.text("PRAGMA foreign_keys = OFF;"))
 
+        # Tables are deleted children-first (reversed dependency order) so no
+        # cascade is needed on either dialect.
         for table in reversed(Base.metadata.sorted_tables):
-            if use_postgres:
-                await conn.execute(sa.text(f'DELETE FROM "{table.name}" CASCADE;'))
-            else:
-                await conn.execute(sa.text(f'DELETE FROM "{table.name}";'))
+            await conn.execute(sa.text(f'DELETE FROM "{table.name}";'))
         await conn.commit()
 
         if not use_postgres:
