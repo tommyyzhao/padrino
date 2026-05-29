@@ -198,7 +198,7 @@ async def _insert_ingested(
     bundle: dict[str, Any],
     submitter_key_id: uuid.UUID | None = None,
     signer_fingerprint: str | None = None,
-    verification_status: str = "unverified",
+    verification_status: str = "verified",
 ) -> None:
     async with session_factory() as session, session.begin():
         await ingested_games_repo.create(
@@ -631,3 +631,65 @@ async def test_cache_tag_invalidates_on_new_submission(
     ).json()
 
     assert first["cache_tag"] != second["cache_tag"]
+
+
+async def test_leaderboard_filters_unverified_games(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    raw, _ = await _seed_key(session_factory, scopes=[SCOPE_SPECTATOR], label="lurker")
+    # Insert one verified game and one unverified game
+    await _insert_ingested(
+        session_factory,
+        bundle=_make_bundle(game_id="g-verified", winner="TOWN"),
+        verification_status="verified",
+    )
+    await _insert_ingested(
+        session_factory,
+        bundle=_make_bundle(game_id="g-unverified", winner="TOWN"),
+        verification_status="unverified",
+    )
+
+    response = await client.get(
+        "/public/leaderboard",
+        params={"ruleset_id": _RULESET},
+        headers=_auth(raw),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Verified town win: modelA games count should be 5 (from g-verified town seats), NOT 10.
+    entries = {entry["display_name"]: entry for entry in body["entries"]}
+    assert entries["modelA"]["games"] == 5
+    assert entries["modelB"]["games"] == 2
+
+
+async def test_anonymous_rate_limiting(
+    anonymous_client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Set the anonymous limit to 2 so the test stays fast.
+    monkeypatch.setattr(
+        get_settings(),
+        "padrino_rate_limit_anonymous_per_minute",
+        2,
+    )
+    # Clear the settings cache
+    get_settings.cache_clear()
+
+    # First two requests pass.
+    for _ in range(2):
+        response = await anonymous_client.get(
+            "/public/leaderboard",
+            params={"ruleset_id": _RULESET},
+        )
+        assert response.status_code == 200, response.text
+
+    # Third request is rate limited with 429.
+    response = await anonymous_client.get(
+        "/public/leaderboard",
+        params={"ruleset_id": _RULESET},
+    )
+    assert response.status_code == 429
+    assert response.json()["detail"] == "rate_limited"
+    assert "Retry-After" in response.headers

@@ -22,6 +22,7 @@ spectator scope (or admin) is required.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from typing import Annotated, Any
 
@@ -34,6 +35,7 @@ from padrino.api.auth import (
     SCOPE_ADMIN,
     SCOPE_SPECTATOR,
     ApiKeyContext,
+    _get_rate_limiter,
     get_auth_context,
 )
 from padrino.api.deps import get_session
@@ -84,7 +86,30 @@ async def require_public_read(
 ) -> ApiKeyContext:
     """Allow anonymous reads when the public flag is on; otherwise spectator+."""
     cfg: Any = getattr(request.app.state, "auth_settings", None) or get_settings()
-    if bool(cfg.padrino_public_leaderboard_anonymous):
+    has_auth = (
+        request.headers.get("Authorization") is not None
+        or request.headers.get("X-Padrino-Admin-Token") is not None
+    )
+
+    if bool(cfg.padrino_public_leaderboard_anonymous) and not has_auth:
+        limiter = _get_rate_limiter(request)
+        xff = request.headers.get("X-Forwarded-For")
+        ip = (
+            xff.split(",")[0].strip()
+            if xff
+            else (request.client.host if request.client else "unknown")
+        )
+        ip_hash = hashlib.sha256(f"ip:{ip}".encode()).hexdigest()
+        ceiling = cfg.padrino_rate_limit_anonymous_per_minute
+
+        allowed, retry_after = await limiter.hit(ip_hash, limit_per_minute=ceiling)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="rate_limited",
+                headers={"Retry-After": str(max(1, round(retry_after)))},
+            )
+
         return ApiKeyContext(
             id=None,
             scopes=frozenset({SCOPE_SPECTATOR}),

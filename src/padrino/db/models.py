@@ -316,6 +316,16 @@ class RateLimitBucket(Base):
 
 class RatingEvent(Base):
     __tablename__ = "rating_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "game_id",
+            "agent_build_id",
+            "scope_type",
+            "scope_value",
+            "public_player_id",
+            name="uq_rating_event_scope",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
@@ -323,6 +333,7 @@ class RatingEvent(Base):
     agent_build_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("agent_builds.id"), nullable=False
     )
+    public_player_id: Mapped[str | None] = mapped_column(String, nullable=True)
     scope_type: Mapped[str] = mapped_column(String, nullable=False)
     scope_value: Mapped[str] = mapped_column(String, nullable=False)
     before_mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)

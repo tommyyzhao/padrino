@@ -286,6 +286,14 @@ async def _persist_terminated_event(
         "day_terminated": day_terminated,
     }
     async with persistence.session_factory() as session, session.begin():
+        game = await games_repo.get(session, persistence.game_id)
+        if game is not None and game.status == STATUS_COMPLETED:
+            _logger.info(
+                "Game already terminated and completed; skipping rating application and status updates.",
+                game_id=str(persistence.game_id),
+            )
+            return
+
         await _append_event_row(session, persistence, stored)
         await games_repo.update_status(
             session,

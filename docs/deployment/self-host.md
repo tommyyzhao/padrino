@@ -218,3 +218,73 @@ assert isinstance(payload['entries'], list)
 print('demo gauntlet leaderboard entries:', len(payload['entries']))
 "
 ```
+
+## TLS & HSTS Reverse Proxy Setup
+
+Padrino's API container speaks plain HTTP on `0.0.0.0:8000` (within its container or host loopback). For production deployments, you MUST terminate TLS at the edge using a reverse proxy (e.g., Caddy or Nginx) and enforce HTTP Strict Transport Security (HSTS) headers to protect credentials and payloads.
+
+### Option A — Caddy (Recommended)
+
+Caddy automatically provisions and renews Let's Encrypt certificates, sets secure TLS configurations, and simplifies reverse proxying.
+
+Create a `Caddyfile` on your host:
+
+```caddy
+padrino.example.com {
+    reverse_proxy localhost:8000
+
+    header {
+        # Enforce HTTPS with a 1-year HSTS max-age, including subdomains and preloading
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Protect against clickjacking
+        X-Frame-Options "DENY"
+        # Disable MIME sniffing
+        X-Content-Type-Options "nosniff"
+        # Control referrer information leak
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}
+```
+
+### Option B — Nginx
+
+If you prefer Nginx, configure your site block:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name padrino.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name padrino.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/padrino.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/padrino.example.com/privkey.pem;
+
+    # Secure TLS settings (Mozilla intermediate profile)
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA256:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA256;
+    ssl_prefer_server_ciphers off;
+
+    location / {
+        proxy_pass http://localhost:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Enforce HSTS
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        # Frame protection
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    }
+}
+```
+

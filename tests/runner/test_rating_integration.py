@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from padrino.core.engine.event_log import StoredEvent
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
@@ -46,7 +47,12 @@ from padrino.db.repositories import (
 )
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA
-from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
+from padrino.runner.game_runner import (
+    GameConfig,
+    GamePersistence,
+    _persist_terminated_event,
+    run_game,
+)
 from tests.conftest import make_town_win_script
 
 _GAME_SEED = "seed-rating-001"
@@ -261,3 +267,68 @@ async def test_persistence_without_league_id_skips_rating_updates(
     async with session_factory() as session:
         ratings = (await session.execute(select(Rating))).scalars().all()
     assert ratings == []
+
+
+async def test_rating_idempotency(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    league_id, game_id, abs_by_seat = await _seed_ranked_setup(
+        session_factory, ranked=True, hash_prefix="us039-idempotency"
+    )
+
+    persistence = GamePersistence(
+        session_factory=session_factory,
+        game_id=game_id,
+        agent_builds=abs_by_seat,
+        league_id=league_id,
+    )
+    outcome = await run_game(
+        GameConfig(game_id="G-RATING-IDEM", game_seed=_GAME_SEED, timeout_s=1.0),
+        DeterministicMockAdapter(script),
+        ranked=True,
+        persistence=persistence,
+    )
+    assert outcome.final_state.terminal_result == "TOWN"
+
+    # Verify initial 14 rating events exist
+    async with session_factory() as session:
+        events = (
+            (await session.execute(select(RatingEvent).where(RatingEvent.game_id == game_id)))
+            .scalars()
+            .all()
+        )
+    assert len(events) == 14
+
+    # Trigger termination again on the completed game.
+    # It must bypass rating updates due to game.status == 'COMPLETED' and not raise an IntegrityError.
+    stored = StoredEvent(
+        sequence=100,
+        event_hash="fake-hash",
+        prev_event_hash="prev-fake-hash",
+        body={
+            "event_type": "GameTerminated",
+            "phase": "TERMINAL",
+            "visibility": "PUBLIC",
+            "payload": {"winner": "TOWN", "reason": "test"},
+        },
+    )
+    await _persist_terminated_event(
+        persistence,
+        stored,
+        outcome.final_state,
+        ranked=True,
+        day_terminated=5,
+    )
+
+    # Assert that NO new rating events were written (still 14)
+    async with session_factory() as session:
+        events_after = (
+            (await session.execute(select(RatingEvent).where(RatingEvent.game_id == game_id)))
+            .scalars()
+            .all()
+        )
+    assert len(events_after) == 14

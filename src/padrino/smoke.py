@@ -50,7 +50,7 @@ from padrino.bootstrap import (
 )
 from padrino.core.rulesets import mini7_v1
 from padrino.db.base import create_engine, create_session_factory
-from padrino.export.bundle import export_game
+from padrino.export.bundle import Ed25519Signer, export_game
 from padrino.runner.scheduler import run_scheduler
 
 _LOG = structlog.get_logger(__name__)
@@ -190,6 +190,8 @@ class _SmokeContext:
     gauntlet_id: str | None = None
     ingested_game_id: str | None = None
     stderr_tail: list[str] = field(default_factory=list)
+    signer: Any = None
+    submitter_raw_key: str | None = None
 
     def add(self, name: str, status: str, **detail: Any) -> None:
         self.steps.append(SmokeStepReport(name=name, status=status, detail=detail))
@@ -250,6 +252,7 @@ def _admin_headers(admin_raw_key: str | None) -> dict[str, str]:
 async def _seed_admin_entities(
     client: AsyncClient,
     *,
+    ctx: _SmokeContext,
     headers: dict[str, str],
 ) -> tuple[str, str, list[str]]:
     """Create provider + model_config + prompt + 7-slot roster.
@@ -335,6 +338,27 @@ async def _seed_admin_entities(
         raise SmokeError(STEP_SEED_ADMIN, f"create league failed: {lg.status_code} {lg.text}")
     league_id = lg.json()["id"]
 
+    # Generate Ed25519 signer and register a submitter key for the smoke test
+    signer = Ed25519Signer.generate()
+    pubkey_b64 = signer.public_key_b64()
+    ab_resp = await client.post(
+        "/admin/keys",
+        json={
+            "label": "smoke-submitter",
+            "scopes": ["submitter"],
+            "submission_public_key": pubkey_b64,
+        },
+        headers=headers,
+    )
+    if ab_resp.status_code != 201:
+        raise SmokeError(
+            STEP_SEED_ADMIN,
+            f"create submitter key failed: {ab_resp.status_code} {ab_resp.text}",
+        )
+    submitter_raw_key = ab_resp.json()["raw_key"]
+    ctx.signer = signer
+    ctx.submitter_raw_key = submitter_raw_key
+
     return league_id, prompt_version_id, roster
 
 
@@ -391,6 +415,7 @@ async def _poll_until_completed(
 async def _export_and_ingest_one_game(
     client: AsyncClient,
     *,
+    ctx: _SmokeContext,
     headers: dict[str, str],
     session_factory: async_sessionmaker[AsyncSession],
     gauntlet_body: dict[str, Any],
@@ -408,12 +433,15 @@ async def _export_and_ingest_one_game(
         )
 
     async with session_factory() as session:
-        bundle = await export_game(session, uuid.UUID(completed_id))
+        bundle = await export_game(session, uuid.UUID(completed_id), signer=ctx.signer)
     raw = bundle.model_dump_json()
+    ingest_headers = (
+        {"Authorization": f"Bearer {ctx.submitter_raw_key}"} if ctx.submitter_raw_key else headers
+    )
     resp = await client.post(
         "/ingest/game",
         content=raw,
-        headers={"Content-Type": "application/json", **headers},
+        headers={"Content-Type": "application/json", **ingest_headers},
     )
     if resp.status_code not in (200, 201):
         raise SmokeError(
@@ -548,7 +576,9 @@ async def _execute_smoke_flow(
     )
     ctx.add(STEP_HEALTHZ_SCHEDULER, "ok", scheduler_status=scheduler_body.get("status"))
 
-    league_id, prompt_version_id, roster = await _seed_admin_entities(client, headers=headers)
+    league_id, prompt_version_id, roster = await _seed_admin_entities(
+        client, ctx=ctx, headers=headers
+    )
     ctx.league_id = league_id
     ctx.add(STEP_SEED_ADMIN, "ok", league_id=league_id, roster_size=len(roster))
 
@@ -580,6 +610,7 @@ async def _execute_smoke_flow(
 
     ingested_id = await _export_and_ingest_one_game(
         client,
+        ctx=ctx,
         headers=headers,
         session_factory=session_factory,
         gauntlet_body=gauntlet_body,

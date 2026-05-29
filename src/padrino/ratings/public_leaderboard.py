@@ -167,7 +167,8 @@ async def compute_public_leaderboard(
     aggregate.
     """
     tag_stmt = select(func.max(IngestedGame.created_at)).where(
-        IngestedGame.ruleset_id == ruleset_id
+        IngestedGame.ruleset_id == ruleset_id,
+        IngestedGame.verification_status == "verified",
     )
     if gauntlet_id is not None:
         tag_stmt = tag_stmt.where(IngestedGame.gauntlet_id == gauntlet_id)
@@ -178,7 +179,10 @@ async def compute_public_leaderboard(
     if cached is not None:
         return cached
 
-    rows_stmt = select(IngestedGame).where(IngestedGame.ruleset_id == ruleset_id)
+    rows_stmt = select(IngestedGame).where(
+        IngestedGame.ruleset_id == ruleset_id,
+        IngestedGame.verification_status == "verified",
+    )
     if gauntlet_id is not None:
         rows_stmt = rows_stmt.where(IngestedGame.gauntlet_id == gauntlet_id)
     rows_stmt = rows_stmt.order_by(IngestedGame.created_at, IngestedGame.id)

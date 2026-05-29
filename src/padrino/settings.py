@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     # one submission carries up to 10 MB of replayed event history.
     padrino_rate_limit_submitter_per_minute: int = 30
     padrino_rate_limit_spectator_per_minute: int = 1200
+    padrino_rate_limit_anonymous_per_minute: int = 60
 
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any
     # scraper that can reach the process; flipping the flag requires the same

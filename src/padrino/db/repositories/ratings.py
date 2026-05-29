@@ -89,6 +89,7 @@ async def record_rating_event(
     before_sigma: float,
     after_mu: float,
     after_sigma: float,
+    public_player_id: str | None = None,
 ) -> RatingEvent:
     """Append a rating-event audit row for the given (league, game, build, scope)."""
     obj = RatingEvent(
@@ -101,6 +102,7 @@ async def record_rating_event(
         before_sigma=before_sigma,
         after_mu=after_mu,
         after_sigma=after_sigma,
+        public_player_id=public_player_id,
     )
     session.add(obj)
     await session.flush()

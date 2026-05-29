@@ -594,3 +594,31 @@ recomputed.
   per-timezone schedule would need UTC<->local normalization.
 
 --- WAVE 4 COMPLETE: all of US-079..US-085 now pass. ---
+
+---
+
+## 2026-05-29 — Wave 5 (Safe Public Surface & Rating Idempotency) COMPLETE
+
+Antigravity successfully completed the remaining Wave 5 gaps to ensure Padrino is fully secure for anonymous public spectating and Elo trusts.
+
+Landed changes:
+- `src/padrino/db/migrations/versions/0015_rating_idempotency.py` — Database unique constraint on `uq_rating_event_scope` for `(game_id, agent_build_id, scope_type, scope_value, public_player_id)`. Including `public_player_id` ensures clone gauntlet compatibility.
+- `src/padrino/db/models.py` — Declared constraint on `RatingEvent` model.
+- `src/padrino/runner/game_runner.py` — Extended `_persist_terminated_event` with a check-completed bypass to safely skip duplicate rating applications.
+- `src/padrino/ratings/public_leaderboard.py` — Restricted public leaderboard calculations strictly to `IngestedGame.verification_status == 'verified'`.
+- `src/padrino/settings.py` — Configured anonymous public route rate-limit setting `padrino_rate_limit_anonymous_per_minute` (default 60).
+- `src/padrino/api/routes/public.py` — Implemented secure client IP extraction (supporting reverse proxy chains via `X-Forwarded-For`) with IP hashing to enforce anonymous rate limits.
+- `src/padrino/smoke.py` — Hardened the localhost end-to-end smoke harness to generate an Ed25519 signer key pair, register the public key securely via `POST /admin/keys`, and sign the exported bundle before ingestion. This exercises the production-grade signature verification flow and produces verified games.
+- `docs/deployment/self-host.md` — Documented owner-only secret file scheme (`file:`) permission requirements and full Caddy & Nginx production reverse proxy TLS and HSTS deployment setups.
+
+All quality gates passed cleanly:
+- `uv run ruff check .` — PASS
+- `uv run ruff format --check .` — PASS (246 files)
+- `uv run mypy src tests` — PASS (Strict, 225 files)
+- `uv run pytest -m "not integration"` — PASS (1295 passed, 19 skipped, 9 deselected)
+- `uv run pytest tests/cli/test_smoke_localhost.py` — PASS (4 passed, 1 skipped)
+
+### Learnings for future iterations
+- In clone gauntlets, identical agent builds occupy multiple seats in a single game. A database unique constraint on game ratings must include `public_player_id` (seat identifier) to allow independent seat-based ratings within the same game.
+- Enforcing verified-only games on the public leaderboard requires that even testing rigs (like the local smoke harness) generate valid cryptographic signatures and register their public keys to perform authentic, verified ingestions.
+

@@ -108,7 +108,7 @@ async def _apply_scope_update(
     )
 
     events: list[RatingEvent] = []
-    for row, new in zip(town_rows, new_town_team, strict=True):
+    for row, (sid, _ab_id), new in zip(town_rows, town_seats, new_town_team, strict=True):
         events.append(
             await _persist_one(
                 session,
@@ -119,9 +119,10 @@ async def _apply_scope_update(
                 game_id=game_id,
                 scope_type=scope_type,
                 scope_value=town_scope_value,
+                public_player_id=sid,
             )
         )
-    for row, new in zip(mafia_rows, new_mafia_team, strict=True):
+    for row, (sid, _ab_id), new in zip(mafia_rows, mafia_seats, new_mafia_team, strict=True):
         events.append(
             await _persist_one(
                 session,
@@ -132,6 +133,7 @@ async def _apply_scope_update(
                 game_id=game_id,
                 scope_type=scope_type,
                 scope_value=mafia_scope_value,
+                public_player_id=sid,
             )
         )
     return events
@@ -147,6 +149,7 @@ async def _persist_one(
     game_id: uuid.UUID,
     scope_type: str,
     scope_value: str,
+    public_player_id: str | None = None,
 ) -> RatingEvent:
     """Update a single rating row + append the matching audit event."""
     from padrino.db.models import Rating
@@ -176,6 +179,7 @@ async def _persist_one(
         before_sigma=before_sigma,
         after_mu=new_mu,
         after_sigma=new_sigma,
+        public_player_id=public_player_id,
     )
 
 
