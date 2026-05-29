@@ -128,6 +128,13 @@ PROVIDER_CASES: tuple[ProviderCase, ...] = (
     ProviderCase("cerebras", "cerebras/zai-glm-4.7"),
     ProviderCase("deepinfra", "deepinfra/deepseek-ai/DeepSeek-V4-Flash"),
     ProviderCase(
+        "deepinfra-gemma",
+        "deepinfra/google/gemma-4-26B-A4B-it",
+        provider="deepinfra",
+        cassette_dir="deepinfra",
+        canonical_cassette="gemma_canonical_response",
+    ),
+    ProviderCase(
         "zai",
         "openai/glm-5.1",
         auth_secret_ref="env:ZAI_API_KEY",

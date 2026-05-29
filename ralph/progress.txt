@@ -379,3 +379,68 @@ Codex left US-081 (DeepInfra Gemma) groundwork uncommitted:
 
 The next iteration picking US-081 should fold these in rather than
 re-recording the cassette.
+
+---
+
+## 2026-05-28 — US-081 (DeepInfra Gemma-4-26B-A4B-it) + Wave-4 operator handoff
+
+Folded the uncommitted Codex groundwork for US-081 into one focused
+commit. No re-recording — the real cassette
+(`tests/llm/cassettes/deepinfra/gemma_canonical_response.yaml`,
+~$0.50 of DeepInfra spend) was reused as-is.
+
+Landed:
+- `tests/cli/test_bootstrap.py` — Gemma seed test exercising the
+  providers.yaml inline-models seam (two ModelConfigs under one
+  DeepInfra provider). Asserts `litellm_model_id` and inference
+  defaults (temp 0.7, top_p 1.0, max 4096).
+- `tests/llm/test_litellm_contract.py` — `deepinfra-gemma` ProviderCase
+  reusing the existing `cassette_dir`/`canonical_cassette` ProviderCase
+  fields (no rename of the DeepSeek cassette needed).
+- `scripts/probe_deepinfra_gemma.py` — quirks probe.
+- `docs/deployment/byo-model.md` — Gemma section + identifiers-table row.
+
+Quirk finding: Gemma wrapped its JSON in a normal markdown ```json
+fence, already handled by `_strip_code_fence`. The known
+`<start_of_turn>`/`<end_of_turn>` chat-template bleed did NOT appear in
+the recorded cassette, so no adapter normalizer change was needed.
+
+NOT done (and why): no new audit-script "Gemma decoy" was added. Gemma
+is a model on the EXISTING DeepInfra provider — it reuses
+`DEEPINFRA_API_KEY`, already covered by `_DEEPINFRA_DECOY`. A
+Gemma-specific decoy would have no distinct key format and would be
+dead weight. (Xiaomi got its own decoy in US-082 because it introduced
+a genuinely new `tp-...` token-plan credential.)
+
+All 6 gates green: ruff check, ruff format --check, mypy (201 files),
+pytest -m "not integration" (1218 passed), core coverage 99%
+(>=85), audit script exit 0. Full live_llm cassette suite: 15 passed,
+3 synthetic skips. Gemma canonical + malformed contract tests pass.
+
+### Wave-4 operator decision: z.ai removed from the live roster
+
+Per maintainer instruction (2026-05-28), z.ai is being dropped as a
+live provider in favor of Xiaomi Mimo-v2.5 / Mimo-v2.5-pro (free
+Xiaomi credits). Scope was deliberately bounded to MINIMAL change:
+- US-079 and US-080 source/tests/cassettes are LEFT INTACT
+  (`passes: true` unchanged). No revert, no history rewrite. The paid
+  z.ai cassettes stay in git history.
+- The same-model multi-host fallback MECHANISM stays in code; the new
+  gauntlet roster simply won't configure a z.ai pair, so Cerebras
+  GLM-4.7 runs solo there (Xiaomi serves Mimo, a different model, so it
+  cannot be a drop-in same-model fallback host for GLM-4.7).
+- The swap is purely a US-083 roster concern. OPEN ITEM for US-083: the
+  original 7-seat roster had z.ai GLM-5.1 at P02; Xiaomi's two models
+  already occupy P05/P06, so dropping z.ai frees a seat that needs a
+  distinct model (likely another DeepInfra model or a deliberate clone)
+  — to be settled with the maintainer before the real-money run.
+
+### Learnings for future iterations
+
+- A "new model on an existing provider" story (US-081) does NOT need a
+  new secret decoy or a new ModelProvider row — only a ModelConfig.
+  Don't cargo-cult the full new-provider checklist from US-082/US-080.
+- `ProviderCase` already supports `cassette_dir` + `canonical_cassette`,
+  so multiple models can share one provider cassette directory without
+  renaming the original `canonical_response.yaml`. Future same-provider
+  models should follow this pattern.

@@ -108,6 +108,7 @@ LiteLLM dispatch id on `ModelConfig.litellm_model_id`:
 | Cerebras     | `cerebras/zai-glm-4.7`                            |
 | Z.AI         | `openai/glm-5.1` with `base_url=https://api.z.ai/api/coding/paas/v4` |
 | DeepInfra    | `deepinfra/deepseek-ai/DeepSeek-V4-Flash`         |
+| DeepInfra    | `deepinfra/google/gemma-4-26B-A4B-it`             |
 | Xiaomi       | `openai/mimo-v2.5` with `base_url=https://token-plan-sgp.xiaomimimo.com/v1` |
 | Groq         | `groq/llama-3.1-70b-versatile`                    |
 | Mistral      | `mistral/mistral-large-latest`                    |
@@ -242,6 +243,42 @@ canonical probe. No Chinese preamble, `</think>`, `<start_of_turn>`, or
 `<end_of_turn>` normalizer was needed. The raw response envelope does
 include a provider `reasoning_content` field, but the adapter parses only
 `choices[0].message.content`.
+
+## DeepInfra Gemma-4-26B-A4B-it (US-081)
+
+`google/gemma-4-26B-A4B-it` is a Google-architecture model hosted on the
+**existing** DeepInfra provider — it reuses the same `DEEPINFRA_API_KEY`
+credential and `base_url` as DeepSeek-V4-Flash, so no new provider row is
+needed. It is simply an additional `ModelConfig` under the DeepInfra
+provider, giving the leaderboard a Gemma lineage alongside the DeepSeek
+and GLM lineages:
+
+```yaml
+providers:
+  - name: deepinfra
+    auth_secret_ref: env:DEEPINFRA_API_KEY
+    base_url: https://api.deepinfra.com/v1/openai
+    models:
+      - model_name: deepseek-ai/DeepSeek-V4-Flash
+        litellm_model_id: deepinfra/deepseek-ai/DeepSeek-V4-Flash
+      - model_name: gemma-4-26B-A4B-it
+        litellm_model_id: deepinfra/google/gemma-4-26B-A4B-it
+```
+
+The probe script uses the canonical mini7 observation and prints the raw
+provider text:
+
+```
+DEEPINFRA_API_KEY=lw... uv run python scripts/probe_deepinfra_gemma.py
+```
+
+Observed 2026-05-24: Gemma wrapped its JSON in a normal markdown `json`
+code fence, which the existing `_strip_code_fence` adapter normalizer
+already handles. Gemma's instruction tuning is *known* to sometimes emit
+`<start_of_turn>` / `<end_of_turn>` chat-template tags, but none appeared
+in the recorded contract cassette, so no extra normalizer was needed. If
+that bleed is ever observed, extend `_strip_code_fence` and add a case to
+`tests/llm/test_litellm_adapter.py::test_markdown_code_fence_is_stripped_before_parse`.
 
 ## Recording cassettes (US-051, US-072)
 

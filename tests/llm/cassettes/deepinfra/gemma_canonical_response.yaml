@@ -1,0 +1,78 @@
+interactions:
+- request:
+    body: '{"messages":[{"role":"system","content":"You are a player in a hidden-role
+      social-deduction game. Your goal is to make your faction win.\nYou may deceive
+      in public chat if strategically useful, but mechanical actions are expressed
+      only through the JSON `action` field.\nPublic messages are visible to every
+      living player. Private messages are visible only when the observation lists
+      a private channel for this phase.\nYour `memory_update` is private and will
+      be shown only to you in later phases of this same game; you have no persistent
+      identity across games.\nRespond with a single JSON object matching this schema
+      exactly:\n  {\"public_message\": str|null, \"private_message\": str|null, \"action\":
+      {\"type\": str, \"target\": str|null}, \"memory_update\": str, \"rationale_summary\":
+      str|null}\nDo not include any text outside the JSON object."},{"role":"user","content":"{\"ruleset_id\":\"mini7_v1\",\"game_public_id\":\"G-CONTRACT\",\"phase\":\"DAY_1_VOTE\",\"day\":1,\"round\":0,\"you\":{\"player_id\":\"P01\",\"alive\":true,\"role\":\"MAFIA_GOON\",\"faction\":\"MAFIA\"},\"alive_players\":[\"P01\",\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"],\"dead_players\":[],\"public_events\":[],\"private_events\":[],\"legal_actions\":{\"allowed_action_types\":[\"VOTE\",\"ABSTAIN\"],\"legal_targets\":[\"P02\",\"P03\",\"P04\",\"P05\",\"P06\",\"P07\"]},\"your_private_memory\":\"\",\"message_limits\":{\"public_message_max_chars\":600,\"private_message_max_chars\":600,\"memory_update_max_chars\":1200},\"mafia_teammates\":[\"P02\"],\"previous_protected_target\":null,\"inspection_history\":null}"}],"model":"google/gemma-4-26B-A4B-it"}'
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate
+      connection:
+      - keep-alive
+      content-length:
+      - '1638'
+      content-type:
+      - application/json
+      host:
+      - api.deepinfra.com
+      user-agent:
+      - AsyncOpenAI/Python 2.36.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.36.0
+      x-stainless-raw-response:
+      - 'true'
+      x-stainless-read-timeout:
+      - '60.0'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.12.13
+    method: POST
+    uri: https://api.deepinfra.com/v1/openai/chat/completions
+  response:
+    body:
+      string: '{"id":"chatcmpl-RNhqcYcZKrktLJIMIHBJCKbK","object":"chat.completion","created":1779643992,"model":"google/gemma-4-26B-A4B-it","choices":[{"index":0,"message":{"role":"assistant","content":"```json\n{\n  \"public_message\":
+        null,\n  \"private_message\": null,\n  \"action\": {\n    \"type\": \"ABSTAIN\",\n    \"target\":
+        null\n  },\n  \"memory_update\": \"Day 1: I am a Mafia Goon. My teammate is
+        P02. I have abstained from the first vote to maintain a low profile.\",\n  \"rationale_summary\":
+        \"As a Mafia Goon on Day 1, it is often safer to abstain or follow the lead
+        of my teammate (P02) to avoid drawing early suspicion. Since no specific target
+        or information is available, abstaining is a neutral starting move.\"\n}\n```","reasoning_content":null,"name":null,"tool_calls":[]},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":433,"total_tokens":585,"completion_tokens":152,"estimated_cost":8.198999999999999e-05,"prompt_tokens_details":null}}'
+    headers:
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '966'
+      Content-Type:
+      - application/json
+      Date:
+      - Sun, 24 May 2026 17:33:12 GMT
+      Server:
+      - uvicorn
+      x-request-id:
+      - RNhqcYcZKrktLJIMIHBJCKbK
+      x-robots-tag:
+      - noindex
+    status:
+      code: 200
+      message: OK
+version: 1

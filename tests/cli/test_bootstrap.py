@@ -370,6 +370,58 @@ def test_bootstrap_with_zai_glm51_yaml_seeds_model_config(
     assert models[0].default_max_output_tokens == 4096
 
 
+def test_bootstrap_with_deepinfra_gemma_yaml_seeds_model_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEEPINFRA_API_KEY", "lw-not-real-but-resolves")
+    providers_path = tmp_path / "providers.yaml"
+    providers_path.write_text(
+        textwrap.dedent(
+            """
+            providers:
+              - name: deepinfra
+                auth_secret_ref: env:DEEPINFRA_API_KEY
+                base_url: https://api.deepinfra.com/v1/openai
+                models:
+                  - model_name: deepseek-ai/DeepSeek-V4-Flash
+                    litellm_model_id: deepinfra/deepseek-ai/DeepSeek-V4-Flash
+                  - model_name: gemma-4-26B-A4B-it
+                    litellm_model_id: deepinfra/google/gemma-4-26B-A4B-it
+            """
+        ).strip()
+    )
+
+    runner = CliRunner()
+    db_url = _db_url(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "--db-url",
+            db_url,
+            "--providers",
+            str(providers_path),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    payload = json.loads(result.stdout)
+    providers_step = _step(payload["steps"], STEP_PROVIDERS)
+    assert providers_step["detail"]["inserted"] == ["deepinfra"]
+    assert sorted(providers_step["detail"]["models_inserted"]) == [
+        "deepinfra/deepseek-ai/DeepSeek-V4-Flash",
+        "deepinfra/gemma-4-26B-A4B-it",
+    ]
+
+    models = asyncio.run(_query_model_configs(db_url))
+    by_name = {m.model_name: m for m in models}
+    assert set(by_name) == {"deepseek-ai/DeepSeek-V4-Flash", "gemma-4-26B-A4B-it"}
+    assert by_name["gemma-4-26B-A4B-it"].litellm_model_id == "deepinfra/google/gemma-4-26B-A4B-it"
+    assert by_name["gemma-4-26B-A4B-it"].default_temperature == pytest.approx(0.7)
+    assert by_name["gemma-4-26B-A4B-it"].default_top_p == pytest.approx(1.0)
+    assert by_name["gemma-4-26B-A4B-it"].default_max_output_tokens == 4096
+
+
 def test_bootstrap_with_invalid_secret_ref_fails_fast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
