@@ -444,3 +444,58 @@ Xiaomi credits). Scope was deliberately bounded to MINIMAL change:
   so multiple models can share one provider cassette directory without
   renaming the original `canonical_response.yaml`. Future same-provider
   models should follow this pattern.
+
+---
+
+## 2026-05-28 — US-083 (Heterogeneous real-LLM gauntlet: one distinct model per seat)
+
+Turned Padrino from a self-play stress test into a head-to-head benchmark:
+each of the 7 seats now runs a DISTINCT model identity.
+
+Design (minimal-invasion):
+- `src/padrino/llm/multiplex.py` — `SeatMultiplexAdapter` implements the
+  `LlmAdapter` Protocol and dispatches each `complete()` to the adapter
+  assigned to `observation.you.player_id`. The runner's `_RecordingAdapter`
+  only ever calls `complete()`, so NO `run_game` signature change was
+  needed — heterogeneity is fully encapsulated in the multiplex.
+- `src/padrino/gauntlets/heterogeneous.py` — `build_heterogeneous_adapter`
+  takes a seat -> `AgentBuild` mapping and builds one `LiteLlmAdapter` per
+  seat with a SINGLE-host `RoutingPolicy` (no fallback, no same-model host),
+  resolving auth/base_url from `provider_endpoints(settings)`.
+- `SeatMultiplexAdapter.calls_by_seat` accumulator enables the per-model
+  coverage assertion (`AdapterResult` carries no seat id).
+
+Tests:
+- `tests/llm/test_multiplex.py` (5) + `tests/gauntlets/test_heterogeneous.py`
+  (4) — non-integration, monkeypatched fake keys (resolve_secret reads env
+  only, no network).
+- `tests/integration/test_heterogeneous_gauntlet.py` — real single game,
+  $4 cap, parse-rate >=70%, per-model coverage, evaluate_gauntlet
+  rating_deltas per model.
+
+z.ai roster swap (per maintainer decision 2026-05-28):
+- Roster: P01 Cerebras GLM-4.7 (solo, no z.ai pair), P02 DeepInfra
+  DeepSeek-V4-Flash, P03 DeepInfra Gemma, P04/P06 Xiaomi Mimo-v2.5,
+  P05/P07 Xiaomi Mimo-v2.5-pro. 5 distinct models, 2 free Xiaomi repeats.
+- AC text said P02=Z.AI GLM-5.1 and to require ZAI_API_KEY; both overridden.
+  The integration test requires only the 3 keys actually seated
+  (CEREBRAS / DEEPINFRA / XIAOMI).
+
+REAL RUN (2026-05-28, verified locally, not just green):
+- 1 game, winner=MAFIA (PARITY_REACHED), passed under the $4 cap.
+- Every distinct model produced >=1 parsed-OK call; parse-rate gate held.
+
+### Learnings for future iterations
+
+- The clean seam for per-seat heterogeneity is a multiplex adapter that
+  implements `LlmAdapter`, NOT a `run_game` signature change. Anything that
+  needs per-seat behaviour should wrap, not fork, the runner.
+- **Xiaomi Mimo-v2.5-pro is SLOW** (~40 s latencies; some calls exceed the
+  45 s timeout). In a single game each Mimo-pro seat still landed >=1 ok
+  call, but US-084's 10-game tournament will hit far more Mimo-pro timeouts
+  — consider a longer per-call timeout for Mimo-pro seats or budget extra
+  wall-clock, and watch the parse-rate gate doesn't dip from timeouts.
+- For heterogeneous gauntlets, build each seat with a single-host
+  `RoutingPolicy` directly — do NOT route through
+  `Settings.build_routing_policy()`, which would re-attach the Cerebras->Z.AI
+  same-model host whenever `ZAI_API_KEY` is still present in `.env`.

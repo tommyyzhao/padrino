@@ -280,6 +280,52 @@ in the recorded contract cassette, so no extra normalizer was needed. If
 that bleed is ever observed, extend `_strip_code_fence` and add a case to
 `tests/llm/test_litellm_adapter.py::test_markdown_code_fence_is_stripped_before_parse`.
 
+## Heterogeneous rosters — one distinct model per seat (US-083)
+
+A normal gauntlet clones one model across all seven seats (self-play). A
+*heterogeneous* gauntlet seats a DISTINCT model in every seat so the
+leaderboard's per-model rating deltas reflect head-to-head competition.
+
+The seam is `padrino.gauntlets.heterogeneous.build_heterogeneous_adapter`,
+which takes a seat -> `AgentBuild` mapping and returns a
+`padrino.llm.multiplex.SeatMultiplexAdapter`. The multiplex satisfies the
+`LlmAdapter` Protocol, so the game runner treats a heterogeneous game
+exactly like a single-model one — it dispatches each seat's observation to
+that seat's own adapter, keyed on `observation.you.player_id`:
+
+```python
+from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
+from padrino.llm.adapter import AgentBuild
+from padrino.settings import Settings
+
+assignments = {
+    "P01": AgentBuild(provider="cerebras", model_id="cerebras/zai-glm-4.7", ...),
+    "P02": AgentBuild(provider="deepinfra", model_id="deepinfra/deepseek-ai/DeepSeek-V4-Flash", ...),
+    "P03": AgentBuild(provider="deepinfra", model_id="deepinfra/google/gemma-4-26B-A4B-it", ...),
+    "P04": AgentBuild(provider="xiaomi", model_id="openai/mimo-v2.5", ...),
+    # ...one entry per seat (P01-P07)
+}
+adapter = build_heterogeneous_adapter(assignments, settings=Settings())
+# hand `adapter` to run_game exactly like any single-model adapter
+```
+
+Each seat gets a **single-host** `RoutingPolicy` — no different-model
+fallback and no same-model alternate host. A heterogeneous gauntlet measures
+the model assigned to each seat, so silently routing a failed Cerebras call
+to Z.AI (the US-079 same-model fallback) would muddy attribution. The
+provider credential and (for OpenAI-compatible endpoints like Xiaomi) the
+base URL are resolved from `provider_endpoints(settings)`. For rating
+attribution, seat the gauntlet roster with one DB `agent_build` row per
+distinct model and map each seat to its model's `agent_build_id`; the
+`SeatMultiplexAdapter.calls_by_seat` accumulator lets a caller assert
+per-model coverage without re-deriving seat attribution (`AdapterResult`
+carries no seat id).
+
+Observed 2026-05-28: Xiaomi Mimo-v2.5-pro is markedly slower than the other
+seats (~40 s latencies, occasionally exceeding the 45 s per-call timeout).
+Each model still produced at least one parsed-OK call in a single game, but
+budget extra wall-clock for Mimo-pro-heavy rosters.
+
 ## Recording cassettes (US-051, US-072)
 
 The contract suite under `tests/llm/test_litellm_contract.py` parses
