@@ -29,6 +29,7 @@ from padrino.api.pagination import (
 )
 from padrino.core.engine.event_log import StoredEvent
 from padrino.core.engine.replay import ReplayHashMismatchError, replay_event_log
+from padrino.core.spectator_projection import project_events_for_spectator
 from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
@@ -112,6 +113,33 @@ _ACTION_EVENT_TYPES = (
     "ProtectSubmitted",
     "InvestigateSubmitted",
 )
+
+
+def _row_to_dict(r: Any) -> dict[str, Any]:
+    """Flatten a stored event row into the dict shape the projection expects."""
+    return {
+        "sequence": r.sequence,
+        "event_type": r.event_type,
+        "phase": r.phase,
+        "visibility": r.visibility,
+        "actor_player_id": r.actor_player_id,
+        "payload": r.payload,
+        "prev_event_hash": r.prev_event_hash,
+        "event_hash": r.event_hash,
+    }
+
+
+def _row_to_entry(r: Any) -> EventEntry:
+    return EventEntry(
+        sequence=r.sequence,
+        event_type=r.event_type,
+        phase=r.phase,
+        visibility=r.visibility,
+        actor_player_id=r.actor_player_id,
+        payload=r.payload,
+        prev_event_hash=r.prev_event_hash,
+        event_hash=r.event_hash,
+    )
 
 
 async def _seat_count(session: AsyncSession, game_id: uuid.UUID) -> int:
@@ -219,7 +247,7 @@ async def list_game_events(
     session: AsyncSession = Depends(get_session),
     admin_token: str | None = Depends(get_admin_token),
 ) -> EventsResponse:
-    await _game_or_404(session, game_id)
+    game = await _game_or_404(session, game_id)
 
     if visibility == "all":
         if admin_token is None or x_padrino_admin_token != admin_token:
@@ -228,22 +256,21 @@ async def list_game_events(
                 detail="admin token required to read non-public events",
             )
         rows = await events_repo.list_events(session, game_id)
-    else:
-        rows = await events_repo.list_events(session, game_id, visibility_filter=_PUBLIC)
+        entries = [_row_to_entry(r) for r in rows]
+        return EventsResponse(game_id=game_id, visibility=visibility, events=entries)
 
-    entries = [
-        EventEntry(
-            sequence=r.sequence,
-            event_type=r.event_type,
-            phase=r.phase,
-            visibility=r.visibility,
-            actor_player_id=r.actor_player_id,
-            payload=r.payload,
-            prev_event_hash=r.prev_event_hash,
-            event_hash=r.event_hash,
-        )
-        for r in rows
-    ]
+    # Public visibility. A *terminal* game may reveal roles in the post-game
+    # surface (same contract as the transcript). A *non-terminal* game is shown
+    # only through the shared spectator projection so no mid-game role/faction
+    # or hidden SYSTEM/PRIVATE content leaks to a spectator (P0 #1).
+    is_terminal = game.status == "COMPLETED" and game.terminal_result is not None
+    if is_terminal:
+        rows = await events_repo.list_events(session, game_id, visibility_filter=_PUBLIC)
+        entries = [_row_to_entry(r) for r in rows]
+    else:
+        rows = await events_repo.list_events(session, game_id)
+        projected = project_events_for_spectator(_row_to_dict(r) for r in rows)
+        entries = [EventEntry(**p) for p in projected]
     return EventsResponse(game_id=game_id, visibility=visibility, events=entries)
 
 

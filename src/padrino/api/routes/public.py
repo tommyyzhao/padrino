@@ -47,6 +47,7 @@ from padrino.api.pagination import (
     invalid_cursor_error,
 )
 from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
+from padrino.core.spectator_projection import project_events_for_spectator
 from padrino.db.models import ApiKey, IngestedGame
 from padrino.db.repositories import ingested_games as ingested_games_repo
 from padrino.db.repositories import leagues as leagues_repo
@@ -261,42 +262,6 @@ def _is_terminal(row: IngestedGame) -> bool:
     return isinstance(terminal_result, dict) and bool(terminal_result.get("winner"))
 
 
-def _strip_forbidden(value: Any) -> Any:
-    """Return ``value`` with every PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS entry removed.
-
-    Walks nested dicts and lists. Strings and other scalars are returned
-    unchanged. Forbidden keys are dropped, not redacted with a sentinel — the
-    public surface should look like the leaked field never existed.
-    """
-    if isinstance(value, dict):
-        return {
-            k: _strip_forbidden(v)
-            for k, v in value.items()
-            if k not in PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS
-        }
-    if isinstance(value, list):
-        return [_strip_forbidden(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_strip_forbidden(item) for item in value)
-    return value
-
-
-def _redact_event_for_non_terminal(ev: dict[str, Any]) -> dict[str, Any] | None:
-    """Return None to drop a PRIVATE event; otherwise strip forbidden payload keys.
-
-    The non-terminal projection is intentionally stricter than the terminal
-    one: role / faction / model identity / mafia private chat all stay out
-    of the public surface until the game is over. Terminal bundles return
-    the events as-is because the outcome is already known.
-    """
-    if str(ev.get("visibility", "")).upper() == "PRIVATE":
-        return None
-    stripped_payload = _strip_forbidden(ev.get("payload", {}))
-    if not isinstance(stripped_payload, dict):
-        stripped_payload = {}
-    return {**ev, "payload": stripped_payload}
-
-
 @router.get(
     "/public/games/{game_id}/events",
     response_model=PublicEventsResponse,
@@ -310,12 +275,7 @@ async def public_game_events(
     row = await _ingested_or_404(session, game_id)
     events = _bundle_events(row)
     if not _is_terminal(row):
-        redacted: list[dict[str, Any]] = []
-        for ev in events:
-            keep = _redact_event_for_non_terminal(ev)
-            if keep is not None:
-                redacted.append(keep)
-        events = redacted
+        events = project_events_for_spectator(events)
     start = 0
     if query.cursor is not None:
         try:

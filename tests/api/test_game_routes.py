@@ -18,6 +18,9 @@ from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
 from padrino.db.repositories import (
+    events as events_repo,
+)
+from padrino.db.repositories import (
     games as games_repo,
 )
 from padrino.db.repositories import (
@@ -170,6 +173,110 @@ async def _seed_completed_game(
         persistence=persistence,
     )
     return game_id
+
+
+async def _seed_running_game_with_hidden_info(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> uuid.UUID:
+    """A RUNNING (non-terminal) game whose log carries hidden info to leak-test.
+
+    Contains a PUBLIC ``PlayerEliminated`` with ``role``/``faction`` baked into
+    its payload (the live bug), plus a SYSTEM ``RolesAssigned`` and a PRIVATE
+    mafia message that must not surface to a spectator mid-game.
+    """
+    async with session_factory() as session, session.begin():
+        game = await games_repo.create(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed=_GAME_SEED,
+            status="RUNNING",
+        )
+        await events_repo.append_event(
+            session,
+            game_id=game.id,
+            sequence=0,
+            event_type="RolesAssigned",
+            phase="SETUP",
+            visibility="SYSTEM",
+            actor_player_id=None,
+            payload={
+                "assignments": [
+                    {
+                        "public_player_id": "P01",
+                        "seat_index": 0,
+                        "role": "MAFIOSO",
+                        "faction": "MAFIA",
+                    }
+                ]
+            },
+            prev_event_hash="",
+            event_hash="h0",
+        )
+        await events_repo.append_event(
+            session,
+            game_id=game.id,
+            sequence=1,
+            event_type="PrivateMessageSubmitted",
+            phase="NIGHT_1",
+            visibility="PRIVATE",
+            actor_player_id="P01",
+            payload={"text": "kill P03", "channel_id": "mafia"},
+            prev_event_hash="h0",
+            event_hash="h1",
+        )
+        await events_repo.append_event(
+            session,
+            game_id=game.id,
+            sequence=2,
+            event_type="PublicMessageSubmitted",
+            phase="DAY_1",
+            visibility="PUBLIC",
+            actor_player_id="P02",
+            payload={"text": "I think P01 is suspicious"},
+            prev_event_hash="h1",
+            event_hash="h2",
+        )
+        await events_repo.append_event(
+            session,
+            game_id=game.id,
+            sequence=3,
+            event_type="PlayerEliminated",
+            phase="DAY_1",
+            visibility="PUBLIC",
+            actor_player_id=None,
+            payload={
+                "public_player_id": "P03",
+                "role": "VILLAGER",
+                "faction": "TOWN",
+                "cause": "DAY_VOTE",
+            },
+            prev_event_hash="h2",
+            event_hash="h3",
+        )
+        game_id = game.id
+    return game_id
+
+
+async def test_get_public_events_strips_hidden_info_mid_game(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """P0 #1: a live (RUNNING) game must not leak role/faction or SYSTEM/PRIVATE."""
+    game_id = await _seed_running_game_with_hidden_info(session_factory)
+    response = await client.get(f"/games/{game_id}/events?visibility=public")
+    assert response.status_code == 200, response.text
+    events = response.json()["events"]
+
+    # SYSTEM (RolesAssigned) and PRIVATE (mafia chat) are dropped wholesale.
+    types = {e["event_type"] for e in events}
+    assert types == {"PublicMessageSubmitted", "PlayerEliminated"}
+    assert all(e["visibility"] == "PUBLIC" for e in events)
+
+    # No role/faction survives anywhere in any payload, mid-game.
+    elim = next(e for e in events if e["event_type"] == "PlayerEliminated")
+    assert "role" not in elim["payload"]
+    assert "faction" not in elim["payload"]
+    assert elim["payload"] == {"public_player_id": "P03", "cause": "DAY_VOTE"}
 
 
 async def test_get_game_returns_summary_and_seat_count(
