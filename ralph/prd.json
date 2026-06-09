@@ -163,6 +163,7 @@
       "description": "As the platform, before any AI-generated game is shown publicly I need a moderation gate that marks it broadcastable, so toxic/unsafe/prompt-injected model output never reaches viewers.",
       "acceptanceCriteria": [
         "New `src/padrino/public/moderation.py` with a deterministic first-pass (regex/keyword/structural filters over public messages) and a pluggable `GuardModelAdapter` protocol for an LLM guard pass.",
+        "Settings `padrino_guard_model: str` (default a DeepInfra-hosted Llama-Guard-family model) routed through the existing LiteLLM adapter using the existing `DEEPINFRA_API_KEY` — NO new credential or provider integration.",
         "A game gets `is_broadcastable: bool`; DEFAULT FAIL-CLOSED \u2014 if the guard pass is unavailable or errors, the game is NOT broadcastable.",
         "Real guard-model call is behind `@pytest.mark.integration` (needs a key); the deterministic path + fail-closed default are covered by default unit tests.",
         "Test `tests/public/test_moderation_gate.py` asserts: clean transcript -> broadcastable; transcript with a seeded toxic line -> not broadcastable; guard error -> not broadcastable.",
@@ -176,7 +177,7 @@
       ],
       "priority": 93,
       "passes": false,
-      "notes": "D5. HUMAN-NEEDED later: guard-model API key (credential, integration-gated). Calibration set deferred (tuning only)."
+      "notes": "D5. DECIDED 2026-06-09: guard = Llama-Guard-family model on DeepInfra via the EXISTING DeepInfra key (no new credential; real call still integration-gated). Judge stays padrino_behavioral_judge_model (xiaomi/mimo-v2.5-pro, already configured). Calibration set deferred (tuning only)."
     },
     {
       "id": "US-094",
@@ -477,7 +478,7 @@
       "description": "As the operator, I need a retention policy for an ever-growing game bank so storage and query cost stay bounded while ratings and replays are preserved.",
       "acceptanceCriteria": [
         "Config-driven policy: keep public_event_v1 + ratings + analytics indefinitely; prune raw internal heavy payloads / non-broadcastable games after a TTL.",
-        "A pure planner `analytics-or-db` function decides prune candidates; the destructive step is a guarded job (dry-run default).",
+        "A pure planner function `src/padrino/db/retention.py::plan_retention(games, policy) -> RetentionPlan` decides prune candidates; the destructive step is a separate guarded job (dry-run default).",
         "Test `tests/db/test_retention_policy.py` asserts prune-candidate selection and that ratings/replay data is never selected.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
@@ -505,9 +506,11 @@
         "uv run pytest -m \"not integration\" passes"
       ],
       "dependencies": [
-        "US-091",
+        "US-092",
+        "US-094",
         "US-098",
-        "US-106"
+        "US-106",
+        "US-107"
       ],
       "priority": 109,
       "passes": false,
