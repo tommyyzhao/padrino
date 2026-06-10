@@ -159,6 +159,10 @@ class Settings(BaseSettings):
     padrino_broadcast_cadence_resolution_ms: int = 3500
     padrino_broadcast_cadence_default_ms: int = 1500
 
+    # SSE connection cap (US-107). Maximum concurrent SSE broadcast streams
+    # per client IP. Excess connections are rejected with 429.
+    padrino_sse_max_connections_per_ip: int = 5
+
     def build_routing_policy(
         self,
         *,

@@ -71,6 +71,7 @@ from padrino.db.models import (
 from padrino.db.repositories import ingested_games as ingested_games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.gauntlets.evaluation import evaluate_gauntlet, redact_for_public
+from padrino.observability.metrics import broadcast_active_streams, record_broadcast_frame
 from padrino.public.broadcast_index import BroadcastState, list_live
 from padrino.public.broadcaster import CadenceConfig, default_cadence, plan_broadcast
 from padrino.ratings.model_rollup import (
@@ -889,11 +890,15 @@ async def public_gauntlet_report(
 
 
 # ---------------------------------------------------------------------------
-# SSE live broadcast endpoint (US-089)
+# SSE live broadcast endpoint (US-089, US-107)
 # ---------------------------------------------------------------------------
 
 #: Maximum speed multiplier for the ?speed= debug param.
 _SSE_SPEED_MAX: float = 100.0
+
+#: Active SSE connection count per IP hash. Managed synchronously within the
+#: async event loop — no lock needed. Decremented in the generator's finally block.
+_sse_active: dict[str, int] = {}
 
 
 def _live_cadence() -> CadenceConfig:
@@ -943,6 +948,24 @@ async def public_game_live_sse(
             detail="game_not_found_or_not_live",
         )
 
+    # Per-IP SSE connection cap (US-107)
+    xff = request.headers.get("X-Forwarded-For")
+    client_ip = (
+        xff.split(",")[0].strip() if xff else (request.client.host if request.client else "unknown")
+    )
+    ip_hash = hashlib.sha256(f"ip:{client_ip}".encode()).hexdigest()
+    sse_cfg: Any = getattr(request.app.state, "auth_settings", None) or get_settings()
+    sse_cap: int = sse_cfg.padrino_sse_max_connections_per_ip
+    active_count = _sse_active.get(ip_hash, 0)
+    if active_count >= sse_cap:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="sse_connection_limit_exceeded",
+            headers={"Retry-After": "60"},
+        )
+    _sse_active[ip_hash] = active_count + 1
+    broadcast_active_streams.inc()
+
     # Resolve cursor: Last-Event-ID header takes precedence over ?after=
     cursor: int | None = after
     last_event_id_header = request.headers.get("Last-Event-ID")
@@ -973,13 +996,18 @@ async def public_game_live_sse(
         frames = [f for f in frames if f.event["sequence"] > cursor]
 
     async def _generate() -> AsyncGenerator[str, None]:
-        for frame in frames:
-            seq = frame.event["sequence"]
-            delay_s = (frame.delay_ms / speed) / 1000.0
-            if delay_s > 0:
-                await asyncio.sleep(delay_s)
-            data = json.dumps(frame.event, separators=(",", ":"))
-            yield f"id: {seq}\ndata: {data}\n\n"
+        try:
+            for frame in frames:
+                seq = frame.event["sequence"]
+                delay_s = (frame.delay_ms / speed) / 1000.0
+                if delay_s > 0:
+                    await asyncio.sleep(delay_s)
+                data = json.dumps(frame.event, separators=(",", ":"))
+                yield f"id: {seq}\ndata: {data}\n\n"
+                record_broadcast_frame()
+        finally:
+            _sse_active[ip_hash] = max(0, _sse_active.get(ip_hash, 1) - 1)
+            broadcast_active_streams.dec()
 
     return StreamingResponse(
         _generate(),
@@ -1248,6 +1276,7 @@ __all__ = [
     "PublicTranscriptResponse",
     "PublicVotingAccuracyAnalytics",
     "_live_cadence",
+    "_sse_active",
     "public_game_analytics",
     "public_game_live_sse",
     "public_ladder",
