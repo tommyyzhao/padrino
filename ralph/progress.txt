@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T18:00 - US-097
+- Created `src/padrino/matchmaking/` package with `matchmaker.py` exposing `MatchRecord` (frozen dataclass, participants tuple), `MatchPlan` (dataclass, ruleset_id/gauntlet_seed/roster_by_seat), and `next_match(roster, history, *, ruleset_id, seed) -> MatchPlan`.
+- `next_match` is pure: uses `SeededRng` for deterministic tie-breaking, `seat_permutation` for faction rotation, and `dict.fromkeys(roster, 0)` + stable sort by play count to prefer least-played agents.
+- Created `tests/matchmaking/test_matchmaker.py` with 15 tests covering: determinism (same inputs → same plan), different seeds produce different assignments, gauntlet_seed depends on history length, faction balance across seeds (seat P01 filled by multiple agents), no duplicates per game, roster-only selection, larger roster selects exactly player_count, fresh agents preferred over overplayed, outsider history participants silently ignored, ValueError on under-sized roster, canonical seat IDs, gauntlet_seed is 64-char hex.
+- Files changed: `src/padrino/matchmaking/__init__.py`, `src/padrino/matchmaking/matchmaker.py`, `tests/matchmaking/__init__.py`, `tests/matchmaking/test_matchmaker.py`
+- **Learnings for future iterations:**
+  - `dict.fromkeys(roster, 0)` avoids ruff C420 (unnecessary dict comprehension for iterable with fixed value).
+  - For pure matchmaking logic, `MatchRecord.participants: tuple[uuid.UUID, ...]` is hashable (frozen dataclass); `MatchPlan` uses a plain `@dataclass` (not frozen) because `dict` fields break `__hash__` but auto-generated `__eq__` still works correctly for determinism assertions.
+  - `sorted(shuffled, key=lambda a: play_counts[a])` — shuffle first for tie-breaking, then stable-sort by count — is the canonical pattern for deterministic least-played selection.
+---
+
 ## 2026-06-10T17:00 - US-096
 - Created `src/padrino/economics/admission.py` with `AdmitDecision` frozen dataclass and `admit(session, settings, *, now) -> AdmitDecision` combining spend cap, daily game count, and concurrency limit; denials short-circuit in priority order and are structured-logged.
 - Added `padrino_max_games_per_day: int = 20` and `padrino_max_concurrent_games: int = 3` to `Settings`.

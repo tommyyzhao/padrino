@@ -258,7 +258,7 @@
         "US-096"
       ],
       "priority": 97,
-      "passes": false,
+      "passes": true,
       "notes": "D4 (partial). Open submission / OAuth identity / anti-Sybil DEFERRED to a later wave."
     },
     {
