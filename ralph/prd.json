@@ -363,7 +363,7 @@
         "US-086"
       ],
       "priority": 102,
-      "passes": false,
+      "passes": true,
       "notes": "D6: deterministic-first; never feeds ratings."
     },
     {

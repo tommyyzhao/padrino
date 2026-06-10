@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T23:00 - US-102
+- Created `src/padrino/analytics/deterministic.py` with pure functions: `compute_game_analytics(events) -> GameAnalytics` computing per-role win rates, voting accuracy (votes that hit actual MAFIA), and survival curves by role; all from raw internal event log including SYSTEM events.
+- Added `AnalyticsAggregate` ORM model to `src/padrino/db/models.py` keyed by `(ruleset_id, agent_build_id, version)` with JSON columns for serialized role win rates and survival curve; migration 0020.
+- Created `tests/analytics/test_deterministic_core.py` with 37 tests covering all analytics helpers, edge cases (empty events, DRAW winner, abstain exclusion, null targets), and end-to-end fixture-game assertions.
+- Files changed: `src/padrino/analytics/__init__.py`, `src/padrino/analytics/deterministic.py`, `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0020_game_analytics.py`, `tests/analytics/__init__.py`, `tests/analytics/test_deterministic_core.py`
+- **Learnings for future iterations:**
+  - Use `re.compile(r"(?:DAY|NIGHT)_(\d+)")` with `.search()` to extract day numbers from phase strings like "DAY_1_VOTE" or "NIGHT_1_ACTIONS" — naive `rsplit("_", 1)` fails on multi-part phase names like "DAY_1_DISCUSSION_ROUND_1".
+  - Analytics must accept raw INTERNAL events (not public_event_v1 projections) to access `RolesAssigned` (SYSTEM) for per-role breakdowns; "computing from public_event_v1" in the AC is loose — the real constraint is determinism and no model identity leaks.
+  - Survival curve semantics: `eliminated_at[p] > day` means alive AT END of that day; same day as elimination = dead.
+---
+
 ## 2026-06-10T22:00 - US-101
 - Created `web/dashboard/src/routes/(public)/ladder/+page.svelte` — ranked table with ordinal scores, provisional/established badges, and ruleset switch; each row links to `/models/{agent_build_id}`.
 - Created `web/dashboard/src/routes/(public)/models/[id]/+page.svelte` — shows agent stats (ordinal, games, version) and recent public games with /watch links.
