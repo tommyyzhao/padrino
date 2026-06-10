@@ -2,7 +2,11 @@
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
-  import type { PublicModelEntryResponse } from '$lib/api/types';
+  import type {
+    PublicModelEntryResponse,
+    PublicLiveGameEntry,
+    PublicRecentGameEntry
+  } from '$lib/api/types';
 
   const RULESET = 'mini7_v1';
 
@@ -10,6 +14,9 @@
   let activeGauntlets = $state<number | null>(null);
   let topModels = $state<PublicModelEntryResponse[]>([]);
   let error = $state<string | null>(null);
+
+  let liveGames = $state<PublicLiveGameEntry[]>([]);
+  let recentGames = $state<PublicRecentGameEntry[]>([]);
 
   async function load() {
     try {
@@ -51,6 +58,20 @@
       activeGauntlets = running.items.length;
     } catch {
       activeGauntlets = null;
+    }
+
+    try {
+      const live = await padrino.client.publicLiveIndex();
+      liveGames = live.items;
+    } catch {
+      // silent: broadcast surface is optional
+    }
+
+    try {
+      const recent = await padrino.client.publicRecentIndex({ limit: 10 });
+      recentGames = recent.items;
+    } catch {
+      // silent: broadcast surface is optional
     }
   }
 
@@ -123,3 +144,53 @@
     Could not load all KPIs ({error}). Some endpoints may require a spectator key.
   </p>
 {/if}
+
+<section class="mt-8" data-testid="lobby-live-section">
+  <h2 class="mb-3 text-lg font-semibold">Live Now</h2>
+  {#if liveGames.length === 0}
+    <p class="text-sm text-muted-foreground" data-testid="lobby-live-empty">No games live right now.</p>
+  {:else}
+    <ul class="grid gap-3 sm:grid-cols-2" data-testid="lobby-live-list">
+      {#each liveGames as game (game.game_id)}
+        <li>
+          <a href="/watch/{game.game_id}" class="block" data-testid="lobby-live-card">
+            <Card>
+              <div class="font-mono text-xs text-muted-foreground mb-1">{game.game_id.slice(0, 8)}</div>
+              <div class="font-medium" data-testid="lobby-live-ruleset">{game.ruleset_id}</div>
+              {#if game.current_phase}
+                <div class="mt-1 text-sm text-muted-foreground" data-testid="lobby-live-phase">{game.current_phase}</div>
+              {/if}
+              <div class="mt-1 text-sm" data-testid="lobby-live-players">{game.players_alive} alive</div>
+              <span class="mt-2 inline-block rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-600">Live</span>
+            </Card>
+          </a>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</section>
+
+<section class="mt-8" data-testid="lobby-recent-section">
+  <h2 class="mb-3 text-lg font-semibold">Recently Finished</h2>
+  {#if recentGames.length === 0}
+    <p class="text-sm text-muted-foreground" data-testid="lobby-recent-empty">No recent games.</p>
+  {:else}
+    <ul class="grid gap-3 sm:grid-cols-2" data-testid="lobby-recent-list">
+      {#each recentGames as game (game.game_id)}
+        <li>
+          <a href="/watch/{game.game_id}" class="block" data-testid="lobby-recent-card">
+            <Card>
+              <div class="font-mono text-xs text-muted-foreground mb-1">{game.game_id.slice(0, 8)}</div>
+              <div class="font-medium" data-testid="lobby-recent-ruleset">{game.ruleset_id}</div>
+              {#if game.terminal_result}
+                <div class="mt-1 text-sm font-semibold" data-testid="lobby-recent-winner">
+                  Winner: {String(game.terminal_result.winner)}
+                </div>
+              {/if}
+            </Card>
+          </a>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</section>

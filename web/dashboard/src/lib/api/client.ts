@@ -7,7 +7,9 @@ import type {
   PublicEventsResponse,
   PublicGameResponse,
   PublicLeaderboardResponse,
-  PublicModelLeaderboardResponse
+  PublicLiveIndexResponse,
+  PublicModelLeaderboardResponse,
+  PublicRecentIndexResponse
 } from './types';
 
 export const DEFAULT_BASE_URL = 'http://localhost:8000';
@@ -107,6 +109,14 @@ export class PadrinoClient {
     params: { limit?: number; cursor?: string | null } = {}
   ): Promise<PublicEventsResponse> {
     return this.request(`/public/games/${encodeURIComponent(gameId)}/events`, params);
+  }
+
+  publicLiveIndex(): Promise<PublicLiveIndexResponse> {
+    return this.request('/public/live');
+  }
+
+  publicRecentIndex(params: { limit?: number; cursor?: string | null } = {}): Promise<PublicRecentIndexResponse> {
+    return this.request('/public/recent', params);
   }
 
   publicGauntletReport(gauntletId: string): Promise<GauntletReport> {

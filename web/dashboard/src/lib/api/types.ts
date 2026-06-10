@@ -135,6 +135,31 @@ export interface PublicLeaderboardResponse {
   total_estimate: number;
 }
 
+export interface PublicLiveGameEntry {
+  game_id: string;
+  ruleset_id: string;
+  current_phase: string | null;
+  players_alive: number;
+}
+
+export interface PublicLiveIndexResponse {
+  items: PublicLiveGameEntry[];
+  total: number;
+}
+
+export interface PublicRecentGameEntry {
+  game_id: string;
+  ruleset_id: string;
+  current_phase: string | null;
+  terminal_result: TerminalResult | null;
+}
+
+export interface PublicRecentIndexResponse {
+  items: PublicRecentGameEntry[];
+  next_cursor: string | null;
+  total_estimate: number;
+}
+
 export type FactionTab = 'global' | 'town' | 'mafia';
 
 // Mirrors padrino.gauntlets.evaluation.CIBand.
