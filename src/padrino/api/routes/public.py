@@ -493,6 +493,7 @@ class PublicModelAnalyticsResponse(BaseModel):
 )
 async def public_game_analytics(
     game_id: uuid.UUID,
+    http_response: Response,
     _ctx: ApiKeyContext = Depends(require_public_read),
     session: AsyncSession = Depends(get_session),
 ) -> PublicGameAnalyticsResponse:
@@ -500,7 +501,8 @@ async def public_game_analytics(
 
     LIVE games return spoiler-safe analytics: ``winner`` and ``role_win_rates``
     are null so the outcome is not revealed before the broadcast completes.
-    RECENT games include the full analytics.
+    RECENT games include the full analytics and carry an immutable CDN cache
+    header — once a game reaches RECENT the analytics never change.
     """
     game = await session.get(Game, game_id)
     if (
@@ -532,6 +534,11 @@ async def public_game_analytics(
     analytics = compute_game_analytics(event_dicts)
     claim_analysis = compute_claim_analysis(event_dicts)
     is_live = game.broadcast_state == BroadcastState.LIVE.value
+
+    if is_live:
+        http_response.headers["Cache-Control"] = "no-store"
+    else:
+        http_response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
 
     return PublicGameAnalyticsResponse(
         game_id=game_id,
@@ -763,14 +770,17 @@ async def public_models_leaderboard(
 )
 async def public_model_analytics(
     agent_build_id: uuid.UUID,
+    http_response: Response,
     _ctx: ApiKeyContext = Depends(require_public_read),
     session: AsyncSession = Depends(get_session),
 ) -> PublicModelAnalyticsResponse:
     """Return stored deterministic analytics aggregate for one agent build.
 
     Analytics are materialized by the offline aggregation job.  Returns 404
-    if no aggregate has been computed yet for this agent.
+    if no aggregate has been computed yet for this agent.  Short CDN cache
+    allows re-aggregation to propagate within minutes.
     """
+    http_response.headers["Cache-Control"] = "public, max-age=300, s-maxage=300"
     stmt = (
         select(AnalyticsAggregate)
         .where(AnalyticsAggregate.agent_build_id == agent_build_id)
@@ -1099,13 +1109,16 @@ async def public_live_index(
 )
 async def public_recent_index(
     query: Annotated[PublicRecentQuery, Query()],
+    http_response: Response,
     _ctx: ApiKeyContext = Depends(require_public_read),
     session: AsyncSession = Depends(get_session),
 ) -> PublicRecentIndexResponse:
     """Return recently broadcast games (RECENT state) with outcome exposed.
 
     Ordered newest-first; paginated via the existing index-cursor mechanism.
+    Short CDN cache so the list stays fresh as new games complete.
     """
+    http_response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
     start = 0
     if query.cursor is not None:
         try:
