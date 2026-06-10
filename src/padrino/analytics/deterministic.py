@@ -82,6 +82,53 @@ class GameAnalytics:
 
 
 # ---------------------------------------------------------------------------
+# Relational analytics result types (US-103)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ClaimRecord:
+    """One structured role claim emitted by a player during a game."""
+
+    player_id: str
+    claimed_role: str
+    sequence: int
+    phase: str
+
+
+@dataclass(frozen=True)
+class CounterClaimGroup:
+    """Two or more players who claimed the same role in the same game."""
+
+    claimed_role: str
+    claimants: tuple[str, ...]  # sorted player_ids
+
+
+@dataclass(frozen=True)
+class ClaimAnalysis:
+    """All role claims and counter-claims extracted from a single game's event log."""
+
+    claims: tuple[ClaimRecord, ...]
+    counter_claims: tuple[CounterClaimGroup, ...]
+
+
+@dataclass(frozen=True)
+class HeadToHeadEntry:
+    """Cross-faction head-to-head record between two agents across one or more games.
+
+    ``agent_a`` is always lexicographically smaller than ``agent_b`` so the
+    pair is canonical — no duplicate reversed entries exist in a matrix.
+    ``a_wins`` counts games where ``agent_a``'s faction was the winner;
+    ``b_wins`` counts games where ``agent_b``'s faction was the winner.
+    """
+
+    agent_a: str
+    agent_b: str
+    a_wins: int
+    b_wins: int
+
+
+# ---------------------------------------------------------------------------
 # Internal extraction helpers
 # ---------------------------------------------------------------------------
 
@@ -221,10 +268,118 @@ def compute_game_analytics(events: Sequence[Mapping[str, Any]]) -> GameAnalytics
     )
 
 
+def compute_claim_analysis(events: Sequence[Mapping[str, Any]]) -> ClaimAnalysis:
+    """Extract role claims and detect counter-claims from the structured event log.
+
+    Only ``RoleClaimed`` events (structured, PUBLIC) are read — free-text chat
+    is never parsed (Hard rule 2).  A counter-claim is when two or more distinct
+    players claim the same role within the same game.
+    """
+    claims: list[ClaimRecord] = []
+    for event in events:
+        if event.get("event_type") != "RoleClaimed":
+            continue
+        actor = event.get("actor_player_id")
+        if actor is None:
+            continue
+        payload = event.get("payload", {})
+        claimed_role = payload.get("claimed_role")
+        if claimed_role is None:
+            continue
+        claims.append(
+            ClaimRecord(
+                player_id=str(actor),
+                claimed_role=str(claimed_role),
+                sequence=int(event.get("sequence", 0)),
+                phase=str(event.get("phase", "")),
+            )
+        )
+
+    by_role: dict[str, list[str]] = {}
+    for claim in claims:
+        by_role.setdefault(claim.claimed_role, []).append(claim.player_id)
+
+    counter_claims = tuple(
+        CounterClaimGroup(
+            claimed_role=role,
+            claimants=tuple(sorted(set(pids))),
+        )
+        for role, pids in sorted(by_role.items())
+        if len(set(pids)) >= 2
+    )
+
+    return ClaimAnalysis(claims=tuple(claims), counter_claims=counter_claims)
+
+
+def compute_head_to_head_matrix(
+    events: Sequence[Mapping[str, Any]],
+    agent_map: Mapping[str, str],
+) -> tuple[HeadToHeadEntry, ...]:
+    """Compute cross-faction head-to-head records between agents for one game.
+
+    Parameters
+    ----------
+    events:
+        Full internal event log for one game (must include ``RolesAssigned``
+        and ``GameTerminated``).
+    agent_map:
+        ``{player_id: agent_build_id}`` mapping injected by the caller (not in
+        the event log) so this pure function remains DB-free.
+
+    Returns a tuple of :class:`HeadToHeadEntry` values, one per cross-faction
+    pair of agents.  Entries are canonical: ``agent_a < agent_b``
+    lexicographically, so no reversed duplicates exist.  Same-faction pairs are
+    excluded (they cooperate, not compete).
+    """
+    role_map = _extract_role_map(events)
+    winner = _extract_winner(events)
+
+    if not role_map or not agent_map or winner is None:
+        return ()
+
+    agent_faction: dict[str, str] = {}
+    for pid, (_role, faction) in role_map.items():
+        agent_id = agent_map.get(str(pid))
+        if agent_id is not None:
+            agent_faction[agent_id] = faction
+
+    agents = sorted(agent_faction.keys())
+    entries: dict[tuple[str, str], list[int]] = {}
+
+    for i in range(len(agents)):
+        for j in range(i + 1, len(agents)):
+            id_i = agents[i]
+            id_j = agents[j]
+            if agent_faction[id_i] == agent_faction[id_j]:
+                continue
+
+            key_a, key_b = (id_i, id_j) if id_i < id_j else (id_j, id_i)
+            if (key_a, key_b) not in entries:
+                entries[(key_a, key_b)] = [0, 0]
+
+            if winner != "DRAW":
+                fac_a = agent_faction[key_a]
+                if fac_a == winner:
+                    entries[(key_a, key_b)][0] += 1
+                else:
+                    entries[(key_a, key_b)][1] += 1
+
+    return tuple(
+        HeadToHeadEntry(agent_a=a, agent_b=b, a_wins=w[0], b_wins=w[1])
+        for (a, b), w in sorted(entries.items())
+    )
+
+
 __all__ = [
+    "ClaimAnalysis",
+    "ClaimRecord",
+    "CounterClaimGroup",
     "GameAnalytics",
+    "HeadToHeadEntry",
     "RoleWinRate",
     "SurvivalPoint",
     "VotingAccuracy",
+    "compute_claim_analysis",
     "compute_game_analytics",
+    "compute_head_to_head_matrix",
 ]

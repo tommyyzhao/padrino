@@ -45,6 +45,8 @@ from padrino.core.engine.events import (
     ProtectSubmittedPayload,
     PublicMessageSubmitted,
     PublicMessageSubmittedPayload,
+    RoleClaimed,
+    RoleClaimedPayload,
     RolesAssigned,
     RolesAssignedPayload,
     SeatAssignment,
@@ -208,6 +210,12 @@ def _all_events() -> list[Event]:
             actor_player_id=None,
             payload=GameTerminatedPayload(winner="TOWN", reason="ALL_MAFIA_ELIMINATED"),
         ),
+        RoleClaimed(
+            sequence=18,
+            phase="DAY_1_DISCUSSION_R1",
+            actor_player_id="P03",
+            payload=RoleClaimedPayload(claimed_role="DETECTIVE"),
+        ),
     ]
 
 
@@ -231,6 +239,7 @@ def test_event_types_catalog_covers_all_classes() -> None:
         "PlayerEliminated",
         "PhaseResolved",
         "GameTerminated",
+        "RoleClaimed",
     }
     assert set(EVENT_TYPES) == expected
 
