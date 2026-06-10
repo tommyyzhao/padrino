@@ -11,6 +11,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T13:00 - US-092
+- Added `PublicLiveGameEntry`, `PublicLiveIndexResponse`, `PublicRecentGameEntry`, `PublicRecentIndexResponse` types to `web/dashboard/src/lib/api/types.ts`.
+- Added `publicLiveIndex()` and `publicRecentIndex()` methods to `PadrinoClient` in `web/dashboard/src/lib/api/client.ts`.
+- Extended `web/dashboard/src/routes/+page.svelte` home page with "Live Now" and "Recently Finished" lobby sections; both load silently (errors swallowed), live cards show no outcome (spoiler-safe by schema), recent cards expose winner.
+- Created `web/dashboard/tests/e2e/lobby.spec.ts` with 2 Playwright tests: live card renders phase/players_alive/watch link with no winner inside the live section; recent card renders winner and watch link.
+- Files changed: `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/lib/api/client.ts`, `web/dashboard/src/routes/+page.svelte`, `web/dashboard/tests/e2e/lobby.spec.ts`
+- **Learnings for future iterations:**
+  - When asserting spoiler-safety on a page that has BOTH a live section and a recent section, scope `getByTestId` to the specific section container rather than the whole page to avoid false positives from the other section.
+  - `page.route` resource-type guards (`resourceType() === 'fetch' || 'xhr'`) prevent SSE connections to the same URL pattern from being intercepted accidentally by the API mock.
+  - Lobby API calls in `onMount` should silently catch all errors (`try { ... } catch {}`) since the broadcast surface is optional and not all backends will have broadcast_state populated.
+---
+
 ## 2026-06-10T12:00 - US-091
 - Created `web/dashboard/src/routes/watch/[id]/+page.svelte` — SvelteKit live-viewer page consuming `GET /public/games/{id}/live` SSE endpoint via native `EventSource` API.
 - Renders: phase badge, seat grid (alive/dead tracking via `PlayerEliminated` events), public chat feed, vote tally, outcome banner (ONLY after `GameTerminated` frame — spoiler-safe).
