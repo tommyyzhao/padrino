@@ -6,6 +6,7 @@ import type {
   GauntletReport,
   PublicEventsResponse,
   PublicGameResponse,
+  PublicLadderResponse,
   PublicLeaderboardResponse,
   PublicLiveIndexResponse,
   PublicModelLeaderboardResponse,
@@ -117,6 +118,14 @@ export class PadrinoClient {
 
   publicRecentIndex(params: { limit?: number; cursor?: string | null } = {}): Promise<PublicRecentIndexResponse> {
     return this.request('/public/recent', params);
+  }
+
+  publicLadder(params: {
+    ruleset_id: string;
+    limit?: number;
+    cursor?: string | null;
+  }): Promise<PublicLadderResponse> {
+    return this.request('/public/ladder', params);
   }
 
   publicGauntletReport(gauntletId: string): Promise<GauntletReport> {

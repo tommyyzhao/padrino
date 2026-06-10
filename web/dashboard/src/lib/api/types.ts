@@ -160,6 +160,23 @@ export interface PublicRecentIndexResponse {
   total_estimate: number;
 }
 
+export interface PublicLadderEntry {
+  agent_build_id: string;
+  display_name: string;
+  version: string;
+  ordinal: number;
+  provisional: boolean;
+  games: number;
+  last_game_at: string | null;
+}
+
+export interface PublicLadderResponse {
+  ruleset_id: string;
+  entries: PublicLadderEntry[];
+  next_cursor: string | null;
+  total_estimate: number;
+}
+
 export type FactionTab = 'global' | 'town' | 'mafia';
 
 // Mirrors padrino.gauntlets.evaluation.CIBand.
