@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     # DEEPINFRA_API_KEY — no new credential required.
     padrino_guard_model: str = "deepinfra/meta-llama/Llama-Guard-3-8B"
 
+    # Global spend governor (US-095). Hard ceiling on cumulative AI spend
+    # across all house-funded games.  $200 is the operator-approved budget;
+    # override via PADRINO_GLOBAL_SPEND_CAP_USD.
+    padrino_global_spend_cap_usd: float = 200.0
+
     # Broadcast cadence (US-088). Delays (ms) applied by the SSE transport layer
     # between consecutive public_event_v1 frames.  Tune without a code change.
     padrino_broadcast_cadence_chat_ms: int = 2500
