@@ -28,6 +28,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
@@ -55,7 +56,16 @@ from padrino.api.pagination import (
 )
 from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
 from padrino.core.spectator_projection import project_events_for_spectator
-from padrino.db.models import ApiKey, Game, GameEvent, GameSeat, IngestedGame
+from padrino.db.models import (
+    AgentBuild,
+    ApiKey,
+    Game,
+    GameEvent,
+    GameSeat,
+    IngestedGame,
+    League,
+    Rating,
+)
 from padrino.db.repositories import ingested_games as ingested_games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.gauntlets.evaluation import evaluate_gauntlet, redact_for_public
@@ -68,6 +78,8 @@ from padrino.ratings.model_rollup import (
 from padrino.ratings.model_rollup import (
     entry_to_response as model_entry_to_response,
 )
+from padrino.ratings.openskill_service import SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL
+from padrino.ratings.provisional_and_decay import apply_decay, days_idle, is_provisional, to_ordinal
 from padrino.ratings.public_leaderboard import (
     compute_public_leaderboard,
     entry_to_response,
@@ -878,12 +890,119 @@ async def public_recent_index(
     )
 
 
+# ---------------------------------------------------------------------------
+# Public ladder endpoint (US-100)
+# ---------------------------------------------------------------------------
+
+
+class PublicLadderQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ruleset_id: str = Field(min_length=1)
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+
+
+class PublicLadderEntry(BaseModel):
+    agent_build_id: uuid.UUID
+    display_name: str
+    version: str
+    ordinal: int
+    provisional: bool
+    games: int
+    last_game_at: datetime | None
+
+
+class PublicLadderResponse(BaseModel):
+    ruleset_id: str
+    entries: list[PublicLadderEntry]
+    next_cursor: str | None = None
+    total_estimate: int
+
+
+@router.get(
+    "/public/ladder",
+    response_model=PublicLadderResponse,
+)
+async def public_ladder(
+    query: Annotated[PublicLadderQuery, Query()],
+    request: Request,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicLadderResponse:
+    """Return per-ruleset agent ladder ranked by ELO-style ordinal.
+
+    Ordinal is derived from OpenSkill (mu, sigma) with sigma inflation applied
+    after the configured grace period of idleness. Provisional agents (< N games)
+    are flagged but still included in the ranking.
+    """
+    cfg: Any = getattr(request.app.state, "auth_settings", None) or get_settings()
+    now = datetime.now(UTC)
+
+    stmt = (
+        select(Rating, AgentBuild)
+        .join(AgentBuild, Rating.agent_build_id == AgentBuild.id)
+        .join(League, Rating.league_id == League.id)
+        .where(
+            League.ruleset_id == query.ruleset_id,
+            Rating.scope_type == SCOPE_GLOBAL,
+            Rating.scope_value == SCOPE_VALUE_GLOBAL,
+        )
+    )
+    rows = list((await session.execute(stmt)).all())
+
+    threshold: int = cfg.padrino_provisional_game_threshold
+    grace_days: int = cfg.padrino_rating_decay_idle_days
+    decay_rate: float = cfg.padrino_rating_decay_sigma_per_day
+
+    entries: list[PublicLadderEntry] = []
+    for rating, build in rows:
+        idle = days_idle(rating.last_game_at, now=now)
+        effective_idle = max(0, idle - grace_days)
+        decayed_sigma = apply_decay(rating.sigma, effective_idle, decay_per_day=decay_rate)
+        ordinal = to_ordinal(rating.mu, decayed_sigma)
+        provisional = is_provisional(rating.games, threshold=threshold)
+        entries.append(
+            PublicLadderEntry(
+                agent_build_id=build.id,
+                display_name=build.display_name,
+                version=build.version,
+                ordinal=ordinal,
+                provisional=provisional,
+                games=rating.games,
+                last_game_at=rating.last_game_at,
+            )
+        )
+
+    entries.sort(key=lambda e: (-e.ordinal, str(e.agent_build_id)))
+
+    start = 0
+    if query.cursor is not None:
+        try:
+            start = decode_index_cursor(query.cursor)
+        except InvalidCursorError as exc:
+            raise invalid_cursor_error() from exc
+    total = len(entries)
+    page = entries[start : start + query.limit]
+    next_cursor = encode_index_cursor(start + query.limit) if start + query.limit < total else None
+
+    return PublicLadderResponse(
+        ruleset_id=query.ruleset_id,
+        entries=page,
+        next_cursor=next_cursor,
+        total_estimate=total,
+    )
+
+
 __all__ = [
     "PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS",
     "PublicChatEntry",
     "PublicEventEntry",
     "PublicEventsResponse",
     "PublicGameResponse",
+    "PublicLadderEntry",
+    "PublicLadderQuery",
+    "PublicLadderResponse",
     "PublicLeaderboardEntryResponse",
     "PublicLeaderboardResponse",
     "PublicLiveGameEntry",
@@ -900,6 +1019,7 @@ __all__ = [
     "PublicTranscriptResponse",
     "_live_cadence",
     "public_game_live_sse",
+    "public_ladder",
     "public_live_index",
     "public_recent_index",
     "require_public_read",
