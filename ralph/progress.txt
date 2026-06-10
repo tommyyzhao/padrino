@@ -11,6 +11,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T11:00 - US-090
+- Added `GET /public/live` returning all LIVE games as `PublicLiveGameEntry` (game_id, ruleset_id, current_phase, players_alive) — spoiler-safe by schema (no terminal_result field).
+- Added `GET /public/recent?limit=&cursor=` returning RECENT games with `terminal_result` exposed; paginated via `encode_index_cursor`/`decode_index_cursor` (offset-based, newest-first).
+- `players_alive` count derived by querying `GameSeat.alive=True` per game in Python (avoids complex SQLAlchemy aggregate typing); zero for games with no seats.
+- Created `tests/api/test_public_live_index.py` with 12 tests: LIVE-only filter, outcome omission, HIDDEN/RECENT exclusion, players_alive field presence, total==len(items), RECENT outcome exposure, LIVE/HIDDEN exclusion from recent, pagination limit, cursor no-overlap, last-page null cursor.
+- Files changed: `src/padrino/api/routes/public.py`, `tests/api/test_public_live_index.py`
+- **Learnings for future iterations:**
+  - Spoiler safety for LIVE index is enforced by the response schema itself (`PublicLiveGameEntry` has no `terminal_result` field) — no runtime filtering needed.
+  - Use `is_(True)` not `== True` for SQLAlchemy boolean columns to avoid potential dialect issues.
+  - `encode_index_cursor`/`decode_index_cursor` (offset-based) is the right tool for paginating in-memory ordered lists; `paginate_keyset` is for DB-ordered ascending keyset pagination.
+---
+
 ## 2026-06-10T10:00 - US-089
 - Added `GET /public/games/{game_id}/live` SSE endpoint in `src/padrino/api/routes/public.py`; streams `public_event_v1` frames at planned cadence, refuses HIDDEN/missing games with 404, honors `Last-Event-ID` header and `?after=` cursor for resume, applies `?speed=` multiplier (capped at 100x) to per-frame delays.
 - Introduced `_live_cadence()` as an injectable FastAPI dependency wrapping `default_cadence()` so tests can inject zero-delay `CadenceConfig` via `app.dependency_overrides`.
