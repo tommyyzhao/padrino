@@ -20,7 +20,7 @@
       ],
       "dependencies": [],
       "priority": 86,
-      "passes": false,
+      "passes": true,
       "notes": "D2 / Phase 0. The stable seam every later phase reads from."
     },
     {
