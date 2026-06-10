@@ -11,6 +11,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T24:00 - US-103
+- Added `RoleClaimed` event type and `RoleClaimedPayload` to `src/padrino/core/engine/events.py`; updated `Event` union, `EVENT_TYPES` tuple, and `__all__` — the PUBLIC structured event analytics reads for claim extraction.
+- Extended `src/padrino/analytics/deterministic.py` with `ClaimRecord`, `CounterClaimGroup`, `ClaimAnalysis`, `HeadToHeadEntry` dataclasses and `compute_claim_analysis(events)` + `compute_head_to_head_matrix(events, agent_map)` pure functions.
+- Created `tests/analytics/test_deterministic_relational.py` with 22 tests: claim extraction/ordering, counter-claim detection (same role claimed by 2+ players), matrix canonical ordering (agent_a < agent_b = no reversed duplicates), win counts for TOWN/MAFIA/DRAW wins, cross-faction-only pairs, partial agent_map, and edge cases.
+- Files changed: `src/padrino/core/engine/events.py`, `src/padrino/analytics/deterministic.py`, `tests/core/test_events.py`, `tests/analytics/test_deterministic_relational.py`
+- **Learnings for future iterations:**
+  - Adding a new event type requires updating 4 places in `events.py` (payload class, event class, `Event` union, `EVENT_TYPES` tuple + `__all__`), and updating `tests/core/test_events.py` (add to expected set, add sample to `_all_events()`).
+  - `claimed_role` as the payload key name passes the `FORBIDDEN_PAYLOAD_KEYS` check (forbidden key is `"role"`, not substring match); this is the safe pattern for structured claims.
+  - Head-to-head matrix accepts `agent_map: Mapping[str, str]` as an injected parameter (not from events) so the pure function stays DB-free while callers can populate it from `GameSeat` rows.
+  - Canonical ordering `(min_id, max_id)` ensures no duplicate reversed pairs and makes the matrix symmetric to assert over.
+---
+
 ## 2026-06-10T23:00 - US-102
 - Created `src/padrino/analytics/deterministic.py` with pure functions: `compute_game_analytics(events) -> GameAnalytics` computing per-role win rates, voting accuracy (votes that hit actual MAFIA), and survival curves by role; all from raw internal event log including SYSTEM events.
 - Added `AnalyticsAggregate` ORM model to `src/padrino/db/models.py` keyed by `(ruleset_id, agent_build_id, version)` with JSON columns for serialized role win rates and survival curve; migration 0020.
