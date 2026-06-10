@@ -5,10 +5,12 @@ import type {
   GauntletListEntry,
   GauntletReport,
   PublicEventsResponse,
+  PublicGameAnalyticsResponse,
   PublicGameResponse,
   PublicLadderResponse,
   PublicLeaderboardResponse,
   PublicLiveIndexResponse,
+  PublicModelAnalyticsResponse,
   PublicModelLeaderboardResponse,
   PublicRecentIndexResponse
 } from './types';
@@ -126,6 +128,14 @@ export class PadrinoClient {
     cursor?: string | null;
   }): Promise<PublicLadderResponse> {
     return this.request('/public/ladder', params);
+  }
+
+  publicGameAnalytics(gameId: string): Promise<PublicGameAnalyticsResponse> {
+    return this.request(`/public/games/${encodeURIComponent(gameId)}/analytics`);
+  }
+
+  publicModelAnalytics(agentBuildId: string): Promise<PublicModelAnalyticsResponse> {
+    return this.request(`/public/models/${encodeURIComponent(agentBuildId)}/analytics`);
   }
 
   publicGauntletReport(gauntletId: string): Promise<GauntletReport> {

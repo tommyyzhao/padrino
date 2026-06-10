@@ -3,14 +3,19 @@
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
-  import type { PublicLadderEntry, PublicRecentGameEntry } from '$lib/api/types';
+  import type {
+    PublicLadderEntry,
+    PublicModelAnalyticsResponse,
+    PublicRecentGameEntry
+  } from '$lib/api/types';
 
   const RULESETS = ['mini7_v1'];
 
-  let agentBuildId = $derived($page.params.id);
+  let agentBuildId = $derived($page.params.id ?? '');
 
   let agent = $state<PublicLadderEntry | null>(null);
   let recentGames = $state<PublicRecentGameEntry[]>([]);
+  let modelAnalytics = $state<PublicModelAnalyticsResponse | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
 
@@ -38,6 +43,12 @@
       recentGames = resp.items;
     } catch {
       // recent games are supplementary; fail silently
+    }
+
+    try {
+      modelAnalytics = await padrino.client.publicModelAnalytics(agentBuildId);
+    } catch {
+      // analytics are supplementary; show section only when present
     }
 
     loading = false;
@@ -97,6 +108,37 @@
       </div>
     </Card>
   </div>
+{/if}
+
+{#if modelAnalytics !== null}
+  <section class="mt-6" data-testid="model-analytics">
+    <h2 class="mb-3 text-lg font-semibold">Analytics</h2>
+    <div class="grid gap-4 sm:grid-cols-2">
+      <Card>
+        <h3 class="mb-2 text-sm font-semibold">Voting Accuracy</h3>
+        <p class="text-2xl font-semibold" data-testid="model-analytics-vote-rate">
+          {(modelAnalytics.voting_accuracy.rate * 100).toFixed(1)}%
+        </p>
+        <p class="mt-1 text-xs text-muted-foreground">
+          {modelAnalytics.voting_accuracy.accurate_votes}/{modelAnalytics.voting_accuracy.total_votes}
+          votes hit Mafia
+        </p>
+      </Card>
+      {#if modelAnalytics.role_win_rates.length > 0}
+        <Card>
+          <h3 class="mb-2 text-sm font-semibold">Role Win Rates</h3>
+          <ul class="flex flex-col gap-1" data-testid="model-analytics-role-win-rates">
+            {#each modelAnalytics.role_win_rates as rwr (rwr.role)}
+              <li class="flex justify-between text-xs" data-testid="model-analytics-role-row">
+                <span class="font-mono">{rwr.role}</span>
+                <span>{rwr.wins}/{rwr.games} ({(rwr.rate * 100).toFixed(1)}%)</span>
+              </li>
+            {/each}
+          </ul>
+        </Card>
+      {/if}
+    </div>
+  </section>
 {/if}
 
 <section class="mt-4" data-testid="model-recent-games">
