@@ -144,6 +144,13 @@ class Settings(BaseSettings):
     padrino_max_games_per_day: int = 20
     padrino_max_concurrent_games: int = 3
 
+    # Judge sampling enrichment (US-105). ``padrino_judge_sample_rate`` controls
+    # the fraction of unevaluated completed games selected per batch run.
+    # ``padrino_judge_max_games_per_run`` is a hard per-invocation ceiling that
+    # acts as the per-run cost cap (one game = one judge LLM call).
+    padrino_judge_sample_rate: float = 0.1
+    padrino_judge_max_games_per_run: int = 5
+
     # Broadcast cadence (US-088). Delays (ms) applied by the SSE transport layer
     # between consecutive public_event_v1 frames.  Tune without a code change.
     padrino_broadcast_cadence_chat_ms: int = 2500

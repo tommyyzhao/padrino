@@ -431,6 +431,36 @@ class AnalyticsAggregate(Base):
     )
 
 
+class JudgeEnrichmentCard(Base):
+    """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
+
+    Keyed by (agent_build_id, role, ruleset_id).  Stores average judge dimension
+    scores across all evaluated games the agent played in the given role.
+    Clearly separate from rating tables (Rating, RatingEvent) — judge output
+    never writes a Rating row.
+    """
+
+    __tablename__ = "judge_enrichment_cards"
+    __table_args__ = (
+        UniqueConstraint("agent_build_id", "role", "ruleset_id", name="uq_judge_enrichment_card"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    games_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    avg_persuasion: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    avg_deception: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    avg_logical_consistency: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    avg_social_heuristics: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 __all__ = [
     "AgentBuild",
     "AnalyticsAggregate",
@@ -442,6 +472,7 @@ __all__ = [
     "Gauntlet",
     "GauntletRosterSlot",
     "IngestedGame",
+    "JudgeEnrichmentCard",
     "League",
     "LlmCall",
     "ModelConfig",
