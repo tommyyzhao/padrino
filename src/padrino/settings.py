@@ -163,6 +163,15 @@ class Settings(BaseSettings):
     # per client IP. Excess connections are rejected with 429.
     padrino_sse_max_connections_per_ip: int = 5
 
+    # Retention / archival (US-108). ``padrino_raw_payload_ttl_days`` controls
+    # when heavy llm_call columns (request_json, raw_response) are scrubbed for
+    # all completed games.  ``padrino_non_broadcastable_game_ttl_days`` controls
+    # when non-broadcastable game rows (+ cascades) are hard-deleted.
+    # Broadcastable games are never hard-deleted — ratings and replay data are
+    # kept indefinitely.
+    padrino_raw_payload_ttl_days: int = 30
+    padrino_non_broadcastable_game_ttl_days: int = 7
+
     def build_routing_policy(
         self,
         *,
