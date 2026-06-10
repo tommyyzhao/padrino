@@ -11,6 +11,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T19:00 - US-098
+- Created `src/padrino/scheduler/continuous_matchmaking.py` with `run_continuous_matchmaking_tick(session_factory, *, settings, now, guard, adapter_factory) -> bool`; checks `padrino_enable_continuous_matchmaking` flag → `admission.admit()` → loads curated roster (active AgentBuilds) + match history from DB → `matchmaker.next_match()` → `run_tournament_from_roster(n_games=1)` → `is_broadcastable()` per game → marks `is_broadcastable=True` + promotes to LIVE on pass.
+- Added `padrino_enable_continuous_matchmaking: bool = False` to `Settings`.
+- Extended `build_scheduled_gauntlet_tick_hook` in `bootstrap.py` to accept an optional `guard: GuardModelAdapter | None` parameter and call the continuous matchmaking tick when the feature flag is enabled.
+- Created `tests/scheduler/test_continuous_matchmaking.py` with 3 tests: disabled → no-op; enabled+admitted → one game completed, is_broadcastable=True, broadcast_state=LIVE; daily cap=0 → skipped, no game created.
+- Files changed: `src/padrino/scheduler/continuous_matchmaking.py`, `src/padrino/scheduler/bootstrap.py`, `src/padrino/settings.py`, `tests/scheduler/test_continuous_matchmaking.py`
+- **Learnings for future iterations:**
+  - SQLAlchemy identity map: `session.get(Game, gid)` inside the same session returns the same in-memory object already loaded in that session; setting `game.is_broadcastable = True` before calling `mark_live(session, gid)` works because `mark_live` re-fetches via identity map (same object, already marked).
+  - Load curated roster as active AgentBuilds (`AgentBuild.active.is_(True)`) — no new table needed; curated = admin-controlled via the `active` flag.
+  - Match history can be reconstructed from `Game + GameSeat` (completed games + their seat-agent mappings) without a dedicated history table.
+---
+
 ## 2026-06-10T18:00 - US-097
 - Created `src/padrino/matchmaking/` package with `matchmaker.py` exposing `MatchRecord` (frozen dataclass, participants tuple), `MatchPlan` (dataclass, ruleset_id/gauntlet_seed/roster_by_seat), and `next_match(roster, history, *, ruleset_id, seed) -> MatchPlan`.
 - `next_match` is pure: uses `SeededRng` for deterministic tie-breaking, `seat_permutation` for faction rotation, and `dict.fromkeys(roster, 0)` + stable sort by play count to prefer least-played agents.
