@@ -114,6 +114,14 @@ class Settings(BaseSettings):
     padrino_enable_behavioral_evaluation: bool = False
     padrino_behavioral_judge_model: str = "xiaomi/mimo-v2.5-pro"
 
+    # Broadcast cadence (US-088). Delays (ms) applied by the SSE transport layer
+    # between consecutive public_event_v1 frames.  Tune without a code change.
+    padrino_broadcast_cadence_chat_ms: int = 2500
+    padrino_broadcast_cadence_phase_ms: int = 3000
+    padrino_broadcast_cadence_elimination_ms: int = 4000
+    padrino_broadcast_cadence_resolution_ms: int = 3500
+    padrino_broadcast_cadence_default_ms: int = 1500
+
     def build_routing_policy(
         self,
         *,
