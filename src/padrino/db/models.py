@@ -159,6 +159,9 @@ class Game(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     current_phase: Mapped[str | None] = mapped_column(String, nullable=True)
     event_hash_head: Mapped[str | None] = mapped_column(String, nullable=True)
+    broadcast_state: Mapped[str] = mapped_column(
+        String, nullable=False, default="HIDDEN", server_default="HIDDEN"
+    )
 
 
 class GameSeat(Base):
