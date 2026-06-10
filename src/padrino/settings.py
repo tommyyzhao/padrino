@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     padrino_enable_behavioral_evaluation: bool = False
     padrino_behavioral_judge_model: str = "xiaomi/mimo-v2.5-pro"
 
+    # Moderation gate (US-093). Guard model is a DeepInfra-hosted Llama-Guard
+    # family model routed through the existing LiteLLM adapter with
+    # DEEPINFRA_API_KEY — no new credential required.
+    padrino_guard_model: str = "deepinfra/meta-llama/Llama-Guard-3-8B"
+
     # Broadcast cadence (US-088). Delays (ms) applied by the SSE transport layer
     # between consecutive public_event_v1 frames.  Tune without a code change.
     padrino_broadcast_cadence_chat_ms: int = 2500
