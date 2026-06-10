@@ -130,7 +130,7 @@
         "US-089"
       ],
       "priority": 91,
-      "passes": false,
+      "passes": true,
       "notes": "Loop owns UI (Playwright-gated); human does final 10% polish."
     },
     {

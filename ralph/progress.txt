@@ -11,6 +11,20 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T12:00 - US-091
+- Created `web/dashboard/src/routes/watch/[id]/+page.svelte` — SvelteKit live-viewer page consuming `GET /public/games/{id}/live` SSE endpoint via native `EventSource` API.
+- Renders: phase badge, seat grid (alive/dead tracking via `PlayerEliminated` events), public chat feed, vote tally, outcome banner (ONLY after `GameTerminated` frame — spoiler-safe).
+- EventSource auto-reconnect uses Last-Event-ID header natively; connection is closed when game terminates.
+- Created `web/dashboard/tests/e2e/watch.spec.ts` with 2 Playwright tests: (1) base events without terminal — phase/chat/seats/votes render, outcome banner absent; (2) events with `GameTerminated` — outcome banner appears with winner, status shows "Ended".
+- SSE mocked in tests via `page.route` + `route.fulfill({ contentType: 'text/event-stream', body: sseBody })`; reconnect aborted via `route.abort('failed')` to prevent duplicate event delivery.
+- Files changed: `web/dashboard/src/routes/watch/[id]/+page.svelte`, `web/dashboard/tests/e2e/watch.spec.ts`
+- **Learnings for future iterations:**
+  - Playwright can mock SSE by fulfilling with `contentType: 'text/event-stream'` and a complete SSE body string; browser EventSource parses it correctly and fires all events.
+  - Abort reconnect requests with `route.abort('failed')` in the route handler (after first fulfillment) to prevent duplicate events from re-delivering the same SSE body.
+  - `sse = false; prerender = false` in `+layout.ts` means the whole app is a pure SPA — no SSR guards needed for browser APIs like `EventSource`.
+  - Vote tally is cleared on `DayVoteResolved`/`PhaseResolved` events; the seat grid tracks all seen `actor_player_id` values as alive, then marks via `PlayerEliminated`.
+---
+
 ## 2026-06-10T11:00 - US-090
 - Added `GET /public/live` returning all LIVE games as `PublicLiveGameEntry` (game_id, ruleset_id, current_phase, players_alive) — spoiler-safe by schema (no terminal_result field).
 - Added `GET /public/recent?limit=&cursor=` returning RECENT games with `terminal_result` exposed; paginated via `encode_index_cursor`/`decode_index_cursor` (offset-based, newest-first).
