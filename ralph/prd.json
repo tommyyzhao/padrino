@@ -424,7 +424,7 @@
         "US-102"
       ],
       "priority": 105,
-      "passes": false,
+      "passes": true,
       "notes": "D6. HUMAN-NEEDED: judge model key (integration-gated). Calibration deferred."
     },
     {

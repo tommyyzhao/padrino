@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T26:00 - US-105
+- Created `src/padrino/ratings/judge_sampling.py` with `run_sampled_judge_enrichment(session_factory, *, settings, judge_adapter)` — samples `ceil(n_candidates * padrino_judge_sample_rate)` unevaluated completed games (capped by `padrino_judge_max_games_per_run`), evaluates them via the existing judge pipeline, and aggregates scores into `JudgeEnrichmentCard` trend cards keyed by `(agent_build_id, role, ruleset_id)`.
+- Added `JudgeEnrichmentCard` ORM model to `src/padrino/db/models.py` with average scores (persuasion, deception, logical_consistency, social_heuristics) and `games_count`; migration 0021; clearly separate from `Rating`/`RatingEvent` tables.
+- Added `padrino_judge_sample_rate: float = 0.1` and `padrino_judge_max_games_per_run: int = 5` to `Settings`; created `tests/ratings/test_judge_sampling.py` with 7 tests: sampling fraction, cap stop, no rating rows written, spend cap gates run, no eligible games, correct averages after aggregation, and idempotent re-run skip.
+- Files changed: `src/padrino/ratings/judge_sampling.py`, `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0021_judge_enrichment_cards.py`, `src/padrino/settings.py`, `tests/ratings/test_judge_sampling.py`
+- **Learnings for future iterations:**
+  - `_refresh_enrichment_cards` joins `BehavioralEvaluation → GameSeat → Game` on `(game_id, public_player_id)` to get the role and ruleset_id for each scored seat — the role is stored on `GameSeat`, not on `BehavioralEvaluation`.
+  - `math.ceil(n * rate)` with no `max(1, ...)` allows 0 games when rate is 0 (correct); for positive rates and non-empty candidate lists, ceil always returns ≥ 1.
+  - Per-run cap via `padrino_judge_max_games_per_run` (game count) is simpler and more testable than a USD-based per-run cap when mock adapters don't create `LlmCall` rows.
+---
+
 ## 2026-06-10T25:00 - US-104
 - Added `GET /public/games/{game_id}/analytics` and `GET /public/models/{agent_build_id}/analytics` endpoints to `src/padrino/api/routes/public.py`; per-game analytics computed on-the-fly from `GameEvent` rows using `compute_game_analytics` + `compute_claim_analysis`; model analytics served from stored `AnalyticsAggregate` rows.
 - Spoiler safety: LIVE games return `winner=null` and `role_win_rates=null`; RECENT games return full analytics. Non-broadcastable and HIDDEN games return 404.
