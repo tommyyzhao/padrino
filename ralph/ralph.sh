@@ -6,6 +6,10 @@ set -e
 
 # Parse arguments
 TOOL="claude"  # Default to claude; pass --tool amp to use amp.
+# Pin the model explicitly: a bare `claude --print` inherits the operator's
+# ~/.claude/settings.json model (currently a 1M-context Opus-tier pin), which
+# would run the whole loop at ~3x Sonnet cost. Override via RALPH_CLAUDE_MODEL.
+CLAUDE_MODEL="${RALPH_CLAUDE_MODEL:-claude-sonnet-4-6}"
 # Default high enough to clear every remaining `passes: false` story in
 # ralph/prd.json with retry headroom. The loop exits early on the
 # <promise>COMPLETE</promise> sentinel, so over-allocating is free.
@@ -115,7 +119,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     OUTPUT=$(cat "$SCRIPT_DIR/prompt.md" | amp --dangerously-allow-all 2>&1 | tee /dev/stderr) || true
   else
     # Claude Code: use --dangerously-skip-permissions for autonomous operation, --print for output
-    OUTPUT=$(claude --dangerously-skip-permissions --print < "$SCRIPT_DIR/prompt.md" 2>&1 | tee /dev/stderr) || true
+    OUTPUT=$(claude --model "$CLAUDE_MODEL" --dangerously-skip-permissions --print < "$SCRIPT_DIR/prompt.md" 2>&1 | tee /dev/stderr) || true
   fi
   
   # Check for completion signal
