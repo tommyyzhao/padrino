@@ -176,7 +176,7 @@
         "US-086"
       ],
       "priority": 93,
-      "passes": false,
+      "passes": true,
       "notes": "D5. DECIDED 2026-06-09: guard = Llama-Guard-family model on DeepInfra via the EXISTING DeepInfra key (no new credential; real call still integration-gated). Judge stays padrino_behavioral_judge_model (xiaomi/mimo-v2.5-pro, already configured). Calibration set deferred (tuning only)."
     },
     {

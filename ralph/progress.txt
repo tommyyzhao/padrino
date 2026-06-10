@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T14:00 - US-093
+- Created `src/padrino/public/moderation.py` with `deterministic_first_pass` (regex/keyword first-pass filter), `GuardModelAdapter` runtime-checkable Protocol, `LiteLlmGuardAdapter` (real Llama-Guard via LiteLLM, integration-only), and `is_broadcastable(events, guard)` fail-closed async gate.
+- Added `padrino_guard_model: str = "deepinfra/meta-llama/Llama-Guard-3-8B"` to `Settings` — routes through existing `DEEPINFRA_API_KEY`, no new credential.
+- Created `tests/public/test_moderation_gate.py` with 17 tests covering: deterministic first-pass (clean/toxic/case-insensitive/non-chat), fail-closed paths (guard=None, guard error, guard failing), happy path (clean transcript + passing guard), short-circuit behaviour (toxic line blocks before guard), and settings smoke-test.
+- Files changed: `src/padrino/public/moderation.py`, `src/padrino/settings.py`, `tests/public/test_moderation_gate.py`
+- **Learnings for future iterations:**
+  - `@runtime_checkable` on the `Protocol` lets tests assert `isinstance(mock, GuardModelAdapter)` without inheritance — clean duck-typing check.
+  - `_TOXIC_PATTERNS` includes a `toxic_word` sentinel so unit tests can seed known-failing messages without real slurs in source code.
+  - `guard=None` is the "unavailable" path — explicitly fail-closed by the gate so misconfigured deployments don't accidentally broadcast.
+---
+
 ## 2026-06-10T13:00 - US-092
 - Added `PublicLiveGameEntry`, `PublicLiveIndexResponse`, `PublicRecentGameEntry`, `PublicRecentIndexResponse` types to `web/dashboard/src/lib/api/types.ts`.
 - Added `publicLiveIndex()` and `publicRecentIndex()` methods to `PadrinoClient` in `web/dashboard/src/lib/api/client.ts`.
