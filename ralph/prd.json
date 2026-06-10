@@ -163,7 +163,7 @@
       "description": "As the platform, before any AI-generated game is shown publicly I need a moderation gate that marks it broadcastable, so toxic/unsafe/prompt-injected model output never reaches viewers.",
       "acceptanceCriteria": [
         "New `src/padrino/public/moderation.py` with a deterministic first-pass (regex/keyword/structural filters over public messages) and a pluggable `GuardModelAdapter` protocol for an LLM guard pass.",
-        "Settings `padrino_guard_model: str` (default a DeepInfra-hosted Llama-Guard-family model) routed through the existing LiteLLM adapter using the existing `DEEPINFRA_API_KEY` — NO new credential or provider integration.",
+        "Settings `padrino_guard_model: str` (default a DeepInfra-hosted Llama-Guard-family model) routed through the existing LiteLLM adapter using the existing `DEEPINFRA_API_KEY` \u2014 NO new credential or provider integration.",
         "A game gets `is_broadcastable: bool`; DEFAULT FAIL-CLOSED \u2014 if the guard pass is unavailable or errors, the game is NOT broadcastable.",
         "Real guard-model call is behind `@pytest.mark.integration` (needs a key); the deterministic path + fail-closed default are covered by default unit tests.",
         "Test `tests/public/test_moderation_gate.py` asserts: clean transcript -> broadcastable; transcript with a seeded toxic line -> not broadcastable; guard error -> not broadcastable.",
@@ -217,7 +217,7 @@
       ],
       "dependencies": [],
       "priority": 95,
-      "passes": false,
+      "passes": true,
       "notes": "D3. $200 = cumulative global ceiling (human decision; configurable)."
     },
     {

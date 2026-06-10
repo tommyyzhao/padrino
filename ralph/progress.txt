@@ -11,6 +11,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T16:00 - US-095
+- Created `src/padrino/economics/` package with `spend_governor.py`; exposes `cumulative_spend_usd(session)` and `can_start_game(session, settings) -> bool` that sums all `LlmCall.cost_usd` rows and returns False (with `spend.cap.reached` warning log) when total >= `padrino_global_spend_cap_usd`.
+- Added `padrino_global_spend_cap_usd: float = 200.0` to `Settings`.
+- Created `tests/economics/test_spend_governor.py` with 10 tests: zero spend, below-cap, exactly-at-cap flip, above-cap, multi-game cumulative, NULL rows treated as zero, cap read from settings, default cap is 200, empty-table returns 0, sum of mixed calls.
+- Files changed: `src/padrino/economics/__init__.py`, `src/padrino/economics/spend_governor.py`, `src/padrino/settings.py`, `tests/economics/__init__.py`, `tests/economics/test_spend_governor.py`
+- **Learnings for future iterations:**
+  - `func.coalesce(func.sum(col), 0.0)` is the correct SQLAlchemy aggregate for summing a nullable float column — scalar_one() returns `float | None`, so cast defensively.
+  - The governor is intentionally read-only; callers are responsible for checking it before launching and for passing a per-game `cost_cap_usd` to the tournament runner for within-game enforcement.
+---
+
 ## 2026-06-10T15:00 - US-094
 - Added `is_broadcastable: bool` column (default `False`, fail-closed) to `Game` model; migration `0018_game_is_broadcastable.py`.
 - Updated `list_live()` and `list_recent()` in `broadcast_index.py` to filter `is_broadcastable=True`; `mark_live()`/`mark_recent()` now return `None` and refuse to promote non-broadcastable games.
