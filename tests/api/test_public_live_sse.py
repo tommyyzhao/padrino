@@ -44,6 +44,7 @@ async def _make_game(
     broadcast_state: str = BroadcastState.LIVE.value,
     status: str = "RUNNING",
     terminal_result: dict[str, Any] | None = None,
+    is_broadcastable: bool = True,
 ) -> Game:
     g = Game(
         ruleset_id="mini7_v1",
@@ -51,6 +52,7 @@ async def _make_game(
         status=status,
         terminal_result=terminal_result,
         broadcast_state=broadcast_state,
+        is_broadcastable=is_broadcastable,
     )
     session.add(g)
     await session.flush()

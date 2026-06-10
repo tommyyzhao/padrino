@@ -162,6 +162,9 @@ class Game(Base):
     broadcast_state: Mapped[str] = mapped_column(
         String, nullable=False, default="HIDDEN", server_default="HIDDEN"
     )
+    is_broadcastable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
 
 class GameSeat(Base):

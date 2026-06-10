@@ -694,9 +694,14 @@ async def public_game_live_sse(
     emitting each frame.
     """
     game = await session.get(Game, game_id)
-    if game is None or game.broadcast_state not in (
-        BroadcastState.LIVE.value,
-        BroadcastState.RECENT.value,
+    if (
+        game is None
+        or not game.is_broadcastable
+        or game.broadcast_state
+        not in (
+            BroadcastState.LIVE.value,
+            BroadcastState.RECENT.value,
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -847,7 +852,10 @@ async def public_recent_index(
 
     stmt = (
         select(Game)
-        .where(Game.broadcast_state == BroadcastState.RECENT.value)
+        .where(
+            Game.broadcast_state == BroadcastState.RECENT.value,
+            Game.is_broadcastable.is_(True),
+        )
         .order_by(Game.created_at.desc())
     )
     all_games = list((await session.execute(stmt)).scalars())

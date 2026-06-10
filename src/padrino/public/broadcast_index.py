@@ -69,10 +69,15 @@ def _to_entry(game: Game, *, spoiler_safe: bool) -> GamePublicEntry:
 async def list_live(session: AsyncSession) -> list[GamePublicEntry]:
     """Return all games currently in LIVE broadcast state, spoiler-safe.
 
+    Only games with ``is_broadcastable=True`` are returned — the moderation gate
+    is enforced at the query layer as defense-in-depth.
     ``terminal_result`` is always ``None`` in the returned entries regardless
     of the stored value — outcome is hidden until broadcast completes.
     """
-    stmt = select(Game).where(Game.broadcast_state == BroadcastState.LIVE.value)
+    stmt = select(Game).where(
+        Game.broadcast_state == BroadcastState.LIVE.value,
+        Game.is_broadcastable.is_(True),
+    )
     result = await session.execute(stmt)
     return [_to_entry(g, spoiler_safe=True) for g in result.scalars()]
 
@@ -80,11 +85,15 @@ async def list_live(session: AsyncSession) -> list[GamePublicEntry]:
 async def list_recent(session: AsyncSession, *, limit: int = 20) -> list[GamePublicEntry]:
     """Return recently broadcast games (RECENT state), WITH outcome exposed.
 
+    Only games with ``is_broadcastable=True`` are returned.
     Results are ordered newest-first by ``created_at``.
     """
     stmt = (
         select(Game)
-        .where(Game.broadcast_state == BroadcastState.RECENT.value)
+        .where(
+            Game.broadcast_state == BroadcastState.RECENT.value,
+            Game.is_broadcastable.is_(True),
+        )
         .order_by(Game.created_at.desc())
         .limit(limit)
     )
@@ -93,9 +102,13 @@ async def list_recent(session: AsyncSession, *, limit: int = 20) -> list[GamePub
 
 
 async def mark_live(session: AsyncSession, game_id: uuid.UUID) -> Game | None:
-    """Transition a game to LIVE broadcast state."""
+    """Transition a game to LIVE broadcast state.
+
+    Returns ``None`` if the game does not exist or is not broadcastable.
+    The moderation gate (US-093) must pass before calling this function.
+    """
     game = await session.get(Game, game_id)
-    if game is None:
+    if game is None or not game.is_broadcastable:
         return None
     game.broadcast_state = BroadcastState.LIVE.value
     await session.flush()
@@ -103,9 +116,12 @@ async def mark_live(session: AsyncSession, game_id: uuid.UUID) -> Game | None:
 
 
 async def mark_recent(session: AsyncSession, game_id: uuid.UUID) -> Game | None:
-    """Transition a game to RECENT broadcast state (broadcast complete)."""
+    """Transition a game to RECENT broadcast state (broadcast complete).
+
+    Returns ``None`` if the game does not exist or is not broadcastable.
+    """
     game = await session.get(Game, game_id)
-    if game is None:
+    if game is None or not game.is_broadcastable:
         return None
     game.broadcast_state = BroadcastState.RECENT.value
     await session.flush()

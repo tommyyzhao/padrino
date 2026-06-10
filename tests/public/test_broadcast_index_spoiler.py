@@ -35,12 +35,14 @@ async def _make_game(
     *,
     terminal_result: dict[str, Any] | None = None,
     status: str = "RUNNING",
+    is_broadcastable: bool = True,
 ) -> Game:
     g = Game(
         ruleset_id="mini7_v1",
         game_seed="test-seed-087",
         status=status,
         terminal_result=terminal_result,
+        is_broadcastable=is_broadcastable,
     )
     session.add(g)
     await session.flush()

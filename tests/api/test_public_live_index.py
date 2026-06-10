@@ -36,6 +36,7 @@ async def _make_game(
     terminal_result: dict[str, Any] | None = None,
     current_phase: str | None = None,
     status: str = "RUNNING",
+    is_broadcastable: bool = True,
 ) -> Game:
     g = Game(
         ruleset_id="mini7_v1",
@@ -44,6 +45,7 @@ async def _make_game(
         terminal_result=terminal_result,
         broadcast_state=broadcast_state,
         current_phase=current_phase,
+        is_broadcastable=is_broadcastable,
     )
     session.add(g)
     await session.flush()
