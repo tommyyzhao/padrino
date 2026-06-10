@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T17:00 - US-096
+- Created `src/padrino/economics/admission.py` with `AdmitDecision` frozen dataclass and `admit(session, settings, *, now) -> AdmitDecision` combining spend cap, daily game count, and concurrency limit; denials short-circuit in priority order and are structured-logged.
+- Added `padrino_max_games_per_day: int = 20` and `padrino_max_concurrent_games: int = 3` to `Settings`.
+- Created `tests/economics/test_admission.py` with 12 tests covering: all-clear admit, spend cap denial, daily cap denial (boundary + yesterday exclusion), concurrency cap denial (boundary + COMPLETED exclusion), priority ordering (spend > daily > concurrency), and default settings values.
+- Files changed: `src/padrino/economics/admission.py`, `src/padrino/settings.py`, `tests/economics/test_admission.py`
+- **Learnings for future iterations:**
+  - Inject `now: datetime | None = None` defaulting to `datetime.now(tz=UTC)` to keep admission logic wall-clock-free in tests; pass a fixed `_NOW` constant from the test module.
+  - Set `Game.created_at` directly on the ORM object before `flush()` to override the Python-side `default=_utcnow` in test fixtures — no need for a separate update query.
+  - `status != "COMPLETED"` is the canonical "active game" predicate, mirroring the scheduler's own `g.status != "COMPLETED"` filter (scheduler.py line 115).
+---
+
 ## 2026-06-10T16:00 - US-095
 - Created `src/padrino/economics/` package with `spend_governor.py`; exposes `cumulative_spend_usd(session)` and `can_start_game(session, settings) -> bool` that sums all `LlmCall.cost_usd` rows and returns False (with `spend.cap.reached` warning log) when total >= `padrino_global_spend_cap_usd`.
 - Added `padrino_global_spend_cap_usd: float = 200.0` to `Settings`.
