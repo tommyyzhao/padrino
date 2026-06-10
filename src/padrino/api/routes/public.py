@@ -22,11 +22,16 @@ spectator scope (or admin) is required.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
+import json
 import uuid
+from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,10 +55,12 @@ from padrino.api.pagination import (
 )
 from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
 from padrino.core.spectator_projection import project_events_for_spectator
-from padrino.db.models import ApiKey, IngestedGame
+from padrino.db.models import ApiKey, Game, GameEvent, IngestedGame
 from padrino.db.repositories import ingested_games as ingested_games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.gauntlets.evaluation import evaluate_gauntlet, redact_for_public
+from padrino.public.broadcast_index import BroadcastState
+from padrino.public.broadcaster import CadenceConfig, default_cadence, plan_broadcast
 from padrino.ratings.model_rollup import (
     detail_for_model,
     rollup_by_model,
@@ -646,6 +653,105 @@ async def public_gauntlet_report(
     return redact_for_public(report)
 
 
+# ---------------------------------------------------------------------------
+# SSE live broadcast endpoint (US-089)
+# ---------------------------------------------------------------------------
+
+#: Maximum speed multiplier for the ?speed= debug param.
+_SSE_SPEED_MAX: float = 100.0
+
+
+def _live_cadence() -> CadenceConfig:
+    """Return the broadcast cadence config for the live SSE endpoint.
+
+    Defined as a FastAPI dependency so tests can inject a zero-delay
+    :class:`CadenceConfig` via ``app.dependency_overrides``.
+    """
+    return default_cadence()
+
+
+@router.get("/public/games/{game_id}/live")
+async def public_game_live_sse(
+    game_id: uuid.UUID,
+    request: Request,
+    after: int | None = Query(default=None),
+    speed: float = Query(default=1.0, ge=0.0001, le=_SSE_SPEED_MAX),
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    cadence: CadenceConfig = Depends(_live_cadence),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Stream a game's broadcast frames as Server-Sent Events.
+
+    Each SSE message carries one ``public_event_v1`` frame; the SSE ``id:``
+    field is set to the event's ``sequence`` number, enabling resumption via
+    the standard ``Last-Event-ID`` reconnect header or the ``?after=``
+    query parameter.
+
+    Only LIVE and RECENT games are served; anything else returns 404.
+    PRIVATE/SYSTEM events are silently dropped (identity-blind via US-086).
+    The optional ``?speed=`` multiplier (capped at 100x) divides each
+    frame's delay for debugging — the transport applies the delay before
+    emitting each frame.
+    """
+    game = await session.get(Game, game_id)
+    if game is None or game.broadcast_state not in (
+        BroadcastState.LIVE.value,
+        BroadcastState.RECENT.value,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="game_not_found_or_not_live",
+        )
+
+    # Resolve cursor: Last-Event-ID header takes precedence over ?after=
+    cursor: int | None = after
+    last_event_id_header = request.headers.get("Last-Event-ID")
+    if last_event_id_header is not None:
+        with contextlib.suppress(ValueError):
+            cursor = int(last_event_id_header)
+
+    stmt = select(GameEvent).where(GameEvent.game_id == game_id).order_by(GameEvent.sequence)
+    result = await session.execute(stmt)
+    raw_events = list(result.scalars())
+
+    event_dicts: list[dict[str, Any]] = [
+        {
+            "sequence": e.sequence,
+            "event_type": e.event_type,
+            "phase": e.phase,
+            "visibility": e.visibility,
+            "actor_player_id": e.actor_player_id,
+            "payload": dict(e.payload) if e.payload else {},
+            "prev_event_hash": e.prev_event_hash,
+            "event_hash": e.event_hash,
+        }
+        for e in raw_events
+    ]
+
+    frames = plan_broadcast(event_dicts, cadence)
+    if cursor is not None:
+        frames = [f for f in frames if f.event["sequence"] > cursor]
+
+    async def _generate() -> AsyncGenerator[str, None]:
+        for frame in frames:
+            seq = frame.event["sequence"]
+            delay_s = (frame.delay_ms / speed) / 1000.0
+            if delay_s > 0:
+                await asyncio.sleep(delay_s)
+            data = json.dumps(frame.event, separators=(",", ":"))
+            yield f"id: {seq}\ndata: {data}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 __all__ = [
     "PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS",
     "PublicChatEntry",
@@ -662,6 +768,8 @@ __all__ = [
     "PublicSubmitterEntry",
     "PublicSubmittersResponse",
     "PublicTranscriptResponse",
+    "_live_cadence",
+    "public_game_live_sse",
     "require_public_read",
     "router",
 ]
