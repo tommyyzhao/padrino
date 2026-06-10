@@ -62,7 +62,7 @@
         "US-086"
       ],
       "priority": 88,
-      "passes": false,
+      "passes": true,
       "notes": "D1 spine. Production/presentation decoupled; engine not modified."
     },
     {

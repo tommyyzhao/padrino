@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T09:00 - US-088
+- Implemented `src/padrino/public/broadcaster.py` with `CadenceConfig` dataclass, `BroadcastFrame` dataclass, and pure `plan_broadcast(events, cadence) -> list[BroadcastFrame]`; PRIVATE/SYSTEM events dropped via `to_public_event_v1`.
+- Added five `padrino_broadcast_cadence_*_ms` settings to `Settings` (chat=2500ms, phase=3000ms, elimination=4000ms, resolution=3500ms, default=1500ms) with `default_cadence()` factory in the broadcaster.
+- Created `tests/public/test_broadcaster_plan.py` with 21 tests covering frame count, ordering, per-event-type delays, and schema version presence.
+- Files changed: `src/padrino/public/broadcaster.py`, `src/padrino/settings.py`, `tests/public/test_broadcaster_plan.py`
+- **Learnings for future iterations:**
+  - `RUF022` enforces isort-style `__all__` ordering where underscore-prefixed names sort before uppercase; use `uv run ruff check --fix` to auto-apply.
+  - `CadenceConfig` and `BroadcastFrame` are `frozen=True` dataclasses — safe to cache/reuse; `default_cadence()` defers the settings import to keep module-level imports clean.
+  - US-089 (SSE endpoint) consumes `BroadcastFrame.delay_ms` — it applies the delay using `asyncio.sleep(frame.delay_ms / 1000)` in the transport, not here.
+---
+
 ## 2026-06-10T08:00 - US-087
 - Added `broadcast_state` column (HIDDEN/LIVE/RECENT) to `Game` model and migration 0017.
 - Created `src/padrino/public/broadcast_index.py` with `BroadcastState` StrEnum, `GamePublicEntry` dataclass, `list_live()` / `list_recent(limit)` / `mark_*` transitions; spoiler protection enforced at query layer.
