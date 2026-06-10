@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     padrino_enable_behavioral_evaluation: bool = False
     padrino_behavioral_judge_model: str = "xiaomi/mimo-v2.5-pro"
 
+    # Continuous matchmaking (US-098). When True the scheduler tick also runs
+    # the matchmaker → game runner → moderation gate pipeline each iteration.
+    # Defaults to False so it must be explicitly opted in by the operator.
+    padrino_enable_continuous_matchmaking: bool = False
+
     # Moderation gate (US-093). Guard model is a DeepInfra-hosted Llama-Guard
     # family model routed through the existing LiteLLM adapter with
     # DEEPINFRA_API_KEY — no new credential required.
