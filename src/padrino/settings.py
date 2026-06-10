@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     # override via PADRINO_GLOBAL_SPEND_CAP_USD.
     padrino_global_spend_cap_usd: float = 200.0
 
+    # Admission / queue policy (US-096). Daily and concurrency caps that bound
+    # how many games run independently of spend.  Defaults are conservative:
+    # 20 games/day and 3 concurrent keeps cost predictable during initial rollout.
+    padrino_max_games_per_day: int = 20
+    padrino_max_concurrent_games: int = 3
+
     # Broadcast cadence (US-088). Delays (ms) applied by the SSE transport layer
     # between consecutive public_event_v1 frames.  Tune without a code change.
     padrino_broadcast_cadence_chat_ms: int = 2500
