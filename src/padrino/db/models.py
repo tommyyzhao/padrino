@@ -92,6 +92,7 @@ class AgentBuild(Base):
     adapter_version: Mapped[str] = mapped_column(String, nullable=False)
     inference_params: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    version: Mapped[str] = mapped_column(String, nullable=False, server_default="v1", default="v1")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -263,6 +264,7 @@ class Rating(Base):
     sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     conservative_score: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     games: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_game_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

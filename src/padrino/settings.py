@@ -114,6 +114,15 @@ class Settings(BaseSettings):
     padrino_enable_behavioral_evaluation: bool = False
     padrino_behavioral_judge_model: str = "xiaomi/mimo-v2.5-pro"
 
+    # Provisional/decay (US-099). An agent is provisional until it has played
+    # at least padrino_provisional_game_threshold rated games. Sigma inflation
+    # kicks in when a rated agent has been idle for more than
+    # padrino_rating_decay_idle_days days; each additional idle day inflates
+    # sigma by padrino_rating_decay_sigma_per_day (fraction, e.g. 0.05 = 5%).
+    padrino_provisional_game_threshold: int = 10
+    padrino_rating_decay_sigma_per_day: float = 0.05
+    padrino_rating_decay_idle_days: int = 30
+
     # Continuous matchmaking (US-098). When True the scheduler tick also runs
     # the matchmaker → game runner → moderation gate pipeline each iteration.
     # Defaults to False so it must be explicitly opted in by the operator.
