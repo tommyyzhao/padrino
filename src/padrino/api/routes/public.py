@@ -37,6 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.analytics.deterministic import compute_claim_analysis, compute_game_analytics
 from padrino.api.auth import (
     SCOPE_ADMIN,
     SCOPE_SPECTATOR,
@@ -58,6 +59,7 @@ from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
 from padrino.core.spectator_projection import project_events_for_spectator
 from padrino.db.models import (
     AgentBuild,
+    AnalyticsAggregate,
     ApiKey,
     Game,
     GameEvent,
@@ -424,6 +426,161 @@ async def public_game_transcript(
     )
 
 
+# ---------------------------------------------------------------------------
+# Analytics endpoints (US-104)
+# ---------------------------------------------------------------------------
+
+
+class PublicVotingAccuracyAnalytics(BaseModel):
+    total_votes: int
+    accurate_votes: int
+    rate: float
+
+
+class PublicSurvivalPointAnalytics(BaseModel):
+    role: str
+    day: int
+    alive_count: int
+    total_count: int
+    fraction: float
+
+
+class PublicRoleWinRateAnalytics(BaseModel):
+    role: str
+    wins: int
+    games: int
+    rate: float
+
+
+class PublicClaimRecordAnalytics(BaseModel):
+    player_id: str
+    claimed_role: str
+    sequence: int
+    phase: str
+
+
+class PublicCounterClaimGroupAnalytics(BaseModel):
+    claimed_role: str
+    claimants: list[str]
+
+
+class PublicGameAnalyticsResponse(BaseModel):
+    game_id: uuid.UUID
+    ruleset_id: str
+    winner: str | None
+    voting_accuracy: PublicVotingAccuracyAnalytics
+    survival_curve: list[PublicSurvivalPointAnalytics]
+    role_win_rates: list[PublicRoleWinRateAnalytics] | None
+    claims: list[PublicClaimRecordAnalytics]
+    counter_claims: list[PublicCounterClaimGroupAnalytics]
+
+
+class PublicModelAnalyticsResponse(BaseModel):
+    agent_build_id: uuid.UUID
+    ruleset_id: str
+    version: str
+    games_played: int
+    role_win_rates: list[PublicRoleWinRateAnalytics]
+    voting_accuracy: PublicVotingAccuracyAnalytics
+    survival_curve: list[PublicSurvivalPointAnalytics]
+    computed_at: datetime
+
+
+@router.get(
+    "/public/games/{game_id}/analytics",
+    response_model=PublicGameAnalyticsResponse,
+)
+async def public_game_analytics(
+    game_id: uuid.UUID,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicGameAnalyticsResponse:
+    """Return deterministic analytics for a broadcastable game.
+
+    LIVE games return spoiler-safe analytics: ``winner`` and ``role_win_rates``
+    are null so the outcome is not revealed before the broadcast completes.
+    RECENT games include the full analytics.
+    """
+    game = await session.get(Game, game_id)
+    if (
+        game is None
+        or not game.is_broadcastable
+        or game.broadcast_state not in (BroadcastState.LIVE.value, BroadcastState.RECENT.value)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="game_not_found_or_not_broadcastable",
+        )
+
+    stmt = select(GameEvent).where(GameEvent.game_id == game_id).order_by(GameEvent.sequence)
+    raw_events = list((await session.execute(stmt)).scalars())
+    event_dicts: list[dict[str, Any]] = [
+        {
+            "sequence": e.sequence,
+            "event_type": e.event_type,
+            "phase": e.phase,
+            "visibility": e.visibility,
+            "actor_player_id": e.actor_player_id,
+            "payload": dict(e.payload) if e.payload else {},
+            "prev_event_hash": e.prev_event_hash,
+            "event_hash": e.event_hash,
+        }
+        for e in raw_events
+    ]
+
+    analytics = compute_game_analytics(event_dicts)
+    claim_analysis = compute_claim_analysis(event_dicts)
+    is_live = game.broadcast_state == BroadcastState.LIVE.value
+
+    return PublicGameAnalyticsResponse(
+        game_id=game_id,
+        ruleset_id=game.ruleset_id,
+        winner=None if is_live else analytics.winner,
+        voting_accuracy=PublicVotingAccuracyAnalytics(
+            total_votes=analytics.voting_accuracy.total_votes,
+            accurate_votes=analytics.voting_accuracy.accurate_votes,
+            rate=analytics.voting_accuracy.rate,
+        ),
+        survival_curve=[
+            PublicSurvivalPointAnalytics(
+                role=sp.role,
+                day=sp.day,
+                alive_count=sp.alive_count,
+                total_count=sp.total_count,
+                fraction=sp.fraction,
+            )
+            for sp in analytics.survival_curve
+        ],
+        role_win_rates=None
+        if is_live
+        else [
+            PublicRoleWinRateAnalytics(
+                role=rwr.role,
+                wins=rwr.wins,
+                games=rwr.games,
+                rate=rwr.rate,
+            )
+            for rwr in analytics.role_win_rates
+        ],
+        claims=[
+            PublicClaimRecordAnalytics(
+                player_id=cr.player_id,
+                claimed_role=cr.claimed_role,
+                sequence=cr.sequence,
+                phase=cr.phase,
+            )
+            for cr in claim_analysis.claims
+        ],
+        counter_claims=[
+            PublicCounterClaimGroupAnalytics(
+                claimed_role=ccg.claimed_role,
+                claimants=list(ccg.claimants),
+            )
+            for ccg in claim_analysis.counter_claims
+        ],
+    )
+
+
 class PublicSubmitterEntry(BaseModel):
     label: str
     key_prefix: str
@@ -596,6 +753,72 @@ async def public_models_leaderboard(
         entries=[PublicModelEntryResponse(**model_entry_to_response(e)) for e in page],  # type: ignore[arg-type]
         next_cursor=next_cursor,
         total_estimate=len(entries),
+    )
+
+
+@router.get(
+    "/public/models/{agent_build_id}/analytics",
+    response_model=PublicModelAnalyticsResponse,
+)
+async def public_model_analytics(
+    agent_build_id: uuid.UUID,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicModelAnalyticsResponse:
+    """Return stored deterministic analytics aggregate for one agent build.
+
+    Analytics are materialized by the offline aggregation job.  Returns 404
+    if no aggregate has been computed yet for this agent.
+    """
+    stmt = (
+        select(AnalyticsAggregate)
+        .where(AnalyticsAggregate.agent_build_id == agent_build_id)
+        .order_by(AnalyticsAggregate.computed_at.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"analytics not found for agent {agent_build_id}",
+        )
+
+    role_win_rates_data: list[dict[str, Any]] = json.loads(row.role_win_rates_json)
+    survival_curve_data: list[dict[str, Any]] = json.loads(row.survival_curve_json)
+    voting_rate = (
+        row.voting_accurate_votes / row.voting_total_votes if row.voting_total_votes > 0 else 0.0
+    )
+
+    return PublicModelAnalyticsResponse(
+        agent_build_id=agent_build_id,
+        ruleset_id=row.ruleset_id,
+        version=row.version,
+        games_played=row.games_played,
+        role_win_rates=[
+            PublicRoleWinRateAnalytics(
+                role=r["role"],
+                wins=r["wins"],
+                games=r["games"],
+                rate=r["wins"] / r["games"] if r["games"] > 0 else 0.0,
+            )
+            for r in role_win_rates_data
+        ],
+        voting_accuracy=PublicVotingAccuracyAnalytics(
+            total_votes=row.voting_total_votes,
+            accurate_votes=row.voting_accurate_votes,
+            rate=voting_rate,
+        ),
+        survival_curve=[
+            PublicSurvivalPointAnalytics(
+                role=sp["role"],
+                day=sp["day"],
+                alive_count=sp["alive_count"],
+                total_count=sp["total_count"],
+                fraction=sp["alive_count"] / sp["total_count"] if sp["total_count"] > 0 else 0.0,
+            )
+            for sp in survival_curve_data
+        ],
+        computed_at=row.computed_at,
     )
 
 
@@ -997,8 +1220,11 @@ async def public_ladder(
 __all__ = [
     "PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS",
     "PublicChatEntry",
+    "PublicClaimRecordAnalytics",
+    "PublicCounterClaimGroupAnalytics",
     "PublicEventEntry",
     "PublicEventsResponse",
+    "PublicGameAnalyticsResponse",
     "PublicGameResponse",
     "PublicLadderEntry",
     "PublicLadderQuery",
@@ -1007,6 +1233,7 @@ __all__ = [
     "PublicLeaderboardResponse",
     "PublicLiveGameEntry",
     "PublicLiveIndexResponse",
+    "PublicModelAnalyticsResponse",
     "PublicModelBuildEntry",
     "PublicModelDetailResponse",
     "PublicModelEntryResponse",
@@ -1014,13 +1241,18 @@ __all__ = [
     "PublicModelLeaderboardResponse",
     "PublicRecentGameEntry",
     "PublicRecentIndexResponse",
+    "PublicRoleWinRateAnalytics",
     "PublicSubmitterEntry",
     "PublicSubmittersResponse",
+    "PublicSurvivalPointAnalytics",
     "PublicTranscriptResponse",
+    "PublicVotingAccuracyAnalytics",
     "_live_cadence",
+    "public_game_analytics",
     "public_game_live_sse",
     "public_ladder",
     "public_live_index",
+    "public_model_analytics",
     "public_recent_index",
     "require_public_read",
     "router",
