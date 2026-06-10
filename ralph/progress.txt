@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T08:00 - US-087
+- Added `broadcast_state` column (HIDDEN/LIVE/RECENT) to `Game` model and migration 0017.
+- Created `src/padrino/public/broadcast_index.py` with `BroadcastState` StrEnum, `GamePublicEntry` dataclass, `list_live()` / `list_recent(limit)` / `mark_*` transitions; spoiler protection enforced at query layer.
+- Created `tests/public/test_broadcast_index_spoiler.py` with 11 tests covering LIVE/RECENT/HIDDEN partition, spoiler omission, state transitions, unknown-game returns-None, and limit enforcement.
+- Files changed: `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0017_game_broadcast_state.py`, `src/padrino/public/broadcast_index.py`, `tests/public/test_broadcast_index_spoiler.py`
+- **Learnings for future iterations:**
+  - `BroadcastState(StrEnum)` is the ruff-preferred pattern; `class Foo(str, enum.Enum)` triggers UP042.
+  - `server_default=` in `op.add_column` handles backfilling existing rows in Alembic migrations; both `default=` (ORM) and `server_default=` (migration/DDL) are needed for a NOT NULL column.
+  - US-088 and US-090 both depend on this `broadcast_state` column — they can query `Game.broadcast_state` via `list_live()` / `list_recent()`.
+---
+
 ## 2026-06-10T00:00 - US-086
 - Implemented `src/padrino/public/projection.py` with `to_public_event_v1()` and `to_public_events_v1()` — stable versioned public envelope wrapping the core spectator projection.
 - Created golden-file test `tests/public/test_projection_contract.py` with 7 tests: golden match, exact-field-set assertion, schema_version check, PlayerEliminated role/faction regression guard, SYSTEM/PRIVATE drop, and Hypothesis property test (no forbidden key survives in any PUBLIC event payload).
