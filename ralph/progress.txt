@@ -11,6 +11,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T21:00 - US-100
+- Added `GET /public/ladder?ruleset_id=` endpoint to `src/padrino/api/routes/public.py`; queries `Rating` rows (GLOBAL scope) joined to `League` (filtered by `ruleset_id`) and `AgentBuild` (for `display_name`, `version`).
+- Applies sigma-decay at read time (impure layer): `effective_idle = max(0, idle_days - padrino_rating_decay_idle_days)` then `apply_decay(sigma, effective_idle)`; computes `ordinal = to_ordinal(mu, decayed_sigma)` and `provisional = is_provisional(games, threshold)`.
+- Results sorted by ordinal DESC (tie-break on `agent_build_id` for determinism); paginated via existing index-cursor mechanism.
+- Created `tests/api/test_public_ladder.py` with 9 tests: ordering by ordinal, required fields, provisional/established badges, per-ruleset isolation, empty unknown ruleset, pagination limit, no-overlap pages, last-page no cursor.
+- Files changed: `src/padrino/api/routes/public.py`, `tests/api/test_public_ladder.py`
+- **Learnings for future iterations:**
+  - SQLAlchemy 2.x multi-table `select(Rating, AgentBuild)` with `.join()` returns `Row` objects destructurable as `for rating, build in rows`.
+  - Decay grace period: pass `effective_idle = max(0, idle - grace_days)` to `apply_decay` so the function's `idle_days <= 0` guard handles the within-grace-period case cleanly.
+  - Each test that seeds DB rows must create unique PromptVersion hashes (use `str(uuid.uuid4())`) to avoid unique-constraint violations across tests.
+---
+
 ## 2026-06-10T20:00 - US-099
 - Created `src/padrino/ratings/provisional_and_decay.py` with pure functions: `is_provisional(games, threshold)`, `to_ordinal(mu, sigma)`, `days_idle(last_game_at, now)`, `apply_decay(sigma, idle_days, decay_per_day)`; ordinal is `round(1000 + (mu - 3*sigma) * 40)` (ELO-style integer).
 - Added `version: Mapped[str]` to `AgentBuild` (server_default="v1") and `last_game_at: Mapped[datetime | None]` to `Rating`; migration 0019; `update_ratings_for_game` now accepts `now: datetime | None` and threads it down to `update_rating` so `last_game_at` is stamped on each rating update.
