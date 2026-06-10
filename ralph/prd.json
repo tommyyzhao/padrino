@@ -513,7 +513,7 @@
         "US-107"
       ],
       "priority": 109,
-      "passes": false,
+      "passes": true,
       "notes": "BLOCKED at seam: needs human prod provisioning (domain, scaled Postgres, CDN, secrets, billing) + legal/ToS. Loop builds config; human launches."
     }
   ]

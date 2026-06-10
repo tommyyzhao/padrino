@@ -2,6 +2,19 @@
 Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
+## 2026-06-10T30:00 - US-109
+- Extended `docker-compose.yml` with Wave 7 env vars in the `x-padrino-env` anchor: `DEEPINFRA_API_KEY`, `PADRINO_GLOBAL_SPEND_CAP_USD`, `PADRINO_ENABLE_CONTINUOUS_MATCHMAKING`, `PADRINO_BROADCAST_CADENCE_CHAT_MS`, `PADRINO_RAW_PAYLOAD_TTL_DAYS`, `PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS`.
+- Added `Cache-Control` headers to RECENT game analytics (`immutable`), model analytics (`300s`), and recent-game-list (`60s`) endpoints via FastAPI `Response` parameter injection.
+- Created `docs/deployment/v2-public.md` runbook documenting all env vars, cost rails, CDN caching behavior, and human-gated launch steps.
+- Created `tests/docker/test_compose_v2.py` (10 tests, `@pytest.mark.docker`) asserting all Wave 7 services declared, shared padrino image, dashboard separate context, wave-7 env var presence, and healthcheck dependency order.
+- Files changed: `docker-compose.yml`, `src/padrino/api/routes/public.py`, `docs/deployment/v2-public.md`, `tests/docker/test_compose_v2.py`
+- **Learnings for future iterations:**
+  - Inject `response: Response` as a positional parameter (before `Depends`) in FastAPI route functions to set headers while still returning a Pydantic model — FastAPI merges the headers onto the JSON response.
+  - `Cache-Control: public, max-age=31536000, immutable` is the correct CDN-immutable header for content that will never change (RECENT analytics); `no-store` is correct for LIVE analytics (always fresh).
+  - YAML-parse-only tests can be marked `@pytest.mark.docker` even without needing Docker itself — they skip in CI's normal run but validate the compose schema without container startup cost.
+  - Wave 7 env vars in `x-padrino-env` use `${VAR:-default}` form so compose works with no `.env` file while still being overridable.
+---
+
 ## 2026-06-10T29:00 - US-108
 - Created `src/padrino/db/retention.py` with `RetentionPolicy`, `GameRetentionInfo`, `RetentionPlan` dataclasses and pure `plan_retention(games, policy, *, now, dry_run=True) -> RetentionPlan`; non-broadcastable completed games past `non_broadcastable_game_ttl_days` → `games_to_delete`; all completed games past `raw_payload_ttl_days` → `llm_calls_to_scrub`; games in `games_to_delete` removed from scrub list (CASCADE handles them); broadcastable games never hard-deleted.
 - Added `padrino_raw_payload_ttl_days: int = 30` and `padrino_non_broadcastable_game_ttl_days: int = 7` to `Settings`.
