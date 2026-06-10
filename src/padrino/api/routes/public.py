@@ -55,11 +55,11 @@ from padrino.api.pagination import (
 )
 from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
 from padrino.core.spectator_projection import project_events_for_spectator
-from padrino.db.models import ApiKey, Game, GameEvent, IngestedGame
+from padrino.db.models import ApiKey, Game, GameEvent, GameSeat, IngestedGame
 from padrino.db.repositories import ingested_games as ingested_games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.gauntlets.evaluation import evaluate_gauntlet, redact_for_public
-from padrino.public.broadcast_index import BroadcastState
+from padrino.public.broadcast_index import BroadcastState, list_live
 from padrino.public.broadcaster import CadenceConfig, default_cadence, plan_broadcast
 from padrino.ratings.model_rollup import (
     detail_for_model,
@@ -752,6 +752,124 @@ async def public_game_live_sse(
     )
 
 
+# ---------------------------------------------------------------------------
+# Live/recent index endpoints (US-090)
+# ---------------------------------------------------------------------------
+
+
+class PublicLiveGameEntry(BaseModel):
+    game_id: uuid.UUID
+    ruleset_id: str
+    current_phase: str | None
+    players_alive: int
+
+
+class PublicLiveIndexResponse(BaseModel):
+    items: list[PublicLiveGameEntry]
+    total: int
+
+
+class PublicRecentGameEntry(BaseModel):
+    game_id: uuid.UUID
+    ruleset_id: str
+    current_phase: str | None
+    terminal_result: dict[str, Any] | None
+
+
+class PublicRecentQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
+    cursor: str | None = None
+
+
+class PublicRecentIndexResponse(BaseModel):
+    items: list[PublicRecentGameEntry]
+    next_cursor: str | None = None
+    total_estimate: int
+
+
+@router.get(
+    "/public/live",
+    response_model=PublicLiveIndexResponse,
+)
+async def public_live_index(
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicLiveIndexResponse:
+    """Return all currently LIVE broadcast games, spoiler-safe.
+
+    ``terminal_result`` is absent from the response schema — the
+    ``PublicLiveGameEntry`` model enforces spoiler safety at the transport layer.
+    ``players_alive`` is the count of alive seats (0 if no seats are recorded).
+    """
+    live_entries = await list_live(session)
+    game_ids = [e.game_id for e in live_entries]
+    alive_counts: dict[uuid.UUID, int] = {}
+    if game_ids:
+        seats_stmt = select(GameSeat).where(
+            GameSeat.game_id.in_(game_ids), GameSeat.alive.is_(True)
+        )
+        for seat in (await session.execute(seats_stmt)).scalars():
+            alive_counts[seat.game_id] = alive_counts.get(seat.game_id, 0) + 1
+
+    items = [
+        PublicLiveGameEntry(
+            game_id=e.game_id,
+            ruleset_id=e.ruleset_id,
+            current_phase=e.current_phase,
+            players_alive=alive_counts.get(e.game_id, 0),
+        )
+        for e in live_entries
+    ]
+    return PublicLiveIndexResponse(items=items, total=len(items))
+
+
+@router.get(
+    "/public/recent",
+    response_model=PublicRecentIndexResponse,
+)
+async def public_recent_index(
+    query: Annotated[PublicRecentQuery, Query()],
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicRecentIndexResponse:
+    """Return recently broadcast games (RECENT state) with outcome exposed.
+
+    Ordered newest-first; paginated via the existing index-cursor mechanism.
+    """
+    start = 0
+    if query.cursor is not None:
+        try:
+            start = decode_index_cursor(query.cursor)
+        except InvalidCursorError as exc:
+            raise invalid_cursor_error() from exc
+
+    stmt = (
+        select(Game)
+        .where(Game.broadcast_state == BroadcastState.RECENT.value)
+        .order_by(Game.created_at.desc())
+    )
+    all_games = list((await session.execute(stmt)).scalars())
+    total = len(all_games)
+    page = all_games[start : start + query.limit]
+    next_cursor = encode_index_cursor(start + query.limit) if start + query.limit < total else None
+    items = [
+        PublicRecentGameEntry(
+            game_id=g.id,
+            ruleset_id=g.ruleset_id,
+            current_phase=g.current_phase,
+            terminal_result=g.terminal_result,
+        )
+        for g in page
+    ]
+    return PublicRecentIndexResponse(
+        items=items,
+        next_cursor=next_cursor,
+        total_estimate=total,
+    )
+
+
 __all__ = [
     "PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS",
     "PublicChatEntry",
@@ -760,16 +878,22 @@ __all__ = [
     "PublicGameResponse",
     "PublicLeaderboardEntryResponse",
     "PublicLeaderboardResponse",
+    "PublicLiveGameEntry",
+    "PublicLiveIndexResponse",
     "PublicModelBuildEntry",
     "PublicModelDetailResponse",
     "PublicModelEntryResponse",
     "PublicModelFactionAggregate",
     "PublicModelLeaderboardResponse",
+    "PublicRecentGameEntry",
+    "PublicRecentIndexResponse",
     "PublicSubmitterEntry",
     "PublicSubmittersResponse",
     "PublicTranscriptResponse",
     "_live_cadence",
     "public_game_live_sse",
+    "public_live_index",
+    "public_recent_index",
     "require_public_read",
     "router",
 ]
