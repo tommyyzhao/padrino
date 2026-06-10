@@ -2,6 +2,19 @@
 Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
+## 2026-06-10T28:00 - US-107
+- Added `broadcast_active_streams` (Gauge) and `broadcast_frames_total` (Counter) to `src/padrino/observability/metrics.py`; added `record_broadcast_frame()` helper; updated `reset_metrics()` using `.reset()` for the unlabeled counter (labeled counters use `._metrics.clear()`).
+- Added `padrino_sse_max_connections_per_ip: int = 5` to `Settings`; wired per-IP SSE connection cap and broadcast metrics into `public_game_live_sse` — module-level `_sse_active: dict[str, int]` tracks active connections, `broadcast_active_streams` gauge incremented on open / decremented in generator's `finally` block.
+- Created `tests/observability/test_public_v2_metrics.py` (8 tests) asserting gauge existence, frame counter increments, zero-after-completion gauge, and reset behavior; created `tests/api/test_public_v2_rate_limits.py` (7 tests) asserting anon rate limits on `/public/live`, `/public/recent`, `/public/ladder`, `/public/games/{id}/live`, and SSE cap enforcement.
+- Files changed: `src/padrino/observability/metrics.py`, `src/padrino/settings.py`, `src/padrino/api/routes/public.py`, `tests/observability/test_public_v2_metrics.py`, `tests/api/test_public_v2_rate_limits.py`
+- **Learnings for future iterations:**
+  - Unlabeled `prometheus_client.Counter` (no labelnames) does NOT have `._metrics` dict — use `.reset()` to zero it; labeled counters use `._metrics.clear()` to remove child metrics.
+  - `broadcast_active_streams` gauge starts at 0 after `reset_metrics()` but only appears in Prometheus output once `.inc()` or `.set()` has been called; unlabeled Gauge always appears (appears at 0 from `reset`).
+  - SSE per-IP cap uses a module-level `_sse_active: dict[str, int]` dict (safe in single event-loop async); import it in tests to pre-populate and assert its state.
+  - `X-Forwarded-For` header is the cleanest way to control client IP in ASGI transport tests (avoiding uncertainty about `request.client.host` value in httpx).
+  - `app.state.auth_settings = Settings(...)` overrides rate limits, SSE cap, and anon mode cleanly per test without monkeypatching `get_settings`.
+---
+
 ## Codebase Patterns
 
 - `src/padrino/public/` is the new module for Wave 7 public surface. Start each new public module here.
