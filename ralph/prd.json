@@ -489,7 +489,7 @@
         "US-095"
       ],
       "priority": 108,
-      "passes": false,
+      "passes": true,
       "notes": "Cross-cutting (council: storage growth of compounding bank)."
     },
     {

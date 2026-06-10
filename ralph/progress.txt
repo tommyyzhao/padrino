@@ -2,6 +2,18 @@
 Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
+## 2026-06-10T29:00 - US-108
+- Created `src/padrino/db/retention.py` with `RetentionPolicy`, `GameRetentionInfo`, `RetentionPlan` dataclasses and pure `plan_retention(games, policy, *, now, dry_run=True) -> RetentionPlan`; non-broadcastable completed games past `non_broadcastable_game_ttl_days` → `games_to_delete`; all completed games past `raw_payload_ttl_days` → `llm_calls_to_scrub`; games in `games_to_delete` removed from scrub list (CASCADE handles them); broadcastable games never hard-deleted.
+- Added `padrino_raw_payload_ttl_days: int = 30` and `padrino_non_broadcastable_game_ttl_days: int = 7` to `Settings`.
+- Created `tests/db/test_retention_policy.py` with 17 tests: deletion selection, broadcastable protection, scrub list dedup, mixed batch, dry_run flag, naive datetime handling, and settings defaults.
+- Files changed: `src/padrino/db/retention.py`, `src/padrino/settings.py`, `tests/db/test_retention_policy.py`
+- **Learnings for future iterations:**
+  - Pure planner pattern: accept `now: datetime` as an injected keyword arg (no wall-clock); caller passes `datetime.now(UTC)` in production, a fixed timestamp in tests — same pattern used by `apply_decay` in US-099.
+  - Naive datetimes from DB rows should be normalised to UTC at the planner boundary (`replace(tzinfo=UTC)`) rather than rejected, since SQLite drops timezone info on roundtrip.
+  - Games scheduled for hard deletion should be removed from the `llm_calls_to_scrub` list to avoid redundant work — the ON DELETE CASCADE on `llm_calls.game_id` means the rows disappear anyway.
+  - `dry_run=True` as the default makes the plan advisory until a human-initiated executor explicitly opts in — safe default for a destructive operation.
+---
+
 ## 2026-06-10T28:00 - US-107
 - Added `broadcast_active_streams` (Gauge) and `broadcast_frames_total` (Counter) to `src/padrino/observability/metrics.py`; added `record_broadcast_frame()` helper; updated `reset_metrics()` using `.reset()` for the unlabeled counter (labeled counters use `._metrics.clear()`).
 - Added `padrino_sse_max_connections_per_ip: int = 5` to `Settings`; wired per-IP SSE connection cap and broadcast metrics into `public_game_live_sse` — module-level `_sse_active: dict[str, int]` tracks active connections, `broadcast_active_streams` gauge incremented on open / decremented in generator's `finally` block.
