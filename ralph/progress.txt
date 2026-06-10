@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T22:00 - US-101
+- Created `web/dashboard/src/routes/(public)/ladder/+page.svelte` — ranked table with ordinal scores, provisional/established badges, and ruleset switch; each row links to `/models/{agent_build_id}`.
+- Created `web/dashboard/src/routes/(public)/models/[id]/+page.svelte` — shows agent stats (ordinal, games, version) and recent public games with /watch links.
+- Added `PublicLadderEntry` / `PublicLadderResponse` types to `types.ts` and `publicLadder()` method to `client.ts`; added 3 Playwright tests in `tests/e2e/ladder.spec.ts` (ranking render, provisional badge, ruleset switch).
+- Files changed: `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/lib/api/client.ts`, `web/dashboard/src/routes/(public)/ladder/+page.svelte`, `web/dashboard/src/routes/(public)/models/[id]/+page.svelte`, `web/dashboard/tests/e2e/ladder.spec.ts`
+- **Learnings for future iterations:**
+  - SvelteKit `(public)` layout group uses parenthesis in the directory name — create dirs as `(public)/ladder` etc.; the parentheses are part of the filesystem path but absent from the URL.
+  - Pre-existing Playwright failures in games/home/leaderboard specs are caused by tests that hit a real backend without mocking — these are NOT regressions; always verify with `git stash` before attributing failures.
+  - Playwright `page.route` intercepts both `fetch` and `xhr` resource types; always check `resourceType()` to avoid intercepting non-API requests (e.g. SSE streams).
+---
+
 ## 2026-06-10T21:00 - US-100
 - Added `GET /public/ladder?ruleset_id=` endpoint to `src/padrino/api/routes/public.py`; queries `Rating` rows (GLOBAL scope) joined to `League` (filtered by `ruleset_id`) and `AgentBuild` (for `display_name`, `version`).
 - Applies sigma-decay at read time (impure layer): `effective_idle = max(0, idle_days - padrino_rating_decay_idle_days)` then `apply_decay(sigma, effective_idle)`; computes `ordinal = to_ordinal(mu, decayed_sigma)` and `provisional = is_provisional(games, threshold)`.
