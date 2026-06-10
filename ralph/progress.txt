@@ -11,6 +11,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T15:00 - US-094
+- Added `is_broadcastable: bool` column (default `False`, fail-closed) to `Game` model; migration `0018_game_is_broadcastable.py`.
+- Updated `list_live()` and `list_recent()` in `broadcast_index.py` to filter `is_broadcastable=True`; `mark_live()`/`mark_recent()` now return `None` and refuse to promote non-broadcastable games.
+- Updated SSE endpoint (`public_game_live_sse`) and `public_recent_index` direct query in `public.py` to also filter on `is_broadcastable=True`.
+- Created `tests/api/test_broadcast_moderation_enforced.py` (11 tests); updated existing test helpers in `test_public_live_sse.py`, `test_public_live_index.py`, `test_broadcast_index_spoiler.py` to pass `is_broadcastable=True` for happy-path games.
+- Files changed: `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0018_game_is_broadcastable.py`, `src/padrino/public/broadcast_index.py`, `src/padrino/api/routes/public.py`, `tests/api/test_broadcast_moderation_enforced.py`, `tests/api/test_public_live_sse.py`, `tests/api/test_public_live_index.py`, `tests/public/test_broadcast_index_spoiler.py`
+- **Learnings for future iterations:**
+  - Defense-in-depth: enforce `is_broadcastable=True` at both the DB query layer (`list_live`, `list_recent`) AND the transition layer (`mark_live`, `mark_recent`) so the gate holds even if direct DB access bypasses the query helpers.
+  - When adding a new column that gates existing test fixtures, update all `_make_game` helpers in affected tests to default the new column to `True` (happy path) so existing tests continue to pass without modification.
+  - `server_default="false"` (SQLite string) works for Boolean columns in Alembic — SQLAlchemy normalizes the comparison.
+---
+
 ## 2026-06-10T14:00 - US-093
 - Created `src/padrino/public/moderation.py` with `deterministic_first_pass` (regex/keyword first-pass filter), `GuardModelAdapter` runtime-checkable Protocol, `LiteLlmGuardAdapter` (real Llama-Guard via LiteLLM, integration-only), and `is_broadcastable(events, guard)` fail-closed async gate.
 - Added `padrino_guard_model: str = "deepinfra/meta-llama/Llama-Guard-3-8B"` to `Settings` — routes through existing `DEEPINFRA_API_KEY`, no new credential.
