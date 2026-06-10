@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T10:00 - US-089
+- Added `GET /public/games/{game_id}/live` SSE endpoint in `src/padrino/api/routes/public.py`; streams `public_event_v1` frames at planned cadence, refuses HIDDEN/missing games with 404, honors `Last-Event-ID` header and `?after=` cursor for resume, applies `?speed=` multiplier (capped at 100x) to per-frame delays.
+- Introduced `_live_cadence()` as an injectable FastAPI dependency wrapping `default_cadence()` so tests can inject zero-delay `CadenceConfig` via `app.dependency_overrides`.
+- Created `tests/api/test_public_live_sse.py` with 13 tests: frame order, SSE id=sequence, cursor resume (`?after=`, `Last-Event-ID`, precedence), 404 for HIDDEN/missing, RECENT works, forbidden keys stripped, PRIVATE events dropped, schema_version on every frame.
+- Files changed: `src/padrino/api/routes/public.py`, `tests/api/test_public_live_sse.py`
+- **Learnings for future iterations:**
+  - FastAPI `StreamingResponse` + `Depends(get_session)` works safely because all DB queries happen before the `StreamingResponse` is returned; the generator closure only uses the already-loaded `frames` list, so the session can close without race.
+  - `app.dependency_overrides[_live_cadence] = _zero_cadence` is the pattern for injecting zero-delay cadence in SSE tests — keeps test suite instant without monkeypatching asyncio.sleep.
+  - US-090 (live/recent index endpoints) only depends on US-087 and is now unblocked.
+---
+
 ## 2026-06-10T09:00 - US-088
 - Implemented `src/padrino/public/broadcaster.py` with `CadenceConfig` dataclass, `BroadcastFrame` dataclass, and pure `plan_broadcast(events, cadence) -> list[BroadcastFrame]`; PRIVATE/SYSTEM events dropped via `to_public_event_v1`.
 - Added five `padrino_broadcast_cadence_*_ms` settings to `Settings` (chat=2500ms, phase=3000ms, elimination=4000ms, resolution=3500ms, default=1500ms) with `default_cadence()` factory in the broadcaster.
