@@ -11,6 +11,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-10T20:00 - US-099
+- Created `src/padrino/ratings/provisional_and_decay.py` with pure functions: `is_provisional(games, threshold)`, `to_ordinal(mu, sigma)`, `days_idle(last_game_at, now)`, `apply_decay(sigma, idle_days, decay_per_day)`; ordinal is `round(1000 + (mu - 3*sigma) * 40)` (ELO-style integer).
+- Added `version: Mapped[str]` to `AgentBuild` (server_default="v1") and `last_game_at: Mapped[datetime | None]` to `Rating`; migration 0019; `update_ratings_for_game` now accepts `now: datetime | None` and threads it down to `update_rating` so `last_game_at` is stamped on each rating update.
+- Added `padrino_provisional_game_threshold`, `padrino_rating_decay_sigma_per_day`, `padrino_rating_decay_idle_days` to `Settings`; 26 tests in `tests/ratings/test_provisional_and_decay.py` covering all four function families + settings defaults + AgentBuild.version field.
+- Files changed: `src/padrino/ratings/provisional_and_decay.py`, `src/padrino/db/migrations/versions/0019_agent_version_and_rating_decay.py`, `src/padrino/db/models.py`, `src/padrino/db/repositories/ratings.py`, `src/padrino/ratings/openskill_service.py`, `src/padrino/settings.py`, `tests/ratings/test_provisional_and_decay.py`
+- **Learnings for future iterations:**
+  - `mapped_column(default="v1")` sets the DB INSERT default but does NOT populate the attribute before flush; tests that construct ORM objects without the attribute get `None`. Either pass the value explicitly in tests or test via the repository after a flush.
+  - `round(float_value)` with no second arg returns `int` in Python 3 — wrapping with `int(round(...))` triggers ruff RUF046. Use `round()` directly.
+  - Thread `now: datetime | None = None` into the service and default to `datetime.now(UTC)` inside; this makes the timestamp injectable for tests without breaking the impure-layer contract.
+---
+
 ## 2026-06-10T19:00 - US-098
 - Created `src/padrino/scheduler/continuous_matchmaking.py` with `run_continuous_matchmaking_tick(session_factory, *, settings, now, guard, adapter_factory) -> bool`; checks `padrino_enable_continuous_matchmaking` flag → `admission.admit()` → loads curated roster (active AgentBuilds) + match history from DB → `matchmaker.next_match()` → `run_tournament_from_roster(n_games=1)` → `is_broadcastable()` per game → marks `is_broadcastable=True` + promotes to LIVE on pass.
 - Added `padrino_enable_continuous_matchmaking: bool = False` to `Settings`.
