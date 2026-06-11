@@ -1,123 +1,35 @@
 {
   "project": "Padrino",
-  "branchName": "ralph/padrino-v7",
-  "description": "Wave 7 \u2014 Public Live League (v2 MVP). Turns the deterministic benchmark engine into a public spectating product: paced replay of committed events as 'live' broadcast, a curated-roster compounding game bank driving an ELO-style OpenSkill ladder, and deterministic Town-of-Salem analytics with sampled LLM-judge enrichment. Scope per prd-v2.md and locked decisions (loop builds UI Playwright-gated; invite/curated roster; anonymous MVP; house-funded $200 hard cap). DEFERRED to a later wave: open submissions, OAuth identity, anti-Sybil, accounts/profiles. Build order: Phase 0 contract -> Phase 1 broadcast spine -> Phase 2 safety+cost rails (gate public launch) -> Phase 3 matchmaking+ladder -> Phase 4 analytics -> Phase 5 hardening. See prd-v2.md sections 2 (decisions), 3 (phases), 6 (human-dependency register).",
+  "branchName": "ralph/padrino-v8",
+  "description": "Wave 8 — Production Launch Hardening. Closes every loop-buildable gap between the Wave 7 feature-complete state and a public production release, under the locked product shape: the PUBLIC surface is a spectator website (lobby, live watch, ladder, recap) served exclusively from /public/* endpoints; everything else (admin, ingest, gauntlets, leagues, scheduler, metrics) runs on a PRIVATE backend that is never exposed to the internet. Build order: P0 surface split (110-111) -> P1 trust + ops rails (112-116) -> P2 verification + flake burn-down (117-118) -> P3 deploy + perf (119-120). Human-gated launch steps (key rotation, domain/TLS/CDN/Postgres provisioning, cap/cadence sign-off, legal pages, one paid integration run) are NOT stories — see the launch checklist in the session plan; the loop must reach loop-complete without any new credential.",
   "userStories": [
     {
-      "id": "US-086",
-      "title": "Versioned public_event_v1 projection contract",
-      "description": "As a platform building live views, replays, analytics and ratings on top of the event log, I need a STABLE, versioned public projection of game events distinct from internal core events, so internal schema changes never become public-API migrations.",
+      "id": "US-110",
+      "title": "Public-surface-only API mode",
+      "description": "As the operator, I need the API to run in a mode that serves ONLY the public spectator surface, so the internet-facing process physically cannot expose admin, ingest, or any private route — the architectural embodiment of 'website public, everything else private'.",
       "acceptanceCriteria": [
-        "New module `src/padrino/public/projection.py` (impure-adjacent, pure-ish) exposing `to_public_event_v1(event: Mapping) -> dict | None` built on top of `core.spectator_projection.project_event_for_spectator` (identity-blind: never leaks role/faction/model/provider/build-id of others).",
-        "Each emitted dict carries `schema_version: \"public_event_v1\"`, `sequence: int`, `phase`, `event_type`, `visibility`, `actor_player_id|null`, `payload`, and the hash-chain fields (`prev_event_hash`, `event_hash`).",
-        "A `PUBLIC_EVENT_FORBIDDEN_KEYS` allow/deny set is asserted; mid-game role/faction reveal is impossible (regression-guards the prior P0 spectator leak).",
-        "Golden-file test `tests/public/test_projection_contract.py` pins the exact public shape for a recorded game; any field change must update the golden file consciously.",
-        "Hypothesis property test: for every internal event, the public projection contains no key in the forbidden set.",
+        "New setting `padrino_public_surface_only: bool = False`; when True, `create_app` mounts ONLY the public router and the health router — admin, admin_keys, ingest, games, leagues, gauntlets, and scheduled_gauntlets routers are not mounted at all (404, not 401/403).",
+        "`/metrics` is NOT served in public-surface-only mode (scraping happens against the internal instance).",
+        "`/healthz` and `/readyz` still work in public mode (the edge needs probes).",
+        "Test `tests/api/test_public_surface_only.py` asserts: with the flag on, every private route prefix 404s, `/public/live`, `/public/recent`, `/public/ladder`, `/public/games/{id}/live` and `/healthz` work; with the flag off (default) behavior is unchanged.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
       "dependencies": [],
-      "priority": 86,
-      "passes": true,
-      "notes": "D2 / Phase 0. The stable seam every later phase reads from."
+      "priority": 110,
+      "passes": false,
+      "notes": "P0. Defense in depth: even a reverse-proxy misconfiguration cannot leak a private route, because the public process never registers them."
     },
     {
-      "id": "US-087",
-      "title": "Spoiler-safe public game broadcast index",
-      "description": "As a spectator watching a game 'live' (paced replay), I must NOT be able to learn the outcome early via any other endpoint, so live tension is preserved even though the result is already committed in the DB.",
+      "id": "US-111",
+      "title": "Spectator website consumes only /public endpoints",
+      "description": "As a public visitor, every page I can reach must work against the public-surface-only API, so the deployed website functions with zero access to private routes.",
       "acceptanceCriteria": [
-        "New `BroadcastState` enum/column on a public index (LIVE, RECENT, HIDDEN) derived from a game's broadcast lifecycle, not its true `status`.",
-        "While a game is LIVE, public endpoints MUST NOT expose `terminal_result`, winner, final ratings delta, or any not-yet-streamed event (enforced by sequence high-water-mark per viewer is out of scope here; index-level outcome hiding is in scope).",
-        "Repository `src/padrino/public/broadcast_index.py` with `list_live()`, `list_recent(limit)`, and `mark_*` transitions; pure query layer, no scheduler coupling.",
-        "Test `tests/public/test_broadcast_index_spoiler.py` asserts a LIVE game's public payload omits outcome fields and that a RECENT game exposes them.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-086"
-      ],
-      "priority": 87,
-      "passes": true,
-      "notes": "Spoiler policy (council). Outcome hidden until broadcast completes."
-    },
-    {
-      "id": "US-088",
-      "title": "Broadcaster core: deterministic paced stream generator",
-      "description": "As the broadcast layer, I need a PURE, deterministic generator that turns a game's committed events into a paced sequence of public_event_v1 frames with inter-frame delays, so pacing logic is unit-testable with zero I/O and the runner stays untouched.",
-      "acceptanceCriteria": [
-        "New `src/padrino/public/broadcaster.py::plan_broadcast(events, cadence) -> list[BroadcastFrame]` where each frame has `(public_event_v1, delay_ms)`; cadence config carries per-event-type delays (e.g. chat line vs phase change).",
-        "Pure function: no clock reads, no sleeps, no DB \u2014 delays are DATA, applied by the transport layer (US-089).",
-        "Cadence defaults live in settings (`padrino_broadcast_cadence_*`), human-tunable; sane defaults shipped (e.g. ~2.5s per public message).",
-        "Test `tests/public/test_broadcaster_plan.py` asserts frame count == projected-event count, ordering preserved, and delays match config for each event type.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-086"
-      ],
-      "priority": 88,
-      "passes": true,
-      "notes": "D1 spine. Production/presentation decoupled; engine not modified."
-    },
-    {
-      "id": "US-089",
-      "title": "SSE live endpoint, resumable by sequence cursor",
-      "description": "As a spectator (incl. one who reconnects), I need a Server-Sent-Events endpoint that streams a game's broadcast frames at the planned cadence and lets me resume from where I left off, so reconnection doesn't replay from zero.",
-      "acceptanceCriteria": [
-        "New route `GET /public/games/{game_id}/live` (in `src/padrino/api/routes/public.py` or a new `public_live.py`) returning `text/event-stream`; each SSE message is one public_event_v1 frame with its `sequence` as the SSE `id:`.",
-        "Honors `Last-Event-ID` / `?after=<sequence>` to resume; never replays already-sent frames.",
-        "Refuses (404/409) games not in LIVE/RECENT broadcast state; identity-blind via US-086 only.",
-        "Transport applies the per-frame delay from US-088; a `?speed=` debug multiplier is allowed but capped.",
-        "Test `tests/api/test_public_live_sse.py` drives the endpoint with a stubbed clock, asserts frame order, resume-after-cursor correctness, and that no forbidden keys appear.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-088",
-        "US-087"
-      ],
-      "priority": 89,
-      "passes": true,
-      "notes": "One-way dumb SSE on committed events (council: transport is the easy part)."
-    },
-    {
-      "id": "US-090",
-      "title": "Live-now and recent public index endpoints",
-      "description": "As a spectator landing on the site, I need REST endpoints listing games currently broadcasting and recently finished, so I can choose what to watch.",
-      "acceptanceCriteria": [
-        "`GET /public/live` -> games in LIVE state (spoiler-safe summary: ruleset, players alive count, current phase, NO outcome).",
-        "`GET /public/recent?limit=` -> RECENT games WITH outcome.",
-        "Anonymous-readable under the existing `require_public_read` + IP-hash rate limiter; pagination via existing cursor pattern.",
-        "Test `tests/api/test_public_live_index.py` asserts LIVE entries omit outcome and RECENT entries include it.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-087"
-      ],
-      "priority": 90,
-      "passes": true,
-      "notes": "Spoiler-safe lobby data."
-    },
-    {
-      "id": "US-091",
-      "title": "Consumer live-viewer page",
-      "description": "As a spectator, I want a chess.com-style match page that renders a game unfolding in real time \u2014 seat board, per-phase reveal, running vote tally, and an event timeline \u2014 so watching an AI Mafia game is engaging.",
-      "acceptanceCriteria": [
-        "New route `web/dashboard/src/routes/watch/[id]/+page.svelte` consuming the SSE endpoint (US-089), rendering seat grid (alive/dead), current phase, public chat feed, and live vote tally.",
-        "Reconnect uses Last-Event-ID; no full reload on transient disconnect.",
-        "Outcome banner appears ONLY after the terminal frame streams (spoiler-safe).",
-        "Playwright test `web/dashboard/tests/watch.spec.ts` mocks an SSE stream and asserts phased rendering + that the winner is hidden until the final frame.",
+        "Audit `web/dashboard/src/routes/**`: the home page currently calls `listGames` and `listGauntlets` (private `/games`, `/gauntlets`) for KPIs — replace home KPIs with public-surface data (e.g. live-now count from `/public/live`, recent count from `/public/recent` total_estimate, top-3 from `/public/ladder`); no public-reachable page may call a non-/public endpoint.",
+        "Private-only pages (e.g. internal games browser) are either removed from the public nav or clearly degrade when the private API is absent — no infinite spinners, no hard errors on the public site.",
+        "Playwright `web/dashboard/tests/e2e/home.spec.ts` updated to the new KPI set and passing against the smoke harness.",
         "pnpm -C web/dashboard lint passes",
         "pnpm -C web/dashboard check passes",
         "pnpm -C web/dashboard test:e2e passes (Playwright)",
@@ -127,394 +39,178 @@
         "uv run pytest -m \"not integration\" passes"
       ],
       "dependencies": [
-        "US-089"
+        "US-110"
       ],
-      "priority": 91,
-      "passes": true,
-      "notes": "Loop owns UI (Playwright-gated); human does final 10% polish."
+      "priority": 111,
+      "passes": false,
+      "notes": "Root cause of the pre-existing home.spec e2e failure: the home page depends on auth-gated private endpoints."
     },
     {
-      "id": "US-092",
-      "title": "Live/recent lobby page",
-      "description": "As a spectator, I want a landing lobby that shows what's live now and what finished recently, so I can pick a match.",
+      "id": "US-112",
+      "title": "Public surfaces exclude unverified ingested games",
+      "description": "As the platform, the public ladder/leaderboards must never include results from self-signed ingested bundles that were not centrally verified, so a submitter-scoped key can never pollute the public rankings.",
       "acceptanceCriteria": [
-        "New route `web/dashboard/src/routes/(public)/+page.svelte` (or home) listing `/public/live` and `/public/recent`, linking to `/watch/[id]`.",
-        "Live cards show no outcome; recent cards show winner.",
-        "Playwright test `web/dashboard/tests/lobby.spec.ts` asserts live vs recent rendering and spoiler-safety.",
-        "pnpm -C web/dashboard lint passes",
-        "pnpm -C web/dashboard check passes",
-        "pnpm -C web/dashboard test:e2e passes (Playwright)",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-090",
-        "US-091"
-      ],
-      "priority": 92,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-093",
-      "title": "Moderation gate: is_broadcastable (fail-closed)",
-      "description": "As the platform, before any AI-generated game is shown publicly I need a moderation gate that marks it broadcastable, so toxic/unsafe/prompt-injected model output never reaches viewers.",
-      "acceptanceCriteria": [
-        "New `src/padrino/public/moderation.py` with a deterministic first-pass (regex/keyword/structural filters over public messages) and a pluggable `GuardModelAdapter` protocol for an LLM guard pass.",
-        "Settings `padrino_guard_model: str` (default a DeepInfra-hosted Llama-Guard-family model) routed through the existing LiteLLM adapter using the existing `DEEPINFRA_API_KEY` \u2014 NO new credential or provider integration.",
-        "A game gets `is_broadcastable: bool`; DEFAULT FAIL-CLOSED \u2014 if the guard pass is unavailable or errors, the game is NOT broadcastable.",
-        "Real guard-model call is behind `@pytest.mark.integration` (needs a key); the deterministic path + fail-closed default are covered by default unit tests.",
-        "Test `tests/public/test_moderation_gate.py` asserts: clean transcript -> broadcastable; transcript with a seeded toxic line -> not broadcastable; guard error -> not broadcastable.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-086"
-      ],
-      "priority": 93,
-      "passes": true,
-      "notes": "D5. DECIDED 2026-06-09: guard = Llama-Guard-family model on DeepInfra via the EXISTING DeepInfra key (no new credential; real call still integration-gated). Judge stays padrino_behavioral_judge_model (xiaomi/mimo-v2.5-pro, already configured). Calibration set deferred (tuning only)."
-    },
-    {
-      "id": "US-094",
-      "title": "Only broadcastable games reach the public surface",
-      "description": "As the platform, I must ensure the live SSE endpoint and live/recent index only ever serve games whose `is_broadcastable` is true, so the moderation gate is actually enforced.",
-      "acceptanceCriteria": [
-        "`/public/live`, `/public/recent`, and `GET /public/games/{id}/live` all filter on `is_broadcastable=true`; a non-broadcastable game returns 404 from the live endpoint and is absent from indexes.",
-        "Broadcast index transitions (US-087) only promote a game to LIVE/RECENT after the moderation gate passes.",
-        "Test `tests/api/test_broadcast_moderation_enforced.py` asserts a non-broadcastable game is invisible across all three surfaces.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-093",
-        "US-090",
-        "US-089"
-      ],
-      "priority": 94,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-095",
-      "title": "Global spend governor with hard $200 ceiling",
-      "description": "As the operator funding house play, I need a cumulative cost ledger and a hard global spend cap so continuous AI-vs-AI games can never exceed budget (the 'wallet-DDoS' guard).",
-      "acceptanceCriteria": [
-        "New `src/padrino/economics/spend_governor.py` tracking cumulative USD spend across games (reads existing per-game cost accounting / `cost_cap_usd` machinery).",
-        "Settings `padrino_global_spend_cap_usd: float = 200.0` (configurable). When cumulative spend >= cap, `spend_governor.can_start_game()` returns False and emits a structured `spend.cap.reached` log.",
-        "Per-game budget ceiling reuses the existing `cost_cap_usd`/`cost_capped` path; the governor composes global + per-game limits.",
-        "Test `tests/economics/test_spend_governor.py` asserts admission flips to denied exactly at the cap and that the cap is read from settings.",
+        "Every public rating/analytics surface (public leaderboard, model rollup, ladder, recent index) excludes games originating from `IngestedGame` rows whose `verification_status` is not 'verified'; house-run (non-ingested) games are unaffected.",
+        "Test `tests/api/test_public_excludes_unverified.py` seeds one house game, one verified ingest, one unverified ingest, and asserts the unverified one is absent from each public surface while remaining visible on the private/admin surface.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
       "dependencies": [],
-      "priority": 95,
-      "passes": true,
-      "notes": "D3. $200 = cumulative global ceiling (human decision; configurable)."
+      "priority": 112,
+      "passes": false,
+      "notes": "Cheap insurance: ingest is private in this deployment, but the filter makes the trust property hold by construction."
     },
     {
-      "id": "US-096",
-      "title": "Admission/queue policy + daily global game cap",
-      "description": "As the operator, I need an admission policy that bounds how many games run (per day and concurrently) independent of spend, so capacity and provider quotas are respected.",
+      "id": "US-113",
+      "title": "Operational alerting: webhook notifier + alert rules",
+      "description": "As the operator of an unattended money-spending system, I need to be notified when something important happens — spend cap reached, scheduler dead, moderation gate degraded — instead of discovering it on the provider bill.",
       "acceptanceCriteria": [
-        "Settings `padrino_max_games_per_day: int` and `padrino_max_concurrent_games: int` with conservative defaults.",
-        "`spend_governor` (or a sibling `admission.py`) exposes `admit() -> AdmitDecision` combining spend cap + daily count + concurrency; denials are typed and logged with reason.",
-        "Test `tests/economics/test_admission.py` covers each denial reason (spend, daily, concurrency) and the admit path.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-095"
-      ],
-      "priority": 96,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-097",
-      "title": "Curated roster + continuous matchmaker",
-      "description": "As the operator running an invite/curated ladder, I need a matchmaker that continuously composes balanced games from a curated agent roster using deterministic seeds and faction permutations, so ratings are statistically credible (single games are too noisy).",
-      "acceptanceCriteria": [
-        "New `src/padrino/matchmaking/matchmaker.py::next_match(roster, history) -> MatchPlan` choosing N agents for a ruleset, with faction-permutation gauntlet semantics reusing existing gauntlet seed derivation.",
-        "Deterministic: same (roster, history, seed) -> same MatchPlan (pure; no wall-clock/RNG outside SeededRng).",
-        "Roster is a curated list (DB-backed) of approved AgentBuild ids \u2014 NO open submission in this wave (per locked scope).",
-        "Test `tests/matchmaking/test_matchmaker.py` asserts determinism, faction balance, and roster-only selection.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-096"
-      ],
-      "priority": 97,
-      "passes": true,
-      "notes": "D4 (partial). Open submission / OAuth identity / anti-Sybil DEFERRED to a later wave."
-    },
-    {
-      "id": "US-098",
-      "title": "Matchmaker -> scheduler wiring with rails",
-      "description": "As the operator, I need the in-process scheduler to continuously run matchmaker-produced games, but only when admission allows and only marking them broadcastable after moderation, so the compounding game bank grows safely.",
-      "acceptanceCriteria": [
-        "Extend the existing scheduler tick hook (`src/padrino/scheduler/bootstrap.py`) to: check `admission.admit()`, run `matchmaker.next_match`, execute the game via the existing runner, then run the moderation gate (US-093) before broadcast promotion.",
-        "Gated behind `padrino_enable_continuous_matchmaking: bool = False`.",
-        "On admission denial, the tick is a no-op with a structured log; no partial games.",
-        "Test `tests/scheduler/test_continuous_matchmaking.py` (mock adapter) asserts: disabled -> no games; enabled+admitted -> one game ran and gated; cap reached -> skipped.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-097",
-        "US-095",
-        "US-093"
-      ],
-      "priority": 98,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-099",
-      "title": "Agent versioning, provisional/established ratings, decay",
-      "description": "As a viewer of the ladder, I need ratings that distinguish provisional from established agents, decay stale ones, and are tied to an agent VERSION, so the leaderboard is credible.",
-      "acceptanceCriteria": [
-        "AgentBuild gains a `version` concept; ratings are stamped per (agent identity, version, ruleset_id).",
-        "Rating rows expose `provisional: bool` (e.g. < N rated games) and an `ordinal` presented as an ELO-style integer derived from OpenSkill `mu - 3*sigma` (presentation only; OpenSkill math unchanged).",
-        "Optional sigma-inflation/decay for agents idle > T (config), in the ratings service.",
-        "Test `tests/ratings/test_provisional_and_decay.py` asserts provisional thresholding, ordinal mapping, and decay.",
+        "New `src/padrino/observability/alerts.py` with `AlertNotifier` (async, posts JSON to `padrino_alert_webhook_url: str | None = None`; no-op transport when unset; always emits a structured log).",
+        "Alerts fired from existing seams: `spend.cap.reached` (spend governor denial), `scheduler.heartbeat.stale` (checked in the tick against the heartbeats table), `moderation.guard.unavailable` (guard None or erroring while continuous matchmaking enabled), `admission.denied.streak` (N consecutive denials, configurable).",
+        "A Prometheus alert-rules file (`docs/deployment/alert-rules.yml`) covering the same conditions from the existing metrics, shipped with the deploy config.",
+        "Tests `tests/observability/test_alerts.py` use a stub transport (httpx MockTransport) — no network, no integration marker: each trigger fires exactly once per condition transition (no alert spam every tick).",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
       "dependencies": [],
-      "priority": 99,
-      "passes": true,
-      "notes": "D4 trust primitive (credibility), curated-roster appropriate."
+      "priority": 113,
+      "passes": false,
+      "notes": "Webhook URL is set by the human at deploy time (Slack/Discord/etc.); the loop builds and tests the machinery."
     },
     {
-      "id": "US-100",
-      "title": "Public ladder endpoints",
-      "description": "As a spectator, I need ranked ladder endpoints per ruleset with provisional badges and ELO-style scores, so I can see who's best.",
+      "id": "US-114",
+      "title": "Scheduler claim hardening (SKIP LOCKED)",
+      "description": "As the operator, two scheduler replicas must never double-claim the same gauntlet, so accidental horizontal scaling (or a stuck-then-restarted instance) cannot corrupt runs.",
       "acceptanceCriteria": [
-        "`GET /public/ladder?ruleset_id=` -> ranked agents with ordinal score, provisional flag, games played, last-active; anonymous-readable + rate-limited.",
-        "Reuses model rollup / openskill service; per-ruleset boards (existing invariant).",
-        "Test `tests/api/test_public_ladder.py` asserts ordering by ordinal, provisional badge presence, per-ruleset isolation.",
+        "`claim_oldest_pending` (runner/scheduler claim path) uses `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL (`with_for_update(skip_locked=True)`); SQLite path unchanged (single-writer documented in the function docstring).",
+        "Postgres-marked test (`@pytest.mark.postgres`) asserts two concurrent claimers receive distinct rows (or one row + one None) — never the same row.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 114,
+      "passes": false,
+      "notes": "Matters exactly now that continuous matchmaking gives the scheduler a permanent workload."
+    },
+    {
+      "id": "US-115",
+      "title": "Honor PADRINO_LOG_LEVEL",
+      "description": "As the operator debugging production, the configured log level must actually take effect — cli.py currently hardcodes 'INFO'.",
+      "acceptanceCriteria": [
+        "`padrino serve`, `padrino scheduler`, and `padrino bootstrap` configure logging from `settings.padrino_log_level` (env `PADRINO_LOG_LEVEL`), not a hardcoded literal.",
+        "Unit test asserts the logging configuration call receives the settings value (e.g. DEBUG) for at least the serve and scheduler entrypoints.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 115,
+      "passes": false,
+      "notes": "Known bug: cli.py:47-ish hardcodes \"INFO\"."
+    },
+    {
+      "id": "US-116",
+      "title": "Retention executor job (guarded, dry-run default)",
+      "description": "As the operator, the retention planner from US-108 needs an actual executor wired into the scheduler so the compounding game bank stays bounded without manual intervention.",
+      "acceptanceCriteria": [
+        "Scheduler tick gains a retention step gated by `padrino_enable_retention: bool = False` and `padrino_retention_dry_run: bool = True` (both must be explicitly flipped for destructive action).",
+        "Executor applies `plan_retention` output: deletes expired non-broadcastable games (cascade), scrubs heavy `llm_calls` payloads past TTL; emits structured logs with counts; dry-run logs the plan without touching rows.",
+        "Tests `tests/db/test_retention_executor.py`: dry-run mutates nothing; enabled run deletes/scrubs exactly the planned candidates and NEVER touches broadcastable games, ratings, or public replay data; idempotent on re-run.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 116,
+      "passes": false,
+      "notes": "US-108 built the pure planner; this is the impure executor it was designed for."
+    },
+    {
+      "id": "US-117",
+      "title": "Broadcast pipeline end-to-end smoke test",
+      "description": "As the platform, one default-suite test must exercise the ENTIRE Wave 7 spine — matchmaking tick through SSE consumption — so a cross-boundary contract break (like the Wave 7 moderation event-type bug) can never again pass a green suite.",
+      "acceptanceCriteria": [
+        "New `tests/public/test_broadcast_pipeline_e2e.py` (mock LLM adapter, stub guard, zero cadence): run_continuous_matchmaking_tick → game COMPLETED → analytics aggregates written → moderation pass marks broadcastable → LIVE → consume the full SSE stream → every frame validates against the public_event_v1 golden contract → terminal frame is last → mark_recent → recap analytics served spoiler-free.",
+        "The test asserts at least one PublicMessageSubmitted frame's text was actually seen by the moderation gate (e.g. via a recording stub guard) — regression-guards the vacuous-gate class of bug.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 117,
+      "passes": false,
+      "notes": "Lesson from the Wave 7 review: per-story unit tests validated each side of an invented contract; only an end-to-end path catches lockstep-wrong seams."
+    },
+    {
+      "id": "US-118",
+      "title": "Flake burn-down: migrations, scheduler timing, dashboard e2e",
+      "description": "As the operator, the gates must be trustworthy: every known-flaky or environment-dependent test either becomes hermetic or is properly isolated, so a red CI means a real problem.",
+      "acceptanceCriteria": [
+        "`tests/db/test_migrations_all_dialects.py::test_postgres_full_cycle_upgrade_downgrade_upgrade` passes reliably in the full suite (isolate shared Postgres state per test, e.g. unique schema/database per run).",
+        "`tests/runner/test_scheduler.py::test_pending_gauntlet_runs_and_finalizes_to_completed` no longer depends on wall-clock timing under load (injected clock or generous deterministic synchronization).",
+        "Dashboard e2e `games.spec.ts` and `leaderboard.spec.ts` are hermetic against the smoke harness (deterministic seeded data, no dependence on machine state); `home.spec.ts` covered by US-111.",
+        "Full suite passes 3 consecutive runs locally (`uv run pytest -m \"not integration\"` ×3) — document the runs in progress.txt.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
       "dependencies": [
-        "US-099"
+        "US-111"
       ],
-      "priority": 100,
-      "passes": true,
-      "notes": ""
+      "priority": 118,
+      "passes": false,
+      "notes": "Known offenders enumerated from the Wave 7 verification runs."
     },
     {
-      "id": "US-101",
-      "title": "Ladder + model profile pages",
-      "description": "As a spectator, I want a ladder page and per-model profile pages, so I can browse rankings and a model's history.",
+      "id": "US-119",
+      "title": "Deploy topology: public edge vs private backend",
+      "description": "As the operator, the compose/deploy config must encode the public/private split: a public-api (surface-only) + static dashboard exposed to the edge, and api/scheduler/Postgres reachable only on an internal network.",
       "acceptanceCriteria": [
-        "`web/dashboard/src/routes/(public)/ladder/+page.svelte` (ranked table, provisional badges, ruleset switch) and `.../models/[id]/+page.svelte` (rating history, recent games linking to /watch).",
-        "Playwright `web/dashboard/tests/ladder.spec.ts` asserts ranking render + provisional badge + ruleset switch.",
-        "pnpm -C web/dashboard lint passes",
-        "pnpm -C web/dashboard check passes",
-        "pnpm -C web/dashboard test:e2e passes (Playwright)",
+        "`docker-compose.yml` gains a `public-api` service running with `PADRINO_PUBLIC_SURFACE_ONLY=true` and a published port; the full `api` service and `postgres` lose published ports (internal network only); `scheduler` internal; `dashboard` built against the public-api URL.",
+        "Compose networks: `edge` (public-api, dashboard) and `internal` (postgres, api, scheduler, public-api) — postgres/api/scheduler are NOT on `edge`.",
+        "`docs/deployment/v2-public.md` runbook updated for the split topology, including the reverse-proxy/CDN expectations (TLS termination, caching immutable RECENT responses) and the env vars for spend cap, guard model, alert webhook — this story MAY edit that md as explicit deploy doc.",
+        "`tests/docker/test_compose_v2.py` extended (docker-marked, opt-in): compose graph parses, public-api has the flag and a published port, postgres/api/scheduler publish no ports.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
       "dependencies": [
-        "US-100",
-        "US-091"
+        "US-110",
+        "US-111"
       ],
-      "priority": 101,
-      "passes": true,
-      "notes": ""
+      "priority": 119,
+      "passes": false,
+      "notes": "Human provisions the actual edge (domain/TLS/CDN); the loop ships config that makes the safe topology the default."
     },
     {
-      "id": "US-102",
-      "title": "Deterministic analytics layer I",
-      "description": "As a spectator wanting Town-of-Salem-style insight, I need deterministic per-game and aggregate analytics computed from public_event_v1 (not an LLM), so stats are cheap, reproducible and defensible.",
+      "id": "US-120",
+      "title": "Materialize per-game analytics at RECENT promotion",
+      "description": "As the platform serving a public recap page, per-game analytics for finished games should be computed once when the game becomes RECENT instead of re-deriving the full event log on every request.",
       "acceptanceCriteria": [
-        "New `src/padrino/analytics/deterministic.py` computing from public_event_v1: per-role win rates, voting accuracy (votes that hit actual mafia), and survival curves by role.",
-        "Pure functions over event lists; materialization repo persists aggregates keyed by (ruleset_id, agent/version).",
-        "Test `tests/analytics/test_deterministic_core.py` over a fixture game asserts each metric.",
+        "On `mark_recent` (or completion of broadcast), the deterministic per-game analytics + claim analysis are computed once and persisted (new table or JSON column keyed by game_id).",
+        "`GET /public/games/{id}/analytics` serves the stored result for RECENT games (immutable Cache-Control already in place); LIVE games keep the existing on-the-fly spoiler-safe path; behavior identical from the client's perspective (existing tests keep passing unchanged).",
+        "Backfill path: a stored-missing RECENT game falls back to on-the-fly compute and persists the result (self-healing for games promoted before this story).",
+        "Test `tests/api/test_game_analytics_materialized.py` asserts the stored row is created at promotion, served on GET, and the fallback persists.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
-      "dependencies": [
-        "US-086"
-      ],
-      "priority": 102,
-      "passes": true,
-      "notes": "D6: deterministic-first; never feeds ratings."
-    },
-    {
-      "id": "US-103",
-      "title": "Deterministic analytics layer II",
-      "description": "As a spectator, I want richer relational analytics \u2014 claim/counter-claim tracking and head-to-head matrices \u2014 so I can study agent behavior.",
-      "acceptanceCriteria": [
-        "Extend `analytics/deterministic.py`: claim/counter-claim extraction from structured events (NOT free-text parsing of votes \u2014 chat stays non-mechanical per Hard rule 2), and head-to-head win matrices between agents.",
-        "Test `tests/analytics/test_deterministic_relational.py` asserts matrix symmetry/counts and claim tracking on a fixture.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-102"
-      ],
-      "priority": 103,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-104",
-      "title": "Analytics REST endpoints",
-      "description": "As the consumer UI, I need endpoints serving per-model and per-game analytics, so the frontend can render breakdowns.",
-      "acceptanceCriteria": [
-        "`GET /public/models/{id}/analytics` and `GET /public/games/{id}/analytics` (deterministic stats only); anonymous-readable + rate-limited.",
-        "Test `tests/api/test_public_analytics.py` asserts shape and that per-game analytics for a LIVE game stay spoiler-safe.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-102",
-        "US-103"
-      ],
-      "priority": 104,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-105",
-      "title": "Judge productionization: sampled async enrichment",
-      "description": "As the platform, I need the LLM behavioral judge to run OFFLINE, batched, sampled and cost-capped, contributing only enrichment trend cards \u2014 never ratings or live logic \u2014 so judge cost/drift never threatens the product.",
-      "acceptanceCriteria": [
-        "Refactor `src/padrino/ratings/evaluator.py` usage so judging is a sampled batch job (e.g. top-tier ladder games or N% sample), respecting the global spend governor (US-095) and its own per-run cap.",
-        "Aggregate judge scores into per-model/per-role trend cards in an enrichment table; clearly separated from rating tables.",
-        "Real judge calls remain `@pytest.mark.integration`; sampling + aggregation + cap enforcement covered by default unit tests.",
-        "Test `tests/ratings/test_judge_sampling.py` asserts sampling rate, cap stop, and that judge output never writes a rating row.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-095",
-        "US-102"
-      ],
-      "priority": 105,
-      "passes": true,
-      "notes": "D6. HUMAN-NEEDED: judge model key (integration-gated). Calibration deferred."
-    },
-    {
-      "id": "US-106",
-      "title": "Post-match breakdown + analytics cards",
-      "description": "As a spectator, after a match I want a breakdown page (deterministic stats + judge enrichment where present), so I understand what happened.",
-      "acceptanceCriteria": [
-        "`web/dashboard/src/routes/watch/[id]/recap/+page.svelte` rendering deterministic analytics; judge trend cards shown only when present (enrichment).",
-        "Model profile page (US-101) gains an analytics section from `/public/models/{id}/analytics`.",
-        "Playwright `web/dashboard/tests/recap.spec.ts` asserts deterministic stats render and recap is reachable only for RECENT (not LIVE) games.",
-        "pnpm -C web/dashboard lint passes",
-        "pnpm -C web/dashboard check passes",
-        "pnpm -C web/dashboard test:e2e passes (Playwright)",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-104",
-        "US-091"
-      ],
-      "priority": 106,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-107",
-      "title": "Public-traffic hardening for new endpoints",
-      "description": "As the operator preparing for public traffic, I need the new live/index/ladder/analytics endpoints to honor CORS, anonymous rate limits, and observability metrics, so the public surface is safe under load.",
-      "acceptanceCriteria": [
-        "All new `/public/*` and SSE endpoints respect existing CORS config and the anonymous IP-hash rate limiter; SSE has a sane max-connection / per-IP cap.",
-        "Prometheus-style metrics for broadcast (active streams, frames/s) and per-endpoint request counts wired into the existing observability surface.",
-        "Test `tests/observability/test_public_v2_metrics.py` asserts metrics exist; `tests/api/test_public_v2_rate_limits.py` asserts anon limits apply to the new endpoints.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-089",
-        "US-090"
-      ],
-      "priority": 107,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-108",
-      "title": "Retention/archival for the compounding game bank",
-      "description": "As the operator, I need a retention policy for an ever-growing game bank so storage and query cost stay bounded while ratings and replays are preserved.",
-      "acceptanceCriteria": [
-        "Config-driven policy: keep public_event_v1 + ratings + analytics indefinitely; prune raw internal heavy payloads / non-broadcastable games after a TTL.",
-        "A pure planner function `src/padrino/db/retention.py::plan_retention(games, policy) -> RetentionPlan` decides prune candidates; the destructive step is a separate guarded job (dry-run default).",
-        "Test `tests/db/test_retention_policy.py` asserts prune-candidate selection and that ratings/replay data is never selected.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-095"
-      ],
-      "priority": 108,
-      "passes": true,
-      "notes": "Cross-cutting (council: storage growth of compounding bank)."
-    },
-    {
-      "id": "US-109",
-      "title": "Deploy config for broadcaster + consumer web + scheduler",
-      "description": "As the operator, I need deployment config to run the broadcaster API, the consumer web app, and the continuous scheduler together, with cacheable immutable replays, so the product can be launched.",
-      "acceptanceCriteria": [
-        "Extend `docker-compose.yml` / `Dockerfile` / `web/dashboard/Dockerfile` to stand up api + scheduler + web; immutable replay/RECENT responses send long-lived `Cache-Control` headers (CDN/edge-cacheable).",
-        "A documented `docs/deployment/v2-public.md` runbook (env vars incl. spend cap + guard key + cadence) \u2014 this story MAY create that md as it is explicitly deploy doc.",
-        "`tests/docker/test_compose_v2.py` (marked `docker`, opt-in) validates the compose graph parses and services are declared.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-092",
-        "US-094",
-        "US-098",
-        "US-106",
-        "US-107"
-      ],
-      "priority": 109,
-      "passes": true,
-      "notes": "BLOCKED at seam: needs human prod provisioning (domain, scaled Postgres, CDN, secrets, billing) + legal/ToS. Loop builds config; human launches."
+      "dependencies": [],
+      "priority": 120,
+      "passes": false,
+      "notes": "Review finding #14 (deliberately deferred from the --fix pass as architectural)."
     }
   ]
 }
