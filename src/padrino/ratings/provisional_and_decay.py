@@ -5,7 +5,7 @@ All public functions are pure: no DB access, no wall-clock, no side effects.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 DEFAULT_PROVISIONAL_GAMES: int = 10
 ORDINAL_BASE: int = 1000
@@ -28,11 +28,21 @@ def to_ordinal(mu: float, sigma: float) -> int:
     return round(ORDINAL_BASE + (mu - 3.0 * sigma) * ORDINAL_SCALE)
 
 
+def _aware(dt: datetime) -> datetime:
+    """Coerce a naive datetime (e.g. from aiosqlite) to UTC for comparison."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 def days_idle(last_game_at: datetime | None, *, now: datetime) -> int:
-    """Return whole days elapsed since *last_game_at*, or 0 if never played."""
+    """Return whole days elapsed since *last_game_at*, or 0 if never played.
+
+    Both operands are normalized to aware UTC: SQLite drivers return naive
+    datetimes for ``DateTime(timezone=True)`` columns while callers pass
+    ``datetime.now(UTC)`` — mixing the two would raise TypeError.
+    """
     if last_game_at is None:
         return 0
-    return max(0, (now - last_game_at).days)
+    return max(0, (_aware(now) - _aware(last_game_at)).days)
 
 
 def apply_decay(

@@ -38,7 +38,9 @@ class _ErrorGuard:
 
 
 def _public_event(text: str) -> dict[str, object]:
-    return {"event_type": "PublicMessage", "payload": {"text": text}}
+    # Must match the engine's real public-chat event type (core/engine/events.py);
+    # a made-up type here would let the gate silently skip every real message.
+    return {"event_type": "PublicMessageSubmitted", "payload": {"text": text}}
 
 
 def _non_chat_event() -> dict[str, object]:

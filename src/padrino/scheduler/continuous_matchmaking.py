@@ -6,8 +6,9 @@ On each scheduler tick :func:`run_continuous_matchmaking_tick`:
   3. Loads the curated roster (active AgentBuilds) and match history from the DB.
   4. Calls ``matchmaker.next_match()`` for a deterministic :class:`MatchPlan`.
   5. Executes one game via ``run_tournament_from_roster``.
-  6. Runs the moderation gate (``is_broadcastable``) on the completed game.
-  7. If broadcastable, marks ``is_broadcastable=True`` and transitions the game to LIVE.
+  6. Materializes deterministic analytics aggregates for every seated agent.
+  7. Runs the moderation gate (``is_broadcastable``) on the completed game.
+  8. If broadcastable, marks ``is_broadcastable=True`` and transitions the game to LIVE.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.analytics.repository import refresh_analytics_aggregates_for_game
 from padrino.core.rulesets import get_ruleset
 from padrino.economics.admission import admit
 from padrino.gauntlets.tournament import AdapterFactory, run_tournament_from_roster
@@ -147,6 +149,9 @@ async def run_continuous_matchmaking_tick(
 
     for gid in game_ids:
         async with session_factory() as session, session.begin():
+            # Analytics aggregates feed /public/models/{id}/analytics for every
+            # completed game, broadcastable or not (same policy as ratings).
+            await refresh_analytics_aggregates_for_game(session, gid, now=now)
             events = await _load_events_for_game(session, gid)
             safe = await is_broadcastable(events, guard)
             if safe:
@@ -156,7 +161,7 @@ async def run_continuous_matchmaking_tick(
                     # mark_live reuses the same identity-map instance; is_broadcastable=True
                     # is already set so the guard check inside mark_live passes.
                     await mark_live(session, gid)
-                _logger.info("continuous_matchmaking.game_promoted", game_id=str(gid))
+                    _logger.info("continuous_matchmaking.game_promoted", game_id=str(gid))
             else:
                 _logger.info("continuous_matchmaking.game_not_broadcastable", game_id=str(gid))
 

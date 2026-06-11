@@ -113,6 +113,19 @@ def test_days_idle_future_last_game_clamps_to_zero() -> None:
     assert days_idle(future, now=_NOW) == 0
 
 
+def test_days_idle_naive_last_game_at_from_sqlite() -> None:
+    # aiosqlite returns naive datetimes for DateTime(timezone=True) columns;
+    # the ladder route passes aware datetime.now(UTC). Must not TypeError.
+    naive_last = (_NOW - timedelta(days=4)).replace(tzinfo=None)
+    assert days_idle(naive_last, now=_NOW) == 4
+
+
+def test_days_idle_naive_now_with_aware_last_game_at() -> None:
+    naive_now = _NOW.replace(tzinfo=None)
+    last = _NOW - timedelta(days=2)
+    assert days_idle(last, now=naive_now) == 2
+
+
 # ---------------------------------------------------------------------------
 # apply_decay (sigma inflation)
 # ---------------------------------------------------------------------------

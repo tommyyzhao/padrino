@@ -19,12 +19,22 @@
   let recentGames = $state<PublicRecentGameEntry[]>([]);
 
   async function load() {
-    try {
-      // Top models: requires a league id; pick the first available league via
-      // the public surface indirectly — for the home KPI we accept a fallback
-      // to the global public leaderboard (entity-keyed, identity-blind).
-      const lb = await padrino.client.publicLeaderboard({ ruleset_id: RULESET, limit: 3 });
-      topModels = lb.entries.slice(0, 3).map((e) => ({
+    // The five KPI fetches are independent — run them concurrently and keep
+    // each one's degrade-on-failure semantics via allSettled.
+    const [lbResult, gamesResult, runningResult, liveResult, recentResult] =
+      await Promise.allSettled([
+        // Top models: requires a league id; pick the first available league via
+        // the public surface indirectly — for the home KPI we accept a fallback
+        // to the global public leaderboard (entity-keyed, identity-blind).
+        padrino.client.publicLeaderboard({ ruleset_id: RULESET, limit: 3 }),
+        padrino.client.listGames({ limit: 1 }),
+        padrino.client.listGauntlets({ status: 'RUNNING', limit: 50 }),
+        padrino.client.publicLiveIndex(),
+        padrino.client.publicRecentIndex({ limit: 10 })
+      ]);
+
+    if (lbResult.status === 'fulfilled') {
+      topModels = lbResult.value.entries.slice(0, 3).map((e) => ({
         model_key: `${e.model_provider}/${e.model_name}${e.model_version ? '@' + e.model_version : ''}`,
         display_name: e.display_name,
         model_provider: e.model_provider,
@@ -41,37 +51,25 @@
         mafia: { mu: 0, sigma: 0, conservative_score: 0, games: 0, wins: 0, draws: 0, losses: 0 },
         agent_build_count: 1
       }));
-    } catch (e) {
+    } else {
       // Anonymous mode may not be enabled; degrade silently for KPIs.
-      error = (e as Error).message;
+      error = (lbResult.reason as Error).message;
     }
 
-    try {
-      const games = await padrino.client.listGames({ limit: 1 });
-      totalGames = games.total_estimate ?? games.items.length;
-    } catch {
-      totalGames = null;
-    }
+    totalGames =
+      gamesResult.status === 'fulfilled'
+        ? (gamesResult.value.total_estimate ?? gamesResult.value.items.length)
+        : null;
 
-    try {
-      const running = await padrino.client.listGauntlets({ status: 'RUNNING', limit: 50 });
-      activeGauntlets = running.items.length;
-    } catch {
-      activeGauntlets = null;
-    }
+    activeGauntlets = runningResult.status === 'fulfilled' ? runningResult.value.items.length : null;
 
-    try {
-      const live = await padrino.client.publicLiveIndex();
-      liveGames = live.items;
-    } catch {
-      // silent: broadcast surface is optional
+    if (liveResult.status === 'fulfilled') {
+      liveGames = liveResult.value.items;
     }
+    // silent on failure: broadcast surface is optional
 
-    try {
-      const recent = await padrino.client.publicRecentIndex({ limit: 10 });
-      recentGames = recent.items;
-    } catch {
-      // silent: broadcast surface is optional
+    if (recentResult.status === 'fulfilled') {
+      recentGames = recentResult.value.items;
     }
   }
 

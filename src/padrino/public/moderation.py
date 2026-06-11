@@ -43,13 +43,19 @@ _TOXIC_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 
+#: Event types whose payload carries spectator-visible chat text. The engine
+#: emits ``PublicMessageSubmitted`` (core/engine/events.py) with the text under
+#: ``payload["text"]``; matching anything else would silently skip moderation.
+_PUBLIC_CHAT_EVENT_TYPES: tuple[str, ...] = ("PublicMessageSubmitted",)
+
+
 def _extract_public_messages(events: Sequence[dict[str, Any]]) -> list[str]:
     """Pull text from public chat events in the public_event_v1 envelope."""
     messages: list[str] = []
     for ev in events:
-        if ev.get("event_type") in ("PublicMessage", "ChatMessage"):
+        if ev.get("event_type") in _PUBLIC_CHAT_EVENT_TYPES:
             payload = ev.get("payload", {})
-            text = payload.get("text") or payload.get("message") or payload.get("content")
+            text = payload.get("text")
             if text:
                 messages.append(str(text))
     return messages

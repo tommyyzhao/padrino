@@ -23,18 +23,17 @@ spectator scope (or admin) is required.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.analytics.deterministic import compute_claim_analysis, compute_game_analytics
@@ -100,6 +99,29 @@ PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS = FORBIDDEN_PAYLOAD_KEYS
 
 # Submitter-identity keys scrubbed from bundle responses.
 _BUNDLE_PII_KEYS: frozenset[str] = frozenset({"submitter_key_id", "submitter_label"})
+
+_PageItemT = TypeVar("_PageItemT")
+
+
+def _paginate_index(
+    items: Sequence[_PageItemT],
+    limit: int,
+    cursor: str | None,
+) -> tuple[list[_PageItemT], str | None]:
+    """Slice *items* per the opaque index cursor; 400 on a malformed cursor.
+
+    Returns ``(page, next_cursor)`` — the shared decode → slice → encode
+    pattern used by every index-cursor-paginated public route.
+    """
+    start = 0
+    if cursor is not None:
+        try:
+            start = decode_index_cursor(cursor)
+        except InvalidCursorError as exc:
+            raise invalid_cursor_error() from exc
+    page = list(items[start : start + limit])
+    next_cursor = encode_index_cursor(start + limit) if start + limit < len(items) else None
+    return page, next_cursor
 
 
 async def require_public_read(
@@ -196,16 +218,7 @@ async def public_leaderboard(
         gauntlet_id=query.gauntlet_id,
     )
     entries = list(leaderboard.entries)
-    start = 0
-    if query.cursor is not None:
-        try:
-            start = decode_index_cursor(query.cursor)
-        except InvalidCursorError as exc:
-            raise invalid_cursor_error() from exc
-    page = entries[start : start + query.limit]
-    next_cursor = (
-        encode_index_cursor(start + query.limit) if start + query.limit < len(entries) else None
-    )
+    page, next_cursor = _paginate_index(entries, query.limit, query.cursor)
     return PublicLeaderboardResponse(
         ruleset_id=leaderboard.ruleset_id,
         gauntlet_id=leaderboard.gauntlet_id,
@@ -323,13 +336,7 @@ async def public_game_events(
     events = _bundle_events(row)
     if not _is_terminal(row):
         events = project_events_for_spectator(events)
-    start = 0
-    if query.cursor is not None:
-        try:
-            start = decode_index_cursor(query.cursor)
-        except InvalidCursorError as exc:
-            raise invalid_cursor_error() from exc
-    page = events[start : start + query.limit]
+    page, next_cursor = _paginate_index(events, query.limit, query.cursor)
     items = [
         PublicEventEntry(
             sequence=int(ev.get("sequence", 0)),
@@ -343,9 +350,6 @@ async def public_game_events(
         )
         for ev in page
     ]
-    next_cursor = (
-        encode_index_cursor(start + query.limit) if start + query.limit < len(events) else None
-    )
     return PublicEventsResponse(
         game_id=game_id,
         items=items,
@@ -743,16 +747,7 @@ async def public_models_leaderboard(
     )
     rollup = await rollup_by_model(session, query.league_id, query.ruleset_id)
     entries = list(rollup.entries)
-    start = 0
-    if query.cursor is not None:
-        try:
-            start = decode_index_cursor(query.cursor)
-        except InvalidCursorError as exc:
-            raise invalid_cursor_error() from exc
-    page = entries[start : start + query.limit]
-    next_cursor = (
-        encode_index_cursor(start + query.limit) if start + query.limit < len(entries) else None
-    )
+    page, next_cursor = _paginate_index(entries, query.limit, query.cursor)
     return PublicModelLeaderboardResponse(
         league_id=rollup.league_id,
         ruleset_id=rollup.ruleset_id,
@@ -924,7 +919,7 @@ def _live_cadence() -> CadenceConfig:
 async def public_game_live_sse(
     game_id: uuid.UUID,
     request: Request,
-    after: int | None = Query(default=None),
+    after: int | None = Query(default=None, ge=0),
     speed: float = Query(default=1.0, ge=0.0001, le=_SSE_SPEED_MAX),
     _ctx: ApiKeyContext = Depends(require_public_read),
     cadence: CadenceConfig = Depends(_live_cadence),
@@ -973,17 +968,27 @@ async def public_game_live_sse(
             detail="sse_connection_limit_exceeded",
             headers={"Retry-After": "60"},
         )
-    _sse_active[ip_hash] = active_count + 1
-    broadcast_active_streams.inc()
 
-    # Resolve cursor: Last-Event-ID header takes precedence over ?after=
+    # Resolve cursor: Last-Event-ID header takes precedence over ?after=.
+    # The server only emits integer sequence ids, so a non-integer header is
+    # a client/proxy bug — reject it instead of silently replaying frame 0.
     cursor: int | None = after
     last_event_id_header = request.headers.get("Last-Event-ID")
     if last_event_id_header is not None:
-        with contextlib.suppress(ValueError):
+        try:
             cursor = int(last_event_id_header)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid_last_event_id_header",
+            ) from exc
 
     stmt = select(GameEvent).where(GameEvent.game_id == game_id).order_by(GameEvent.sequence)
+    if cursor is not None:
+        # Resume filtering happens in SQL so a reconnect doesn't load and plan
+        # the already-sent prefix. plan_broadcast is per-event (no inter-event
+        # dependencies), so this is equivalent to post-filtering frames.
+        stmt = stmt.where(GameEvent.sequence > cursor)
     result = await session.execute(stmt)
     raw_events = list(result.scalars())
 
@@ -1002,10 +1007,17 @@ async def public_game_live_sse(
     ]
 
     frames = plan_broadcast(event_dicts, cadence)
-    if cursor is not None:
-        frames = [f for f in frames if f.event["sequence"] > cursor]
 
     async def _generate() -> AsyncGenerator[str, None]:
+        # The counter is incremented here rather than in the route body so it
+        # is paired with the stream's actual lifetime: if the response body is
+        # never iterated (client gone, error before send), neither the
+        # increment nor the finally runs, and nothing leaks. The cap check
+        # above reads the counter pre-increment, so a simultaneous burst from
+        # one IP can briefly overshoot the cap — acceptable for an in-process
+        # advisory limit.
+        _sse_active[ip_hash] = _sse_active.get(ip_hash, 0) + 1
+        broadcast_active_streams.inc()
         try:
             for frame in frames:
                 seq = frame.event["sequence"]
@@ -1016,7 +1028,13 @@ async def public_game_live_sse(
                 yield f"id: {seq}\ndata: {data}\n\n"
                 record_broadcast_frame()
         finally:
-            _sse_active[ip_hash] = max(0, _sse_active.get(ip_hash, 1) - 1)
+            remaining = max(0, _sse_active.get(ip_hash, 0) - 1)
+            if remaining:
+                _sse_active[ip_hash] = remaining
+            else:
+                # Drop zeroed entries so the dict doesn't grow one key per
+                # client IP ever seen.
+                _sse_active.pop(ip_hash, None)
             broadcast_active_streams.dec()
 
     return StreamingResponse(
@@ -1126,17 +1144,23 @@ async def public_recent_index(
         except InvalidCursorError as exc:
             raise invalid_cursor_error() from exc
 
+    recent_filter = (
+        Game.broadcast_state == BroadcastState.RECENT.value,
+        Game.is_broadcastable.is_(True),
+    )
+    total = (
+        await session.execute(select(func.count()).select_from(Game).where(*recent_filter))
+    ).scalar_one()
+    # Page in SQL: the RECENT set grows without bound, so loading it all to
+    # slice one page in Python would scale with the whole game bank.
     stmt = (
         select(Game)
-        .where(
-            Game.broadcast_state == BroadcastState.RECENT.value,
-            Game.is_broadcastable.is_(True),
-        )
+        .where(*recent_filter)
         .order_by(Game.created_at.desc())
+        .offset(start)
+        .limit(query.limit)
     )
-    all_games = list((await session.execute(stmt)).scalars())
-    total = len(all_games)
-    page = all_games[start : start + query.limit]
+    page = list((await session.execute(stmt)).scalars())
     next_cursor = encode_index_cursor(start + query.limit) if start + query.limit < total else None
     items = [
         PublicRecentGameEntry(
@@ -1240,15 +1264,8 @@ async def public_ladder(
 
     entries.sort(key=lambda e: (-e.ordinal, str(e.agent_build_id)))
 
-    start = 0
-    if query.cursor is not None:
-        try:
-            start = decode_index_cursor(query.cursor)
-        except InvalidCursorError as exc:
-            raise invalid_cursor_error() from exc
     total = len(entries)
-    page = entries[start : start + query.limit]
-    next_cursor = encode_index_cursor(start + query.limit) if start + query.limit < total else None
+    page, next_cursor = _paginate_index(entries, query.limit, query.cursor)
 
     return PublicLadderResponse(
         ruleset_id=query.ruleset_id,

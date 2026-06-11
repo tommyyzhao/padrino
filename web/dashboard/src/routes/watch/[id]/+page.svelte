@@ -113,7 +113,20 @@
 
     sse.onerror = () => {
       connected = false;
+      // EventSource gives up permanently (readyState CLOSED) when the server
+      // keeps refusing — e.g. the game flipped LIVE→RECENT mid-watch and the
+      // live endpoint now 404s. Surface that instead of showing "Connecting…"
+      // forever; transient drops (readyState CONNECTING) keep auto-retrying.
+      if (terminalResult === null && sse?.readyState === EventSource.CLOSED) {
+        error = 'Connection lost — the stream was closed by the server.';
+      }
     };
+  }
+
+  function reconnect(): void {
+    sse?.close();
+    error = null;
+    connect();
   }
 
   onMount(() => {
@@ -176,7 +189,10 @@
 <p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="watch-game-id">{gameId}</p>
 
 {#if error}
-  <p class="mb-4 text-sm text-red-500" data-testid="watch-error">{error}</p>
+  <p class="mb-4 text-sm text-red-500" data-testid="watch-error">
+    {error}
+    <button class="ml-2 underline" data-testid="watch-retry" onclick={reconnect}>Retry</button>
+  </p>
 {/if}
 
 {#if terminalResult !== null}

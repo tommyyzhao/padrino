@@ -26,6 +26,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 
+def _aware(dt: datetime) -> datetime:
+    """Coerce a naive datetime (e.g. from aiosqlite) to UTC for comparison."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 @dataclass(frozen=True)
 class RetentionPolicy:
     """Config-driven retention parameters."""
@@ -90,8 +95,7 @@ def plan_retention(
         payload TTL).  Broadcastable games are *never* placed in
         ``games_to_delete``, protecting ratings and public replay data.
     """
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=UTC)
+    now = _aware(now)
 
     games_to_delete: list[uuid.UUID] = []
     llm_calls_to_scrub: list[uuid.UUID] = []
@@ -103,9 +107,7 @@ def plan_retention(
         if g.completed_at is None:
             continue
 
-        completed = g.completed_at
-        if completed.tzinfo is None:
-            completed = completed.replace(tzinfo=UTC)
+        completed = _aware(g.completed_at)
 
         if completed <= raw_cutoff:
             llm_calls_to_scrub.append(g.id)
