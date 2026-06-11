@@ -134,6 +134,27 @@ class LiteLlmGuardAdapter:
         return text.startswith("safe")
 
 
+def build_guard_from_settings(settings: Any) -> LiteLlmGuardAdapter | None:
+    """Construct the production guard adapter from settings, or None.
+
+    Returns None when no DeepInfra key resolves — the gate then fails closed,
+    so with continuous matchmaking enabled but no key, NO game ever becomes
+    broadcastable. Callers (the scheduler CLI) should warn loudly on None.
+    """
+    import os
+
+    from padrino.llm.secrets import resolve_secret
+
+    raw = settings.deepinfra_api_key or os.environ.get("DEEPINFRA_API_KEY")
+    if not raw:
+        return None
+    try:
+        key = resolve_secret(raw)
+    except Exception:
+        key = raw
+    return LiteLlmGuardAdapter(model=settings.padrino_guard_model, api_key=key)
+
+
 # ---------------------------------------------------------------------------
 # Top-level gate
 # ---------------------------------------------------------------------------
@@ -166,6 +187,7 @@ async def is_broadcastable(
 __all__ = [
     "GuardModelAdapter",
     "LiteLlmGuardAdapter",
+    "build_guard_from_settings",
     "deterministic_first_pass",
     "is_broadcastable",
 ]

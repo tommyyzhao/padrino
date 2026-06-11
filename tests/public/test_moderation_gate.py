@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
 from padrino.public.moderation import (
     GuardModelAdapter,
     deterministic_first_pass,
@@ -168,3 +170,29 @@ def test_guard_model_setting_has_deepinfra_default() -> None:
 
     s = Settings()
     assert "deepinfra" in s.padrino_guard_model
+
+
+# ---------------------------------------------------------------------------
+# build_guard_from_settings (production wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_build_guard_returns_none_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from padrino.public.moderation import build_guard_from_settings
+    from padrino.settings import Settings
+
+    monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+    settings = Settings(deepinfra_api_key=None)
+    assert build_guard_from_settings(settings) is None
+
+
+def test_build_guard_constructs_adapter_from_settings() -> None:
+    from padrino.public.moderation import LiteLlmGuardAdapter, build_guard_from_settings
+    from padrino.settings import Settings
+
+    settings = Settings(
+        deepinfra_api_key="test-key",
+        padrino_guard_model="deepinfra/meta-llama/Llama-Guard-3-8B",
+    )
+    guard = build_guard_from_settings(settings)
+    assert isinstance(guard, LiteLlmGuardAdapter)
