@@ -62,6 +62,7 @@ async def update_rating(
     conservative_score: float,
     games: int,
     updated_at: datetime | None = None,
+    last_game_at: datetime | None = None,
 ) -> Rating | None:
     """Update the mu/sigma/conservative_score/games on an existing rating row."""
     rating = await session.get(Rating, rating_id)
@@ -73,6 +74,8 @@ async def update_rating(
     rating.games = games
     if updated_at is not None:
         rating.updated_at = updated_at
+    if last_game_at is not None:
+        rating.last_game_at = last_game_at
     await session.flush()
     return rating
 

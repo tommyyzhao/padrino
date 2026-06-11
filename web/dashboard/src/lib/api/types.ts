@@ -135,6 +135,103 @@ export interface PublicLeaderboardResponse {
   total_estimate: number;
 }
 
+export interface PublicLiveGameEntry {
+  game_id: string;
+  ruleset_id: string;
+  current_phase: string | null;
+  players_alive: number;
+}
+
+export interface PublicLiveIndexResponse {
+  items: PublicLiveGameEntry[];
+  total: number;
+}
+
+export interface PublicRecentGameEntry {
+  game_id: string;
+  ruleset_id: string;
+  current_phase: string | null;
+  terminal_result: TerminalResult | null;
+}
+
+export interface PublicRecentIndexResponse {
+  items: PublicRecentGameEntry[];
+  next_cursor: string | null;
+  total_estimate: number;
+}
+
+export interface PublicLadderEntry {
+  agent_build_id: string;
+  display_name: string;
+  version: string;
+  ordinal: number;
+  provisional: boolean;
+  games: number;
+  last_game_at: string | null;
+}
+
+export interface PublicLadderResponse {
+  ruleset_id: string;
+  entries: PublicLadderEntry[];
+  next_cursor: string | null;
+  total_estimate: number;
+}
+
+export interface VotingAccuracyAnalytics {
+  total_votes: number;
+  accurate_votes: number;
+  rate: number;
+}
+
+export interface SurvivalPointAnalytics {
+  role: string;
+  day: number;
+  alive_count: number;
+  total_count: number;
+  fraction: number;
+}
+
+export interface RoleWinRateAnalytics {
+  role: string;
+  wins: number;
+  games: number;
+  rate: number;
+}
+
+export interface ClaimRecordAnalytics {
+  player_id: string;
+  claimed_role: string;
+  sequence: number;
+  phase: string;
+}
+
+export interface CounterClaimGroupAnalytics {
+  claimed_role: string;
+  claimants: string[];
+}
+
+export interface PublicGameAnalyticsResponse {
+  game_id: string;
+  ruleset_id: string;
+  winner: string | null;
+  voting_accuracy: VotingAccuracyAnalytics;
+  survival_curve: SurvivalPointAnalytics[];
+  role_win_rates: RoleWinRateAnalytics[] | null;
+  claims: ClaimRecordAnalytics[];
+  counter_claims: CounterClaimGroupAnalytics[];
+}
+
+export interface PublicModelAnalyticsResponse {
+  agent_build_id: string;
+  ruleset_id: string;
+  version: string;
+  games_played: number;
+  role_win_rates: RoleWinRateAnalytics[];
+  voting_accuracy: VotingAccuracyAnalytics;
+  survival_curve: SurvivalPointAnalytics[];
+  computed_at: string;
+}
+
 export type FactionTab = 'global' | 'town' | 'mafia';
 
 // Mirrors padrino.gauntlets.evaluation.CIBand.

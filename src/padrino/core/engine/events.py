@@ -131,6 +131,10 @@ class GameTerminatedPayload(_FrozenModel):
     reason: str
 
 
+class RoleClaimedPayload(_FrozenModel):
+    claimed_role: str
+
+
 # --------------------------------------------------------------------------- #
 # Events
 # --------------------------------------------------------------------------- #
@@ -298,6 +302,15 @@ class GameTerminated(_FrozenModel):
     payload: GameTerminatedPayload
 
 
+class RoleClaimed(_FrozenModel):
+    event_type: Literal["RoleClaimed"] = "RoleClaimed"
+    sequence: int
+    phase: str
+    visibility: Literal["PUBLIC"] = "PUBLIC"
+    actor_player_id: str
+    payload: RoleClaimedPayload
+
+
 # --------------------------------------------------------------------------- #
 # Discriminated union
 # --------------------------------------------------------------------------- #
@@ -320,7 +333,8 @@ Event = Annotated[
     | DetectiveResultDelivered
     | PlayerEliminated
     | PhaseResolved
-    | GameTerminated,
+    | GameTerminated
+    | RoleClaimed,
     Field(discriminator="event_type"),
 ]
 
@@ -345,6 +359,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "PlayerEliminated",
     "PhaseResolved",
     "GameTerminated",
+    "RoleClaimed",
 )
 
 
@@ -384,6 +399,8 @@ __all__ = [
     "ProtectSubmittedPayload",
     "PublicMessageSubmitted",
     "PublicMessageSubmittedPayload",
+    "RoleClaimed",
+    "RoleClaimedPayload",
     "RolesAssigned",
     "RolesAssignedPayload",
     "SeatAssignment",

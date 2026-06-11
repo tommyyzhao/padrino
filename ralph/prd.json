@@ -20,7 +20,7 @@
       ],
       "dependencies": [],
       "priority": 86,
-      "passes": false,
+      "passes": true,
       "notes": "D2 / Phase 0. The stable seam every later phase reads from."
     },
     {
@@ -41,7 +41,7 @@
         "US-086"
       ],
       "priority": 87,
-      "passes": false,
+      "passes": true,
       "notes": "Spoiler policy (council). Outcome hidden until broadcast completes."
     },
     {
@@ -62,7 +62,7 @@
         "US-086"
       ],
       "priority": 88,
-      "passes": false,
+      "passes": true,
       "notes": "D1 spine. Production/presentation decoupled; engine not modified."
     },
     {
@@ -85,7 +85,7 @@
         "US-087"
       ],
       "priority": 89,
-      "passes": false,
+      "passes": true,
       "notes": "One-way dumb SSE on committed events (council: transport is the easy part)."
     },
     {
@@ -106,7 +106,7 @@
         "US-087"
       ],
       "priority": 90,
-      "passes": false,
+      "passes": true,
       "notes": "Spoiler-safe lobby data."
     },
     {
@@ -130,7 +130,7 @@
         "US-089"
       ],
       "priority": 91,
-      "passes": false,
+      "passes": true,
       "notes": "Loop owns UI (Playwright-gated); human does final 10% polish."
     },
     {
@@ -154,7 +154,7 @@
         "US-091"
       ],
       "priority": 92,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -163,7 +163,7 @@
       "description": "As the platform, before any AI-generated game is shown publicly I need a moderation gate that marks it broadcastable, so toxic/unsafe/prompt-injected model output never reaches viewers.",
       "acceptanceCriteria": [
         "New `src/padrino/public/moderation.py` with a deterministic first-pass (regex/keyword/structural filters over public messages) and a pluggable `GuardModelAdapter` protocol for an LLM guard pass.",
-        "Settings `padrino_guard_model: str` (default a DeepInfra-hosted Llama-Guard-family model) routed through the existing LiteLLM adapter using the existing `DEEPINFRA_API_KEY` — NO new credential or provider integration.",
+        "Settings `padrino_guard_model: str` (default a DeepInfra-hosted Llama-Guard-family model) routed through the existing LiteLLM adapter using the existing `DEEPINFRA_API_KEY` \u2014 NO new credential or provider integration.",
         "A game gets `is_broadcastable: bool`; DEFAULT FAIL-CLOSED \u2014 if the guard pass is unavailable or errors, the game is NOT broadcastable.",
         "Real guard-model call is behind `@pytest.mark.integration` (needs a key); the deterministic path + fail-closed default are covered by default unit tests.",
         "Test `tests/public/test_moderation_gate.py` asserts: clean transcript -> broadcastable; transcript with a seeded toxic line -> not broadcastable; guard error -> not broadcastable.",
@@ -176,7 +176,7 @@
         "US-086"
       ],
       "priority": 93,
-      "passes": false,
+      "passes": true,
       "notes": "D5. DECIDED 2026-06-09: guard = Llama-Guard-family model on DeepInfra via the EXISTING DeepInfra key (no new credential; real call still integration-gated). Judge stays padrino_behavioral_judge_model (xiaomi/mimo-v2.5-pro, already configured). Calibration set deferred (tuning only)."
     },
     {
@@ -198,7 +198,7 @@
         "US-089"
       ],
       "priority": 94,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -217,7 +217,7 @@
       ],
       "dependencies": [],
       "priority": 95,
-      "passes": false,
+      "passes": true,
       "notes": "D3. $200 = cumulative global ceiling (human decision; configurable)."
     },
     {
@@ -237,7 +237,7 @@
         "US-095"
       ],
       "priority": 96,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -258,7 +258,7 @@
         "US-096"
       ],
       "priority": 97,
-      "passes": false,
+      "passes": true,
       "notes": "D4 (partial). Open submission / OAuth identity / anti-Sybil DEFERRED to a later wave."
     },
     {
@@ -281,7 +281,7 @@
         "US-093"
       ],
       "priority": 98,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -300,7 +300,7 @@
       ],
       "dependencies": [],
       "priority": 99,
-      "passes": false,
+      "passes": true,
       "notes": "D4 trust primitive (credibility), curated-roster appropriate."
     },
     {
@@ -320,7 +320,7 @@
         "US-099"
       ],
       "priority": 100,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -343,7 +343,7 @@
         "US-091"
       ],
       "priority": 101,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -363,7 +363,7 @@
         "US-086"
       ],
       "priority": 102,
-      "passes": false,
+      "passes": true,
       "notes": "D6: deterministic-first; never feeds ratings."
     },
     {
@@ -382,7 +382,7 @@
         "US-102"
       ],
       "priority": 103,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -402,7 +402,7 @@
         "US-103"
       ],
       "priority": 104,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -424,7 +424,7 @@
         "US-102"
       ],
       "priority": 105,
-      "passes": false,
+      "passes": true,
       "notes": "D6. HUMAN-NEEDED: judge model key (integration-gated). Calibration deferred."
     },
     {
@@ -448,7 +448,7 @@
         "US-091"
       ],
       "priority": 106,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -469,7 +469,7 @@
         "US-090"
       ],
       "priority": 107,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -489,7 +489,7 @@
         "US-095"
       ],
       "priority": 108,
-      "passes": false,
+      "passes": true,
       "notes": "Cross-cutting (council: storage growth of compounding bank)."
     },
     {
@@ -513,7 +513,7 @@
         "US-107"
       ],
       "priority": 109,
-      "passes": false,
+      "passes": true,
       "notes": "BLOCKED at seam: needs human prod provisioning (domain, scaled Postgres, CDN, secrets, billing) + legal/ToS. Loop builds config; human launches."
     }
   ]

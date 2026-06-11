@@ -18,6 +18,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Final, Literal
 
 from openskill.models import PlackettLuce
@@ -69,6 +70,7 @@ async def _apply_scope_update(
     mafia_seats: list[tuple[str, uuid.UUID]],
     winner: Literal["TOWN", "MAFIA", "DRAW"],
     model: PlackettLuce,
+    now: datetime,
 ) -> list[RatingEvent]:
     """Run one PlackettLuce update for a single scope and persist rows + audit."""
     town_rows = []
@@ -120,6 +122,7 @@ async def _apply_scope_update(
                 scope_type=scope_type,
                 scope_value=town_scope_value,
                 public_player_id=sid,
+                now=now,
             )
         )
     for row, (sid, _ab_id), new in zip(mafia_rows, mafia_seats, new_mafia_team, strict=True):
@@ -134,6 +137,7 @@ async def _apply_scope_update(
                 scope_type=scope_type,
                 scope_value=mafia_scope_value,
                 public_player_id=sid,
+                now=now,
             )
         )
     return events
@@ -150,6 +154,7 @@ async def _persist_one(
     scope_type: str,
     scope_value: str,
     public_player_id: str | None = None,
+    now: datetime,
 ) -> RatingEvent:
     """Update a single rating row + append the matching audit event."""
     from padrino.db.models import Rating
@@ -164,6 +169,7 @@ async def _persist_one(
         sigma=new_sigma,
         conservative_score=_conservative(new_mu, new_sigma),
         games=row.games + 1,
+        last_game_at=now,
     )
     if updated is None:  # pragma: no cover — row was just inserted in this txn.
         msg = f"Rating row {row.id} disappeared between insert and update"
@@ -189,6 +195,7 @@ async def update_ratings_for_game(
     league_id: uuid.UUID,
     game_result: GameResult,
     agent_builds_by_seat: Mapping[str, uuid.UUID],
+    now: datetime | None = None,
 ) -> list[RatingEvent]:
     """Apply OpenSkill updates for one game across GLOBAL + FACTION scopes.
 
@@ -214,6 +221,7 @@ async def update_ratings_for_game(
         else:
             mafia_seats.append((sid, ab_id))
 
+    _now = now if now is not None else datetime.now(UTC)
     model = PlackettLuce(mu=INITIAL_MU, sigma=INITIAL_SIGMA)
     events: list[RatingEvent] = []
 
@@ -229,6 +237,7 @@ async def update_ratings_for_game(
             mafia_seats=mafia_seats,
             winner=game_result.winner,
             model=model,
+            now=_now,
         )
     )
     events.extend(
@@ -243,6 +252,7 @@ async def update_ratings_for_game(
             mafia_seats=mafia_seats,
             winner=game_result.winner,
             model=model,
+            now=_now,
         )
     )
 

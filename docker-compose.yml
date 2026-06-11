@@ -1,4 +1,4 @@
-# US-064: Padrino self-hosting stack.
+# US-064 / US-109: Padrino self-hosting stack (Wave 7 public surface).
 #
 # Services:
 #   - postgres : the canonical first-class database target (US-057).
@@ -8,17 +8,32 @@
 #   - scheduler: `padrino scheduler` with `/healthz/scheduler` readiness probe
 #                (US-060 — the scheduler container queries the api service over
 #                the compose-private network).
-#   - dashboard: SvelteKit spectator dashboard (US-069) served on port 5173.
+#   - dashboard: SvelteKit spectator dashboard (US-069/US-109) served on port 5173.
 #
 # The same image (built once) serves all three padrino services; the only
 # difference is the argv passed to the `padrino` entrypoint. The dashboard
 # has its own image built from `web/dashboard/`.
+#
+# Wave 7 (public live league) env vars — see docs/deployment/v2-public.md:
+#   DEEPINFRA_API_KEY           guard model key (Llama-Guard-3-8B on DeepInfra)
+#   PADRINO_GLOBAL_SPEND_CAP_USD   hard $200 ceiling (default: 200.0)
+#   PADRINO_ENABLE_CONTINUOUS_MATCHMAKING   set "true" to start game bank
+#   PADRINO_BROADCAST_CADENCE_CHAT_MS       ms between chat-line frames (2500)
+#   PADRINO_RAW_PAYLOAD_TTL_DAYS            scrub llm_call payloads after N days (30)
+#   PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS delete non-broadcastable games after N days (7)
 
 x-padrino-env: &padrino-env
   PADRINO_DB_URL: postgresql+asyncpg://padrino:${POSTGRES_PASSWORD:-padrino}@postgres:5432/padrino
   PADRINO_LOG_LEVEL: ${PADRINO_LOG_LEVEL:-INFO}
   PADRINO_API_HOST: 0.0.0.0
   PADRINO_API_PORT: "8000"
+  # Wave 7: public live league. Override these in your .env file or environment.
+  DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
+  PADRINO_GLOBAL_SPEND_CAP_USD: ${PADRINO_GLOBAL_SPEND_CAP_USD:-200.0}
+  PADRINO_ENABLE_CONTINUOUS_MATCHMAKING: ${PADRINO_ENABLE_CONTINUOUS_MATCHMAKING:-false}
+  PADRINO_BROADCAST_CADENCE_CHAT_MS: ${PADRINO_BROADCAST_CADENCE_CHAT_MS:-2500}
+  PADRINO_RAW_PAYLOAD_TTL_DAYS: ${PADRINO_RAW_PAYLOAD_TTL_DAYS:-30}
+  PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS: ${PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS:-7}
 
 services:
   postgres:

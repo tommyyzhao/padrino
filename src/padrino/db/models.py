@@ -92,6 +92,7 @@ class AgentBuild(Base):
     adapter_version: Mapped[str] = mapped_column(String, nullable=False)
     inference_params: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    version: Mapped[str] = mapped_column(String, nullable=False, server_default="v1", default="v1")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -159,6 +160,12 @@ class Game(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     current_phase: Mapped[str | None] = mapped_column(String, nullable=True)
     event_hash_head: Mapped[str | None] = mapped_column(String, nullable=True)
+    broadcast_state: Mapped[str] = mapped_column(
+        String, nullable=False, default="HIDDEN", server_default="HIDDEN"
+    )
+    is_broadcastable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
 
 class GameSeat(Base):
@@ -257,6 +264,7 @@ class Rating(Base):
     sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     conservative_score: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     games: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_game_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -394,8 +402,68 @@ class BehavioralEvaluation(Base):
     )
 
 
+class AnalyticsAggregate(Base):
+    """Per-agent analytics aggregate keyed by (ruleset_id, agent_build_id, version) (US-102).
+
+    Materialized by ``padrino.analytics.deterministic.compute_game_analytics``
+    rolled up across all games an agent participated in.  JSON columns store
+    serialized ``RoleWinRate`` and ``SurvivalPoint`` lists.
+    """
+
+    __tablename__ = "analytics_aggregates"
+    __table_args__ = (
+        UniqueConstraint("ruleset_id", "agent_build_id", "version", name="uq_analytics_aggregate"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[str] = mapped_column(String, nullable=False)
+    games_played: Mapped[int] = mapped_column(Integer, nullable=False)
+    role_win_rates_json: Mapped[str] = mapped_column(String, nullable=False)
+    voting_total_votes: Mapped[int] = mapped_column(Integer, nullable=False)
+    voting_accurate_votes: Mapped[int] = mapped_column(Integer, nullable=False)
+    survival_curve_json: Mapped[str] = mapped_column(String, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class JudgeEnrichmentCard(Base):
+    """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
+
+    Keyed by (agent_build_id, role, ruleset_id).  Stores average judge dimension
+    scores across all evaluated games the agent played in the given role.
+    Clearly separate from rating tables (Rating, RatingEvent) — judge output
+    never writes a Rating row.
+    """
+
+    __tablename__ = "judge_enrichment_cards"
+    __table_args__ = (
+        UniqueConstraint("agent_build_id", "role", "ruleset_id", name="uq_judge_enrichment_card"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    games_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    avg_persuasion: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    avg_deception: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    avg_logical_consistency: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    avg_social_heuristics: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 __all__ = [
     "AgentBuild",
+    "AnalyticsAggregate",
     "ApiKey",
     "BehavioralEvaluation",
     "Game",
@@ -404,6 +472,7 @@ __all__ = [
     "Gauntlet",
     "GauntletRosterSlot",
     "IngestedGame",
+    "JudgeEnrichmentCard",
     "League",
     "LlmCall",
     "ModelConfig",

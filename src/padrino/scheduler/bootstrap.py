@@ -4,6 +4,9 @@
 current clock time. :func:`build_scheduled_gauntlet_tick_hook` returns the hook
 that fires due ``scheduled_gauntlets`` rows, threading the injected clock so the
 job's timing stays deterministic under test.
+
+US-098 extends the hook to also run the continuous matchmaking pipeline when
+``padrino_enable_continuous_matchmaking`` is True.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.gauntlets.tournament import AdapterFactory
+from padrino.public.moderation import GuardModelAdapter
 from padrino.scheduler.gauntlet_job import run_due_scheduled_gauntlets
 from padrino.settings import Settings
 
@@ -25,8 +29,14 @@ def build_scheduled_gauntlet_tick_hook(
     *,
     settings: Settings,
     adapter_factory: AdapterFactory | None = None,
+    guard: GuardModelAdapter | None = None,
 ) -> TickHook:
-    """Return a scheduler tick hook that fires every due scheduled gauntlet."""
+    """Return a scheduler tick hook that fires every due scheduled gauntlet.
+
+    When ``padrino_enable_continuous_matchmaking`` is True the hook also runs
+    the continuous matchmaking pipeline (admission → matchmaker → runner →
+    moderation gate) on each tick.
+    """
 
     async def _hook(now: datetime) -> None:
         await run_due_scheduled_gauntlets(
@@ -41,6 +51,18 @@ def build_scheduled_gauntlet_tick_hook(
             await run_pending_behavioral_evaluations(
                 session_factory,
                 settings=settings,
+            )
+        if settings.padrino_enable_continuous_matchmaking:
+            from padrino.scheduler.continuous_matchmaking import (
+                run_continuous_matchmaking_tick,
+            )
+
+            await run_continuous_matchmaking_tick(
+                session_factory,
+                settings=settings,
+                now=now,
+                guard=guard,
+                adapter_factory=adapter_factory,
             )
 
     return _hook

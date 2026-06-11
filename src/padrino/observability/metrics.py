@@ -22,6 +22,10 @@ Metric inventory:
   being driven by ``padrino.runner.scheduler``.
 * ``padrino_api_requests_total{route,method,status}`` — every HTTP request
   served by the FastAPI app, counted by template path + status code.
+* ``padrino_broadcast_active_streams`` — current count of SSE live broadcast
+  streams open (US-107).
+* ``padrino_broadcast_frames_total`` — cumulative count of
+  ``public_event_v1`` frames emitted via SSE broadcast (US-107).
 
 The instruments live on a single :class:`CollectorRegistry` exposed through
 :data:`REGISTRY` so tests can clear state without touching the global
@@ -132,6 +136,18 @@ api_requests_total = Counter(
     registry=REGISTRY,
 )
 
+broadcast_active_streams = Gauge(
+    "padrino_broadcast_active_streams",
+    "Number of SSE live broadcast streams currently active.",
+    registry=REGISTRY,
+)
+
+broadcast_frames_total = Counter(
+    "padrino_broadcast_frames_total",
+    "Total count of public_event_v1 frames emitted via SSE broadcast.",
+    registry=REGISTRY,
+)
+
 
 def split_litellm_model_id(model_id: str | None) -> tuple[str, str]:
     """Return ``(provider, model)`` parsed from a litellm-style model id.
@@ -181,6 +197,11 @@ def record_invalid_action(*, reason: str) -> None:
     invalid_action_total.labels(reason=reason).inc()
 
 
+def record_broadcast_frame() -> None:
+    """Increment the broadcast frame counter by one."""
+    broadcast_frames_total.inc()
+
+
 def render_prometheus_text() -> bytes:
     """Return the current snapshot serialized as Prometheus text exposition."""
     return generate_latest(REGISTRY)
@@ -203,6 +224,8 @@ def reset_metrics() -> None:
     ):
         collector._metrics.clear()
     scheduler_inflight_gauntlets.set(0)
+    broadcast_active_streams.set(0)
+    broadcast_frames_total.reset()
 
 
 __all__ = [
@@ -210,11 +233,14 @@ __all__ = [
     "REGISTRY",
     "UNKNOWN_LABEL",
     "api_requests_total",
+    "broadcast_active_streams",
+    "broadcast_frames_total",
     "games_total",
     "invalid_action_total",
     "llm_calls_total",
     "llm_latency_seconds",
     "phase_duration_seconds",
+    "record_broadcast_frame",
     "record_game_completed",
     "record_invalid_action",
     "record_llm_call",

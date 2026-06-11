@@ -114,6 +114,64 @@ class Settings(BaseSettings):
     padrino_enable_behavioral_evaluation: bool = False
     padrino_behavioral_judge_model: str = "xiaomi/mimo-v2.5-pro"
 
+    # Provisional/decay (US-099). An agent is provisional until it has played
+    # at least padrino_provisional_game_threshold rated games. Sigma inflation
+    # kicks in when a rated agent has been idle for more than
+    # padrino_rating_decay_idle_days days; each additional idle day inflates
+    # sigma by padrino_rating_decay_sigma_per_day (fraction, e.g. 0.05 = 5%).
+    padrino_provisional_game_threshold: int = 10
+    padrino_rating_decay_sigma_per_day: float = 0.05
+    padrino_rating_decay_idle_days: int = 30
+
+    # Continuous matchmaking (US-098). When True the scheduler tick also runs
+    # the matchmaker → game runner → moderation gate pipeline each iteration.
+    # Defaults to False so it must be explicitly opted in by the operator.
+    padrino_enable_continuous_matchmaking: bool = False
+
+    # Moderation gate (US-093). Guard model is a DeepInfra-hosted Llama-Guard
+    # family model routed through the existing LiteLLM adapter with
+    # DEEPINFRA_API_KEY — no new credential required.
+    padrino_guard_model: str = "deepinfra/meta-llama/Llama-Guard-3-8B"
+
+    # Global spend governor (US-095). Hard ceiling on cumulative AI spend
+    # across all house-funded games.  $200 is the operator-approved budget;
+    # override via PADRINO_GLOBAL_SPEND_CAP_USD.
+    padrino_global_spend_cap_usd: float = 200.0
+
+    # Admission / queue policy (US-096). Daily and concurrency caps that bound
+    # how many games run independently of spend.  Defaults are conservative:
+    # 20 games/day and 3 concurrent keeps cost predictable during initial rollout.
+    padrino_max_games_per_day: int = 20
+    padrino_max_concurrent_games: int = 3
+
+    # Judge sampling enrichment (US-105). ``padrino_judge_sample_rate`` controls
+    # the fraction of unevaluated completed games selected per batch run.
+    # ``padrino_judge_max_games_per_run`` is a hard per-invocation ceiling that
+    # acts as the per-run cost cap (one game = one judge LLM call).
+    padrino_judge_sample_rate: float = 0.1
+    padrino_judge_max_games_per_run: int = 5
+
+    # Broadcast cadence (US-088). Delays (ms) applied by the SSE transport layer
+    # between consecutive public_event_v1 frames.  Tune without a code change.
+    padrino_broadcast_cadence_chat_ms: int = 2500
+    padrino_broadcast_cadence_phase_ms: int = 3000
+    padrino_broadcast_cadence_elimination_ms: int = 4000
+    padrino_broadcast_cadence_resolution_ms: int = 3500
+    padrino_broadcast_cadence_default_ms: int = 1500
+
+    # SSE connection cap (US-107). Maximum concurrent SSE broadcast streams
+    # per client IP. Excess connections are rejected with 429.
+    padrino_sse_max_connections_per_ip: int = 5
+
+    # Retention / archival (US-108). ``padrino_raw_payload_ttl_days`` controls
+    # when heavy llm_call columns (request_json, raw_response) are scrubbed for
+    # all completed games.  ``padrino_non_broadcastable_game_ttl_days`` controls
+    # when non-broadcastable game rows (+ cascades) are hard-deleted.
+    # Broadcastable games are never hard-deleted — ratings and replay data are
+    # kept indefinitely.
+    padrino_raw_payload_ttl_days: int = 30
+    padrino_non_broadcastable_game_ttl_days: int = 7
+
     def build_routing_policy(
         self,
         *,

@@ -245,7 +245,21 @@ def scheduler(
             from padrino.settings import get_settings
 
             settings = get_settings()
-            tick_hook = build_scheduled_gauntlet_tick_hook(session_factory, settings=settings)
+            guard = None
+            if settings.padrino_enable_continuous_matchmaking:
+                from padrino.public.moderation import build_guard_from_settings
+
+                guard = build_guard_from_settings(settings)
+                if guard is None:
+                    typer.echo(
+                        "WARNING: continuous matchmaking is enabled but no "
+                        "DEEPINFRA_API_KEY resolves — the moderation gate fails "
+                        "closed and NO game will be broadcastable.",
+                        err=True,
+                    )
+            tick_hook = build_scheduled_gauntlet_tick_hook(
+                session_factory, settings=settings, guard=guard
+            )
 
             await run_scheduler(
                 session_factory,

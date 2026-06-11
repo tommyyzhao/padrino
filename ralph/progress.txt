@@ -1,645 +1,288 @@
-# Padrino — Ralph progress log (wave 4)
+# Ralph Progress Log
+Started: Wed Jun 10 00:26:47 PDT 2026
+---
 
-Each iteration MUST append a dated section. Never replace existing content.
-Older wave-3 learnings live in `ralph/archive/2026-05-22-padrino-v3/`.
-Older wave-2 learnings live in `ralph/archive/2026-05-20-padrino-v2/`.
-Older v1-era learnings live in `ralph/archive/2026-05-14-padrino-v1/`.
+## 2026-06-10T30:00 - US-109
+- Extended `docker-compose.yml` with Wave 7 env vars in the `x-padrino-env` anchor: `DEEPINFRA_API_KEY`, `PADRINO_GLOBAL_SPEND_CAP_USD`, `PADRINO_ENABLE_CONTINUOUS_MATCHMAKING`, `PADRINO_BROADCAST_CADENCE_CHAT_MS`, `PADRINO_RAW_PAYLOAD_TTL_DAYS`, `PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS`.
+- Added `Cache-Control` headers to RECENT game analytics (`immutable`), model analytics (`300s`), and recent-game-list (`60s`) endpoints via FastAPI `Response` parameter injection.
+- Created `docs/deployment/v2-public.md` runbook documenting all env vars, cost rails, CDN caching behavior, and human-gated launch steps.
+- Created `tests/docker/test_compose_v2.py` (10 tests, `@pytest.mark.docker`) asserting all Wave 7 services declared, shared padrino image, dashboard separate context, wave-7 env var presence, and healthcheck dependency order.
+- Files changed: `docker-compose.yml`, `src/padrino/api/routes/public.py`, `docs/deployment/v2-public.md`, `tests/docker/test_compose_v2.py`
+- **Learnings for future iterations:**
+  - Inject `response: Response` as a positional parameter (before `Depends`) in FastAPI route functions to set headers while still returning a Pydantic model — FastAPI merges the headers onto the JSON response.
+  - `Cache-Control: public, max-age=31536000, immutable` is the correct CDN-immutable header for content that will never change (RECENT analytics); `no-store` is correct for LIVE analytics (always fresh).
+  - YAML-parse-only tests can be marked `@pytest.mark.docker` even without needing Docker itself — they skip in CI's normal run but validate the compose schema without container startup cost.
+  - Wave 7 env vars in `x-padrino-env` use `${VAR:-default}` form so compose works with no `.env` file while still being overridable.
+---
+
+## 2026-06-10T29:00 - US-108
+- Created `src/padrino/db/retention.py` with `RetentionPolicy`, `GameRetentionInfo`, `RetentionPlan` dataclasses and pure `plan_retention(games, policy, *, now, dry_run=True) -> RetentionPlan`; non-broadcastable completed games past `non_broadcastable_game_ttl_days` → `games_to_delete`; all completed games past `raw_payload_ttl_days` → `llm_calls_to_scrub`; games in `games_to_delete` removed from scrub list (CASCADE handles them); broadcastable games never hard-deleted.
+- Added `padrino_raw_payload_ttl_days: int = 30` and `padrino_non_broadcastable_game_ttl_days: int = 7` to `Settings`.
+- Created `tests/db/test_retention_policy.py` with 17 tests: deletion selection, broadcastable protection, scrub list dedup, mixed batch, dry_run flag, naive datetime handling, and settings defaults.
+- Files changed: `src/padrino/db/retention.py`, `src/padrino/settings.py`, `tests/db/test_retention_policy.py`
+- **Learnings for future iterations:**
+  - Pure planner pattern: accept `now: datetime` as an injected keyword arg (no wall-clock); caller passes `datetime.now(UTC)` in production, a fixed timestamp in tests — same pattern used by `apply_decay` in US-099.
+  - Naive datetimes from DB rows should be normalised to UTC at the planner boundary (`replace(tzinfo=UTC)`) rather than rejected, since SQLite drops timezone info on roundtrip.
+  - Games scheduled for hard deletion should be removed from the `llm_calls_to_scrub` list to avoid redundant work — the ON DELETE CASCADE on `llm_calls.game_id` means the rows disappear anyway.
+  - `dry_run=True` as the default makes the plan advisory until a human-initiated executor explicitly opts in — safe default for a destructive operation.
+---
+
+## 2026-06-10T28:00 - US-107
+- Added `broadcast_active_streams` (Gauge) and `broadcast_frames_total` (Counter) to `src/padrino/observability/metrics.py`; added `record_broadcast_frame()` helper; updated `reset_metrics()` using `.reset()` for the unlabeled counter (labeled counters use `._metrics.clear()`).
+- Added `padrino_sse_max_connections_per_ip: int = 5` to `Settings`; wired per-IP SSE connection cap and broadcast metrics into `public_game_live_sse` — module-level `_sse_active: dict[str, int]` tracks active connections, `broadcast_active_streams` gauge incremented on open / decremented in generator's `finally` block.
+- Created `tests/observability/test_public_v2_metrics.py` (8 tests) asserting gauge existence, frame counter increments, zero-after-completion gauge, and reset behavior; created `tests/api/test_public_v2_rate_limits.py` (7 tests) asserting anon rate limits on `/public/live`, `/public/recent`, `/public/ladder`, `/public/games/{id}/live`, and SSE cap enforcement.
+- Files changed: `src/padrino/observability/metrics.py`, `src/padrino/settings.py`, `src/padrino/api/routes/public.py`, `tests/observability/test_public_v2_metrics.py`, `tests/api/test_public_v2_rate_limits.py`
+- **Learnings for future iterations:**
+  - Unlabeled `prometheus_client.Counter` (no labelnames) does NOT have `._metrics` dict — use `.reset()` to zero it; labeled counters use `._metrics.clear()` to remove child metrics.
+  - `broadcast_active_streams` gauge starts at 0 after `reset_metrics()` but only appears in Prometheus output once `.inc()` or `.set()` has been called; unlabeled Gauge always appears (appears at 0 from `reset`).
+  - SSE per-IP cap uses a module-level `_sse_active: dict[str, int]` dict (safe in single event-loop async); import it in tests to pre-populate and assert its state.
+  - `X-Forwarded-For` header is the cleanest way to control client IP in ASGI transport tests (avoiding uncertainty about `request.client.host` value in httpx).
+  - `app.state.auth_settings = Settings(...)` overrides rate limits, SSE cap, and anon mode cleanly per test without monkeypatching `get_settings`.
+---
 
 ## Codebase Patterns
-(Reusable learnings discovered across wave-4 iterations. Keep this section short
-and general — story-specific notes live in the iteration entries below. Patterns
-inherited from waves 1-3 are NOT duplicated here; read the archive for those.)
 
-- OpenAI-compatible non-OpenAI providers should use `ModelProvider.base_url`
-  for the endpoint and `ModelConfig.litellm_model_id` for the LiteLLM dispatch
-  id; do not add a parallel `api_base` column.
+- `src/padrino/public/` is the new module for Wave 7 public surface. Start each new public module here.
+- `padrino.core.spectator_projection.project_event_for_spectator` is the identity-blind filter for PUBLIC events; always build on top of it rather than reimplementing visibility filtering.
+- `padrino.core.observation_privacy.FORBIDDEN_PAYLOAD_KEYS` is the canonical deny list for identity/role/faction leaks — shared across spectator, ranked-observation, and public_event_v1.
+- Golden-file tests live in `tests/public/fixtures/` as JSON. The test loads the file and diffs computed output against stored expected — any schema drift fails the test until the golden file is updated consciously.
 
 ---
 
-## 2026-05-22 — Wave 4 kickoff (post-Wave-3 verification)
-
-Wave 3 finished with all 8 stories self-reporting `passes: true`, but per the
-established discipline this got an auditor's run before being declared truly
-done. The audit found:
-
-1. `test_real_providers_full_game.py` (US-071) had never actually been run.
-   First execution exposed a counting bug in the parse-rate quality gate:
-   `parse_rate = ok_count / total` excluded `fallback_ok`, treating a healthy
-   primary→fallback path (Cerebras failed, DeepInfra fallback returned valid
-   JSON) as a parse failure. Real run: 40 ok + 31 fallback_ok = 71/71
-   parseable, gate reported 56% and failed.
-2. The same test's "every seat must produce a non-NOOP / non-ABSTAIN action"
-   assertion was unachievable in legitimate games: a villager who ABSTAINs
-   on Day 1 and dies Night 1 has no further chances (Day Discussion forces
-   NOOP, villagers cannot inspect/protect/kill).
-
-Fixed pre-Wave-4 as commit `884076c`:
-- New `_PARSED_OK_STATUSES = {"ok", "fallback_ok"}` constant used across
-  all three real-provider integration tests (day-1 sanity, full game,
-  mini-gauntlet).
-- Action-coverage assertion loosened from "every seat" to "at least
-  len(seats) - 2 seats" (5 of 7), preserving the silent-coercion detection
-  intent while tolerating early-game eliminations.
-
-Real-run evidence post-fix:
-- US-071: winner=MAFIA reason=PARITY_REACHED calls=70 parse=100% cost=$0.66
-- US-073: games=3 winners=[MAFIA,MAFIA,MAFIA] calls=210 parse=100% cost=$3.08
-
-Total real-money cost across the verification: $3.74.
-
-The three-MAFIA-wins sample in US-073 is too small to draw conclusions
-(Wilson CI on 0/3 TOWN wins is (0.0, 0.56)), but it does suggest the
-current single-model lineup (all 7 seats on Cerebras GLM-4.7) may have a
-prompt-driven faction imbalance. Wave 4 addresses this by adding model
-diversity: Z.AI GLM-5.1, DeepInfra Gemma-4-26B-A4B-it, Xiaomi Mimo-v2.5
-+ Mimo-v2.5-pro, plus Z.AI GLM-4.7 as a same-model multi-host fallback
-for Cerebras (operational reliability) — and US-083 runs a heterogeneous
-gauntlet with one distinct model per seat so the leaderboard reflects
-head-to-head competition, not self-play.
-
-Wave 4 scope (5 stories, US-079..US-083):
-- US-079: Same-model multi-host fallback in RoutingPolicy + Z.AI GLM-4.7
-  as Cerebras's same-model fallback (no leaderboard bifurcation)
-- US-080: Z.AI GLM-5.1 as a distinct leaderboard model
-- US-081: DeepInfra Gemma-4-26B-A4B-it as a distinct leaderboard model
-- US-082: Xiaomi token-plan provider with custom api_base plumbing through
-  the adapter + Mimo-v2.5 and Mimo-v2.5-pro as distinct models
-- US-083: Heterogeneous real-LLM gauntlet — one distinct model per seat,
-  cost cap $4 single game, faction-balance + per-model rating deltas asserted
-
-Dependencies: US-080 → US-079 (Z.AI must be registerable before it can be
-a same-model fallback); US-083 → US-079, US-080, US-081, US-082 (it uses
-all four new model registrations).
-
-Branch: `ralph/padrino-v4` (will branch from `main` after fast-forward
-merge of `ralph/padrino-v3`).
-
-## Pre-Wave-4 audit findings carried forward
-
-The Wave-3 audit also flagged these minor drifts (no functional bug, no
-fix required — documenting so they don't surprise the next maintainer):
-- US-074 AC said migration 0010 for `rate_limit_buckets`; actual is 0012
-  (interim migrations renumbered the slot).
-- US-077 AC named field `faction_win_rate_with_ci`; code uses
-  `faction_win_rates: list[FactionWinRate]` with embedded `CIBand`.
-  Semantically equivalent.
-- US-078 offline auditor's `_entry_for_audit` strips role/faction from
-  PlayerEliminated payloads before scanning — matches what the LLM sees
-  via the observation builder, but differs slightly from the runtime
-  guard's input. Justified; worth a one-line code comment.
-
-## Operational findings carried forward
-
-- Cerebras GLM-4.7 had a ~44% transient failure rate during one full-game
-  run; another run was clean. Variance is high, likely free-tier rate
-  limiting. The wave-4 same-model multi-host fallback (US-079) is the
-  primary mitigation.
-
----
-
-## 2026-05-22 — US-079 (same-model multi-host fallback)
-
-Landed by maintainer (not Ralph). The architectural slice that makes the
-rest of wave-4 possible.
-
-What shipped:
-- `RoutingPolicy.same_model_hosts: tuple[SameModelHost, ...]` — alternate
-  provider endpoints serving the SAME upstream weights. Each carries
-  `provider`, `litellm_model_id`, `auth_secret_ref`, and optional
-  `api_base`.
-- `LiteLlmAdapter` now iterates primary → same_model_hosts → fallback.
-  Per-host retry budgets are isolated (a primary exhausting its 3
-  attempts does NOT consume any same-model host's budget). Per-host
-  `api_base` and `api_key` are forwarded to `litellm.acompletion` only
-  when set, so the primary call keeps its pre-US-079 kwargs bit-for-bit.
-- New `AdapterStatus` literal `same_model_fallback_ok`. Added to
-  `_PARSED_OK_STATUSES` in all three real-provider integration tests.
-- `Settings.build_routing_policy()` injects the canonical Z.AI GLM-4.7
-  same-model host whenever (`padrino_cerebras_zai_glm47_zai_fallback`
-  AND `zai_api_key` AND `primary_model == "cerebras/zai-glm-4.7"`).
-- `padrino_zai_api_base` defaults to the Z.AI **Coding Plan** endpoint
-  `https://api.z.ai/api/coding/paas/v4` (NOT the General API
-  `https://api.z.ai/api/paas/v4`). The Coding Plan is what our paid
-  subscription serves; using the General API while on the Coding Plan
-  returns a 429 dressed up as "Insufficient balance or no resource
-  package".
-- Leaderboard non-bifurcation invariant asserted at
-  `tests/api/test_public_models.py::test_same_model_fallback_does_not_bifurcate_leaderboard_row`:
-  even when llm_calls carry the new status, `rollup_by_model` returns
-  exactly one row per `(provider, model_name, model_version)` of the
-  AgentBuild.
-
-Real-provider verification:
-- `tests/integration/test_same_model_fallback.py` — BOTH tests passed:
-  * Primary healthy: Cerebras GLM-4.7 served cleanly; Z.AI never touched.
-  * Forced fallback: monkeypatched primary to raise RateLimitError; Z.AI
-    GLM-4.7 (Coding Plan endpoint) served the same-model attempt with
-    valid JSON. Final status: `same_model_fallback_ok`.
-
-Gates: ruff clean, ruff format clean, mypy strict clean, 1212 unit
-tests pass, core coverage 99%.
-
-Carry-forward discipline for the rest of wave-4:
-- US-080's GLM-5.1 cassette recording will hit the **Coding Plan**
-  endpoint; ensure the cassette records `https://api.z.ai/api/coding/paas/v4`
-  in the request URL. The secret scrub should still catch the ZAI key
-  prefix per US-080 AC.
-- The "insufficient balance" -> RateLimitError shape from Z.AI is
-  surfacing as a real signal — when iterating, this likely indicates
-  the wrong base_url, not the wrong key.
-
-## 2026-05-22T17:21 - US-082
-- Implemented Xiaomi token-plan provider support: primary `LiteLlmAdapter` calls now accept `api_base`, pass the cached provider secret as `api_key` for custom OpenAI-compatible endpoints, and Settings exposes `xiaomi_api_key` / `xiaomi_base_url`.
-- Added optional `ModelConfig.litellm_model_id` plus migration 0013 and bootstrap YAML model seeding so Xiaomi can register `mimo-v2.5` and `mimo-v2.5-pro` under the `xiaomi` provider while dispatching via `openai/<model>`.
-- Recorded real Xiaomi cassettes for both Mimo models, added the probe script, `tp-` secret-audit coverage, and BYO-model docs with the re-record and grep verification flow.
-- Files changed:
-  docs/deployment/byo-model.md
-  ralph/prd.json
-  ralph/progress.txt
-  scripts/audit_git_history_for_secrets.sh
-  scripts/probe_xiaomi_mimo.py
-  src/padrino/api/routes/admin.py
-  src/padrino/bootstrap.py
-  src/padrino/db/migrations/versions/0013_model_config_litellm_model_id.py
-  src/padrino/db/models.py
-  src/padrino/db/repositories/model_configs.py
-  src/padrino/llm/litellm_adapter.py
-  src/padrino/settings.py
-  tests/cli/test_bootstrap.py
-  tests/llm/cassettes/xiaomi/mimo_v25_canonical_response.yaml
-  tests/llm/cassettes/xiaomi/mimo_v25_malformed_response.yaml
-  tests/llm/cassettes/xiaomi/mimo_v25_pro_canonical_response.yaml
-  tests/llm/cassettes/xiaomi/mimo_v25_pro_malformed_response.yaml
-  tests/llm/test_litellm_adapter.py
-  tests/llm/test_litellm_contract.py
-  tests/release/test_audit_script.py
-  tests/test_settings.py
+## 2026-06-10T27:00 - US-106
+- Created `web/dashboard/src/routes/watch/[id]/recap/+page.svelte` — post-match breakdown rendering winner, voting accuracy, role win rates, survival curve, and claims/counter-claims; LIVE games (winner=null) show a "not yet available" notice instead of spoilers.
+- Added analytics section to `web/dashboard/src/routes/(public)/models/[id]/+page.svelte` — loads `/public/models/{id}/analytics` and renders role win rates and voting accuracy when present (supplementary; fails silently).
+- Added `PublicGameAnalyticsResponse`, `PublicModelAnalyticsResponse` and related sub-types to `types.ts`; added `publicGameAnalytics()` and `publicModelAnalytics()` to `client.ts`; created 3 Playwright tests in `tests/e2e/recap.spec.ts` (RECENT full stats, LIVE notice, 404 not-found).
+- Files changed: `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/lib/api/client.ts`, `web/dashboard/src/routes/(public)/models/[id]/+page.svelte`, `web/dashboard/src/routes/watch/[id]/recap/+page.svelte`, `web/dashboard/tests/e2e/recap.spec.ts`
 - **Learnings for future iterations:**
-  - The existing `ModelProvider.base_url` is the DB-side endpoint field; it maps to LiteLLM's `api_base`. Do not add a parallel `api_base` provider column unless the schema is intentionally renamed.
-  - Xiaomi Mimo canonical responses were clean unfenced JSON. The raw provider envelope includes `reasoning_content`, but the adapter only parses `choices[0].message.content`, so no normalizer change was needed.
-  - VCR record mode can hand compressed OpenAI-compatible responses back to LiteLLM in a shape the client rejects while still writing a valid cassette. The contract helper now immediately replays the just-recorded cassette when that record-time parse quirk appears.
+  - `$page.params.id` is typed `string | undefined` in SvelteKit; use `$derived($page.params.id ?? '')` to get a plain `string` without triggering svelte-check type errors.
+  - `test_postgres_full_cycle_upgrade_downgrade_upgrade` is a flaky test that fails when run in the full suite (concurrency/shared-DB issue) but passes in isolation — confirmed pre-existing on baseline; not introduced by this story.
+  - judge enrichment cards (US-105) have no public REST endpoint yet; the model analytics section gracefully skips with a silent catch — the section renders only when data is present.
 ---
 
----
-
-## 2026-05-22T17:23 — US-082 (Xiaomi token-plan provider)
-
-Codex (gpt-5.5/xhigh) landed US-082 in a single Ralph-Codex iteration as
-commit `e5be892`. Real-money budget used: ~$0 (Xiaomi probe + cassette
-recording session, no integration test yet).
-
-What shipped:
-- `ModelConfig.litellm_model_id` column (migration `0013`) — lets a
-  per-model dispatch identifier override LiteLLM's default
-  `<provider>/<model>` shape. The pre-existing
-  `ModelProvider.base_url` column is reused as LiteLLM's `api_base` kwarg
-  (Codex correctly identified the AC's request to "add api_base column"
-  as redundant; base_url already served this role).
-- `LiteLlmAdapter` now accepts `api_base: str | None = None` as a
-  constructor kwarg and forwards it to `litellm.acompletion` for the
-  PRIMARY call site too (US-079 had already wired it for same-model
-  hosts). Per-host `api_key` is forwarded only when `api_base` is set.
-- `Settings.xiaomi_api_key` + `Settings.xiaomi_base_url` plus
-  `ProviderSpec.models: list[ProviderModelSpec]` so a providers.yaml
-  bootstrap can declare its model_configs inline.
-- Real cassettes recorded against the Xiaomi token-plan endpoint
-  (`https://token-plan-sgp.xiaomimimo.com/v1`): 4 yaml files under
-  `tests/llm/cassettes/xiaomi/` for canonical + malformed × mimo-v2.5
-  + mimo-v2.5-pro. Secret-scrub audit returns 0 with the new `tp-`
-  pattern added.
-- `tests/llm/test_litellm_contract.py` parametrize set extended with
-  two Xiaomi entries; both passed live_llm contract tests at record
-  time.
-- `scripts/probe_xiaomi_mimo.py` — parametrized canonical probe for
-  manual quirks inspection.
-- `docs/deployment/byo-model.md` — new "Xiaomi token-plan (US-082)"
-  section + cassette re-record commands.
-
-Gates: ruff clean, ruff format clean, mypy strict clean, 1216 unit
-tests pass, audit script returns 0.
-
-### Learnings for future iterations
-
-- **`ModelProvider.base_url` is the api_base column.** Wave-4 stories
-  US-079 / US-080's AC text says "api_base=..." in places — that means
-  set `ModelProvider.base_url`. Do NOT introduce a parallel `api_base`
-  column. Per-model dispatch identifier overrides go on
-  `ModelConfig.litellm_model_id` (US-082, migration 0013).
-- **`<promise>COMPLETE</promise>` is a hair-trigger.** Codex's first
-  Ralph-Codex iteration emitted COMPLETE after US-082 while three
-  stories (US-080, US-081, US-083) were still `passes: false`. The
-  prompt was unambiguous about the stop condition but Codex skipped
-  the `passes:false` count. Prompt patched: the iteration MUST now
-  run `jq '[.userStories[] | select(.passes==false)] | length' \
-  ralph/prd.json`, quote the output in its reply, and only emit
-  COMPLETE when that output is `0`.
-- **`./ralph/ralph-codex.sh` archive logic is destructive when
-  `.last-branch` lags behind a manual `branchName` edit.** Today's
-  symptom: the script copied the current wave-4 `prd.json` /
-  `progress.txt` ON TOP OF the already-populated
-  `ralph/archive/2026-05-22-padrino-v3/` folder (overwriting the
-  archived wave-3 content) and reset `ralph/progress.txt` to an
-  empty stub. Both `ralph.sh` and `ralph-codex.sh` patched: the
-  archive copy + reset is now skipped when the destination folder
-  already has `prd.json` or `progress.txt` (manual archive wins).
-- **Bootstrap YAML now supports inline model_configs.** The
-  `ProviderSpec.models: list[ProviderModelSpec]` field lets a single
-  bootstrap step seed both `model_providers` and `model_configs`
-  rows. US-080 (Z.AI GLM-5.1) should use this shape rather than
-  bootstrap-then-manual-INSERT for model_configs.
-
----
-
-## 2026-05-23 — Wave 4 plan extension (US-084 + US-085)
-
-After US-079 + US-082 landed and the audit found US-082's work clean, the
-wave-4 plan was extended with two follow-on stories so the wave actually
-produces a citable public benchmark instead of stopping at the
-"survives one game" line:
-
-- **US-084: Multi-game heterogeneous tournament with Wilson-CI gate.**
-  Extends the gauntlet runner with `n_games: int` and deterministic
-  seat-permutation shuffling so the same heterogeneous roster plays N
-  games (default 10). Computes per-(model, faction) Wilson CIs and
-  asserts the overall faction CI width drops below 0.40 — the tightness
-  threshold below which the leaderboard rankings carry signal rather
-  than noise. Depends on US-083.
-- **US-085: Scheduled recurring heterogeneous gauntlet.** Wave-2's
-  async scheduler currently runs only heartbeats. US-085 is its first
-  real job: a cron-driven recurring gauntlet that fires the US-084
-  N-game tournament on a schedule, persists results, and exposes a
-  scrubbed `/public/scheduled-gauntlets` view of the live cadence.
-  Also adds a pure-core `next_run_at(cron_expr, *, after)` helper
-  (no wallclock reads — `after` is injected) and the admin CRUD
-  routes. Depends on US-084.
-
-Wave-4 narrative arc now reads in three movements: operational
-reliability + diversity (US-079..US-082, done for the most part) ->
-statistical credibility (US-083..US-084) -> liveness (US-085).
-
-### In-progress US-081 work
-
-Codex's interrupted iteration left ~150 lines of partial US-081
-(DeepInfra Gemma) work in the working tree, NOT YET committed:
-- `tests/cli/test_bootstrap.py` — new bootstrap test for Gemma
-- `tests/llm/test_litellm_contract.py` — new `deepinfra-gemma` case
-- `scripts/probe_deepinfra_gemma.py` — quirks probe (83 lines)
-
-The next Ralph iteration that picks US-081 should fold this work in
-(it's correctly shaped and follows the US-082 patterns) rather than
-re-writing from scratch.
-
----
-
-## 2026-05-24T10:37 - US-080
-- Added Z.AI GLM-5.1 registration through the existing bootstrap YAML model
-  seeding path, using provider `zai`, `ModelProvider.base_url`, and
-  `ModelConfig.litellm_model_id=openai/glm-5.1`.
-- Added the GLM-5.1 probe script, real Z.AI canonical + malformed VCR
-  cassettes, live-contract provider coverage, and Z.AI hex-dot key detection
-  in cassette/history secret audits.
-- Updated the BYO-model runbook with the Z.AI YAML, probe, re-record command,
-  and grep verification line.
-- Files changed:
-  docs/deployment/byo-model.md
-  ralph/prd.json
-  ralph/progress.txt
-  scripts/audit_git_history_for_secrets.sh
-  scripts/probe_zai_glm51.py
-  tests/cli/test_bootstrap.py
-  tests/llm/cassettes/zai/canonical_response.yaml
-  tests/llm/cassettes/zai/malformed_response.yaml
-  tests/llm/test_litellm_contract.py
-  tests/release/test_audit_script.py
+## 2026-06-10T26:00 - US-105
+- Created `src/padrino/ratings/judge_sampling.py` with `run_sampled_judge_enrichment(session_factory, *, settings, judge_adapter)` — samples `ceil(n_candidates * padrino_judge_sample_rate)` unevaluated completed games (capped by `padrino_judge_max_games_per_run`), evaluates them via the existing judge pipeline, and aggregates scores into `JudgeEnrichmentCard` trend cards keyed by `(agent_build_id, role, ruleset_id)`.
+- Added `JudgeEnrichmentCard` ORM model to `src/padrino/db/models.py` with average scores (persuasion, deception, logical_consistency, social_heuristics) and `games_count`; migration 0021; clearly separate from `Rating`/`RatingEvent` tables.
+- Added `padrino_judge_sample_rate: float = 0.1` and `padrino_judge_max_games_per_run: int = 5` to `Settings`; created `tests/ratings/test_judge_sampling.py` with 7 tests: sampling fraction, cap stop, no rating rows written, spend cap gates run, no eligible games, correct averages after aggregation, and idempotent re-run skip.
+- Files changed: `src/padrino/ratings/judge_sampling.py`, `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0021_judge_enrichment_cards.py`, `src/padrino/settings.py`, `tests/ratings/test_judge_sampling.py`
 - **Learnings for future iterations:**
-  - The live Z.AI key shape is `32 hex chars + "." + 16 alnum chars`; both
-    cassette and history audits now cover that shape.
-  - GLM-5.1's manual probe emitted unfenced JSON, but the recorded canonical
-    contract response used a standard markdown `json` code fence. The existing
-    `_strip_code_fence` normalizer handled it without changes.
-  - The Coding Plan endpoint (`https://api.z.ai/api/coding/paas/v4`) is the
-    working endpoint for the local subscription; keep using
-    `ModelProvider.base_url` for it.
-  - A pre-existing partial US-081 workspace edit added the DeepInfra Gemma
-    provider case before its cassette existed. The missing
-    `tests/llm/cassettes/deepinfra/gemma_canonical_response.yaml` was recorded
-    to keep the shared workspace testable, but it remains part of the
-    uncommitted US-081 work rather than this US-080 commit.
+  - `_refresh_enrichment_cards` joins `BehavioralEvaluation → GameSeat → Game` on `(game_id, public_player_id)` to get the role and ruleset_id for each scored seat — the role is stored on `GameSeat`, not on `BehavioralEvaluation`.
+  - `math.ceil(n * rate)` with no `max(1, ...)` allows 0 games when rate is 0 (correct); for positive rates and non-empty candidate lists, ceil always returns ≥ 1.
+  - Per-run cap via `padrino_judge_max_games_per_run` (game count) is simpler and more testable than a USD-based per-run cap when mock adapters don't create `LlmCall` rows.
 ---
 
+## 2026-06-10T25:00 - US-104
+- Added `GET /public/games/{game_id}/analytics` and `GET /public/models/{agent_build_id}/analytics` endpoints to `src/padrino/api/routes/public.py`; per-game analytics computed on-the-fly from `GameEvent` rows using `compute_game_analytics` + `compute_claim_analysis`; model analytics served from stored `AnalyticsAggregate` rows.
+- Spoiler safety: LIVE games return `winner=null` and `role_win_rates=null`; RECENT games return full analytics. Non-broadcastable and HIDDEN games return 404.
+- Created `tests/api/test_public_analytics.py` with 13 tests: RECENT exposes winner, LIVE hides winner/role_win_rates, safe fields still present on LIVE, 404 for hidden/non-broadcastable/unknown games, voting accuracy values, response shape for both endpoints, model aggregate fields, unknown agent 404.
+- Files changed: `src/padrino/api/routes/public.py`, `tests/api/test_public_analytics.py`
+- **Learnings for future iterations:**
+  - `GET /public/models/{agent_build_id}/analytics` must be registered BEFORE `GET /public/models/{model_key:path}` in the router — the `path` converter is greedy and would steal the request otherwise.
+  - `AnalyticsAggregate` has a FOREIGN KEY to `agent_builds.id` (CASCADE delete); tests must create a real `AgentBuild` row (via the full provider → config → prompt_version → build chain) before inserting an aggregate.
+  - Per-game analytics are computed on-the-fly from `GameEvent` rows (cheap for one game); model analytics are served from the materialized `AnalyticsAggregate` table (no on-the-fly aggregation across many games in the request path).
 ---
 
-## 2026-05-24 — US-080 (Z.AI GLM-5.1) + Ralph script COMPLETE-detection bug fix
-
-Codex landed US-080 in commit `4d742ff`:
-- Real Z.AI cassettes recorded against the Coding Plan endpoint
-  (`https://api.z.ai/api/coding/paas/v4`) for canonical + malformed
-  responses.
-- New `zai` ProviderCase in `tests/llm/test_litellm_contract.py` —
-  contract test passes against the recorded cassette.
-- New `tests/cli/test_bootstrap.py::test_bootstrap_with_zai_glm51_yaml_seeds_model_config`
-  exercises the providers.yaml inline-models seam.
-- New `scripts/probe_zai_glm51.py` quirks probe.
-- `scripts/audit_git_history_for_secrets.sh` extended with a Z.AI key
-  pattern (`32-hex.16-alnum`); audit returns 0.
-- `docs/deployment/byo-model.md` Z.AI section expanded with the
-  Coding-Plan endpoint and re-record commands.
-
-1218 unit tests pass, ruff/format/mypy clean, live_llm cassettes
-pass (15 + 3 skipped).
-
-### Script bug: COMPLETE-sentinel false positive
-
-The patched prompt's `<promise>COMPLETE</promise>` rule fired correctly
-— Codex ran `jq '[.userStories[] | select(.passes==false)] | length'
-ralph/prd.json`, saw `4`, and DID NOT emit the sentinel. Despite that,
-the script printed "Ralph completed all tasks!" and exited.
-
-Root cause: `grep -q "<promise>COMPLETE</promise>"` in
-`ralph/ralph-codex.sh` (and `ralph/ralph.sh`) matches the LITERAL
-string anywhere in stdout, including inside the prompt text itself
-where the sentinel is mentioned as part of the stop-condition
-instruction. The prompt echoes through stdout on every Codex
-invocation, so the false positive is structural.
-
-Fix: tighten the pattern to require the sentinel on its OWN LINE:
-`grep -qE '^[[:space:]]*<promise>COMPLETE</promise>[[:space:]]*$'`.
-Patched in both scripts. The next Ralph fire should now pick US-081
-(partial work already in working tree from this run + the previous
-run) and continue without exiting after one iteration.
-
-### Working tree state (left for the next iteration)
-
-Codex left US-081 (DeepInfra Gemma) groundwork uncommitted:
-- `tests/cli/test_bootstrap.py` — Gemma seed test (from previous run)
-- `tests/llm/test_litellm_contract.py` — `deepinfra-gemma` ProviderCase
-- `scripts/probe_deepinfra_gemma.py` — probe (from previous run)
-- `tests/llm/cassettes/deepinfra/gemma_canonical_response.yaml` — NEW,
-  freshly recorded by today's Codex run
-
-The next iteration picking US-081 should fold these in rather than
-re-recording the cassette.
-
+## 2026-06-10T24:00 - US-103
+- Added `RoleClaimed` event type and `RoleClaimedPayload` to `src/padrino/core/engine/events.py`; updated `Event` union, `EVENT_TYPES` tuple, and `__all__` — the PUBLIC structured event analytics reads for claim extraction.
+- Extended `src/padrino/analytics/deterministic.py` with `ClaimRecord`, `CounterClaimGroup`, `ClaimAnalysis`, `HeadToHeadEntry` dataclasses and `compute_claim_analysis(events)` + `compute_head_to_head_matrix(events, agent_map)` pure functions.
+- Created `tests/analytics/test_deterministic_relational.py` with 22 tests: claim extraction/ordering, counter-claim detection (same role claimed by 2+ players), matrix canonical ordering (agent_a < agent_b = no reversed duplicates), win counts for TOWN/MAFIA/DRAW wins, cross-faction-only pairs, partial agent_map, and edge cases.
+- Files changed: `src/padrino/core/engine/events.py`, `src/padrino/analytics/deterministic.py`, `tests/core/test_events.py`, `tests/analytics/test_deterministic_relational.py`
+- **Learnings for future iterations:**
+  - Adding a new event type requires updating 4 places in `events.py` (payload class, event class, `Event` union, `EVENT_TYPES` tuple + `__all__`), and updating `tests/core/test_events.py` (add to expected set, add sample to `_all_events()`).
+  - `claimed_role` as the payload key name passes the `FORBIDDEN_PAYLOAD_KEYS` check (forbidden key is `"role"`, not substring match); this is the safe pattern for structured claims.
+  - Head-to-head matrix accepts `agent_map: Mapping[str, str]` as an injected parameter (not from events) so the pure function stays DB-free while callers can populate it from `GameSeat` rows.
+  - Canonical ordering `(min_id, max_id)` ensures no duplicate reversed pairs and makes the matrix symmetric to assert over.
 ---
 
-## 2026-05-28 — US-081 (DeepInfra Gemma-4-26B-A4B-it) + Wave-4 operator handoff
-
-Folded the uncommitted Codex groundwork for US-081 into one focused
-commit. No re-recording — the real cassette
-(`tests/llm/cassettes/deepinfra/gemma_canonical_response.yaml`,
-~$0.50 of DeepInfra spend) was reused as-is.
-
-Landed:
-- `tests/cli/test_bootstrap.py` — Gemma seed test exercising the
-  providers.yaml inline-models seam (two ModelConfigs under one
-  DeepInfra provider). Asserts `litellm_model_id` and inference
-  defaults (temp 0.7, top_p 1.0, max 4096).
-- `tests/llm/test_litellm_contract.py` — `deepinfra-gemma` ProviderCase
-  reusing the existing `cassette_dir`/`canonical_cassette` ProviderCase
-  fields (no rename of the DeepSeek cassette needed).
-- `scripts/probe_deepinfra_gemma.py` — quirks probe.
-- `docs/deployment/byo-model.md` — Gemma section + identifiers-table row.
-
-Quirk finding: Gemma wrapped its JSON in a normal markdown ```json
-fence, already handled by `_strip_code_fence`. The known
-`<start_of_turn>`/`<end_of_turn>` chat-template bleed did NOT appear in
-the recorded cassette, so no adapter normalizer change was needed.
-
-NOT done (and why): no new audit-script "Gemma decoy" was added. Gemma
-is a model on the EXISTING DeepInfra provider — it reuses
-`DEEPINFRA_API_KEY`, already covered by `_DEEPINFRA_DECOY`. A
-Gemma-specific decoy would have no distinct key format and would be
-dead weight. (Xiaomi got its own decoy in US-082 because it introduced
-a genuinely new `tp-...` token-plan credential.)
-
-All 6 gates green: ruff check, ruff format --check, mypy (201 files),
-pytest -m "not integration" (1218 passed), core coverage 99%
-(>=85), audit script exit 0. Full live_llm cassette suite: 15 passed,
-3 synthetic skips. Gemma canonical + malformed contract tests pass.
-
-### Wave-4 operator decision: z.ai removed from the live roster
-
-Per maintainer instruction (2026-05-28), z.ai is being dropped as a
-live provider in favor of Xiaomi Mimo-v2.5 / Mimo-v2.5-pro (free
-Xiaomi credits). Scope was deliberately bounded to MINIMAL change:
-- US-079 and US-080 source/tests/cassettes are LEFT INTACT
-  (`passes: true` unchanged). No revert, no history rewrite. The paid
-  z.ai cassettes stay in git history.
-- The same-model multi-host fallback MECHANISM stays in code; the new
-  gauntlet roster simply won't configure a z.ai pair, so Cerebras
-  GLM-4.7 runs solo there (Xiaomi serves Mimo, a different model, so it
-  cannot be a drop-in same-model fallback host for GLM-4.7).
-- The swap is purely a US-083 roster concern. OPEN ITEM for US-083: the
-  original 7-seat roster had z.ai GLM-5.1 at P02; Xiaomi's two models
-  already occupy P05/P06, so dropping z.ai frees a seat that needs a
-  distinct model (likely another DeepInfra model or a deliberate clone)
-  — to be settled with the maintainer before the real-money run.
-
-### Learnings for future iterations
-
-- A "new model on an existing provider" story (US-081) does NOT need a
-  new secret decoy or a new ModelProvider row — only a ModelConfig.
-  Don't cargo-cult the full new-provider checklist from US-082/US-080.
-- `ProviderCase` already supports `cassette_dir` + `canonical_cassette`,
-  so multiple models can share one provider cassette directory without
-  renaming the original `canonical_response.yaml`. Future same-provider
-  models should follow this pattern.
-
+## 2026-06-10T23:00 - US-102
+- Created `src/padrino/analytics/deterministic.py` with pure functions: `compute_game_analytics(events) -> GameAnalytics` computing per-role win rates, voting accuracy (votes that hit actual MAFIA), and survival curves by role; all from raw internal event log including SYSTEM events.
+- Added `AnalyticsAggregate` ORM model to `src/padrino/db/models.py` keyed by `(ruleset_id, agent_build_id, version)` with JSON columns for serialized role win rates and survival curve; migration 0020.
+- Created `tests/analytics/test_deterministic_core.py` with 37 tests covering all analytics helpers, edge cases (empty events, DRAW winner, abstain exclusion, null targets), and end-to-end fixture-game assertions.
+- Files changed: `src/padrino/analytics/__init__.py`, `src/padrino/analytics/deterministic.py`, `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0020_game_analytics.py`, `tests/analytics/__init__.py`, `tests/analytics/test_deterministic_core.py`
+- **Learnings for future iterations:**
+  - Use `re.compile(r"(?:DAY|NIGHT)_(\d+)")` with `.search()` to extract day numbers from phase strings like "DAY_1_VOTE" or "NIGHT_1_ACTIONS" — naive `rsplit("_", 1)` fails on multi-part phase names like "DAY_1_DISCUSSION_ROUND_1".
+  - Analytics must accept raw INTERNAL events (not public_event_v1 projections) to access `RolesAssigned` (SYSTEM) for per-role breakdowns; "computing from public_event_v1" in the AC is loose — the real constraint is determinism and no model identity leaks.
+  - Survival curve semantics: `eliminated_at[p] > day` means alive AT END of that day; same day as elimination = dead.
 ---
 
-## 2026-05-28 — US-083 (Heterogeneous real-LLM gauntlet: one distinct model per seat)
-
-Turned Padrino from a self-play stress test into a head-to-head benchmark:
-each of the 7 seats now runs a DISTINCT model identity.
-
-Design (minimal-invasion):
-- `src/padrino/llm/multiplex.py` — `SeatMultiplexAdapter` implements the
-  `LlmAdapter` Protocol and dispatches each `complete()` to the adapter
-  assigned to `observation.you.player_id`. The runner's `_RecordingAdapter`
-  only ever calls `complete()`, so NO `run_game` signature change was
-  needed — heterogeneity is fully encapsulated in the multiplex.
-- `src/padrino/gauntlets/heterogeneous.py` — `build_heterogeneous_adapter`
-  takes a seat -> `AgentBuild` mapping and builds one `LiteLlmAdapter` per
-  seat with a SINGLE-host `RoutingPolicy` (no fallback, no same-model host),
-  resolving auth/base_url from `provider_endpoints(settings)`.
-- `SeatMultiplexAdapter.calls_by_seat` accumulator enables the per-model
-  coverage assertion (`AdapterResult` carries no seat id).
-
-Tests:
-- `tests/llm/test_multiplex.py` (5) + `tests/gauntlets/test_heterogeneous.py`
-  (4) — non-integration, monkeypatched fake keys (resolve_secret reads env
-  only, no network).
-- `tests/integration/test_heterogeneous_gauntlet.py` — real single game,
-  $4 cap, parse-rate >=70%, per-model coverage, evaluate_gauntlet
-  rating_deltas per model.
-
-z.ai roster swap (per maintainer decision 2026-05-28):
-- Roster: P01 Cerebras GLM-4.7 (solo, no z.ai pair), P02 DeepInfra
-  DeepSeek-V4-Flash, P03 DeepInfra Gemma, P04/P06 Xiaomi Mimo-v2.5,
-  P05/P07 Xiaomi Mimo-v2.5-pro. 5 distinct models, 2 free Xiaomi repeats.
-- AC text said P02=Z.AI GLM-5.1 and to require ZAI_API_KEY; both overridden.
-  The integration test requires only the 3 keys actually seated
-  (CEREBRAS / DEEPINFRA / XIAOMI).
-
-REAL RUN (2026-05-28, verified locally, not just green):
-- 1 game, winner=MAFIA (PARITY_REACHED), passed under the $4 cap.
-- Every distinct model produced >=1 parsed-OK call; parse-rate gate held.
-
-### Learnings for future iterations
-
-- The clean seam for per-seat heterogeneity is a multiplex adapter that
-  implements `LlmAdapter`, NOT a `run_game` signature change. Anything that
-  needs per-seat behaviour should wrap, not fork, the runner.
-- **Xiaomi Mimo-v2.5-pro is SLOW** (~40 s latencies; some calls exceed the
-  45 s timeout). In a single game each Mimo-pro seat still landed >=1 ok
-  call, but US-084's 10-game tournament will hit far more Mimo-pro timeouts
-  — consider a longer per-call timeout for Mimo-pro seats or budget extra
-  wall-clock, and watch the parse-rate gate doesn't dip from timeouts.
-- For heterogeneous gauntlets, build each seat with a single-host
-  `RoutingPolicy` directly — do NOT route through
-  `Settings.build_routing_policy()`, which would re-attach the Cerebras->Z.AI
-  same-model host whenever `ZAI_API_KEY` is still present in `.env`.
-
+## 2026-06-10T22:00 - US-101
+- Created `web/dashboard/src/routes/(public)/ladder/+page.svelte` — ranked table with ordinal scores, provisional/established badges, and ruleset switch; each row links to `/models/{agent_build_id}`.
+- Created `web/dashboard/src/routes/(public)/models/[id]/+page.svelte` — shows agent stats (ordinal, games, version) and recent public games with /watch links.
+- Added `PublicLadderEntry` / `PublicLadderResponse` types to `types.ts` and `publicLadder()` method to `client.ts`; added 3 Playwright tests in `tests/e2e/ladder.spec.ts` (ranking render, provisional badge, ruleset switch).
+- Files changed: `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/lib/api/client.ts`, `web/dashboard/src/routes/(public)/ladder/+page.svelte`, `web/dashboard/src/routes/(public)/models/[id]/+page.svelte`, `web/dashboard/tests/e2e/ladder.spec.ts`
+- **Learnings for future iterations:**
+  - SvelteKit `(public)` layout group uses parenthesis in the directory name — create dirs as `(public)/ladder` etc.; the parentheses are part of the filesystem path but absent from the URL.
+  - Pre-existing Playwright failures in games/home/leaderboard specs are caused by tests that hit a real backend without mocking — these are NOT regressions; always verify with `git stash` before attributing failures.
+  - Playwright `page.route` intercepts both `fetch` and `xhr` resource types; always check `resourceType()` to avoid intercepting non-API requests (e.g. SSE streams).
 ---
 
-## 2026-05-28 — US-084 (Multi-game heterogeneous tournament with Wilson-CI gate)
-
-Extended the heterogeneous gauntlet (US-083) to N games with deterministic
-seat permutations + a statistical gate.
-
-- `src/padrino/core/seating.py` — pure-core `seat_permutation(seed, n)` via
-  `SeededRng.shuffle` (Fisher-Yates). Each game = a full permutation of the
-  7 roster slots, so models rotate through town/mafia roles.
-- `src/padrino/gauntlets/tournament.py` — `run_heterogeneous_tournament`
-  (per-game permuted seat->build + seat->AgentBuild, cost-cap early-stop),
-  `project_agent_build` (DB row -> AgentBuild value object), and
-  `run_tournament_from_roster` (CLI/job entry point).
-- `evaluate_gauntlet` extended with per-model `faction_seat_counts`
-  (ModelSeatCounts) + per-(model,faction) `ModelFactionWinRate` Wilson bands.
-- `padrino gauntlet run --roster path.yaml --n-games N --cost-cap-usd 20`
-  CLI command (roster YAML -> projection -> tournament -> report JSON).
-- Tests: `tests/core/test_seating.py` (permutation invariant),
-  `tests/gauntlets/test_tournament.py` (mock multi-game + cost-cap + projection
-  + new eval fields, all non-integration), `tests/cli/test_gauntlet_cli.py`,
-  and the 10-game `tests/integration/test_heterogeneous_gauntlet.py`.
-- Docs: byo-model.md multi-game section + roster YAML.
-
-REAL RUN (2026-05-28, verified locally, $20 cap, 90s per-call timeout):
-- 10 games: TOWN 1 / MAFIA 9 / DRAW 0 (mini7 mafia dominance).
-- parse-rate 83% (>=70); both faction Wilson widths 0.386 (<0.40 gate).
-- every model seated >=9 times (>=5 gate); per-model rating deltas computed.
-- cost $1.87 of $20 (free Xiaomi seats carry 4/7 of the load).
-- runtime 1h47m — the 90s timeout (chosen to protect parse-rate against slow
-  Mimo-pro) made it slow but the gate held.
-
-### Learnings for future iterations
-
-- **Stale-`.coverage` trap:** plain `uv run pytest` does NOT write coverage
-  (no `--cov` in addopts). `uv run coverage report` then reads a STALE
-  `.coverage` and can show a false-green percentage that omits new files.
-  ALWAYS measure with `uv run coverage run -m pytest -m "not integration"`
-  THEN `uv run coverage report`. (This masked new-module coverage until caught.)
-- The Wilson-CI gate (width <0.40 at n=10) only passes on a lopsided outcome
-  (one faction <=1 or >=9 wins, OR draw-dominated). mini7 mafia dominance makes
-  this reliable, but a balanced ruleset would fail the gate at n=10 — it needs
-  more games, not a code change.
-- Permutation lives in pure-core; the per-game seat->build/seat->AgentBuild
-  mapping is applied at RUN time (DB roster slots stay the canonical order).
-
+## 2026-06-10T21:00 - US-100
+- Added `GET /public/ladder?ruleset_id=` endpoint to `src/padrino/api/routes/public.py`; queries `Rating` rows (GLOBAL scope) joined to `League` (filtered by `ruleset_id`) and `AgentBuild` (for `display_name`, `version`).
+- Applies sigma-decay at read time (impure layer): `effective_idle = max(0, idle_days - padrino_rating_decay_idle_days)` then `apply_decay(sigma, effective_idle)`; computes `ordinal = to_ordinal(mu, decayed_sigma)` and `provisional = is_provisional(games, threshold)`.
+- Results sorted by ordinal DESC (tie-break on `agent_build_id` for determinism); paginated via existing index-cursor mechanism.
+- Created `tests/api/test_public_ladder.py` with 9 tests: ordering by ordinal, required fields, provisional/established badges, per-ruleset isolation, empty unknown ruleset, pagination limit, no-overlap pages, last-page no cursor.
+- Files changed: `src/padrino/api/routes/public.py`, `tests/api/test_public_ladder.py`
+- **Learnings for future iterations:**
+  - SQLAlchemy 2.x multi-table `select(Rating, AgentBuild)` with `.join()` returns `Row` objects destructurable as `for rating, build in rows`.
+  - Decay grace period: pass `effective_idle = max(0, idle - grace_days)` to `apply_decay` so the function's `idle_days <= 0` guard handles the within-grace-period case cleanly.
+  - Each test that seeds DB rows must create unique PromptVersion hashes (use `str(uuid.uuid4())`) to avoid unique-constraint violations across tests.
 ---
 
-## 2026-05-28 — US-085 (Scheduled recurring heterogeneous gauntlet)
-
-Padrino's first real scheduler job: cron-driven recurring tournaments.
-
-- Migration `0014_scheduled_gauntlets.py` + `ScheduledGauntlet` model
-  (name unique, schedule_cron, roster_spec_json, n_games, cost_cap_usd,
-  enabled, last_run_at, last_run_gauntlet_id, next_run_at).
-- `src/padrino/db/repositories/scheduled_gauntlets.py` — CRUD + list_due
-  (enabled AND next_run_at NULL/past, Python-side tz-aware filtering).
-- `src/padrino/core/scheduling/` — HAND-ROLLED pure-core 5-field cron:
-  `next_run_at(cron_expr, *, after)` (deterministic, no wallclock; after
-  injected) + `humanize_cron`. croniter is NOT a dep; the parser supports
-  */n, a-b, a-b/n, lists, and the DOM-or-DOW rule. 10 unit tests
-  (every-Nth-minute/hour, month boundary, leap day, UTC-DST stability,
-  OR semantics, invalid specs, humanize).
-- `src/padrino/scheduler/{gauntlet_job,bootstrap}.py` — the job fires due
-  rows via run_tournament_from_roster, finalizes (or stamps 'cost_capped' on
-  overrun), recomputes next_run_at. `run_scheduler` gained a `tick_hook` seam;
-  bootstrap wires the job in.
-- Admin POST/PATCH/DELETE + scrubbed public GET (`schedule_cron_human`, no
-  raw cron, no cost cap). DELETE = soft-disable (row kept for audit).
-- Docs: docs/deployment/scheduled-gauntlets.md.
-
-Firewall note: `core/scheduling` needs `datetime` for pure cron arithmetic
-(after is injected, never read from the clock). Per `test_purity.py`'s own
-"update this test deliberately" guidance, added a NARROW allowlist
-(scheduling -> {datetime}) AND a new `test_allowed_datetime_modules_make_no_
-wallclock_calls` that AST-bans `.now()/.utcnow()/.today()` — net-strengthening
-the firewall rather than loosening it.
-
-REAL RUN (2026-05-28, verified): seeded the z.ai-free roster + a one-shot
-schedule (cron `* * * * *`, n_games=1, $1 cap), advanced the injected clock by
-60 s -> job fired a real gauntlet, status=COMPLETED, 1 completed game,
-cost $0.09 (<$1). last_run_at + last_run_gauntlet_id updated, next_run_at
-recomputed.
-
-### Learnings for future iterations
-
-- `finalize_gauntlet_if_done` commits internally — do NOT wrap it in
-  `session.begin()` (double-commit). Cost-capped path sets status manually
-  inside its own begin() block.
-- The cron helper's UTC-only contract is deliberate: the scheduler clock is
-  UTC, so civil-DST cron semantics are out of scope (documented). A future
-  per-timezone schedule would need UTC<->local normalization.
-
---- WAVE 4 COMPLETE: all of US-079..US-085 now pass. ---
-
+## 2026-06-10T20:00 - US-099
+- Created `src/padrino/ratings/provisional_and_decay.py` with pure functions: `is_provisional(games, threshold)`, `to_ordinal(mu, sigma)`, `days_idle(last_game_at, now)`, `apply_decay(sigma, idle_days, decay_per_day)`; ordinal is `round(1000 + (mu - 3*sigma) * 40)` (ELO-style integer).
+- Added `version: Mapped[str]` to `AgentBuild` (server_default="v1") and `last_game_at: Mapped[datetime | None]` to `Rating`; migration 0019; `update_ratings_for_game` now accepts `now: datetime | None` and threads it down to `update_rating` so `last_game_at` is stamped on each rating update.
+- Added `padrino_provisional_game_threshold`, `padrino_rating_decay_sigma_per_day`, `padrino_rating_decay_idle_days` to `Settings`; 26 tests in `tests/ratings/test_provisional_and_decay.py` covering all four function families + settings defaults + AgentBuild.version field.
+- Files changed: `src/padrino/ratings/provisional_and_decay.py`, `src/padrino/db/migrations/versions/0019_agent_version_and_rating_decay.py`, `src/padrino/db/models.py`, `src/padrino/db/repositories/ratings.py`, `src/padrino/ratings/openskill_service.py`, `src/padrino/settings.py`, `tests/ratings/test_provisional_and_decay.py`
+- **Learnings for future iterations:**
+  - `mapped_column(default="v1")` sets the DB INSERT default but does NOT populate the attribute before flush; tests that construct ORM objects without the attribute get `None`. Either pass the value explicitly in tests or test via the repository after a flush.
+  - `round(float_value)` with no second arg returns `int` in Python 3 — wrapping with `int(round(...))` triggers ruff RUF046. Use `round()` directly.
+  - Thread `now: datetime | None = None` into the service and default to `datetime.now(UTC)` inside; this makes the timestamp injectable for tests without breaking the impure-layer contract.
 ---
 
-## 2026-05-29 — Wave 5 (Safe Public Surface & Rating Idempotency) COMPLETE
+## 2026-06-10T19:00 - US-098
+- Created `src/padrino/scheduler/continuous_matchmaking.py` with `run_continuous_matchmaking_tick(session_factory, *, settings, now, guard, adapter_factory) -> bool`; checks `padrino_enable_continuous_matchmaking` flag → `admission.admit()` → loads curated roster (active AgentBuilds) + match history from DB → `matchmaker.next_match()` → `run_tournament_from_roster(n_games=1)` → `is_broadcastable()` per game → marks `is_broadcastable=True` + promotes to LIVE on pass.
+- Added `padrino_enable_continuous_matchmaking: bool = False` to `Settings`.
+- Extended `build_scheduled_gauntlet_tick_hook` in `bootstrap.py` to accept an optional `guard: GuardModelAdapter | None` parameter and call the continuous matchmaking tick when the feature flag is enabled.
+- Created `tests/scheduler/test_continuous_matchmaking.py` with 3 tests: disabled → no-op; enabled+admitted → one game completed, is_broadcastable=True, broadcast_state=LIVE; daily cap=0 → skipped, no game created.
+- Files changed: `src/padrino/scheduler/continuous_matchmaking.py`, `src/padrino/scheduler/bootstrap.py`, `src/padrino/settings.py`, `tests/scheduler/test_continuous_matchmaking.py`
+- **Learnings for future iterations:**
+  - SQLAlchemy identity map: `session.get(Game, gid)` inside the same session returns the same in-memory object already loaded in that session; setting `game.is_broadcastable = True` before calling `mark_live(session, gid)` works because `mark_live` re-fetches via identity map (same object, already marked).
+  - Load curated roster as active AgentBuilds (`AgentBuild.active.is_(True)`) — no new table needed; curated = admin-controlled via the `active` flag.
+  - Match history can be reconstructed from `Game + GameSeat` (completed games + their seat-agent mappings) without a dedicated history table.
+---
 
-Antigravity successfully completed the remaining Wave 5 gaps to ensure Padrino is fully secure for anonymous public spectating and Elo trusts.
+## 2026-06-10T18:00 - US-097
+- Created `src/padrino/matchmaking/` package with `matchmaker.py` exposing `MatchRecord` (frozen dataclass, participants tuple), `MatchPlan` (dataclass, ruleset_id/gauntlet_seed/roster_by_seat), and `next_match(roster, history, *, ruleset_id, seed) -> MatchPlan`.
+- `next_match` is pure: uses `SeededRng` for deterministic tie-breaking, `seat_permutation` for faction rotation, and `dict.fromkeys(roster, 0)` + stable sort by play count to prefer least-played agents.
+- Created `tests/matchmaking/test_matchmaker.py` with 15 tests covering: determinism (same inputs → same plan), different seeds produce different assignments, gauntlet_seed depends on history length, faction balance across seeds (seat P01 filled by multiple agents), no duplicates per game, roster-only selection, larger roster selects exactly player_count, fresh agents preferred over overplayed, outsider history participants silently ignored, ValueError on under-sized roster, canonical seat IDs, gauntlet_seed is 64-char hex.
+- Files changed: `src/padrino/matchmaking/__init__.py`, `src/padrino/matchmaking/matchmaker.py`, `tests/matchmaking/__init__.py`, `tests/matchmaking/test_matchmaker.py`
+- **Learnings for future iterations:**
+  - `dict.fromkeys(roster, 0)` avoids ruff C420 (unnecessary dict comprehension for iterable with fixed value).
+  - For pure matchmaking logic, `MatchRecord.participants: tuple[uuid.UUID, ...]` is hashable (frozen dataclass); `MatchPlan` uses a plain `@dataclass` (not frozen) because `dict` fields break `__hash__` but auto-generated `__eq__` still works correctly for determinism assertions.
+  - `sorted(shuffled, key=lambda a: play_counts[a])` — shuffle first for tie-breaking, then stable-sort by count — is the canonical pattern for deterministic least-played selection.
+---
 
-Landed changes:
-- `src/padrino/db/migrations/versions/0015_rating_idempotency.py` — Database unique constraint on `uq_rating_event_scope` for `(game_id, agent_build_id, scope_type, scope_value, public_player_id)`. Including `public_player_id` ensures clone gauntlet compatibility.
-- `src/padrino/db/models.py` — Declared constraint on `RatingEvent` model.
-- `src/padrino/runner/game_runner.py` — Extended `_persist_terminated_event` with a check-completed bypass to safely skip duplicate rating applications.
-- `src/padrino/ratings/public_leaderboard.py` — Restricted public leaderboard calculations strictly to `IngestedGame.verification_status == 'verified'`.
-- `src/padrino/settings.py` — Configured anonymous public route rate-limit setting `padrino_rate_limit_anonymous_per_minute` (default 60).
-- `src/padrino/api/routes/public.py` — Implemented secure client IP extraction (supporting reverse proxy chains via `X-Forwarded-For`) with IP hashing to enforce anonymous rate limits.
-- `src/padrino/smoke.py` — Hardened the localhost end-to-end smoke harness to generate an Ed25519 signer key pair, register the public key securely via `POST /admin/keys`, and sign the exported bundle before ingestion. This exercises the production-grade signature verification flow and produces verified games.
-- `docs/deployment/self-host.md` — Documented owner-only secret file scheme (`file:`) permission requirements and full Caddy & Nginx production reverse proxy TLS and HSTS deployment setups.
+## 2026-06-10T17:00 - US-096
+- Created `src/padrino/economics/admission.py` with `AdmitDecision` frozen dataclass and `admit(session, settings, *, now) -> AdmitDecision` combining spend cap, daily game count, and concurrency limit; denials short-circuit in priority order and are structured-logged.
+- Added `padrino_max_games_per_day: int = 20` and `padrino_max_concurrent_games: int = 3` to `Settings`.
+- Created `tests/economics/test_admission.py` with 12 tests covering: all-clear admit, spend cap denial, daily cap denial (boundary + yesterday exclusion), concurrency cap denial (boundary + COMPLETED exclusion), priority ordering (spend > daily > concurrency), and default settings values.
+- Files changed: `src/padrino/economics/admission.py`, `src/padrino/settings.py`, `tests/economics/test_admission.py`
+- **Learnings for future iterations:**
+  - Inject `now: datetime | None = None` defaulting to `datetime.now(tz=UTC)` to keep admission logic wall-clock-free in tests; pass a fixed `_NOW` constant from the test module.
+  - Set `Game.created_at` directly on the ORM object before `flush()` to override the Python-side `default=_utcnow` in test fixtures — no need for a separate update query.
+  - `status != "COMPLETED"` is the canonical "active game" predicate, mirroring the scheduler's own `g.status != "COMPLETED"` filter (scheduler.py line 115).
+---
 
-All quality gates passed cleanly:
-- `uv run ruff check .` — PASS
-- `uv run ruff format --check .` — PASS (246 files)
-- `uv run mypy src tests` — PASS (Strict, 225 files)
-- `uv run pytest -m "not integration"` — PASS (1295 passed, 19 skipped, 9 deselected)
-- `uv run pytest tests/cli/test_smoke_localhost.py` — PASS (4 passed, 1 skipped)
+## 2026-06-10T16:00 - US-095
+- Created `src/padrino/economics/` package with `spend_governor.py`; exposes `cumulative_spend_usd(session)` and `can_start_game(session, settings) -> bool` that sums all `LlmCall.cost_usd` rows and returns False (with `spend.cap.reached` warning log) when total >= `padrino_global_spend_cap_usd`.
+- Added `padrino_global_spend_cap_usd: float = 200.0` to `Settings`.
+- Created `tests/economics/test_spend_governor.py` with 10 tests: zero spend, below-cap, exactly-at-cap flip, above-cap, multi-game cumulative, NULL rows treated as zero, cap read from settings, default cap is 200, empty-table returns 0, sum of mixed calls.
+- Files changed: `src/padrino/economics/__init__.py`, `src/padrino/economics/spend_governor.py`, `src/padrino/settings.py`, `tests/economics/__init__.py`, `tests/economics/test_spend_governor.py`
+- **Learnings for future iterations:**
+  - `func.coalesce(func.sum(col), 0.0)` is the correct SQLAlchemy aggregate for summing a nullable float column — scalar_one() returns `float | None`, so cast defensively.
+  - The governor is intentionally read-only; callers are responsible for checking it before launching and for passing a per-game `cost_cap_usd` to the tournament runner for within-game enforcement.
+---
 
-### Learnings for future iterations
-- In clone gauntlets, identical agent builds occupy multiple seats in a single game. A database unique constraint on game ratings must include `public_player_id` (seat identifier) to allow independent seat-based ratings within the same game.
-- Enforcing verified-only games on the public leaderboard requires that even testing rigs (like the local smoke harness) generate valid cryptographic signatures and register their public keys to perform authentic, verified ingestions.
+## 2026-06-10T15:00 - US-094
+- Added `is_broadcastable: bool` column (default `False`, fail-closed) to `Game` model; migration `0018_game_is_broadcastable.py`.
+- Updated `list_live()` and `list_recent()` in `broadcast_index.py` to filter `is_broadcastable=True`; `mark_live()`/`mark_recent()` now return `None` and refuse to promote non-broadcastable games.
+- Updated SSE endpoint (`public_game_live_sse`) and `public_recent_index` direct query in `public.py` to also filter on `is_broadcastable=True`.
+- Created `tests/api/test_broadcast_moderation_enforced.py` (11 tests); updated existing test helpers in `test_public_live_sse.py`, `test_public_live_index.py`, `test_broadcast_index_spoiler.py` to pass `is_broadcastable=True` for happy-path games.
+- Files changed: `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0018_game_is_broadcastable.py`, `src/padrino/public/broadcast_index.py`, `src/padrino/api/routes/public.py`, `tests/api/test_broadcast_moderation_enforced.py`, `tests/api/test_public_live_sse.py`, `tests/api/test_public_live_index.py`, `tests/public/test_broadcast_index_spoiler.py`
+- **Learnings for future iterations:**
+  - Defense-in-depth: enforce `is_broadcastable=True` at both the DB query layer (`list_live`, `list_recent`) AND the transition layer (`mark_live`, `mark_recent`) so the gate holds even if direct DB access bypasses the query helpers.
+  - When adding a new column that gates existing test fixtures, update all `_make_game` helpers in affected tests to default the new column to `True` (happy path) so existing tests continue to pass without modification.
+  - `server_default="false"` (SQLite string) works for Boolean columns in Alembic — SQLAlchemy normalizes the comparison.
+---
 
+## 2026-06-10T14:00 - US-093
+- Created `src/padrino/public/moderation.py` with `deterministic_first_pass` (regex/keyword first-pass filter), `GuardModelAdapter` runtime-checkable Protocol, `LiteLlmGuardAdapter` (real Llama-Guard via LiteLLM, integration-only), and `is_broadcastable(events, guard)` fail-closed async gate.
+- Added `padrino_guard_model: str = "deepinfra/meta-llama/Llama-Guard-3-8B"` to `Settings` — routes through existing `DEEPINFRA_API_KEY`, no new credential.
+- Created `tests/public/test_moderation_gate.py` with 17 tests covering: deterministic first-pass (clean/toxic/case-insensitive/non-chat), fail-closed paths (guard=None, guard error, guard failing), happy path (clean transcript + passing guard), short-circuit behaviour (toxic line blocks before guard), and settings smoke-test.
+- Files changed: `src/padrino/public/moderation.py`, `src/padrino/settings.py`, `tests/public/test_moderation_gate.py`
+- **Learnings for future iterations:**
+  - `@runtime_checkable` on the `Protocol` lets tests assert `isinstance(mock, GuardModelAdapter)` without inheritance — clean duck-typing check.
+  - `_TOXIC_PATTERNS` includes a `toxic_word` sentinel so unit tests can seed known-failing messages without real slurs in source code.
+  - `guard=None` is the "unavailable" path — explicitly fail-closed by the gate so misconfigured deployments don't accidentally broadcast.
+---
 
-## 2026-05-29 — Wave 6 (Balanced 10-Player Ruleset, Local PostgreSQL Migration, and LLM Post-Game Behavioral Evaluation) COMPLETE
+## 2026-06-10T13:00 - US-092
+- Added `PublicLiveGameEntry`, `PublicLiveIndexResponse`, `PublicRecentGameEntry`, `PublicRecentIndexResponse` types to `web/dashboard/src/lib/api/types.ts`.
+- Added `publicLiveIndex()` and `publicRecentIndex()` methods to `PadrinoClient` in `web/dashboard/src/lib/api/client.ts`.
+- Extended `web/dashboard/src/routes/+page.svelte` home page with "Live Now" and "Recently Finished" lobby sections; both load silently (errors swallowed), live cards show no outcome (spoiler-safe by schema), recent cards expose winner.
+- Created `web/dashboard/tests/e2e/lobby.spec.ts` with 2 Playwright tests: live card renders phase/players_alive/watch link with no winner inside the live section; recent card renders winner and watch link.
+- Files changed: `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/lib/api/client.ts`, `web/dashboard/src/routes/+page.svelte`, `web/dashboard/tests/e2e/lobby.spec.ts`
+- **Learnings for future iterations:**
+  - When asserting spoiler-safety on a page that has BOTH a live section and a recent section, scope `getByTestId` to the specific section container rather than the whole page to avoid false positives from the other section.
+  - `page.route` resource-type guards (`resourceType() === 'fetch' || 'xhr'`) prevent SSE connections to the same URL pattern from being intercepted accidentally by the API mock.
+  - Lobby API calls in `onMount` should silently catch all errors (`try { ... } catch {}`) since the broadcast surface is optional and not all backends will have broadcast_state populated.
+---
 
-Antigravity has successfully completed the implementation of all Wave 6 checklist items, rendering Padrino fully optimized for local PostgreSQL migration, balanced 10-player ruleset (`bench10_v1`), and post-game LLM judge evaluations.
+## 2026-06-10T12:00 - US-091
+- Created `web/dashboard/src/routes/watch/[id]/+page.svelte` — SvelteKit live-viewer page consuming `GET /public/games/{id}/live` SSE endpoint via native `EventSource` API.
+- Renders: phase badge, seat grid (alive/dead tracking via `PlayerEliminated` events), public chat feed, vote tally, outcome banner (ONLY after `GameTerminated` frame — spoiler-safe).
+- EventSource auto-reconnect uses Last-Event-ID header natively; connection is closed when game terminates.
+- Created `web/dashboard/tests/e2e/watch.spec.ts` with 2 Playwright tests: (1) base events without terminal — phase/chat/seats/votes render, outcome banner absent; (2) events with `GameTerminated` — outcome banner appears with winner, status shows "Ended".
+- SSE mocked in tests via `page.route` + `route.fulfill({ contentType: 'text/event-stream', body: sseBody })`; reconnect aborted via `route.abort('failed')` to prevent duplicate event delivery.
+- Files changed: `web/dashboard/src/routes/watch/[id]/+page.svelte`, `web/dashboard/tests/e2e/watch.spec.ts`
+- **Learnings for future iterations:**
+  - Playwright can mock SSE by fulfilling with `contentType: 'text/event-stream'` and a complete SSE body string; browser EventSource parses it correctly and fires all events.
+  - Abort reconnect requests with `route.abort('failed')` in the route handler (after first fulfillment) to prevent duplicate events from re-delivering the same SSE body.
+  - `sse = false; prerender = false` in `+layout.ts` means the whole app is a pure SPA — no SSR guards needed for browser APIs like `EventSource`.
+  - Vote tally is cleared on `DayVoteResolved`/`PhaseResolved` events; the seat grid tracks all seen `actor_player_id` values as alive, then marks via `PlayerEliminated`.
+---
 
-Landed changes:
-- `src/padrino/ratings/evaluator.py` — Implemented the post-game LLM judge behavioral evaluations pipeline (`persuasion`, `deception`, `logic`, `social` on a 1-5 scale) using strict LiteLLM structured JSON schema outputs (`response_format=JudgeResponse`), safe defaults for unscored seats, and transactional batch worker loop (`run_pending_behavioral_evaluations`).
-- `src/padrino/settings.py` — Declared behavioral settings (`padrino_enable_behavioral_evaluation`, `padrino_behavioral_judge_model`, and `padrino_behavioral_evaluation_cost_cap`).
-- `src/padrino/cli.py` — Registered `game` subcommand group and `evaluate-behavioral <game_id>` command, and wired `tick_hook` into the scheduler daemon run command.
-- `src/padrino/scheduler/bootstrap.py` — Integrated the batch evaluation job into the scheduler's async tick hook.
-- `tests/conftest.py` — Standardized the global `engine` and `session_factory` fixtures, ensuring SQLite `PRAGMA foreign_keys` toggle runs outside active transaction blocks to keep SQLite integrity checking functional across tests.
-- `tests/ratings/test_behavioral_evaluation.py` — Created extensive unit tests asserting completed game transcript parsing, mock judge scoring, unique constraints, and background jobs (5/5 passed).
-- `tests/core/test_bench10_constants.py` — Created unit tests verifying `bench10_v1` player count, role counts, families, and factions (7/7 passed).
-- `tests/` AST sweep cleanup — Swept and automatically cleaned up 30+ test modules to remove all duplicate local database fixtures in favor of global conftest ones.
-- Lint and Type hardening — Fully resolved all mypy strict typings, ruff checks, and ruff format lints across the entire codebase.
+## 2026-06-10T11:00 - US-090
+- Added `GET /public/live` returning all LIVE games as `PublicLiveGameEntry` (game_id, ruleset_id, current_phase, players_alive) — spoiler-safe by schema (no terminal_result field).
+- Added `GET /public/recent?limit=&cursor=` returning RECENT games with `terminal_result` exposed; paginated via `encode_index_cursor`/`decode_index_cursor` (offset-based, newest-first).
+- `players_alive` count derived by querying `GameSeat.alive=True` per game in Python (avoids complex SQLAlchemy aggregate typing); zero for games with no seats.
+- Created `tests/api/test_public_live_index.py` with 12 tests: LIVE-only filter, outcome omission, HIDDEN/RECENT exclusion, players_alive field presence, total==len(items), RECENT outcome exposure, LIVE/HIDDEN exclusion from recent, pagination limit, cursor no-overlap, last-page null cursor.
+- Files changed: `src/padrino/api/routes/public.py`, `tests/api/test_public_live_index.py`
+- **Learnings for future iterations:**
+  - Spoiler safety for LIVE index is enforced by the response schema itself (`PublicLiveGameEntry` has no `terminal_result` field) — no runtime filtering needed.
+  - Use `is_(True)` not `== True` for SQLAlchemy boolean columns to avoid potential dialect issues.
+  - `encode_index_cursor`/`decode_index_cursor` (offset-based) is the right tool for paginating in-memory ordered lists; `paginate_keyset` is for DB-ordered ascending keyset pagination.
+---
 
-### Learnings for future iterations
-- SQLite transaction block pragmas: Running `PRAGMA foreign_keys = ON` inside a SQLAlchemy transaction block in SQLite has no effect. To reliably toggle SQLite pragmas per test, execute them on a raw connection outside of active transactions (`conn.commit()` after table drops/deletes).
-- Structured Outputs protocol: Passing Pydantic models directly to `response_format` in LiteLLM is a highly powerful and robust way to guarantee strict JSON schemas across diverse model providers.
+## 2026-06-10T10:00 - US-089
+- Added `GET /public/games/{game_id}/live` SSE endpoint in `src/padrino/api/routes/public.py`; streams `public_event_v1` frames at planned cadence, refuses HIDDEN/missing games with 404, honors `Last-Event-ID` header and `?after=` cursor for resume, applies `?speed=` multiplier (capped at 100x) to per-frame delays.
+- Introduced `_live_cadence()` as an injectable FastAPI dependency wrapping `default_cadence()` so tests can inject zero-delay `CadenceConfig` via `app.dependency_overrides`.
+- Created `tests/api/test_public_live_sse.py` with 13 tests: frame order, SSE id=sequence, cursor resume (`?after=`, `Last-Event-ID`, precedence), 404 for HIDDEN/missing, RECENT works, forbidden keys stripped, PRIVATE events dropped, schema_version on every frame.
+- Files changed: `src/padrino/api/routes/public.py`, `tests/api/test_public_live_sse.py`
+- **Learnings for future iterations:**
+  - FastAPI `StreamingResponse` + `Depends(get_session)` works safely because all DB queries happen before the `StreamingResponse` is returned; the generator closure only uses the already-loaded `frames` list, so the session can close without race.
+  - `app.dependency_overrides[_live_cadence] = _zero_cadence` is the pattern for injecting zero-delay cadence in SSE tests — keeps test suite instant without monkeypatching asyncio.sleep.
+  - US-090 (live/recent index endpoints) only depends on US-087 and is now unblocked.
+---
 
+## 2026-06-10T09:00 - US-088
+- Implemented `src/padrino/public/broadcaster.py` with `CadenceConfig` dataclass, `BroadcastFrame` dataclass, and pure `plan_broadcast(events, cadence) -> list[BroadcastFrame]`; PRIVATE/SYSTEM events dropped via `to_public_event_v1`.
+- Added five `padrino_broadcast_cadence_*_ms` settings to `Settings` (chat=2500ms, phase=3000ms, elimination=4000ms, resolution=3500ms, default=1500ms) with `default_cadence()` factory in the broadcaster.
+- Created `tests/public/test_broadcaster_plan.py` with 21 tests covering frame count, ordering, per-event-type delays, and schema version presence.
+- Files changed: `src/padrino/public/broadcaster.py`, `src/padrino/settings.py`, `tests/public/test_broadcaster_plan.py`
+- **Learnings for future iterations:**
+  - `RUF022` enforces isort-style `__all__` ordering where underscore-prefixed names sort before uppercase; use `uv run ruff check --fix` to auto-apply.
+  - `CadenceConfig` and `BroadcastFrame` are `frozen=True` dataclasses — safe to cache/reuse; `default_cadence()` defers the settings import to keep module-level imports clean.
+  - US-089 (SSE endpoint) consumes `BroadcastFrame.delay_ms` — it applies the delay using `asyncio.sleep(frame.delay_ms / 1000)` in the transport, not here.
+---
 
+## 2026-06-10T08:00 - US-087
+- Added `broadcast_state` column (HIDDEN/LIVE/RECENT) to `Game` model and migration 0017.
+- Created `src/padrino/public/broadcast_index.py` with `BroadcastState` StrEnum, `GamePublicEntry` dataclass, `list_live()` / `list_recent(limit)` / `mark_*` transitions; spoiler protection enforced at query layer.
+- Created `tests/public/test_broadcast_index_spoiler.py` with 11 tests covering LIVE/RECENT/HIDDEN partition, spoiler omission, state transitions, unknown-game returns-None, and limit enforcement.
+- Files changed: `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0017_game_broadcast_state.py`, `src/padrino/public/broadcast_index.py`, `tests/public/test_broadcast_index_spoiler.py`
+- **Learnings for future iterations:**
+  - `BroadcastState(StrEnum)` is the ruff-preferred pattern; `class Foo(str, enum.Enum)` triggers UP042.
+  - `server_default=` in `op.add_column` handles backfilling existing rows in Alembic migrations; both `default=` (ORM) and `server_default=` (migration/DDL) are needed for a NOT NULL column.
+  - US-088 and US-090 both depend on this `broadcast_state` column — they can query `Game.broadcast_state` via `list_live()` / `list_recent()`.
+---
+
+## 2026-06-10T00:00 - US-086
+- Implemented `src/padrino/public/projection.py` with `to_public_event_v1()` and `to_public_events_v1()` — stable versioned public envelope wrapping the core spectator projection.
+- Created golden-file test `tests/public/test_projection_contract.py` with 7 tests: golden match, exact-field-set assertion, schema_version check, PlayerEliminated role/faction regression guard, SYSTEM/PRIVATE drop, and Hypothesis property test (no forbidden key survives in any PUBLIC event payload).
+- Files changed: `src/padrino/public/__init__.py`, `src/padrino/public/projection.py`, `tests/public/__init__.py`, `tests/public/test_projection_contract.py`, `tests/public/fixtures/projection_contract.json`
+- **Learnings for future iterations:**
+  - `to_public_event_v1` normalizes field types (int, str) so downstream consumers don't need to coerce — pattern to follow for US-088, US-089.
+  - The `PUBLIC_EVENT_V1_FIELDS` frozenset is exported; US-089 SSE transport should assert against it to avoid drifting the shape.
+  - `zip(..., strict=True)` required by ruff B905 — always add it when zipping same-length lists.
+---
