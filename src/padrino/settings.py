@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # any api_key.
     padrino_rate_limit_human_per_minute: int = 120
 
+    # Guest quickplay (US-128). How long a freshly-minted guest/account human
+    # session cookie stays valid, and whether the cookie carries the ``Secure``
+    # attribute. ``Secure`` defaults on (HTTPS-only) for production; tests and
+    # local plain-HTTP dev flip it off so the cookie survives an http:// client.
+    padrino_human_session_ttl_hours: int = 720
+    padrino_human_session_cookie_secure: bool = True
+
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any
     # scraper that can reach the process; flipping the flag requires the same
     # spectator scope as the read-only API surface.

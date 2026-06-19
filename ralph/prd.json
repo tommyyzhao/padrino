@@ -152,7 +152,7 @@
       ],
       "dependencies": ["US-127"],
       "priority": 128,
-      "passes": false,
+      "passes": true,
       "notes": "P1. Decision 4 (guest quickplay)."
     },
     {
