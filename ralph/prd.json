@@ -57,7 +57,7 @@
       ],
       "dependencies": ["US-121"],
       "priority": 123,
-      "passes": false,
+      "passes": true,
       "notes": "P0. Fixes the GDPR-vs-hash-chain impossibility all three reviewers independently flagged."
     },
     {

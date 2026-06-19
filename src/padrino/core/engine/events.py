@@ -63,11 +63,19 @@ class PhaseStartedPayload(_FrozenModel):
 class PublicMessageSubmittedPayload(_FrozenModel):
     text: str
     round_index: int | None = None
+    # US-123: a HUMAN seat's message carries ONLY this opaque content reference
+    # (sha256 of the raw text); the raw/cleaned text lives in the
+    # ``human_chat_messages`` sidecar so it can be GDPR-redacted without changing
+    # any event_hash. None for AI seats (whose text lives inline as before), so
+    # existing/AI events stay byte-identical.
+    content_ref: str | None = None
 
 
 class PrivateMessageSubmittedPayload(_FrozenModel):
     text: str
     channel_id: str
+    # US-123: see PublicMessageSubmittedPayload.content_ref.
+    content_ref: str | None = None
 
 
 class VoteSubmittedPayload(_FrozenModel):

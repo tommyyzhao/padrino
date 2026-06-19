@@ -469,6 +469,43 @@ class MaterializedGameAnalytics(Base):
     )
 
 
+class HumanChatMessage(Base):
+    """Out-of-band sidecar for human free-text chat, OFF the hash chain (US-123).
+
+    Human chat is personally-identifiable (PII) and must be erasable for GDPR.
+    Putting the raw text inside a hash-chained ``game_events`` row would make
+    erasure mathematically impossible without breaking deterministic replay, so
+    the raw text lives ONLY here. The paired ``PublicMessageSubmitted`` /
+    ``PrivateMessageSubmitted`` core event carries only an opaque ``content_ref``
+    (a sha256), so redacting a sidecar row never changes any ``event_hash``.
+
+    ``sequence`` pairs with the ``game_events.sequence`` of the message event, so
+    a released/masked human message is reconstructable by joining on
+    (``game_id``, ``sequence``). ``redact`` nulls ``raw_text``/``cleaned_text``
+    and flips ``redacted`` without touching ``game_events``.
+    """
+
+    __tablename__ = "human_chat_messages"
+    __table_args__ = (
+        UniqueConstraint("game_id", "sequence", name="uq_human_chat_message_sequence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    public_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    raw_text: Mapped[str | None] = mapped_column(String, nullable=True)
+    cleaned_text: Mapped[str | None] = mapped_column(String, nullable=True)
+    redacted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -509,6 +546,7 @@ __all__ = [
     "GameSeat",
     "Gauntlet",
     "GauntletRosterSlot",
+    "HumanChatMessage",
     "IngestedGame",
     "JudgeEnrichmentCard",
     "League",
