@@ -95,7 +95,7 @@
       ],
       "dependencies": [],
       "priority": 114,
-      "passes": false,
+      "passes": true,
       "notes": "Matters exactly now that continuous matchmaking gives the scheduler a permanent workload."
     },
     {

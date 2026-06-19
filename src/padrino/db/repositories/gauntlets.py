@@ -107,8 +107,16 @@ async def claim_oldest_pending(
 
     Returns ``None`` when no pending gauntlets exist. The status flip and
     heartbeat stamp happen inside the caller-supplied session; the caller is
-    expected to commit. SQLite's lack of ``FOR UPDATE`` is fine here because
-    the scheduler is single-writer.
+    expected to commit.
+
+    On PostgreSQL the row is selected with ``SELECT ... FOR UPDATE SKIP
+    LOCKED`` (``with_for_update(skip_locked=True)``) so two scheduler replicas
+    that race never claim the same gauntlet: the second claimer skips the row
+    the first has row-locked and falls through to the next pending gauntlet (or
+    ``None``). On SQLite ``FOR UPDATE`` is a no-op and is intentionally omitted
+    because the SQLite scheduler deployment is single-writer (one process holds
+    the database lock for the whole transaction), so no row-lock skipping is
+    needed or possible.
     """
     stmt = (
         select(Gauntlet)
@@ -116,6 +124,8 @@ async def claim_oldest_pending(
         .order_by(Gauntlet.created_at, Gauntlet.id)
         .limit(1)
     )
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update(skip_locked=True)
     obj = (await session.execute(stmt)).scalars().first()
     if obj is None:
         return None
