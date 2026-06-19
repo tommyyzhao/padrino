@@ -33,6 +33,7 @@ from padrino.core.engine.events import (
     ProtectSubmitted,
     PublicMessageSubmitted,
     RolesAssigned,
+    SeatTakenOver,
     VoteSubmitted,
 )
 from padrino.core.engine.state import GameState, Phase, QueuedInspection, Seat
@@ -52,6 +53,7 @@ _RECORDED_ONLY: tuple[type[Event], ...] = (
     DayVoteResolved,
     NightResolved,
     PhaseResolved,
+    SeatTakenOver,
 )
 
 
@@ -96,6 +98,7 @@ def apply_event(state: GameState, event: Event) -> GameState:
                 role=a.role,
                 faction=a.faction,
                 alive=True,
+                seat_kind=a.seat_kind,
             )
             for a in event.payload.assignments
         )
@@ -132,4 +135,31 @@ def apply_event(state: GameState, event: Event) -> GameState:
     raise ValueError(f"unknown event type: {type(event).__name__}")
 
 
-__all__ = ["apply_event", "initial_state"]
+def compute_seat_provenance(event_log: list[Event]) -> dict[str, str]:
+    """Derive each seat's occupancy provenance from the event log.
+
+    Returns a mapping ``{public_player_id: 'HUMAN'|'AI'|'HUMAN_THEN_AI'}`` built
+    purely from the events. Seats are first labelled by their assignment-time
+    :class:`~padrino.core.engine.state.SeatKind` (``HUMAN``/``AI_TAKEOVER`` map to
+    ``HUMAN``/``AI`` respectively; an absent ``seat_kind`` defaults to ``AI`` so a
+    legacy AI-only log is unchanged). Every :class:`SeatTakenOver` upgrades a
+    ``HUMAN`` seat to ``HUMAN_THEN_AI``; an already-AI seat stays ``AI``.
+
+    This is pure data: no clock, no random, no IO.
+    """
+    provenance: dict[str, str] = {}
+    for event in event_log:
+        if isinstance(event, RolesAssigned):
+            for assignment in event.payload.assignments:
+                kind = assignment.seat_kind
+                provenance[assignment.public_player_id] = "HUMAN" if kind == "HUMAN" else "AI"
+        elif isinstance(event, SeatTakenOver):
+            pid = event.payload.public_player_id
+            if provenance.get(pid) == "HUMAN":
+                provenance[pid] = "HUMAN_THEN_AI"
+            else:
+                provenance.setdefault(pid, "AI")
+    return provenance
+
+
+__all__ = ["apply_event", "compute_seat_provenance", "initial_state"]

@@ -38,7 +38,7 @@
       ],
       "dependencies": [],
       "priority": 122,
-      "passes": false,
+      "passes": true,
       "notes": "P0. One canonical takeover event - the review found 3 epics inventing it under different names."
     },
     {
