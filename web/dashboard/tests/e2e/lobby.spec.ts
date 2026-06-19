@@ -99,3 +99,177 @@ test.describe('lobby', () => {
     await expect(recentCard).toHaveAttribute('href', `/watch/${RECENT_GAME_ID}`);
   });
 });
+
+// US-154: Frontend lobby UI — guest-quickplay join from an invite link, the
+// one-tap consent + 16+ gate, count-only roster, and ready-up.
+//
+// The smoke harness has no human-multiplayer lobby data, so every /human/* and
+// /lobbies/* call is intercepted via `page.route` with deterministic fixtures
+// (the same pattern leaderboard.spec.ts uses). Anonymity (AGENTS.md rule 7) is
+// asserted by checking the roster surfaces ONLY counts, never a per-seat
+// human/AI map.
+const LOBBY_ID = 'cccc0003-0003-0003-0003-cccccccccccc';
+const INVITE_TOKEN = 'invite-abc123';
+const HOST_PRINCIPAL = 'pppp1111-1111-1111-1111-pppppppppppp';
+const GUEST_PRINCIPAL = 'gggg2222-2222-2222-2222-gggggggggggg';
+
+function lobbySummary(status = 'OPEN') {
+  return {
+    id: LOBBY_ID,
+    ruleset_id: 'mini7_v1',
+    identity_mode: 'ANONYMOUS',
+    theme_pack_id: null,
+    stakes: 'CASUAL',
+    status,
+    invite_token: INVITE_TOKEN,
+    host_principal_id: HOST_PRINCIPAL,
+    league_id: 'llll0000-0000-0000-0000-llllllllllll',
+    game_id: null,
+    member_count: 2,
+    composition: { human_count: 2, ai_count: 5, total: 7 }
+  };
+}
+
+function lobbyRoster(guestReady: boolean) {
+  return {
+    id: LOBBY_ID,
+    status: 'OPEN',
+    member_count: 2,
+    composition: { human_count: 2, ai_count: 5, total: 7 },
+    members: [
+      { member_id: HOST_PRINCIPAL, is_host: true, ready: true, present: true },
+      { member_id: GUEST_PRINCIPAL, is_host: false, ready: guestReady, present: true }
+    ]
+  };
+}
+
+test.describe('lobby UI (US-154)', () => {
+  test('guest joins from an invite link, accepts consent, and readies up', async ({ page }) => {
+    let consented = false;
+    let guestReady = false;
+
+    const isApi = (route: import('@playwright/test').Route) => {
+      const t = route.request().resourceType();
+      return t === 'fetch' || t === 'xhr';
+    };
+
+    // Guest quickplay: minting a guest principal (no signup).
+    await page.route('**/human/guest', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ principal_id: GUEST_PRINCIPAL, kind: 'guest', display_name: null })
+      });
+    });
+
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          principal_id: GUEST_PRINCIPAL,
+          kind: 'guest',
+          display_name: 'Friend'
+        })
+      });
+    });
+
+    // Consent status flips to true once the one-tap consent is POSTed.
+    await page.route('**/human/consent', async (route) => {
+      if (!isApi(route)) return route.continue();
+      if (route.request().method() === 'POST') consented = true;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ consented, required_versions: { TOS: '1', PRIVACY: '1', AGE_GATE: '1' } })
+      });
+    });
+
+    await page.route(`**/lobbies/join/${INVITE_TOKEN}`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(lobbySummary())
+      });
+    });
+
+    await page.route(`**/lobbies/${LOBBY_ID}/roster`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(lobbyRoster(guestReady))
+      });
+    });
+
+    await page.route(`**/lobbies/${LOBBY_ID}/ready`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      guestReady = true;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(lobbyRoster(true))
+      });
+    });
+
+    await page.route(`**/lobbies/${LOBBY_ID}/heartbeat`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(lobbyRoster(guestReady))
+      });
+    });
+
+    await page.route(`**/lobbies/${LOBBY_ID}`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(lobbySummary())
+      });
+    });
+
+    // Land on the invite link: /lobby?invite=<token> prefills the join token.
+    await page.goto(`/lobby?invite=${INVITE_TOKEN}`);
+    await expect(page.getByTestId('lobby-join-token')).toHaveValue(INVITE_TOKEN);
+
+    // Join as a guest — no signup.
+    await page.getByTestId('lobby-join-submit').click();
+    await expect(page).toHaveURL(new RegExp(`/lobby/${LOBBY_ID}$`), { timeout: 15_000 });
+
+    // The consent + 16+ gate is shown before play; an optional sign-in CTA too.
+    await expect(page.getByTestId('lobby-consent-row')).toBeVisible();
+    await expect(page.getByTestId('lobby-signin-cta')).toBeVisible();
+
+    // Composition is counts-only — never a per-seat human/AI map (anonymity).
+    await expect(page.getByTestId('lobby-composition')).toContainText('2 humans');
+    await expect(page.getByTestId('lobby-composition')).toContainText('5 AI');
+
+    // One-tap consent.
+    await page.getByTestId('lobby-consent-accept').click();
+
+    // After consent, the ready control appears; ready up.
+    const readyToggle = page.getByTestId('lobby-ready-toggle');
+    await expect(readyToggle).toBeVisible({ timeout: 15_000 });
+    await readyToggle.click();
+    await expect(page.getByTestId('lobby-ready-state')).toHaveText('Ready');
+
+    // Anonymity: the rendered roster exposes no human/AI seat markers.
+    const rosterHtml = (await page.getByTestId('lobby-roster').innerHTML()).toLowerCase();
+    expect(rosterHtml).not.toContain('seat_kind');
+    expect(rosterHtml).not.toContain('is_human');
+    expect(rosterHtml).not.toContain('agent_build');
+  });
+
+  test('create form shows ruleset, identity mode, and CASUAL stakes', async ({ page }) => {
+    await page.goto('/lobby');
+    await expect(page.getByTestId('lobby-create-form')).toBeVisible();
+    await expect(page.getByTestId('lobby-create-ruleset')).toBeVisible();
+    await expect(page.getByTestId('lobby-create-identity-mode')).toBeVisible();
+    await expect(page.getByTestId('lobby-create-stakes')).toContainText('CASUAL');
+  });
+});

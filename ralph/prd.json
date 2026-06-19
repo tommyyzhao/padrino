@@ -707,7 +707,7 @@
         "US-153"
       ],
       "priority": 154,
-      "passes": false,
+      "passes": true,
       "notes": "P5 / frontend."
     },
     {
