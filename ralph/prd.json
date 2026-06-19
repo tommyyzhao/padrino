@@ -491,7 +491,7 @@
         "US-143"
       ],
       "priority": 144,
-      "passes": false,
+      "passes": true,
       "notes": "P4. Keep the hook + personal stat (decision 6); competitive Turing leaderboards deferred per the review."
     },
     {
