@@ -2,6 +2,16 @@
 Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
+## Codebase Patterns
+- CLI logging is configured ONCE in the Typer `@app.callback()` (`_configure_logging_callback` in `cli.py`), which runs for every subcommand. To honor an env-driven setting across serve/scheduler/bootstrap, read it there from `get_settings().padrino_log_level` rather than per-command. `configure_logging` is idempotent (`_configured` flag), so the callback firing on every invocation is safe. Test the callback by patching `padrino.logging.configure_logging` to capture the level, stub the command body (`uvicorn.run`, `asyncio.run`, `create_engine`), set `PADRINO_LOG_LEVEL`, and call `get_settings.cache_clear()` before invoking via `typer.testing.CliRunner`.
+---
+
+## 2026-06-19T02:00 - US-115
+- Honor PADRINO_LOG_LEVEL: the Typer `@app.callback()` in `cli.py` hardcoded `configure_logging("INFO")`, so `settings.padrino_log_level` (env `PADRINO_LOG_LEVEL`) never took effect for ANY subcommand. Changed it to `configure_logging(get_settings().padrino_log_level)`. Because the callback runs for every command, this fixes serve, scheduler, and bootstrap (and all others) in one place.
+- Created `tests/cli/test_logging_config.py` (3 tests): for serve/scheduler/bootstrap, set `PADRINO_LOG_LEVEL` (DEBUG/DEBUG/WARNING), clear `get_settings` cache, invoke via `CliRunner` with `configure_logging` patched to capture the level and the command bodies stubbed, and assert the captured level equals the settings value.
+- Files changed: `src/padrino/cli.py`, `tests/cli/test_logging_config.py`, `ralph/prd.json`, `ralph/progress.txt`
+- Gates (all GREEN): `ruff check .`, `ruff format --check .` (305 files), `mypy src tests` (278 files), `pytest -m "not integration"` -> 1670 passed / 29 skipped.
+
 ## 2026-06-19T01:00 - US-114
 - Scheduler claim hardening: `claim_oldest_pending` (in `db/repositories/gauntlets.py`, the runner/scheduler claim path called at `runner/scheduler.py:300`) now applies `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL only. Implemented via `if session.get_bind().dialect.name == "postgresql": stmt = stmt.with_for_update(skip_locked=True)` between building the ordered-limit-1 select and executing it. SQLite path is unchanged (no `FOR UPDATE`); the docstring documents that SQLite is single-writer so row-lock skipping is neither needed nor possible.
 - Created `tests/db/test_scheduler_claim_skip_locked.py` (2 tests, `@pytest.mark.postgres`, testcontainers `postgres:17-alpine`, skipped without docker): two concurrent claimers over 2 PENDING rows receive DISTINCT gauntlet ids (never the same); two concurrent claimers over 1 PENDING row -> one gets the row + the other gets None (proving the loser SKIPs the row-locked row rather than blocking/re-reading it). Both run each claim in its own session+commit so the asyncio.gather races real concurrent transactions; verified GREEN locally against a live container.
