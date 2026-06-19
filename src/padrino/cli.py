@@ -257,8 +257,11 @@ def scheduler(
                         "closed and NO game will be broadcastable.",
                         err=True,
                     )
+            from padrino.observability.alerts import build_alert_notifier
+
+            notifier = build_alert_notifier(settings)
             tick_hook = build_scheduled_gauntlet_tick_hook(
-                session_factory, settings=settings, guard=guard
+                session_factory, settings=settings, guard=guard, notifier=notifier
             )
 
             await run_scheduler(

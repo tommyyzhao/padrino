@@ -181,6 +181,17 @@ class Settings(BaseSettings):
     padrino_raw_payload_ttl_days: int = 30
     padrino_non_broadcastable_game_ttl_days: int = 7
 
+    # Operational alerting (US-113). ``padrino_alert_webhook_url`` is the
+    # Slack/Discord/etc. incoming-webhook URL the human sets at deploy time;
+    # when unset the notifier is log-only (no network call). The staleness
+    # window decides when the scheduler heartbeat is considered dead, and the
+    # streak threshold decides how many consecutive admission denials fire the
+    # ``admission.denied.streak`` alert.
+    padrino_alert_webhook_url: str | None = None
+    padrino_alert_webhook_timeout_s: float = 5.0
+    padrino_scheduler_heartbeat_stale_seconds: float = 120.0
+    padrino_admission_denied_streak_threshold: int = 5
+
     def build_routing_policy(
         self,
         *,

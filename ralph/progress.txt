@@ -2,6 +2,21 @@
 Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
+## 2026-06-19T00:00 - US-113
+- Operational alerting machinery: webhook notifier + condition-transition alert rules.
+- New `src/padrino/observability/alerts.py` with `AlertNotifier` (async): always emits a structured `alert.fired` log; POSTs the alert as JSON to `padrino_alert_webhook_url` via an injected `httpx.AsyncClient` (no-op when URL/client unset). The core property is fire-once-per-transition: `fire(key, **details)` only POSTs when the key flips inactive->active and returns False (suppressed) while the condition persists; `resolve(key)` re-arms it. Per-key running counters (`increment`/`reset_counter`) carry the consecutive-admission-denial streak across ticks. `build_alert_notifier(settings)` constructs a real owned client when the URL is set, else log-only.
+- Added `EVENT_ALERT_FIRED = "alert.fired"` to `observability/events.py`.
+- New settings: `padrino_alert_webhook_url: str | None = None`, `padrino_alert_webhook_timeout_s: float = 5.0`, `padrino_scheduler_heartbeat_stale_seconds: float = 120.0`, `padrino_admission_denied_streak_threshold: int = 5`.
+- Wired alerts into the EXISTING continuous-matchmaking tick (`scheduler/continuous_matchmaking.py`, optional `notifier` param): `scheduler.heartbeat.stale` (latest `scheduler_heartbeats.latest_beat` older than the window), `moderation.guard.unavailable` (guard None while matchmaking enabled), `spend.cap.reached` (admit() reason == spend_cap_reached), `admission.denied.streak` (N consecutive denials; reset + resolved on the next successful admission). Threaded through `scheduler/bootstrap.py` and constructed in `cli.py serve` via `build_alert_notifier`.
+- New Prometheus alert-rules file `docs/deployment/alert-rules.yml` (4 rules, one per webhook condition) derived from existing `/metrics` series; ships with the deploy config.
+- Created `tests/observability/test_alerts.py` (20 tests, httpx MockTransport, no integration marker): fire posts JSON + de-dups until resolve; log-only when URL unset; delivery error never propagates; counter helpers; each tick trigger (stale heartbeat / guard-none / spend-cap / denial-streak) fires exactly once per transition; the alert-rules YAML parses and has one rule per alert key. Reuses the shared `session_factory` conftest fixture.
+- Files changed: `src/padrino/observability/alerts.py`, `src/padrino/observability/events.py`, `src/padrino/settings.py`, `src/padrino/scheduler/continuous_matchmaking.py`, `src/padrino/scheduler/bootstrap.py`, `src/padrino/cli.py`, `docs/deployment/alert-rules.yml`, `tests/observability/test_alerts.py`, `ralph/prd.json`, `ralph/progress.txt`
+- Gates (all GREEN): `ruff check .`, `ruff format --check .` (303 files), `mypy src tests` (276 files), `pytest -m "not integration"` -> 1663 passed / 29 skipped.
+- **Learnings for future iterations:**
+  - Alert de-duplication = a per-key active-flag state machine on the notifier, NOT a per-tick check. `fire()` flips inactive->active and returns whether it actually transitioned; the matching `resolve()` (called when the condition clears) re-arms it. This is the only way to satisfy "fires exactly once per condition transition (no spam every tick)".
+  - The continuous-matchmaking tick is the single seam where all four conditions are observable in one place (it already calls `admit()` and holds the guard), so wiring the notifier there (optional param, threaded from bootstrap/cli) keeps the alert logic out of the pure paths and out of the spend governor/admission modules themselves.
+  - httpx MockTransport (`httpx.AsyncClient(transport=httpx.MockTransport(handler))`) is the canonical no-network webhook test: the handler records `json.loads(request.content)` and returns `httpx.Response(200, ...)`. A handler that raises `httpx.ConnectError` proves delivery failures are swallowed.
+
 ## 2026-06-18T04:00 - US-112
 - Public surfaces now exclude games originating from unverified ingested bundles.
   - `/public/leaderboard` (the federated rollup over `IngestedGame`) was ALREADY hard-filtered to `verification_status == "verified"` in `compute_public_leaderboard` (both the cache-tag query and the rows query) — no change needed; added regression coverage.
@@ -97,6 +112,7 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 - `padrino.core.spectator_projection.project_event_for_spectator` is the identity-blind filter for PUBLIC events; always build on top of it rather than reimplementing visibility filtering.
 - `padrino.core.observation_privacy.FORBIDDEN_PAYLOAD_KEYS` is the canonical deny list for identity/role/faction leaks — shared across spectator, ranked-observation, and public_event_v1.
 - Golden-file tests live in `tests/public/fixtures/` as JSON. The test loads the file and diffs computed output against stored expected — any schema drift fails the test until the golden file is updated consciously.
+- `padrino.observability.alerts.AlertNotifier` is the canonical operational-alert seam: `await notifier.fire(key, **details)` is fire-once-per-transition (de-duped via a per-key active flag) and `notifier.resolve(key)` re-arms it; it always logs `alert.fired` and POSTs JSON to `padrino_alert_webhook_url` when set. Build it with `build_alert_notifier(settings)`. The matchmaking tick (`run_continuous_matchmaking_tick`, optional `notifier=` param, threaded from `scheduler/bootstrap.py` + `cli.py`) is where spend-cap / stale-heartbeat / guard-unavailable / admission-denial-streak conditions are wired. Add new operator alerts here, never as raw per-tick logs. Test with `httpx.AsyncClient(transport=httpx.MockTransport(handler))` — no network, no integration marker.
 
 ---
 

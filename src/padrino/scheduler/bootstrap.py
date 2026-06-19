@@ -17,6 +17,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.gauntlets.tournament import AdapterFactory
+from padrino.observability.alerts import AlertNotifier
 from padrino.public.moderation import GuardModelAdapter
 from padrino.scheduler.gauntlet_job import run_due_scheduled_gauntlets
 from padrino.settings import Settings
@@ -30,6 +31,7 @@ def build_scheduled_gauntlet_tick_hook(
     settings: Settings,
     adapter_factory: AdapterFactory | None = None,
     guard: GuardModelAdapter | None = None,
+    notifier: AlertNotifier | None = None,
 ) -> TickHook:
     """Return a scheduler tick hook that fires every due scheduled gauntlet.
 
@@ -63,6 +65,7 @@ def build_scheduled_gauntlet_tick_hook(
                 now=now,
                 guard=guard,
                 adapter_factory=adapter_factory,
+                notifier=notifier,
             )
 
     return _hook

@@ -28,9 +28,11 @@ EVENT_SCHEDULER_STALE_RESET: Final[str] = "scheduler.stale_reset"
 EVENT_SCHEDULER_WORKER_HEARTBEAT: Final[str] = "scheduler.worker.heartbeat"
 EVENT_PRIVACY_AUDIT_COMPLETED: Final[str] = "privacy.audit.completed"
 EVENT_PRIVACY_AUDIT_LEAK_DETECTED: Final[str] = "privacy.audit.leak_detected"
+EVENT_ALERT_FIRED: Final[str] = "alert.fired"
 
 
 __all__ = [
+    "EVENT_ALERT_FIRED",
     "EVENT_GAME_COMPLETED",
     "EVENT_GAME_STARTED",
     "EVENT_GAUNTLET_CREATED",

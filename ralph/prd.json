@@ -78,7 +78,7 @@
       ],
       "dependencies": [],
       "priority": 113,
-      "passes": false,
+      "passes": true,
       "notes": "Webhook URL is set by the human at deploy time (Slack/Discord/etc.); the loop builds and tests the machinery."
     },
     {
