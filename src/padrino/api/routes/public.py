@@ -54,6 +54,12 @@ from padrino.api.pagination import (
     invalid_cursor_error,
 )
 from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
+from padrino.core.reveal import (
+    EndgameReveal,
+    RevealModel,
+    SeatRevealInput,
+    project_endgame_reveal,
+)
 from padrino.core.spectator_projection import project_events_for_spectator
 from padrino.db.models import (
     AgentBuild,
@@ -64,6 +70,8 @@ from padrino.db.models import (
     GameSeat,
     IngestedGame,
     League,
+    ModelConfig,
+    ModelProvider,
     Rating,
 )
 from padrino.db.repositories import ingested_games as ingested_games_repo
@@ -514,6 +522,115 @@ async def public_game_composition(
         game_id=game_id,
         ruleset_id=game.ruleset_id,
         composition=composition_counts(seats),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endgame reveal (US-143): terminal-only full per-seat truth, always disclosed
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_seat_models(
+    session: AsyncSession,
+    seats: list[GameSeat],
+) -> dict[uuid.UUID, RevealModel]:
+    """Resolve the exact model identity for every AI-occupied seat.
+
+    Joins ``AgentBuild`` -> ``ModelConfig`` -> ``ModelProvider`` for each seat's
+    finishing agent build (``takeover_agent_build_id`` takes precedence so an
+    ``AI_TAKEOVER`` seat reveals the AI that actually finished it, else
+    ``agent_build_id``). Returns a ``{agent_build_id: RevealModel}`` map; a human
+    seat (no build) contributes nothing.
+    """
+    build_ids: set[uuid.UUID] = set()
+    for seat in seats:
+        build_id = seat.takeover_agent_build_id or seat.agent_build_id
+        if build_id is not None:
+            build_ids.add(build_id)
+    if not build_ids:
+        return {}
+
+    stmt = (
+        select(AgentBuild, ModelConfig, ModelProvider)
+        .join(ModelConfig, AgentBuild.model_config_id == ModelConfig.id)
+        .join(ModelProvider, ModelConfig.provider_id == ModelProvider.id)
+        .where(AgentBuild.id.in_(build_ids))
+    )
+    out: dict[uuid.UUID, RevealModel] = {}
+    for build, mc, provider in (await session.execute(stmt)).all():
+        out[build.id] = RevealModel(
+            provider=provider.name,
+            model_name=mc.model_name,
+            model_version=mc.model_version,
+            agent_build_id=str(build.id),
+            display_name=build.display_name,
+        )
+    return out
+
+
+@router.get(
+    "/public/games/{game_id}/reveal",
+    response_model=EndgameReveal,
+)
+async def public_game_reveal(
+    game_id: uuid.UUID,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> EndgameReveal:
+    """Return the canonical endgame reveal for a terminal game (US-143).
+
+    Decision 11: at the end of a game every player ALWAYS sees the full truth —
+    which seats were human, each seat's role / faction, the exact model for AI
+    seats, and any silent AI takeover provenance (HUMAN / AI / HUMAN_THEN_AI) —
+    even in anonymous mode. The reveal is gated on terminal state: only a RECENT
+    (broadcast-complete) game is served; a LIVE or not-yet-broadcastable game
+    404s so the truth is never disclosed one event early.
+
+    The per-seat truth is assembled by the single pure
+    :func:`padrino.core.reveal.project_endgame_reveal` from seat rows plus the
+    shell-resolved model identity, so every surface shares ONE reveal schema.
+    """
+    game = await session.get(Game, game_id)
+    if (
+        game is None
+        or not game.is_broadcastable
+        or game.broadcast_state != BroadcastState.RECENT.value
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="reveal_not_available",
+        )
+
+    seats_stmt = select(GameSeat).where(GameSeat.game_id == game_id)
+    seats = list((await session.execute(seats_stmt)).scalars())
+    models = await _resolve_seat_models(session, seats)
+
+    inputs: list[SeatRevealInput] = []
+    for seat in seats:
+        build_id = seat.takeover_agent_build_id or seat.agent_build_id
+        inputs.append(
+            SeatRevealInput(
+                public_player_id=seat.public_player_id,
+                seat_index=seat.seat_index,
+                seat_kind=seat.seat_kind,
+                role=seat.role,
+                faction=seat.faction,
+                alive=seat.alive,
+                taken_over_at_phase=seat.taken_over_at_phase,
+                model=models.get(build_id) if build_id is not None else None,
+            )
+        )
+
+    winner = None
+    if isinstance(game.terminal_result, dict):
+        raw_winner = game.terminal_result.get("winner")
+        winner = str(raw_winner) if raw_winner is not None else None
+
+    return project_endgame_reveal(
+        game_id=str(game_id),
+        ruleset_id=game.ruleset_id,
+        winner=winner,
+        seats=inputs,
     )
 
 
@@ -1490,6 +1607,7 @@ __all__ = [
     "public_game_analytics",
     "public_game_composition",
     "public_game_live_sse",
+    "public_game_reveal",
     "public_ladder",
     "public_live_index",
     "public_model_analytics",
