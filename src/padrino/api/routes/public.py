@@ -72,6 +72,7 @@ from padrino.gauntlets.evaluation import evaluate_gauntlet, redact_for_public
 from padrino.observability.metrics import broadcast_active_streams, record_broadcast_frame
 from padrino.public.broadcast_index import BroadcastState, list_live
 from padrino.public.broadcaster import CadenceConfig, default_cadence, plan_broadcast
+from padrino.public.composition_disclosure import CompositionCounts, composition_counts
 from padrino.public.game_analytics_store import (
     build_game_analytics_payload,
     get_materialized_analytics,
@@ -455,6 +456,64 @@ async def public_game_transcript(
         public_chat=public_chat,
         outcome=outcome,
         forbidden_payload_keys=sorted(PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Composition disclosure (US-142): counts only, frozen, never a per-seat map
+# ---------------------------------------------------------------------------
+
+
+class PublicCompositionResponse(BaseModel):
+    game_id: uuid.UUID
+    ruleset_id: str
+    composition: CompositionCounts
+
+
+@router.get(
+    "/public/games/{game_id}/composition",
+    response_model=PublicCompositionResponse,
+)
+async def public_game_composition(
+    game_id: uuid.UUID,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicCompositionResponse:
+    """Return the counts-only composition of a broadcastable game (US-142).
+
+    Decision 7: every player / spectator / lobby surface that shows composition
+    discloses ONLY how many humans vs AI are present, never which seat is which.
+    Counts come from the single canonical
+    :func:`padrino.core.composition.composition_summary` (via
+    :func:`composition_counts`) so the "counts only, never the seat map" rule
+    cannot drift between surfaces. The counts are frozen at game start: a silent
+    AI takeover (``HUMAN`` -> ``AI_TAKEOVER``) does NOT change them, so the
+    disclosure can be served identically while a game is LIVE or RECENT.
+
+    Served for any LIVE or RECENT broadcastable game; anything else 404s. The
+    response carries no per-seat field, so it cannot leak a human/AI seat map.
+    """
+    game = await session.get(Game, game_id)
+    if (
+        game is None
+        or not game.is_broadcastable
+        or game.broadcast_state
+        not in (
+            BroadcastState.LIVE.value,
+            BroadcastState.RECENT.value,
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="game_not_found_or_not_broadcastable",
+        )
+
+    seats_stmt = select(GameSeat).where(GameSeat.game_id == game_id)
+    seats = list((await session.execute(seats_stmt)).scalars())
+    return PublicCompositionResponse(
+        game_id=game_id,
+        ruleset_id=game.ruleset_id,
+        composition=composition_counts(seats),
     )
 
 
@@ -1164,6 +1223,9 @@ class PublicLiveGameEntry(BaseModel):
     ruleset_id: str
     current_phase: str | None
     players_alive: int
+    # Counts-only composition (US-142): how many humans vs AI, never a per-seat
+    # map. Frozen at game start; a silent AI takeover does not change it.
+    composition: CompositionCounts
 
 
 class PublicLiveIndexResponse(BaseModel):
@@ -1208,12 +1270,15 @@ async def public_live_index(
     live_entries = await list_live(session)
     game_ids = [e.game_id for e in live_entries]
     alive_counts: dict[uuid.UUID, int] = {}
+    # All seats per game so the counts-only composition disclosure (US-142) is
+    # derived from the single canonical counter, frozen at game start.
+    seats_by_game: dict[uuid.UUID, list[GameSeat]] = {}
     if game_ids:
-        seats_stmt = select(GameSeat).where(
-            GameSeat.game_id.in_(game_ids), GameSeat.alive.is_(True)
-        )
+        seats_stmt = select(GameSeat).where(GameSeat.game_id.in_(game_ids))
         for seat in (await session.execute(seats_stmt)).scalars():
-            alive_counts[seat.game_id] = alive_counts.get(seat.game_id, 0) + 1
+            seats_by_game.setdefault(seat.game_id, []).append(seat)
+            if seat.alive:
+                alive_counts[seat.game_id] = alive_counts.get(seat.game_id, 0) + 1
 
     items = [
         PublicLiveGameEntry(
@@ -1221,6 +1286,7 @@ async def public_live_index(
             ruleset_id=e.ruleset_id,
             current_phase=e.current_phase,
             players_alive=alive_counts.get(e.game_id, 0),
+            composition=composition_counts(seats_by_game.get(e.game_id, [])),
         )
         for e in live_entries
     ]
@@ -1391,6 +1457,7 @@ __all__ = [
     "PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS",
     "PublicChatEntry",
     "PublicClaimRecordAnalytics",
+    "PublicCompositionResponse",
     "PublicCounterClaimGroupAnalytics",
     "PublicEventEntry",
     "PublicEventsResponse",
@@ -1421,6 +1488,7 @@ __all__ = [
     "_live_tail_config",
     "_sse_active",
     "public_game_analytics",
+    "public_game_composition",
     "public_game_live_sse",
     "public_ladder",
     "public_live_index",
