@@ -147,7 +147,7 @@
       ],
       "dependencies": [],
       "priority": 117,
-      "passes": false,
+      "passes": true,
       "notes": "Lesson from the Wave 7 review: per-story unit tests validated each side of an invented contract; only an end-to-end path catches lockstep-wrong seams."
     },
     {
