@@ -399,6 +399,10 @@ async def export_game(
 
     agent_builds: list[AgentBuildInfo] = []
     for seat in seats:
+        # ``agent_build_id`` is nullable since Wave 9 (human seats have none);
+        # only AI seats contribute agent-build provenance to the export bundle.
+        if seat.agent_build_id is None:
+            continue
         ab = await agent_builds_repo.get(session, seat.agent_build_id)
         if ab is None:
             raise GameNotExportable(

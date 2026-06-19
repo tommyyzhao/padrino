@@ -41,6 +41,19 @@ class ActionType(StrEnum):
     INVESTIGATE = "INVESTIGATE"
 
 
+class SeatKind(StrEnum):
+    """Who occupies a seat (Wave 9 human multiplayer).
+
+    Pure data carried on ``Seat`` with NO effect on mechanics; the engine
+    resolves actions identically regardless of seat kind. ``AI`` is the legacy
+    default so existing event logs replay to identical state.
+    """
+
+    AI = "AI"
+    HUMAN = "HUMAN"
+    AI_TAKEOVER = "AI_TAKEOVER"
+
+
 class PhaseKind(StrEnum):
     """High-level phase type within a game."""
 

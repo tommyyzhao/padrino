@@ -179,13 +179,27 @@ class GameSeat(Base):
     game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
     public_player_id: Mapped[str] = mapped_column(String, nullable=False)
     seat_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    agent_build_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("agent_builds.id"), nullable=False
+    # Nullable since Wave 9 (US-121): a HUMAN seat has no agent build. AI and
+    # AI_TAKEOVER seats still populate it (the latter via takeover_agent_build_id
+    # for provenance).
+    agent_build_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=True
+    )
+    # Who occupies this seat. 'AI' is the byte-identical legacy default so every
+    # pre-Wave-9 game persists/loads unchanged.
+    seat_kind: Mapped[str] = mapped_column(
+        String, nullable=False, default="AI", server_default="AI"
     )
     role: Mapped[str] = mapped_column(String, nullable=False)
     faction: Mapped[str] = mapped_column(String, nullable=False)
     alive: Mapped[bool] = mapped_column(Boolean, nullable=False)
     death_phase: Mapped[str | None] = mapped_column(String, nullable=True)
+    # AI takeover provenance (US-122 emits the canonical event; these columns
+    # persist the resolved provenance for analytics/reveal).
+    taken_over_at_phase: Mapped[str | None] = mapped_column(String, nullable=True)
+    takeover_agent_build_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=True
+    )
 
 
 class GameEvent(Base):

@@ -19,7 +19,7 @@
       ],
       "dependencies": [],
       "priority": 121,
-      "passes": false,
+      "passes": true,
       "notes": "P0 schema lock. Resolves the agent_build_id NOT NULL conflict the review flagged across 4 epics: ONE owner, ONE migration. occupant_principal_id FK is added in US-127 alongside the principals table (kept out of here to avoid a forward dependency)."
     },
     {

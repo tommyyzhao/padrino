@@ -206,6 +206,10 @@ def _per_ab_counters(
     """Bucket seats by agent_build, counting games / wins / draws / losses + factions."""
     counters: dict[uuid.UUID, dict[str, int]] = {}
     for seat in seats:
+        # ``agent_build_id`` is nullable since Wave 9 (human seats); the
+        # scientific leaderboard only aggregates AI seats.
+        if seat.agent_build_id is None:
+            continue
         bucket = counters.setdefault(
             seat.agent_build_id,
             {
@@ -247,6 +251,8 @@ def _per_ab_role_family_breakdown(
     """
     out: dict[uuid.UUID, dict[str, dict[str, float]]] = {}
     for seat in seats:
+        if seat.agent_build_id is None:
+            continue
         try:
             role = Role(seat.role)
         except ValueError:
@@ -372,7 +378,9 @@ async def compute_leaderboard(
     events = await _events_for_games(session, winners.keys())
 
     seat_by_game_actor: dict[tuple[uuid.UUID, str], uuid.UUID] = {
-        (seat.game_id, seat.public_player_id): seat.agent_build_id for seat in seats
+        (seat.game_id, seat.public_player_id): seat.agent_build_id
+        for seat in seats
+        if seat.agent_build_id is not None
     }
     ruleset = get_ruleset(ruleset_id)
     counters = _per_ab_counters(seats, winners)

@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from padrino.core.enums import Faction, PhaseKind, Role
+from padrino.core.enums import Faction, PhaseKind, Role, SeatKind
 
 
 class QueuedInspection(BaseModel):
@@ -36,6 +36,10 @@ class Seat(BaseModel):
     death_phase: str | None = None
     last_protected_target: str | None = None
     queued_inspection_result: QueuedInspection | None = None
+    # Wave 9 (US-121): who occupies the seat, as pure provenance data. Defaults
+    # to None so replaying a pre-Wave-9 event log reproduces identical state and
+    # mechanics are entirely unaffected.
+    seat_kind: SeatKind | None = None
 
 
 class Phase(BaseModel):

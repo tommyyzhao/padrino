@@ -247,7 +247,11 @@ async def finalize_gauntlet_if_done(
         return None
 
     seats_stmt = select(GameSeat.agent_build_id).where(GameSeat.game_id.in_(child_ids)).distinct()
-    agent_build_ids = list((await session.execute(seats_stmt)).scalars().all())
+    # ``agent_build_id`` is nullable since Wave 9 (human seats). Gauntlet games
+    # are AI-only, but filter defensively so the rating path never sees a None.
+    agent_build_ids = [
+        ab_id for ab_id in (await session.execute(seats_stmt)).scalars().all() if ab_id is not None
+    ]
 
     provisional_by_ab = await _provisional_for_agent_builds(
         session,

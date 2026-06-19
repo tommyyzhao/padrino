@@ -167,6 +167,7 @@ async def test_tournament_runs_all_games_and_aggregates_per_model(tmp_path: Path
             )
         positions: dict[uuid.UUID, set[int]] = {}
         for row in seat_rows:
+            assert row.agent_build_id is not None  # gauntlet games are AI-only
             positions.setdefault(row.agent_build_id, set()).add(row.seat_index)
         assert any(len(idxs) > 1 for idxs in positions.values()), (
             "no build changed seats across games — permutation not applied"
