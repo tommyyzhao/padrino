@@ -126,3 +126,26 @@ async def test_unknown_seat_raises_with_known_seats() -> None:
     mux = SeatMultiplexAdapter({"P01": _TaggingAdapter("a")})
     with pytest.raises(KeyError, match="P03"):
         await mux.complete(_observation_for(_SEATS[2]))
+
+
+async def test_swap_seat_rebinds_adapter_and_returns_previous() -> None:
+    # US-139: an AI takeover swaps a seat's adapter between ticks.
+    human = _TaggingAdapter("human")
+    takeover = _TaggingAdapter("ai")
+    mux = SeatMultiplexAdapter({"P01": human})
+
+    before = await mux.complete(_observation_for(_SEATS[0]))
+    assert before.raw_response == "human"
+
+    replaced = mux.swap_seat("P01", takeover)
+    assert replaced is human
+
+    after = await mux.complete(_observation_for(_SEATS[0]))
+    assert after.raw_response == "ai"
+    assert takeover.seen_seats == ["P01"]
+
+
+def test_swap_unknown_seat_raises_with_known_seats() -> None:
+    mux = SeatMultiplexAdapter({"P01": _TaggingAdapter("a")})
+    with pytest.raises(KeyError, match="P03"):
+        mux.swap_seat("P03", _TaggingAdapter("b"))

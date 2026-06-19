@@ -17,6 +17,15 @@ can assert per-model coverage (every distinct model produced at least one
 parsed-OK call) without re-deriving seat attribution from the flat,
 seat-anonymous outcome log — :class:`AdapterResult` carries no seat id.
 
+The same per-seat dispatch is the seam a *mixed human+AI* game rides on
+(US-139): a seat may hold a :class:`~padrino.llm.human_adapter.HumanAdapter`
+or any LLM adapter, and :meth:`swap_seat` rebinds a single seat's adapter
+**between ticks** so a silent AI takeover (paired with a committed
+``SeatTakenOver`` event) changes who drives the seat without touching the
+tick barrier. All non-determinism — which human submitted what, release
+ordering, the takeover itself — is captured by the runner as committed
+events; the adapter swap holds no game state and so never perturbs replay.
+
 Impure ``llm`` layer; pure-core never imports it.
 """
 
@@ -39,6 +48,27 @@ class SeatMultiplexAdapter:
         self._adapters: dict[str, LlmAdapter] = dict(adapters)
         # seat public_player_id -> ordered results that seat's adapter produced.
         self.calls_by_seat: dict[str, list[AdapterResult]] = {}
+
+    def swap_seat(self, seat: str, adapter: LlmAdapter) -> LlmAdapter:
+        """Rebind ``seat``'s adapter and return the one it replaced (US-139).
+
+        This is the mechanism an AI takeover uses: between two ticks the
+        runner swaps a human seat's :class:`~padrino.llm.human_adapter.HumanAdapter`
+        for a curated LLM adapter, then commits a ``SeatTakenOver`` event so the
+        change is replay-reconstructable. The swap mutates only the dispatch
+        table — no game state lives here — so replaying the committed log
+        reproduces an identical hash-chained state regardless of when seats were
+        swapped. The seat must already be known (a takeover replaces an existing
+        occupant; it never introduces a new seat).
+        """
+        if seat not in self._adapters:
+            raise KeyError(
+                f"SeatMultiplexAdapter cannot swap unknown seat {seat!r}; "
+                f"known seats={sorted(self._adapters)}"
+            )
+        previous = self._adapters[seat]
+        self._adapters[seat] = adapter
+        return previous
 
     async def complete(self, observation: Observation) -> AdapterResult:
         seat = observation.you.player_id
