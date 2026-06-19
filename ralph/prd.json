@@ -133,7 +133,7 @@
       ],
       "dependencies": ["US-121"],
       "priority": 127,
-      "passes": false,
+      "passes": true,
       "notes": "P1. Foundation every human story keys off. Friends graph, blocking, and lossless multi-guest merge are CUT from v1."
     },
     {

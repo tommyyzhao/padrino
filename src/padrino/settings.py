@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     padrino_rate_limit_submitter_per_minute: int = 30
     padrino_rate_limit_spectator_per_minute: int = 1200
     padrino_rate_limit_anonymous_per_minute: int = 60
+    # Browser-human principal rate limit (US-127). Per-human-principal sliding
+    # window, completely separate from the API-key ceilings above. Reuses the
+    # same RateLimitStore, keyed by the session hash so it shares no bucket with
+    # any api_key.
+    padrino_rate_limit_human_per_minute: int = 120
 
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any
     # scraper that can reach the process; flipping the flag requires the same

@@ -3,8 +3,9 @@
 Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``agent_builds``, ``leagues``, ``gauntlets``, ``gauntlet_roster_slots``,
 ``games``, ``game_seats``, ``game_events``, ``llm_calls``, ``ratings``,
-``rating_events``, and the dormant human-lane siblings ``human_rating`` /
-``human_rating_event`` (Wave 9, US-125).
+``rating_events``, the dormant human-lane siblings ``human_rating`` /
+``human_rating_event`` (Wave 9, US-125), and the browser-human identity layer
+``principals`` / ``human_sessions`` (Wave 9, US-127).
 """
 
 from __future__ import annotations
@@ -213,6 +214,11 @@ class GameSeat(Base):
     taken_over_at_phase: Mapped[str | None] = mapped_column(String, nullable=True)
     takeover_agent_build_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("agent_builds.id"), nullable=True
+    )
+    # Wave 9 (US-127): a HUMAN seat links to the human principal occupying it.
+    # Nullable so AI / AI_TAKEOVER seats (and every legacy row) stay byte-identical.
+    occupant_principal_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("principals.id"), nullable=True
     )
 
 
@@ -590,6 +596,55 @@ class HumanChatMessage(Base):
     )
 
 
+class Principal(Base):
+    """A browser-human identity, completely separate from API-key auth (US-127).
+
+    A principal is either a ``guest`` (created on first contact from an invite
+    link, no signup) or an ``account`` (upgraded via OAuth in US-129). It carries
+    no scope and is never reachable from the ``api_keys`` auth path — a guest
+    cookie grants zero API scope and an API key grants zero human identity.
+    ``deleted_at`` supports GDPR erasure without a hard delete.
+    """
+
+    __tablename__ = "principals"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class HumanSession(Base):
+    """A browser session bound to a :class:`Principal` (US-127).
+
+    The opaque session token is NEVER persisted: only its sha256 digest lives in
+    ``session_hash`` and is compared with a constant-time comparison. ``kind``
+    distinguishes a guest cookie from an account cookie. A session is invalid
+    once ``revoked_at`` is set or ``expires_at`` is in the past.
+    """
+
+    __tablename__ = "human_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    session_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -633,6 +688,7 @@ __all__ = [
     "HumanChatMessage",
     "HumanRating",
     "HumanRatingEvent",
+    "HumanSession",
     "IngestedGame",
     "JudgeEnrichmentCard",
     "League",
@@ -640,6 +696,7 @@ __all__ = [
     "MaterializedGameAnalytics",
     "ModelConfig",
     "ModelProvider",
+    "Principal",
     "PromptVersion",
     "RateLimitBucket",
     "Rating",
