@@ -168,7 +168,7 @@
         "US-111"
       ],
       "priority": 118,
-      "passes": false,
+      "passes": true,
       "notes": "Known offenders enumerated from the Wave 7 verification runs."
     },
     {

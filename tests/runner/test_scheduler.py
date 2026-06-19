@@ -11,7 +11,9 @@ honor the semaphore, and heartbeat while running" — not "run mini7 games".
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -168,6 +170,68 @@ def _adapter_factory_noop() -> LlmAdapter:
     return NoopMockAdapter()
 
 
+# US-118 flake burn-down: the scheduler tests previously polled the gauntlet
+# status with a TIGHT iteration budget (e.g. ``for _ in range(200)`` ~= 2s),
+# then set the stop event UNCONDITIONALLY. Under load that budget could expire
+# before the gauntlet reached its terminal status, tripping ``stop`` early and
+# making the post-run status assertions flaky. ``_drive_scheduler_until`` keeps
+# the original, deliberately cooperative poll shape (sleep FIRST, then read —
+# this yields the event loop / the single shared in-memory SQLite connection to
+# the scheduler's drive+write coroutines on every iteration, which is why the
+# scheduler actually makes progress) but raises the budget to a generous
+# deterministic bound. It also NEVER trips ``stop`` until the target status is
+# observed, so a slow-but-correct run finalizes instead of being cut short, and
+# fails loudly (rather than hanging) if the bound is genuinely exceeded.
+
+# Cooperative status polling. A coarse 50ms interval (vs the old 10ms) is
+# deliberate: every watcher DB read contends for the single shared in-memory
+# SQLite connection with the scheduler's drive/write coroutines, so polling less
+# often lets the scheduler make progress far faster (a tight 10ms loop could
+# starve it into a multi-second-to-stalled drive). 600 polls = ~30s budget:
+# orders of magnitude more than a correct run needs (~1.5s) yet still bounded.
+_SCHEDULER_POLL_INTERVAL_S = 0.05
+_SCHEDULER_MAX_POLLS = 600
+# Hard ceiling on the scheduler coroutine itself: even after ``stop`` is set, a
+# genuinely wedged run (e.g. stuck inside ``_drive_gauntlet``) must FAIL LOUDLY
+# rather than hang the whole suite. Comfortably larger than the watcher budget.
+_SCHEDULER_RUN_TIMEOUT_S = 60.0
+
+
+async def _drive_scheduler_until(
+    session_factory: async_sessionmaker[AsyncSession],
+    gauntlet_id: uuid.UUID,
+    target_status: str,
+    *,
+    stop: asyncio.Event,
+    run: Awaitable[None],
+) -> None:
+    """Run the scheduler until ``gauntlet_id`` reaches ``target_status``.
+
+    The watcher sets ``stop`` once the gauntlet reaches the target status (or the
+    generous poll budget is exhausted), at which point the scheduler returns. The
+    scheduler coroutine is wrapped in a hard timeout so a wedged run surfaces as a
+    failure instead of hanging; the watcher is bounded and always awaited clean.
+    """
+
+    async def _watch() -> None:
+        for _ in range(_SCHEDULER_MAX_POLLS):
+            await asyncio.sleep(_SCHEDULER_POLL_INTERVAL_S)
+            async with session_factory() as session:
+                g = await gauntlets_repo.get(session, gauntlet_id)
+            if g is not None and g.status == target_status:
+                break
+        stop.set()
+
+    watcher = asyncio.create_task(_watch())
+    try:
+        await asyncio.wait_for(run, timeout=_SCHEDULER_RUN_TIMEOUT_S)
+    finally:
+        stop.set()
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+
+
 async def test_pending_gauntlet_runs_and_finalizes_to_completed(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -175,27 +239,21 @@ async def test_pending_gauntlet_runs_and_finalizes_to_completed(
     executor = _FakeExecutor()
     stop = asyncio.Event()
 
-    async def _stop_after_one_iter() -> None:
-        # Wait for the gauntlet to be marked COMPLETED, then set stop.
-        for _ in range(200):
-            await asyncio.sleep(0.01)
-            async with session_factory() as session:
-                g = await gauntlets_repo.get(session, gauntlet_id)
-            if g is not None and g.status == "COMPLETED":
-                break
-        stop.set()
-
     options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
-    waiter = asyncio.create_task(_stop_after_one_iter())
-    await run_scheduler(
+    await _drive_scheduler_until(
         session_factory,
-        concurrency=4,
-        stop_event=stop,
-        adapter_factory=_adapter_factory_noop,
-        game_executor=executor,
-        options=options,
+        gauntlet_id,
+        "COMPLETED",
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=4,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
     )
-    await waiter
 
     assert {call[1].game_id for call in executor.calls} == set(game_ids)
     async with session_factory() as session:
@@ -214,27 +272,22 @@ async def test_concurrency_cap_honored_via_injected_semaphore(
     semaphore = asyncio.Semaphore(2)
     stop = asyncio.Event()
 
-    async def _waiter() -> None:
-        for _ in range(500):
-            await asyncio.sleep(0.01)
-            async with session_factory() as session:
-                g = await gauntlets_repo.get(session, gauntlet_id)
-            if g is not None and g.status == "COMPLETED":
-                break
-        stop.set()
-
     options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
-    waiter = asyncio.create_task(_waiter())
-    await run_scheduler(
+    await _drive_scheduler_until(
         session_factory,
-        concurrency=2,
-        stop_event=stop,
-        adapter_factory=_adapter_factory_noop,
-        game_executor=executor,
-        semaphore=semaphore,
-        options=options,
+        gauntlet_id,
+        "COMPLETED",
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=2,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            semaphore=semaphore,
+            options=options,
+        ),
     )
-    await waiter
 
     assert len(executor.calls) == len(game_ids)
     assert executor.peak_concurrency <= 2
@@ -255,26 +308,21 @@ async def test_crash_recovery_resets_stale_running_gauntlet(
     executor = _FakeExecutor()
     stop = asyncio.Event()
 
-    async def _waiter() -> None:
-        for _ in range(200):
-            await asyncio.sleep(0.01)
-            async with session_factory() as session:
-                g = await gauntlets_repo.get(session, gauntlet_id)
-            if g is not None and g.status == "COMPLETED":
-                break
-        stop.set()
-
     options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
-    waiter = asyncio.create_task(_waiter())
-    await run_scheduler(
+    await _drive_scheduler_until(
         session_factory,
-        concurrency=4,
-        stop_event=stop,
-        adapter_factory=_adapter_factory_noop,
-        game_executor=executor,
-        options=options,
+        gauntlet_id,
+        "COMPLETED",
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=4,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
     )
-    await waiter
 
     async with session_factory() as session:
         g = await gauntlets_repo.get(session, gauntlet_id)
@@ -294,26 +342,21 @@ async def test_stop_event_finishes_in_flight_gauntlet_before_returning(
     stop = asyncio.Event()
     options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
 
-    async def _set_stop_mid_flight() -> None:
-        # Wait until the gauntlet has flipped to RUNNING, then signal stop.
-        for _ in range(200):
-            await asyncio.sleep(0.005)
-            async with session_factory() as session:
-                g = await gauntlets_repo.get(session, gauntlet_id)
-            if g is not None and g.status == "RUNNING":
-                break
-        stop.set()
-
-    setter = asyncio.create_task(_set_stop_mid_flight())
-    await run_scheduler(
+    # Signal stop as soon as the gauntlet flips to RUNNING (mid-flight).
+    await _drive_scheduler_until(
         session_factory,
-        concurrency=4,
-        stop_event=stop,
-        adapter_factory=_adapter_factory_noop,
-        game_executor=executor,
-        options=options,
+        gauntlet_id,
+        "RUNNING",
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=4,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
     )
-    await setter
 
     assert len(executor.calls) == len(game_ids)
     async with session_factory() as session:
@@ -390,27 +433,38 @@ async def test_heartbeat_is_written_while_gauntlet_in_flight(
     observed_heartbeats: list[datetime] = []
 
     async def _observe() -> None:
-        for _ in range(300):
-            await asyncio.sleep(0.01)
+        # Cooperative poll (sleep first, then read) so the scheduler's drive +
+        # heartbeat coroutines get the shared in-memory SQLite connection each
+        # iteration. Collect any in-flight heartbeats observed along the way;
+        # stop once COMPLETED (or the generous budget is exhausted).
+        for _ in range(_SCHEDULER_MAX_POLLS):
+            await asyncio.sleep(_SCHEDULER_POLL_INTERVAL_S)
             async with session_factory() as session:
                 g = await gauntlets_repo.get(session, gauntlet_id)
-            if g is None:
-                continue
-            if g.status == "RUNNING" and g.heartbeat_at is not None:
-                observed_heartbeats.append(g.heartbeat_at)
-            if g.status == "COMPLETED":
-                break
+            if g is not None:
+                if g.status == "RUNNING" and g.heartbeat_at is not None:
+                    observed_heartbeats.append(g.heartbeat_at)
+                if g.status == "COMPLETED":
+                    break
         stop.set()
 
     waiter = asyncio.create_task(_observe())
-    await run_scheduler(
-        session_factory,
-        concurrency=1,
-        stop_event=stop,
-        adapter_factory=_adapter_factory_noop,
-        game_executor=executor,
-        options=options,
-    )
-    await waiter
+    try:
+        await asyncio.wait_for(
+            run_scheduler(
+                session_factory,
+                concurrency=1,
+                stop_event=stop,
+                adapter_factory=_adapter_factory_noop,
+                game_executor=executor,
+                options=options,
+            ),
+            timeout=_SCHEDULER_RUN_TIMEOUT_S,
+        )
+    finally:
+        stop.set()
+        waiter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiter
 
     assert len(observed_heartbeats) >= 1
