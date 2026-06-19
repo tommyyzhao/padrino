@@ -124,6 +124,24 @@ def _paginate_index(
     return page, next_cursor
 
 
+async def _excluded_game_ids(session: AsyncSession) -> list[uuid.UUID]:
+    """Return local ``Game.id`` values that originate from unverified ingests.
+
+    The public rating/analytics surfaces must exclude games whose source is an
+    :class:`IngestedGame` row that was never centrally verified (US-112). The
+    ingested ``game_id`` is the string form of the local ``Game.id``; ids that
+    don't parse as UUIDs simply can't match a local game and are dropped.
+    """
+    raw_ids = await ingested_games_repo.unverified_game_ids(session)
+    out: list[uuid.UUID] = []
+    for raw in raw_ids:
+        try:
+            out.append(uuid.UUID(raw))
+        except ValueError:
+            continue
+    return out
+
+
 async def require_public_read(
     request: Request,
     session: AsyncSession = Depends(get_session),
@@ -1144,10 +1162,16 @@ async def public_recent_index(
         except InvalidCursorError as exc:
             raise invalid_cursor_error() from exc
 
-    recent_filter = (
+    # US-112: never surface a game that originated from an unverified ingested
+    # bundle. ``game_id`` is the string form of the local ``Game.id``; map back
+    # to UUIDs for the SQL filter (silently drop any malformed id).
+    excluded = await _excluded_game_ids(session)
+    recent_filter: tuple[Any, ...] = (
         Game.broadcast_state == BroadcastState.RECENT.value,
         Game.is_broadcastable.is_(True),
     )
+    if excluded:
+        recent_filter = (*recent_filter, Game.id.notin_(excluded))
     total = (
         await session.execute(select(func.count()).select_from(Game).where(*recent_filter))
     ).scalar_one()

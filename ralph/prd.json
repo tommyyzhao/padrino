@@ -59,7 +59,7 @@
       ],
       "dependencies": [],
       "priority": 112,
-      "passes": false,
+      "passes": true,
       "notes": "Cheap insurance: ingest is private in this deployment, but the filter makes the trust property hold by construction."
     },
     {
