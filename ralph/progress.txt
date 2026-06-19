@@ -679,3 +679,12 @@ Notes:
 - No migration; no new runtime deps (asyncio.wait_for + existing sanitizer/RateLimitStore). The existing US-135 chat-channel test still passes unchanged because clean messages -> ALLOW under the real hook.
 - `except Exception` in the hook is the hardened fail path (asyncio TimeoutError is an Exception subclass); the comment documents why it is broad. Purity preserved: span-mask/first-pass live in `public/` (impure layer), sanitizer is reused from pure core, no clock/RNG added under core/.
 - Gates (all GREEN): ruff check ., ruff format --check . (365 files), mypy src tests (327 files), pytest -m "not integration" -> 1920 passed / 40 skipped.
+
+## 2026-06-19 — US-140 (retry 2): concrete guard adapter + production wiring
+Adversarial verification flagged AC1 as PARTIAL: there was no concrete MessageGuardAdapter in src/ and post_chat instantiated RealtimeModerationHook(guard defaulting to None), so only the deterministic path ran in production; the async-guard arm was exercised only by test stubs. Fixed:
+- src/padrino/api/human_chat_moderation.py: added concrete `LiteLlmMessageGuardAdapter` (Llama-Guard-family via LiteLLM; `check_message` maps a leading `safe`/`unsafe` token to bool; errors/timeouts propagate so the hook takes the hardened fail path) and `build_message_guard_from_settings(settings)` (mirrors public.moderation.build_guard_from_settings — returns None when no DeepInfra key resolves so the gate degrades to the deterministic backstop rather than halting). Both exported.
+- src/padrino/api/routes/human.py: post_chat now passes `guard=build_message_guard_from_settings(settings)` into RealtimeModerationHook so the async guard model actually runs in production under padrino_human_chat_guard_timeout_seconds; the hardened fail path already falls back to deterministic on timeout/error.
+- tests/public/test_live_moderation.py: +4 tests — protocol conformance, builder None-without-key + construct-from-settings, stubbed `litellm.acompletion` safe/unsafe parsing (default suite), and an `@pytest.mark.integration` real-adapter call (skipped without DEEPINFRA_API_KEY).
+Notes:
+- No migration; no new runtime deps (reuses litellm + padrino.llm.secrets.resolve_secret). Mirrors the US-093 public/moderation guard wiring exactly. Purity untouched (adapter lives in api/, not core/).
+- Gates (all GREEN): ruff check ., ruff format --check . (365 files), mypy src tests (327 files), pytest -m "not integration" -> 1924 passed / 40 skipped / 10 deselected.
