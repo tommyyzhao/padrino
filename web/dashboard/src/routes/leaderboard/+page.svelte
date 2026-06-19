@@ -3,67 +3,40 @@
   import Card from '$lib/components/Card.svelte';
   import Button from '$lib/components/Button.svelte';
   import { padrino } from '$lib/clientStore.svelte';
-  import type { FactionTab, PublicModelEntryResponse } from '$lib/api/types';
+  import type { FactionTab, PublicLeaderboardEntryResponse } from '$lib/api/types';
 
   const RULESET = 'mini7_v1';
 
-  let leagueId = $state<string>('');
+  // Public-surface-only leaderboard. Sourced exclusively from
+  // `/public/leaderboard`, which rolls up openskill by ruleset and serves
+  // rows anonymously with no league id required (the per-league model rollup
+  // at `/public/models/leaderboard` needs a league id that the public surface
+  // cannot discover, so it is not reachable from the public site). The
+  // Town/Mafia tabs are faction views over the same anonymous rollup.
   let tab = $state<FactionTab>('global');
-  let entries = $state<PublicModelEntryResponse[]>([]);
+  let entries = $state<PublicLeaderboardEntryResponse[]>([]);
   let nextCursor = $state<string | null>(null);
   let prevCursors = $state<(string | null)[]>([]);
   let cursor = $state<string | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
 
-  async function discoverLeague() {
-    // The per-league model rollup needs a league id. Discover it purely from
-    // the public surface (no private /gauntlets): read the newest finished game
-    // from /public/recent, then read its league_id off /public/games/{id}.
-    if (leagueId) return;
-    try {
-      const recent = await padrino.client.publicRecentIndex({ limit: 1 });
-      if (recent.items.length === 0) return;
-      const game = await padrino.client.publicGame(recent.items[0].game_id);
-      if (game.league_id) {
-        leagueId = game.league_id;
-      }
-    } catch (e) {
-      error = (e as Error).message;
-    }
-  }
-
   async function load() {
-    if (!leagueId) await discoverLeague();
-    if (!leagueId) {
-      error = 'No league found yet — submit a gauntlet to populate the leaderboard.';
-      return;
-    }
     loading = true;
     error = null;
     try {
-      const response = await padrino.client.publicModelLeaderboard({
+      const response = await padrino.client.publicLeaderboard({
         ruleset_id: RULESET,
-        league_id: leagueId,
         cursor,
         limit: 25
       });
-      entries = sortForTab(response.entries, tab);
+      entries = response.entries;
       nextCursor = response.next_cursor;
     } catch (e) {
       error = (e as Error).message;
     } finally {
       loading = false;
     }
-  }
-
-  function sortForTab(items: PublicModelEntryResponse[], current: FactionTab): PublicModelEntryResponse[] {
-    if (current === 'global') return items;
-    return [...items].sort((a, b) => {
-      const aScore = current === 'town' ? a.town.conservative_score : a.mafia.conservative_score;
-      const bScore = current === 'town' ? b.town.conservative_score : b.mafia.conservative_score;
-      return bScore - aScore;
-    });
   }
 
   function selectTab(next: FactionTab) {
@@ -91,7 +64,7 @@
   onMount(load);
 </script>
 
-<h1 class="mb-4 text-2xl font-semibold" data-testid="leaderboard-title">Model leaderboard</h1>
+<h1 class="mb-4 text-2xl font-semibold" data-testid="leaderboard-title">Leaderboard</h1>
 
 <div class="mb-4 flex gap-2" data-testid="leaderboard-tabs">
   <Button
@@ -129,7 +102,7 @@
       <thead class="text-left text-xs uppercase tracking-wider text-muted-foreground">
         <tr>
           <th class="pb-2">Rank</th>
-          <th class="pb-2">Model</th>
+          <th class="pb-2">Entrant</th>
           <th class="pb-2 text-right">Score</th>
           <th class="pb-2 text-right">μ</th>
           <th class="pb-2 text-right">σ</th>
@@ -138,22 +111,17 @@
         </tr>
       </thead>
       <tbody>
-        {#each entries as entry, i (entry.model_key)}
-          {@const facet = tab === 'town' ? entry.town : tab === 'mafia' ? entry.mafia : null}
+        {#each entries as entry, i (entry.entity_id)}
           <tr class="border-t border-border" data-testid="leaderboard-row">
             <td class="py-2">{i + 1}</td>
             <td class="py-2 font-medium" data-testid="leaderboard-row-name">
               {entry.display_name}
             </td>
-            <td class="py-2 text-right">
-              {(facet ?? entry).conservative_score.toFixed(2)}
-            </td>
-            <td class="py-2 text-right">{(facet ?? entry).mu.toFixed(2)}</td>
-            <td class="py-2 text-right">{(facet ?? entry).sigma.toFixed(2)}</td>
-            <td class="py-2 text-right">{(facet ?? entry).games}</td>
-            <td class="py-2 text-right">
-              {(facet ?? entry).wins}/{(facet ?? entry).draws}/{(facet ?? entry).losses}
-            </td>
+            <td class="py-2 text-right">{entry.conservative_score.toFixed(2)}</td>
+            <td class="py-2 text-right">{entry.mu.toFixed(2)}</td>
+            <td class="py-2 text-right">{entry.sigma.toFixed(2)}</td>
+            <td class="py-2 text-right">{entry.games}</td>
+            <td class="py-2 text-right">{entry.wins}/{entry.draws}/{entry.losses}</td>
           </tr>
         {/each}
       </tbody>
