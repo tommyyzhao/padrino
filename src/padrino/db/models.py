@@ -535,6 +535,46 @@ class AnalyticsAggregate(Base):
     )
 
 
+class HumanPlayerStats(Base):
+    """Per-human deterministic play-history aggregate keyed by (ruleset_id, principal_id) (US-145).
+
+    Materialized by
+    :func:`padrino.analytics.deterministic.compute_participant_stats` rolled up
+    across every COMPLETED human-lane game (a seat the principal occupied) of the
+    ruleset.  This is the casual humans-included surface only: it is NEVER written
+    for scientific-league (AI-only) games, and there is NO leaderboard or ELO in
+    v1 (hard rule 8 — the dormant ``human_rating`` table stays empty).
+
+    Counts (not floats) are persisted so re-running a recompute is idempotent
+    under the ``(ruleset_id, principal_id)`` unique constraint and so rates are
+    derived on read.  ``role_win_rates_json`` /  ``faction_win_rates_json`` store
+    serialized ``{name, wins, games}`` lists.
+    """
+
+    __tablename__ = "human_player_stats"
+    __table_args__ = (UniqueConstraint("ruleset_id", "principal_id", name="uq_human_player_stats"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    games: Mapped[int] = mapped_column(Integer, nullable=False)
+    wins: Mapped[int] = mapped_column(Integer, nullable=False)
+    draws: Mapped[int] = mapped_column(Integer, nullable=False)
+    losses: Mapped[int] = mapped_column(Integer, nullable=False)
+    role_win_rates_json: Mapped[str] = mapped_column(String, nullable=False)
+    faction_win_rates_json: Mapped[str] = mapped_column(String, nullable=False)
+    survived_games: Mapped[int] = mapped_column(Integer, nullable=False)
+    voting_total_votes: Mapped[int] = mapped_column(Integer, nullable=False)
+    voting_accurate_votes: Mapped[int] = mapped_column(Integer, nullable=False)
+    detection_total: Mapped[int] = mapped_column(Integer, nullable=False)
+    detection_accurate: Mapped[int] = mapped_column(Integer, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class MaterializedGameAnalytics(Base):
     """Per-game deterministic analytics + claim analysis, computed once at RECENT (US-120).
 
