@@ -409,3 +409,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
   - The `PUBLIC_EVENT_V1_FIELDS` frozenset is exported; US-089 SSE transport should assert against it to avoid drifting the shape.
   - `zip(..., strict=True)` required by ruff B905 — always add it when zipping same-length lists.
 ---
+
+---
+## 2026-06-19 — US-119: Deploy topology: public edge vs private backend
+Files:
+- docker-compose.yml (added public-api surface-only service; removed published ports from api/postgres/scheduler; added edge + internal networks; dashboard built against public-api URL + on edge; added PADRINO_ALERT_WEBHOOK_URL to env anchor)
+- docs/deployment/v2-public.md (split-topology section, reverse-proxy/CDN expectations, env tables incl. guard model + alert webhook, services/network annotations)
+- tests/docker/test_compose_v2.py (extended: public-api flag + published port, postgres/api/scheduler publish no ports, edge/internal networks, backend not on edge, dashboard built against public-api)
+Notes:
+- The full `api` service now publishes NO host port (was 8000); the edge-facing port belongs to the new `public-api` service (PADRINO_PUBLIC_SURFACE_ONLY=true, reuses the same padrino image). Old test_api_exposes_port_8000 was repurposed to test_api_exposes_no_published_port to encode the inversion.
+- Compose networks `internal` declared with `internal: false` so it can still reach Postgres/registry during build/pull; isolation from the host comes from the absence of published ports, not from a fully air-gapped Docker network. Edge isolation is enforced by keeping postgres/api/scheduler OFF the edge network.
+- All 21 docker-marked tests pass under `-m docker`; default suite still green (1677 passed). Gates: ruff/format/mypy/pytest all green.
+
+## Codebase Patterns
+- docker-compose split topology (US-119): the public/private boundary is encoded as (1) a separate `public-api` service with PADRINO_PUBLIC_SURFACE_ONLY=true publishing the only edge port, (2) the full `api`/scheduler/postgres publishing NO host ports and living only on the `internal` network, (3) two compose networks `edge` (public-api + dashboard) and `internal` (everything). The dashboard is built against `http://public-api:8000` (VITE_PADRINO_API_BASE_URL). test_compose_v2.py asserts the graph by parsing the YAML (no containers) under `-m docker`.

@@ -1,6 +1,65 @@
 # Padrino v2 Public League — Deployment Runbook
 
-Wave 7 deployment: broadcaster API + consumer web + continuous scheduler.
+Wave 8 deployment: a **public/private split topology** — a surface-only public
+API + static dashboard at the edge, with the full API, scheduler, and Postgres
+on an internal-only network.
+
+## Topology: public edge vs private backend (US-119)
+
+The product shape is "website public, everything else private". The compose
+file encodes this by construction:
+
+```
+                 internet
+                    │  (TLS terminated by your reverse-proxy / CDN)
+        ┌───────────┴───────────┐
+   edge network            edge network
+   ┌──────────┐            ┌──────────┐
+   │dashboard │            │public-api│   PADRINO_PUBLIC_SURFACE_ONLY=true
+   │ :5173    │            │ :8000    │   mounts ONLY /public/* + /healthz
+   └──────────┘            └────┬─────┘
+                                │ (also on internal)
+        ─ ─ ─ ─ ─ ─ ─ ─ ─ internal network ─ ─ ─ ─ ─ ─ ─ ─ ─
+   ┌──────────┐   ┌──────────┐   ┌──────────┐
+   │ postgres │   │   api    │   │scheduler │   NO published host ports
+   │ (no port)│   │(full surf│   │(matchmkr)│   never on the edge network
+   └──────────┘   │ no port) │   └──────────┘
+                  └──────────┘
+```
+
+- **public-api** is the ONLY backend process the internet can reach. Because it
+  runs with `PADRINO_PUBLIC_SURFACE_ONLY=true` (US-110), the private routers
+  (admin, ingest, games, leagues, gauntlets, scheduled-gauntlets) and `/metrics`
+  are not even registered — a misconfigured reverse-proxy cannot leak them.
+- **api / scheduler / postgres** publish no host ports and live only on the
+  `internal` network. Scrape `/metrics` against the internal `api` from inside
+  the network (e.g. a sidecar Prometheus on `internal`).
+- **dashboard** is built against the public-api URL (`VITE_PADRINO_API_BASE_URL`,
+  default `http://public-api:8000`), so it functions with zero access to private
+  routes (US-111).
+
+### Reverse-proxy / CDN expectations
+
+- Terminate TLS at the edge proxy (Caddy / nginx / Cloudflare) and forward to
+  `public-api:8000` and `dashboard:5173`.
+- Cache aggressively: RECENT analytics responses are `Cache-Control: public,
+  max-age=31536000, immutable` — safe to cache at the CDN forever. `/public/recent`
+  is `max-age=60, s-maxage=60`. Live SSE (`/public/games/{id}/live`) is
+  `no-cache` and must bypass the CDN.
+- Do NOT proxy `/admin`, `/ingest`, `/games`, `/leagues`, `/gauntlets`, or
+  `/metrics` from the edge — they are not served by public-api anyway, but keep
+  the proxy allowlist scoped to `/public/*`, `/healthz`, `/readyz`.
+
+## Quick start (split topology)
+
+```bash
+cp .env.example .env          # fill in secrets
+docker compose up --build -d  # public-api + dashboard at the edge; rest internal
+```
+
+The published host port (`PADRINO_PUBLIC_API_PORT`, default `8000`) belongs to
+**public-api**. The full `api` is reachable only as `http://api:8000` from inside
+the compose network.
 
 ## Quick start
 
@@ -26,6 +85,8 @@ docker compose up --build -d
 | `PADRINO_MAX_GAMES_PER_DAY` | `20` | Daily game cap (independent of spend) |
 | `PADRINO_MAX_CONCURRENT_GAMES` | `3` | Concurrent game cap |
 | `PADRINO_ENABLE_CONTINUOUS_MATCHMAKING` | `false` | Set `true` to start the compounding game bank; defaults off for safety |
+| `PADRINO_GUARD_MODEL` | `deepinfra/meta-llama/Llama-Guard-3-8B` | Moderation guard model (gates public chat) |
+| `PADRINO_ALERT_WEBHOOK_URL` | _(unset)_ | Slack/Discord webhook for ops alerts (spend cap, dead scheduler, degraded guard); unset = structured-log-only |
 
 ## Broadcast cadence (ms between SSE frames)
 
@@ -46,10 +107,16 @@ docker compose up --build -d
 
 ## Public surface URLs
 
-| Service | Default port | Path |
-|---|---|---|
-| API | `8000` | `/public/*`, `/healthz`, `/metrics` |
-| Dashboard | `5173` | `/` (lobby), `/watch/[id]`, `/ladder`, `/models/[id]` |
+| Service | Default port | Path | Network |
+|---|---|---|---|
+| public-api | `8000` (`PADRINO_PUBLIC_API_PORT`) | `/public/*`, `/healthz`, `/readyz` | edge + internal |
+| Dashboard | `5173` | `/` (lobby), `/watch/[id]`, `/ladder`, `/models/[id]` | edge |
+| api (private) | _(no host port)_ | full surface incl. `/metrics`, admin, ingest | internal only |
+| scheduler | _(no host port)_ | matchmaker / gauntlet runner | internal only |
+| postgres | _(no host port)_ | — | internal only |
+
+`/metrics` is served only by the private `api` (not by public-api) — scrape it
+from inside the internal network.
 
 ## Judge enrichment (optional)
 
@@ -74,11 +141,12 @@ Live SSE streams (`/public/games/{id}/live`) carry `Cache-Control: no-cache` and
 ## Services
 
 ```
-postgres   → canonical DB (Postgres 17)
-bootstrap  → one-shot migration runner (exits 0 on success)
-api        → FastAPI server (port 8000)
-scheduler  → in-process gauntlet scheduler + continuous matchmaker
-dashboard  → SvelteKit consumer web (port 5173)
+postgres   → canonical DB (Postgres 17)            [internal]
+bootstrap  → one-shot migration runner (exits 0)    [internal]
+api        → full FastAPI surface (no host port)    [internal]
+public-api → surface-only FastAPI (PADRINO_PUBLIC_SURFACE_ONLY=true), port 8000  [edge+internal]
+scheduler  → gauntlet scheduler + continuous matchmaker (no host port)  [internal]
+dashboard  → SvelteKit consumer web (port 5173)     [edge]
 ```
 
 ## Human-gated steps (not automated by the loop)

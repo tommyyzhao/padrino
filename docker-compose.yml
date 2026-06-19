@@ -1,17 +1,28 @@
-# US-064 / US-109: Padrino self-hosting stack (Wave 7 public surface).
+# US-064 / US-109 / US-119: Padrino self-hosting stack (Wave 8 public/private split).
+#
+# Topology (US-119 — "website public, everything else private"):
+#   edge network     : public-api + dashboard. These are the ONLY edge-facing
+#                      services; a reverse-proxy / CDN terminates TLS in front.
+#   internal network : postgres, api, scheduler, public-api. The full api,
+#                      scheduler, and Postgres have NO published host ports and
+#                      are never reachable from the internet.
 #
 # Services:
-#   - postgres : the canonical first-class database target (US-057).
-#   - bootstrap: one-shot init container running `padrino bootstrap` against
-#                postgres; api/scheduler wait for it to exit 0.
-#   - api      : `padrino serve` on port 8000 with `/healthz` healthcheck.
-#   - scheduler: `padrino scheduler` with `/healthz/scheduler` readiness probe
-#                (US-060 — the scheduler container queries the api service over
-#                the compose-private network).
-#   - dashboard: SvelteKit spectator dashboard (US-069/US-109) served on port 5173.
+#   - postgres   : the canonical first-class database target (US-057). Internal.
+#   - bootstrap  : one-shot init container running `padrino bootstrap` against
+#                  postgres; api/public-api/scheduler wait for it to exit 0.
+#   - api        : `padrino serve` (full surface: admin, ingest, gauntlets...).
+#                  INTERNAL ONLY — no published port.
+#   - public-api : `padrino serve` with PADRINO_PUBLIC_SURFACE_ONLY=true. Mounts
+#                  ONLY /public/* + health (US-110). Edge-facing, published port.
+#   - scheduler  : `padrino scheduler` with `/healthz/scheduler` readiness probe
+#                  (US-060 — queries the api service over the internal network).
+#                  INTERNAL ONLY.
+#   - dashboard  : SvelteKit spectator dashboard (US-069/US-109/US-111) built
+#                  against the public-api URL; edge-facing on port 5173.
 #
-# The same image (built once) serves all three padrino services; the only
-# difference is the argv passed to the `padrino` entrypoint. The dashboard
+# The same image (built once) serves api / public-api / scheduler; the only
+# difference is the argv / env passed to the `padrino` entrypoint. The dashboard
 # has its own image built from `web/dashboard/`.
 #
 # Wave 7 (public live league) env vars — see docs/deployment/v2-public.md:
@@ -34,6 +45,9 @@ x-padrino-env: &padrino-env
   PADRINO_BROADCAST_CADENCE_CHAT_MS: ${PADRINO_BROADCAST_CADENCE_CHAT_MS:-2500}
   PADRINO_RAW_PAYLOAD_TTL_DAYS: ${PADRINO_RAW_PAYLOAD_TTL_DAYS:-30}
   PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS: ${PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS:-7}
+  # Wave 8: operational alerting (US-113). Set to a Slack/Discord webhook URL at
+  # deploy time; unset = structured-log-only (no-op transport).
+  PADRINO_ALERT_WEBHOOK_URL: ${PADRINO_ALERT_WEBHOOK_URL:-}
 
 services:
   postgres:
@@ -51,10 +65,10 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
-    # Postgres only needs to be reachable inside the compose network. Expose
-    # it on the host by uncommenting the line below in a local override file.
-    # ports:
-    #   - "5432:5432"
+    networks:
+      - internal
+    # Postgres is reachable ONLY on the internal network and publishes no host
+    # port. Expose it locally by adding a `ports:` mapping in an override file.
 
   bootstrap:
     build:
@@ -67,6 +81,8 @@ services:
     environment:
       <<: *padrino-env
     command: ["bootstrap"]
+    networks:
+      - internal
     # One-shot: exits 0 once migrations + seeds complete. api/scheduler use
     # `service_completed_successfully` to gate on a clean exit.
     restart: "no"
@@ -84,8 +100,46 @@ services:
     environment:
       <<: *padrino-env
     command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+    # US-119: the FULL api (admin, ingest, gauntlets, leagues, metrics) is
+    # internal-only. It publishes NO host port and is never on the edge network.
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys,urllib.request as u; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  # US-110/US-119: edge-facing surface-only API. Same image as `api`, but runs
+  # with PADRINO_PUBLIC_SURFACE_ONLY=true so it mounts ONLY /public/* + health.
+  # This is the ONLY backend process the internet can reach.
+  public-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PADRINO_IMAGE:-padrino:dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *padrino-env
+      PADRINO_PUBLIC_SURFACE_ONLY: "true"
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "${PADRINO_API_PORT:-8000}:8000"
+      - "${PADRINO_PUBLIC_API_PORT:-8000}:8000"
+    networks:
+      - edge
+      - internal
     healthcheck:
       test:
         [
@@ -115,6 +169,9 @@ services:
     environment:
       <<: *padrino-env
     command: ["scheduler", "--concurrency", "${PADRINO_SCHEDULER_CONCURRENCY:-4}"]
+    # US-119: scheduler is internal-only; it talks to api over the internal net.
+    networks:
+      - internal
     healthcheck:
       test:
         [
@@ -134,16 +191,30 @@ services:
       context: ./web/dashboard
       dockerfile: Dockerfile
       args:
-        VITE_PADRINO_API_BASE_URL: ${VITE_PADRINO_API_BASE_URL:-http://localhost:8000}
+        # US-119: the dashboard is a public spectator surface — it must be built
+        # against the public-api (surface-only) URL, never the private api.
+        VITE_PADRINO_API_BASE_URL: ${VITE_PADRINO_API_BASE_URL:-http://public-api:8000}
     image: ${PADRINO_DASHBOARD_IMAGE:-padrino-dashboard:dev}
     depends_on:
-      api:
+      public-api:
         condition: service_healthy
     environment:
-      VITE_PADRINO_API_BASE_URL: ${VITE_PADRINO_API_BASE_URL:-http://localhost:8000}
+      VITE_PADRINO_API_BASE_URL: ${VITE_PADRINO_API_BASE_URL:-http://public-api:8000}
     ports:
       - "${PADRINO_DASHBOARD_PORT:-5173}:5173"
+    networks:
+      - edge
     restart: unless-stopped
+
+networks:
+  # Edge: only the public-api and dashboard. A reverse-proxy / CDN sits in front
+  # and terminates TLS. Nothing private is reachable from here.
+  edge:
+    driver: bridge
+  # Internal: postgres, api, scheduler, public-api. Not published to the host.
+  internal:
+    driver: bridge
+    internal: false
 
 volumes:
   padrino-postgres-data:

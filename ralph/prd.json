@@ -190,7 +190,7 @@
         "US-111"
       ],
       "priority": 119,
-      "passes": false,
+      "passes": true,
       "notes": "Human provisions the actual edge (domain/TLS/CDN); the loop ships config that makes the safe topology the default."
     },
     {

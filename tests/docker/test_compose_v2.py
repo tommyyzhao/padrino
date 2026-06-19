@@ -110,7 +110,101 @@ def test_postgres_has_named_volume(compose_doc: dict[str, Any]) -> None:
 
 
 @pytest.mark.docker
-def test_api_exposes_port_8000(compose_doc: dict[str, Any]) -> None:
+def test_api_exposes_no_published_port(compose_doc: dict[str, Any]) -> None:
+    """US-119: the full api is internal-only; only public-api faces the edge."""
     ports = compose_doc["services"]["api"].get("ports", [])
+    assert not ports, (
+        "the full api service must NOT publish a host port in the public/private "
+        "split topology; only the public-api service is edge-facing"
+    )
+
+
+# --- US-119: public edge vs private backend split topology -------------------
+
+
+@pytest.mark.docker
+def test_public_api_service_declared(compose_doc: dict[str, Any]) -> None:
+    services = compose_doc.get("services", {})
+    assert "public-api" in services, (
+        "docker-compose.yml must declare a public-api (surface-only) service"
+    )
+
+
+@pytest.mark.docker
+def test_public_api_runs_surface_only(compose_doc: dict[str, Any]) -> None:
+    env = compose_doc["services"]["public-api"].get("environment", {})
+    assert env.get("PADRINO_PUBLIC_SURFACE_ONLY") == "true", (
+        "public-api must set PADRINO_PUBLIC_SURFACE_ONLY=true so it physically "
+        "cannot mount private routers"
+    )
+
+
+@pytest.mark.docker
+def test_public_api_publishes_a_port(compose_doc: dict[str, Any]) -> None:
+    ports = compose_doc["services"]["public-api"].get("ports", [])
     port_strings = [str(p) for p in ports]
-    assert any("8000" in p for p in port_strings), "api service should expose port 8000"
+    assert any("8000" in p for p in port_strings), (
+        "public-api must publish a host port (it is the edge-facing surface)"
+    )
+
+
+@pytest.mark.docker
+def test_postgres_publishes_no_port(compose_doc: dict[str, Any]) -> None:
+    ports = compose_doc["services"]["postgres"].get("ports", [])
+    assert not ports, "postgres must not publish a host port (internal network only)"
+
+
+@pytest.mark.docker
+def test_scheduler_publishes_no_port(compose_doc: dict[str, Any]) -> None:
+    ports = compose_doc["services"]["scheduler"].get("ports", [])
+    assert not ports, "scheduler must not publish a host port (internal network only)"
+
+
+@pytest.mark.docker
+def test_compose_declares_edge_and_internal_networks(compose_doc: dict[str, Any]) -> None:
+    networks = compose_doc.get("networks", {})
+    assert "edge" in networks, "compose must declare an `edge` network"
+    assert "internal" in networks, "compose must declare an `internal` network"
+
+
+@pytest.mark.docker
+def test_public_api_on_both_networks(compose_doc: dict[str, Any]) -> None:
+    nets = compose_doc["services"]["public-api"].get("networks", [])
+    assert "edge" in nets, "public-api must be on the edge network"
+    assert "internal" in nets, "public-api must reach the backend over internal"
+
+
+@pytest.mark.docker
+def test_dashboard_on_edge_network(compose_doc: dict[str, Any]) -> None:
+    nets = compose_doc["services"]["dashboard"].get("networks", [])
+    assert "edge" in nets, "dashboard must be on the edge network"
+
+
+@pytest.mark.docker
+def test_backend_services_not_on_edge(compose_doc: dict[str, Any]) -> None:
+    """postgres/api/scheduler must never be reachable from the edge network."""
+    services = compose_doc["services"]
+    for name in ("postgres", "api", "scheduler"):
+        nets = services[name].get("networks", [])
+        assert "edge" not in nets, f"{name} must NOT be on the edge network"
+        assert "internal" in nets, f"{name} must be on the internal network"
+
+
+@pytest.mark.docker
+def test_public_api_shares_padrino_image(compose_doc: dict[str, Any]) -> None:
+    services = compose_doc["services"]
+    assert services["public-api"].get("image") == services["api"].get("image"), (
+        "public-api should reuse the same padrino image as api"
+    )
+
+
+@pytest.mark.docker
+def test_dashboard_built_against_public_api(compose_doc: dict[str, Any]) -> None:
+    """The dashboard's API base URL must point at the public-api, not the private api."""
+    dashboard = compose_doc["services"]["dashboard"]
+    build_args = dashboard.get("build", {}).get("args", {})
+    base_url = str(build_args.get("VITE_PADRINO_API_BASE_URL", ""))
+    assert "public-api" in base_url or "${" in base_url, (
+        "dashboard must be built against the public-api URL "
+        f"(got {base_url!r}); the default must reference public-api"
+    )
