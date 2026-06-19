@@ -76,7 +76,7 @@
       ],
       "dependencies": [],
       "priority": 124,
-      "passes": false,
+      "passes": true,
       "notes": "P0. Review: the payload-key guard does not yet cover human markers and new DB columns bypass it entirely."
     },
     {
