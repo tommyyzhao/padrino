@@ -639,7 +639,7 @@
         "US-149"
       ],
       "priority": 151,
-      "passes": false,
+      "passes": true,
       "notes": "P5. Decisions 14/19/20. The reviewers' 'AI-only continuation boots humans' anti-pattern is explicitly rejected. Concrete cap numbers are a PREP-v9 sign-off."
     },
     {
