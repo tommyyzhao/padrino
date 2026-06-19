@@ -35,6 +35,7 @@ from padrino.api.human_auth import (
     require_human,
 )
 from padrino.api.human_chat import submit_chat
+from padrino.api.human_chat_moderation import RealtimeModerationHook
 from padrino.api.human_consent import (
     client_ip_hash,
     enforce_consent,
@@ -240,6 +241,8 @@ async def post_chat(
     """
     settings = _get_auth_settings(request)
     await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
+    rate_limiter = getattr(request.app.state, "rate_limiter", None)
+    rate_limit_store = getattr(rate_limiter, "store", None)
     accepted = await submit_chat(
         session,
         game_id=game_id,
@@ -248,6 +251,12 @@ async def post_chat(
         text=body.text,
         idempotency_key=body.idempotency_key,
         now=datetime.now(UTC),
+        moderation=RealtimeModerationHook(
+            timeout_s=settings.padrino_human_chat_guard_timeout_seconds
+        ),
+        rate_limit=rate_limit_store,
+        per_principal_limit=settings.padrino_rate_limit_human_chat_per_minute,
+        per_game_phase_limit=settings.padrino_rate_limit_human_chat_per_game_phase_per_minute,
     )
     return ChatResult(
         accepted=True,

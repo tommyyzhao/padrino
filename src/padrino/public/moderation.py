@@ -43,6 +43,20 @@ _TOXIC_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 
+#: Softer patterns that are masked-in-place rather than blocked outright: the
+#: message is still released but the offending span is replaced with ``*``
+#: (the SOFT_MASK verdict). The ``mask_word`` sentinel lets unit tests trigger a
+#: known soft-mask without a real slur. These NEVER trip the hard first-pass.
+_SOFT_MASK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"\bdamn\b",
+        r"\bhell\b",
+        r"\bmask_word\b",  # unit-test sentinel
+    ]
+)
+
+
 #: Event types whose payload carries spectator-visible chat text. The engine
 #: emits ``PublicMessageSubmitted`` (core/engine/events.py) with the text under
 #: ``payload["text"]``; matching anything else would silently skip moderation.
@@ -66,11 +80,35 @@ def deterministic_first_pass(events: Sequence[dict[str, Any]]) -> bool:
 
     Pure synchronous function: no I/O, no clock reads, no side-effects.
     """
-    for msg in _extract_public_messages(events):
-        for pattern in _TOXIC_PATTERNS:
-            if pattern.search(msg):
-                return False
-    return True
+    return all(deterministic_first_pass_message(msg) for msg in _extract_public_messages(events))
+
+
+def deterministic_first_pass_message(text: str) -> bool:
+    """Return True iff ``text`` contains no banned pattern (pure single message).
+
+    This is the per-message instant backstop the block-before-release human
+    moderation gate (US-140) runs inside the buffer hold: it never makes an I/O
+    or clock call, so it is the deterministic verdict the hardened fail path
+    falls back to when the async guard model times out or errors.
+    """
+    return all(not pattern.search(text) for pattern in _TOXIC_PATTERNS)
+
+
+def deterministic_span_mask(text: str) -> tuple[str, bool]:
+    """Mask every banned-pattern span in ``text`` with ``*`` (pure, deterministic).
+
+    Returns ``(masked_text, did_mask)``. The mask replaces each matched span with
+    a same-length run of ``*`` so the surrounding message is preserved while the
+    offending span is removed — the SOFT_MASK verdict's release text. Pure: no
+    I/O, no clock, no RNG, so two runs over the same input always agree.
+    """
+    masked = text
+    did_mask = False
+    for pattern in _SOFT_MASK_PATTERNS:
+        masked, count = pattern.subn(lambda m: "*" * len(m.group(0)), masked)
+        if count:
+            did_mask = True
+    return masked, did_mask
 
 
 # ---------------------------------------------------------------------------
@@ -189,5 +227,7 @@ __all__ = [
     "LiteLlmGuardAdapter",
     "build_guard_from_settings",
     "deterministic_first_pass",
+    "deterministic_first_pass_message",
+    "deterministic_span_mask",
     "is_broadcastable",
 ]

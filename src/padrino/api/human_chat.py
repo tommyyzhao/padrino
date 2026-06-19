@@ -11,11 +11,16 @@ This impure shell:
   (PUBLIC chat in day discussion/vote; PRIVATE mafia chat in the night mafia
   channel), reusing the pure :func:`legal_actions_for` phase reading;
 * parks the message in the buffer **hold** (``status='HELD'``) and runs it
-  through the block-before-release moderation hook (US-140 lands the verdict;
-  US-135 ships a stub-pass gate) BEFORE any release;
-* on release routes the raw text to the out-of-band sidecar (US-123) — it is
-  NEVER inlined in a hash-chained payload — and flips the hold to ``RELEASED``;
-  a BLOCK is flipped to ``BLOCKED`` and never released/chained;
+  through the block-before-release moderation gate (US-140's
+  :class:`RealtimeModerationHook`: deterministic first-pass + sanitizer +
+  span-mask + an async guard model under a hard latency budget) BEFORE any
+  release; a guard timeout/error falls back to the deterministic verdict so the
+  game never halts;
+* enforces a per-principal AND per-game/phase chat rate limit via RateLimitStore
+  on each genuinely new message;
+* on release routes the released/masked text to the out-of-band sidecar (US-123)
+  — it is NEVER inlined in a hash-chained payload — and flips the hold to
+  ``RELEASED``; a BLOCK is flipped to ``BLOCKED`` and never released/chained;
 * dedupes retries with an idempotency key so a network retry never double-posts.
 
 The chat firewall holds: nothing submitted here mutates game state — only a
@@ -24,6 +29,7 @@ structured ``Action`` (US-134) drives mechanics.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,8 +41,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.api.human_chat_moderation import (
     ChatModerationHook,
     ChatVerdict,
-    StubPassModerationHook,
+    RealtimeModerationHook,
 )
+from padrino.api.rate_limit_store import RateLimitStore
 from padrino.core.engine.state import Seat
 from padrino.core.enums import Faction, PhaseKind
 from padrino.core.observations import format_phase_id
@@ -55,6 +62,7 @@ WRONG_SEAT_DETAIL = "wrong_seat"
 CHAT_NOT_ALLOWED_DETAIL = "chat_not_allowed"
 EMPTY_MESSAGE_DETAIL = "empty_message"
 OVER_LIMIT_DETAIL = "message_over_limit"
+RATE_LIMITED_DETAIL = "chat_rate_limited"
 
 # PUBLIC chat is legal during the day talk/vote phases; PRIVATE (mafia) chat in
 # the night mafia channel. This mirrors the engine's chat-emitting phases.
@@ -100,6 +108,9 @@ async def submit_chat(
     idempotency_key: str,
     now: datetime,
     moderation: ChatModerationHook | None = None,
+    rate_limit: RateLimitStore | None = None,
+    per_principal_limit: int = 30,
+    per_game_phase_limit: int = 120,
 ) -> AcceptedChat:
     """Buffer and (stub-)moderate a human's chat message for their seat.
 
@@ -162,6 +173,20 @@ async def submit_chat(
             idempotent_replay=True,
         )
 
+    # Per-user AND per-game/phase chat rate limits (US-140). Checked only on a
+    # genuinely new message (after the idempotency check) so a retry never
+    # consumes a slot. Both keys flow through the shared RateLimitStore.
+    if rate_limit is not None:
+        await _enforce_chat_rate_limits(
+            rate_limit,
+            principal_id=principal_id,
+            game_id=game_id,
+            phase=phase,
+            now=now,
+            per_principal_limit=per_principal_limit,
+            per_game_phase_limit=per_game_phase_limit,
+        )
+
     held = await holds_repo.record_held(
         session,
         game_id=game_id,
@@ -173,7 +198,7 @@ async def submit_chat(
         created_at=now,
     )
 
-    hook = moderation if moderation is not None else StubPassModerationHook()
+    hook = moderation if moderation is not None else RealtimeModerationHook()
     decision = await hook.review(
         public_player_id=seat_row.public_player_id, channel=channel, text=text
     )
@@ -211,6 +236,42 @@ async def submit_chat(
     )
 
 
+async def _enforce_chat_rate_limits(
+    rate_limit: RateLimitStore,
+    *,
+    principal_id: uuid.UUID,
+    game_id: uuid.UUID,
+    phase: str,
+    now: datetime,
+    per_principal_limit: int,
+    per_game_phase_limit: int,
+) -> None:
+    """Enforce the per-principal and per-game/phase chat ceilings, or 429.
+
+    Both ceilings flow through the shared :class:`RateLimitStore`; the keys are
+    namespaced (``human-chat:user`` vs ``human-chat:game-phase``) and hashed so a
+    chat bucket never collides with an API-key or session bucket.
+    """
+    epoch = now.timestamp()
+    principal_key = _hash_key(f"human-chat:user:{principal_id}")
+    game_phase_key = _hash_key(f"human-chat:game-phase:{game_id}:{phase}")
+    for key_hash, limit in (
+        (principal_key, per_principal_limit),
+        (game_phase_key, per_game_phase_limit),
+    ):
+        decision = await rate_limit.record_request(key_hash, now=epoch, limit_per_minute=limit)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=RATE_LIMITED_DETAIL,
+                headers={"Retry-After": str(int(decision.retry_after_seconds))},
+            )
+
+
+def _hash_key(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _enforce_channel_legal(channel: str, kind: PhaseKind, *, core_seat: Seat) -> None:
     """Reject chat that is not legal for the seat's channel in this phase."""
     if channel == CHANNEL_PUBLIC:
@@ -231,6 +292,7 @@ __all__ = [
     "EMPTY_MESSAGE_DETAIL",
     "GAME_NOT_FOUND_DETAIL",
     "OVER_LIMIT_DETAIL",
+    "RATE_LIMITED_DETAIL",
     "WRONG_SEAT_DETAIL",
     "AcceptedChat",
     "submit_chat",
