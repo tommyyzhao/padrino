@@ -27,6 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.deps import get_session, get_session_factory
 from padrino.api.human_auth import HumanPrincipalContext, require_human
+from padrino.api.lobby_launch import (
+    AutoFillPoolError,
+    LobbyNotLaunchableError,
+    launch_lobby,
+)
 from padrino.api.lobby_presence import (
     MemberView,
     roster_view,
@@ -328,6 +333,50 @@ async def lock_lobby(
     return summary
 
 
+class LaunchResponse(BaseModel):
+    """Result of a launch handoff: the materialized game and lobby status."""
+
+    lobby_id: uuid.UUID
+    game_id: uuid.UUID
+    status: str
+    created: bool
+
+
+@router.post("/lobbies/{lobby_id}/launch", response_model=LaunchResponse)
+async def launch(
+    lobby_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LaunchResponse:
+    """Host-only: materialize a real human-lane game from a LOCKED lobby.
+
+    Empty AI seats are filled deterministically from the curated pool, then a
+    ``Game`` + ``GameSeat`` rows are written (humans -> ``occupant_principal_id``
+    / ``seat_kind=HUMAN``; AI -> ``agent_build_id`` / ``seat_kind=AI``). The
+    presence of a HUMAN seat is what hands the game to the human worker lane
+    (US-132). Launch is single-fire / idempotent: a second call returns the same
+    ``game_id`` (``created=false``) and writes nothing.
+    """
+    await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    try:
+        result = await launch_lobby(session, lobby_id=lobby_id)
+    except LobbyNotLaunchableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc) or "lobby_not_launchable"
+        ) from exc
+    except AutoFillPoolError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="autofill_pool_exhausted"
+        ) from exc
+    await session.commit()
+    return LaunchResponse(
+        lobby_id=lobby_id,
+        game_id=result.game_id,
+        status=LobbyStatus.LAUNCHED.value,
+        created=result.created,
+    )
+
+
 @router.post("/lobbies/{lobby_id}/kick/{member_id}", response_model=LobbySummary)
 async def kick_member(
     lobby_id: uuid.UUID,
@@ -506,6 +555,7 @@ async def _roster(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbyRoster:
 
 
 __all__ = [
+    "LaunchResponse",
     "LobbyCreate",
     "LobbyRoster",
     "LobbySummary",
