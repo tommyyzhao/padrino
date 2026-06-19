@@ -17,14 +17,16 @@
   let error = $state<string | null>(null);
 
   async function discoverLeague() {
-    // The public leaderboard endpoint exposes per-league rollups; we discover
-    // the league id by listing gauntlets and reading the league_id off the
-    // newest one.
+    // The per-league model rollup needs a league id. Discover it purely from
+    // the public surface (no private /gauntlets): read the newest finished game
+    // from /public/recent, then read its league_id off /public/games/{id}.
     if (leagueId) return;
     try {
-      const gauntlets = await padrino.client.listGauntlets({ limit: 1 });
-      if (gauntlets.items.length > 0) {
-        leagueId = gauntlets.items[0].league_id;
+      const recent = await padrino.client.publicRecentIndex({ limit: 1 });
+      if (recent.items.length === 0) return;
+      const game = await padrino.client.publicGame(recent.items[0].game_id);
+      if (game.league_id) {
+        leagueId = game.league_id;
       }
     } catch (e) {
       error = (e as Error).message;

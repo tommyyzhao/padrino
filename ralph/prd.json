@@ -42,7 +42,7 @@
         "US-110"
       ],
       "priority": 111,
-      "passes": false,
+      "passes": true,
       "notes": "Root cause of the pre-existing home.spec e2e failure: the home page depends on auth-gated private endpoints."
     },
     {

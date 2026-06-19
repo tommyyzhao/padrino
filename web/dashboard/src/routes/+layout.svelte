@@ -20,8 +20,7 @@
       <a href="/" class="text-lg font-semibold">Padrino</a>
       <nav class="flex gap-4 text-sm">
         <a class="hover:underline" href="/">Home</a>
-        <a class="hover:underline" href="/leaderboard">Leaderboard</a>
-        <a class="hover:underline" href="/games">Games</a>
+        <a class="hover:underline" href="/ladder">Ladder</a>
       </nav>
     </div>
   </header>

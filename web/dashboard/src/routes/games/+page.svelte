@@ -3,13 +3,21 @@
   import Card from '$lib/components/Card.svelte';
   import Button from '$lib/components/Button.svelte';
   import { padrino } from '$lib/clientStore.svelte';
-  import type { GameListEntry } from '$lib/api/types';
   import { shortenHash } from '$lib/utils';
 
-  let items = $state<GameListEntry[]>([]);
-  let cursor = $state<string | null>(null);
-  let nextCursor = $state<string | null>(null);
-  let prevCursors = $state<(string | null)[]>([]);
+  // Public games browser: sourced exclusively from the public spectator surface
+  // (/public/live + /public/recent) so it works against a public-surface-only
+  // API. LIVE games come from /public/live; finished games from /public/recent.
+  interface BrowserRow {
+    id: string;
+    status: string;
+    current_phase: string | null;
+    outcome: string | null;
+    watchHref: string;
+  }
+
+  let liveRows = $state<BrowserRow[]>([]);
+  let recentRows = $state<BrowserRow[]>([]);
   let statusFilter = $state<string>('');
   let loading = $state(false);
   let error = $state<string | null>(null);
@@ -18,13 +26,26 @@
     loading = true;
     error = null;
     try {
-      const response = await padrino.client.listGames({
-        limit: 25,
-        cursor,
-        status: statusFilter === '' ? null : statusFilter
-      });
-      items = response.items;
-      nextCursor = response.next_cursor;
+      const [live, recent] = await Promise.all([
+        padrino.client.publicLiveIndex(),
+        padrino.client.publicRecentIndex({ limit: 50 })
+      ]);
+      liveRows = live.items.map((g) => ({
+        id: g.game_id,
+        status: 'RUNNING',
+        current_phase: g.current_phase,
+        outcome: null,
+        watchHref: `/watch/${g.game_id}`
+      }));
+      recentRows = recent.items.map((g) => ({
+        id: g.game_id,
+        status: 'COMPLETED',
+        current_phase: g.current_phase,
+        outcome: g.terminal_result
+          ? `${g.terminal_result.winner} — ${g.terminal_result.reason}`
+          : null,
+        watchHref: `/games/${g.game_id}`
+      }));
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -32,26 +53,16 @@
     }
   }
 
+  const items = $derived(
+    statusFilter === 'RUNNING'
+      ? liveRows
+      : statusFilter === 'COMPLETED'
+        ? recentRows
+        : [...liveRows, ...recentRows]
+  );
+
   function applyFilter(value: string) {
     statusFilter = value;
-    cursor = null;
-    prevCursors = [];
-    void load();
-  }
-
-  function nextPage() {
-    if (!nextCursor) return;
-    prevCursors = [...prevCursors, cursor];
-    cursor = nextCursor;
-    void load();
-  }
-
-  function prevPage() {
-    if (prevCursors.length === 0) return;
-    const list = [...prevCursors];
-    cursor = list.pop() ?? null;
-    prevCursors = list;
-    void load();
   }
 
   onMount(load);
@@ -107,12 +118,10 @@
             <td class="py-2 font-mono text-xs">{shortenHash(game.id)}</td>
             <td class="py-2" data-testid="games-row-status">{game.status}</td>
             <td class="py-2">{game.current_phase ?? '—'}</td>
-            <td class="py-2">
-              {game.terminal_result ? `${game.terminal_result.winner} — ${game.terminal_result.reason}` : '—'}
-            </td>
+            <td class="py-2">{game.outcome ?? '—'}</td>
             <td class="py-2 text-right">
               <a
-                href={`/games/${game.id}`}
+                href={game.watchHref}
                 class="text-sm underline"
                 data-testid="games-open-link"
               >
@@ -124,23 +133,4 @@
       </tbody>
     </table>
   {/if}
-
-  <div class="mt-4 flex justify-end gap-2">
-    <Button
-      testid="games-prev"
-      variant="outline"
-      disabled={prevCursors.length === 0}
-      onclick={prevPage}
-    >
-      ← Previous
-    </Button>
-    <Button
-      testid="games-next"
-      variant="outline"
-      disabled={!nextCursor}
-      onclick={nextPage}
-    >
-      Next →
-    </Button>
-  </div>
 </Card>
