@@ -20,7 +20,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -46,6 +46,12 @@ from padrino.db.models import Lobby
 from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
+from padrino.economics.human_cost_governance import (
+    ACTION_CREATE,
+    ACTION_JOIN,
+    ACTION_LAUNCH,
+    admit_human,
+)
 
 router = APIRouter()
 
@@ -60,6 +66,34 @@ def _idle_seconds() -> float:
     from padrino.settings import get_settings
 
     return get_settings().padrino_lobby_idle_cancel_seconds
+
+
+# Map an admission-denial reason to its HTTP status. A breaker-open or per-user
+# cap denial is a 429 (too many requests / rate-limited admission); the body
+# carries the structured reason so the caller never parses prose.
+_ADMISSION_DENIED_STATUS = status.HTTP_429_TOO_MANY_REQUESTS
+
+
+async def _enforce_admission(
+    request: Request,
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    action: str,
+) -> None:
+    """Gate a human create/join/launch admission against per-user caps + breaker.
+
+    The principal is the OAuth account (else the hashed guest token) already
+    resolved by :func:`padrino.api.human_auth.require_human` — admission is keyed
+    on that principal. On a denied decision this raises a 429 whose ``detail`` is
+    the structured admission reason; an admitted decision returns silently.
+    """
+    from padrino.settings import get_settings
+
+    settings = getattr(request.app.state, "auth_settings", None) or get_settings()
+    decision = await admit_human(session, settings, principal_id=principal_id, action=action)
+    if not decision.allowed:
+        raise HTTPException(status_code=_ADMISSION_DENIED_STATUS, detail=decision.reason)
 
 
 class LobbyCreate(BaseModel):
@@ -97,6 +131,7 @@ class LobbySummary(BaseModel):
 @router.post("/lobbies", response_model=LobbySummary, status_code=status.HTTP_201_CREATED)
 async def create_lobby(
     body: LobbyCreate,
+    request: Request,
     ctx: HumanPrincipalContext = Depends(require_human),
     session: AsyncSession = Depends(get_session),
 ) -> LobbySummary:
@@ -105,7 +140,12 @@ async def create_lobby(
     The lobby is OPEN and CASUAL; the host occupies seat 0 (HUMAN). The remaining
     seats are AI: the host's pre-picked human-eligible models fill them in order,
     any beyond the pre-pick are left empty for curated auto-fill (US-149).
+
+    Admission is enforced FIRST: the calling principal's per-user/day game cap,
+    inference-$ cap, and the global cost breaker gate lobby creation (US-151). A
+    denied decision is a 429 before any row is written.
     """
+    await _enforce_admission(request, session, principal_id=ctx.principal_id, action=ACTION_CREATE)
     ruleset = get_ruleset(body.ruleset_id)
     player_count: int = ruleset.PLAYER_COUNT
     ai_seat_count = player_count - 1
@@ -221,6 +261,7 @@ class ReadyUpdate(BaseModel):
 @router.post("/lobbies/join/{invite_token}", response_model=LobbySummary)
 async def join_lobby(
     invite_token: str,
+    request: Request,
     ctx: HumanPrincipalContext = Depends(require_human),
     session: AsyncSession = Depends(get_session),
 ) -> LobbySummary:
@@ -230,6 +271,11 @@ async def join_lobby(
     existing membership (idempotent), never a duplicate row. Joining a
     LOCKED/LAUNCHED/CLOSED lobby is rejected. The join records presence and
     resets the lobby's idle clock.
+
+    Admission is enforced on a FIRST join (US-151): the calling principal's
+    per-user/day join cap, inference-$ cap, and the global cost breaker gate the
+    join. An idempotent re-join (already a member) is exempt — it adds no row and
+    therefore consumes no slot.
     """
     lobby = await lobbies_repo.get_lobby_by_invite_token(session, invite_token)
     if lobby is None:
@@ -240,6 +286,9 @@ async def join_lobby(
         session, lobby_id=lobby.id, principal_id=ctx.principal_id
     )
     if existing is None:
+        await _enforce_admission(
+            request, session, principal_id=ctx.principal_id, action=ACTION_JOIN
+        )
         if lobby.status != LobbyStatus.OPEN.value:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="lobby_not_open")
         member = await lobbies_repo.add_member(
@@ -345,6 +394,7 @@ class LaunchResponse(BaseModel):
 @router.post("/lobbies/{lobby_id}/launch", response_model=LaunchResponse)
 async def launch(
     lobby_id: uuid.UUID,
+    request: Request,
     ctx: HumanPrincipalContext = Depends(require_human),
     session: AsyncSession = Depends(get_session),
 ) -> LaunchResponse:
@@ -356,8 +406,13 @@ async def launch(
     presence of a HUMAN seat is what hands the game to the human worker lane
     (US-132). Launch is single-fire / idempotent: a second call returns the same
     ``game_id`` (``created=false``) and writes nothing.
+
+    Admission is enforced FIRST (US-151): the host principal's per-user/day game
+    cap, inference-$ cap, and the global cost breaker gate the launch. A denied
+    decision is a 429 before any game row is materialized.
     """
     await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    await _enforce_admission(request, session, principal_id=ctx.principal_id, action=ACTION_LAUNCH)
     try:
         result = await launch_lobby(session, lobby_id=lobby_id)
     except LobbyNotLaunchableError as exc:

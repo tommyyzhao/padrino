@@ -39,9 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.core.enums import SeatKind
 from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import games as games_repo
+from padrino.economics.human_cost_governance import global_breaker_open
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import NoopMockAdapter
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
+from padrino.settings import Settings, get_settings
 
 _logger = structlog.get_logger("padrino.runner.human_lane")
 
@@ -198,6 +200,22 @@ async def _run_one_human_game(
             structlog.contextvars.unbind_contextvars("human_lane_game_id")
 
 
+async def _new_turns_halted(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> bool:
+    """Return True when the global cost breaker forbids issuing NEW LLM turns.
+
+    A game that has not yet been claimed has issued ZERO LLM turns, so skipping
+    its dispatch while the breaker is open is exactly the AC2 contract: STOP new
+    lobbies / new LLM turns. Games already RUNNING keep their in-flight task and
+    finish to completion — the breaker NEVER kills an active game or boots a
+    human (the rejected "AI-only continuation" anti-pattern).
+    """
+    async with session_factory() as session:
+        return await global_breaker_open(session, settings)
+
+
 async def run_human_lane(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -207,6 +225,7 @@ async def run_human_lane(
     game_executor: HumanGameExecutor | None = None,
     semaphore: asyncio.Semaphore | None = None,
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+    settings: Settings | None = None,
 ) -> None:
     """Drain human-lane games until ``stop_event`` is set.
 
@@ -215,6 +234,12 @@ async def run_human_lane(
     so no more than ``concurrency`` human games run at once. This lane shares no
     semaphore or claim path with the benchmark scheduler, so a backlog of human
     lobbies cannot reduce benchmark concurrency.
+
+    When the global cost breaker is open (cumulative human-lane spend at the
+    configured threshold) the lane STOPS dispatching NEW games — a not-yet-started
+    game has issued no LLM turns, so this halts new turns — while every game whose
+    task is already in flight runs to completion. The breaker throttles, it never
+    kills an active game.
     """
     if concurrency < 1:
         raise ValueError(f"concurrency must be >= 1, got {concurrency}")
@@ -224,6 +249,7 @@ async def run_human_lane(
     sem = semaphore or asyncio.Semaphore(concurrency)
     make_adapter = adapter_factory or NoopMockAdapter
     executor = game_executor or _default_human_game_executor
+    cfg = settings or get_settings()
 
     tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
 
@@ -232,7 +258,13 @@ async def run_human_lane(
             async with session_factory() as session:
                 candidates = await list_human_lane_games(session)
 
-            pending = [gid for gid in candidates if gid not in tasks]
+            # Throttle-not-kill: while the breaker is open, do not START any new
+            # game (no new LLM turns). Already-dispatched tasks keep running.
+            if await _new_turns_halted(session_factory, cfg):
+                _logger.warning("human_lane.breaker.halt_new_turns", in_flight=len(tasks))
+                pending = []
+            else:
+                pending = [gid for gid in candidates if gid not in tasks]
             for game_id in pending:
 
                 def _make_done_cb(gid: uuid.UUID) -> Callable[[asyncio.Task[None]], None]:

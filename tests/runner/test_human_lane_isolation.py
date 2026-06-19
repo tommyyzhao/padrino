@@ -25,12 +25,13 @@ import contextlib
 import uuid
 from collections.abc import Callable
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import SeatKind
 from padrino.core.rulesets import mini7_v1
-from padrino.db.models import Game, GameSeat
+from padrino.db.models import Game, GameSeat, LlmCall
 from padrino.runner.game_runner import GameConfig, GamePersistence
 from padrino.runner.human_lane import (
     HumanLaneAdmission,
@@ -38,8 +39,30 @@ from padrino.runner.human_lane import (
     list_human_lane_games,
     run_human_lane,
 )
+from padrino.settings import Settings
 
 _SEED = "human-lane-seed"
+
+
+async def _add_cost(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    cost: float,
+) -> None:
+    """Attribute ``cost`` USD of human-lane inference to ``game_id``."""
+    async with session_factory() as session, session.begin():
+        session.add(
+            LlmCall(
+                game_id=game_id,
+                public_player_id="P01",
+                phase="DAY_DISCUSSION",
+                request_json={},
+                request_prompt_hash="hash",
+                status="ok",
+                cost_usd=cost,
+            )
+        )
 
 
 async def _seed_game(
@@ -260,3 +283,119 @@ async def test_run_human_lane_rejects_bad_concurrency(
             assert "concurrency" in str(exc)
         else:  # pragma: no cover - defensive
             raise AssertionError("expected ValueError for concurrency=0")
+
+
+def _breaker_settings(threshold: float) -> Settings:
+    """Settings whose global human-lane cost breaker opens at ``threshold`` USD."""
+    return Settings(padrino_human_global_lobby_cost_breaker_usd=threshold)
+
+
+async def test_open_breaker_stops_new_turns_for_unstarted_game(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An open global breaker prevents the lane from STARTING a new game.
+
+    A not-yet-claimed game has issued zero LLM turns, so refusing to dispatch it
+    is exactly "STOP new LLM turns" (AC2). We open the breaker by attributing
+    spend at/over the threshold to a separate human-lane game, then prove the
+    waiting human game is never handed to the executor while the breaker is open.
+    """
+    # An existing human-lane game whose accrued spend opens the global breaker.
+    spent_game = await _seed_game(session_factory, status="COMPLETED", human=True)
+    await _add_cost(session_factory, game_id=spent_game, cost=50.0)
+    # A fresh waiting human game that must NOT be started while the breaker is open.
+    waiting = await _seed_game(session_factory, status="PENDING", human=True)
+
+    ran: list[uuid.UUID] = []
+
+    async def _executor(config: GameConfig, persistence: GamePersistence, adapter: object) -> None:
+        ran.append(persistence.game_id)
+
+    stop = asyncio.Event()
+    lane = asyncio.create_task(
+        run_human_lane(
+            session_factory,
+            concurrency=2,
+            stop_event=stop,
+            game_executor=_executor,
+            poll_interval_s=0.01,
+            settings=_breaker_settings(50.0),
+        )
+    )
+    # Give the loop several ticks; the breaker must keep the waiting game unstarted.
+    await asyncio.sleep(0.15)
+    stop.set()
+    await lane
+
+    assert waiting not in ran
+    # The waiting game and its human seat are untouched (never killed/booted).
+    async with session_factory() as session:
+        game = await session.get(Game, waiting)
+        assert game is not None
+        assert game.status == "PENDING"
+        seats = (
+            (await session.execute(select(GameSeat).where(GameSeat.game_id == waiting)))
+            .scalars()
+            .all()
+        )
+        assert any(s.seat_kind == SeatKind.HUMAN.value and s.alive for s in seats)
+
+
+async def test_open_breaker_lets_active_game_finish(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The breaker throttles NEW turns but NEVER kills an in-flight active game.
+
+    A game already dispatched (its task running, the human mid-game) must run to
+    completion even after the breaker opens. The human seat is never booted.
+    """
+    active = await _seed_game(session_factory, status="PENDING", human=True)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished: list[uuid.UUID] = []
+
+    async def _executor(config: GameConfig, persistence: GamePersistence, adapter: object) -> None:
+        started.set()
+        await release.wait()
+        # Simulate the active game completing on its own terms.
+        async with session_factory() as session, session.begin():
+            game = await session.get(Game, persistence.game_id)
+            assert game is not None
+            game.status = "COMPLETED"
+        finished.append(persistence.game_id)
+
+    stop = asyncio.Event()
+    lane = asyncio.create_task(
+        run_human_lane(
+            session_factory,
+            concurrency=2,
+            stop_event=stop,
+            game_executor=_executor,
+            poll_interval_s=0.01,
+            settings=_breaker_settings(50.0),
+        )
+    )
+    # The active game is dispatched (no breach yet) and is now mid-game.
+    await _drain_until(started.is_set)
+
+    # The breaker now opens mid-game (spend crosses the threshold). It must NOT
+    # kill the in-flight game: the seat stays HUMAN/alive and the game finishes.
+    await _add_cost(session_factory, game_id=active, cost=50.0)
+    async with session_factory() as session:
+        game = await session.get(Game, active)
+        assert game is not None
+        assert game.status == "RUNNING"  # still in flight, not booted
+        seats = (
+            (await session.execute(select(GameSeat).where(GameSeat.game_id == active)))
+            .scalars()
+            .all()
+        )
+        assert any(s.seat_kind == SeatKind.HUMAN.value and s.alive for s in seats)
+
+    # Let the active game complete on its own; it finishes despite the breaker.
+    release.set()
+    await _drain_until(lambda: active in finished)
+    stop.set()
+    await lane
+    assert active in finished
