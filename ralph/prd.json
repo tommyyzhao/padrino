@@ -223,7 +223,7 @@
         "US-121"
       ],
       "priority": 131,
-      "passes": false,
+      "passes": true,
       "notes": "P1. Review top-risk: the current runner is in-memory. Architecture sign-off is a PREP-v9 item; this story implements the agreed Postgres-snapshot approach."
     },
     {

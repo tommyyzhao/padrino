@@ -702,6 +702,35 @@ class HumanConsent(Base):
     source_ip_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class HumanGameRuntime(Base):
+    """Durable, rehydratable live scaffolding for an in-progress human game (US-131).
+
+    A human-lane game can last minutes to hours, so a process restart must not
+    lose it. This row holds ONLY the *impure* live runner scaffolding — the
+    current ``phase``, the wall-clock ``deadline_at`` for that phase, and an
+    opaque ``buffer_snapshot`` of in-flight per-seat human submissions awaiting
+    release. It is keyed one-to-one by ``game_id``.
+
+    The deterministic core game state is NEVER stored here: it is always
+    reconstructed by replaying the hash-chained ``game_events`` log (hard rule
+    4). The snapshot exists only so the impure shell (deadlines, buffered human
+    input) survives a restart; if it disagreed with the event log, the event log
+    wins. This uses the existing async DB — there is no Redis (stack rule).
+    """
+
+    __tablename__ = "human_game_runtime"
+
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), primary_key=True
+    )
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    buffer_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -744,6 +773,7 @@ __all__ = [
     "GauntletRosterSlot",
     "HumanChatMessage",
     "HumanConsent",
+    "HumanGameRuntime",
     "HumanRating",
     "HumanRatingEvent",
     "HumanSession",
