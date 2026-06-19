@@ -102,6 +102,15 @@ class Settings(BaseSettings):
     # default for a centrally-hosted shared leaderboard.
     padrino_public_leaderboard_anonymous: bool = False
 
+    # Public-surface-only API mode (US-110). When True, ``create_app`` mounts
+    # ONLY the public spectator router and the health probes; every private
+    # router (admin, admin_keys, ingest, games, leagues, gauntlets,
+    # scheduled_gauntlets) and ``/metrics`` are not registered at all. The
+    # internet-facing process therefore cannot leak a private route even if a
+    # reverse proxy is misconfigured — defense in depth. ``/metrics`` is
+    # scraped against the internal (full-surface) instance instead.
+    padrino_public_surface_only: bool = False
+
     # CORS (US-070). Comma-separated list of allowed origins for the SvelteKit
     # dashboard (and any other browser-side consumer). Empty string disables
     # CORS entirely — the API responds without ``Access-Control-Allow-*``
