@@ -263,7 +263,7 @@
         "US-132"
       ],
       "priority": 133,
-      "passes": false,
+      "passes": true,
       "notes": "P2. Review top-risk: the current SSE is post-hoc paced replay, not live tailing. This is the foundational transport lift the whole feature assumes."
     },
     {

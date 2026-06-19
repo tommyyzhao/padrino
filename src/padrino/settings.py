@@ -214,6 +214,18 @@ class Settings(BaseSettings):
     # per client IP. Excess connections are rejected with 429.
     padrino_sse_max_connections_per_ip: int = 5
 
+    # Live-tail SSE (US-133). When ``?tail=true`` the live endpoint streams the
+    # committed prefix then keeps polling the still-growing event log for newly
+    # committed PUBLIC events, emitting keep-alive heartbeats while idle. Each
+    # poll opens its own short read transaction (no long-held DB session).
+    # ``poll_ms`` is the interval between append polls; ``heartbeat_ms`` is the
+    # maximum gap before a keep-alive comment is emitted; ``idle_timeout_ms``
+    # caps how long the tail waits with no new events on a still-LIVE game
+    # before closing (0 disables the timeout).
+    padrino_sse_live_tail_poll_ms: int = 1000
+    padrino_sse_live_tail_heartbeat_ms: int = 15000
+    padrino_sse_live_tail_idle_timeout_ms: int = 300000
+
     # Retention / archival (US-108). ``padrino_raw_payload_ttl_days`` controls
     # when heavy llm_call columns (request_json, raw_response) are scrubbed for
     # all completed games.  ``padrino_non_broadcastable_game_ttl_days`` controls

@@ -43,7 +43,7 @@ from padrino.api.auth import (
     _get_rate_limiter,
     get_auth_context,
 )
-from padrino.api.deps import get_session
+from padrino.api.deps import get_session, get_session_factory
 from padrino.api.pagination import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -76,6 +76,11 @@ from padrino.public.game_analytics_store import (
     build_game_analytics_payload,
     get_materialized_analytics,
     materialize_game_analytics,
+)
+from padrino.public.live_tail import (
+    LiveTailConfig,
+    default_live_tail_config,
+    stream_live_tail,
 )
 from padrino.ratings.model_rollup import (
     detail_for_model,
@@ -961,14 +966,25 @@ def _live_cadence() -> CadenceConfig:
     return default_cadence()
 
 
+def _live_tail_config() -> LiveTailConfig:
+    """Return the live-tail config for the SSE endpoint.
+
+    A FastAPI dependency so tests can inject a near-instant
+    :class:`LiveTailConfig` via ``app.dependency_overrides``.
+    """
+    return default_live_tail_config()
+
+
 @router.get("/public/games/{game_id}/live")
 async def public_game_live_sse(
     game_id: uuid.UUID,
     request: Request,
     after: int | None = Query(default=None, ge=0),
     speed: float = Query(default=1.0, ge=0.0001, le=_SSE_SPEED_MAX),
+    tail: bool = Query(default=False),
     _ctx: ApiKeyContext = Depends(require_public_read),
     cadence: CadenceConfig = Depends(_live_cadence),
+    tail_config: LiveTailConfig = Depends(_live_tail_config),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Stream a game's broadcast frames as Server-Sent Events.
@@ -983,6 +999,12 @@ async def public_game_live_sse(
     The optional ``?speed=`` multiplier (capped at 100x) divides each
     frame's delay for debugging — the transport applies the delay before
     emitting each frame.
+
+    With ``?tail=true`` (US-133) the endpoint streams the committed prefix and
+    then keeps tailing the still-growing event log for newly committed PUBLIC
+    events, emitting keep-alive heartbeats while idle and closing on the
+    terminal frame. The tail uses short per-poll read transactions rather than
+    pacing a finished log, so it works on an in-progress game.
     """
     game = await session.get(Game, game_id)
     if (
@@ -1028,6 +1050,44 @@ async def public_game_live_sse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="invalid_last_event_id_header",
             ) from exc
+
+    if tail:
+        # Live-tail mode (US-133): stream the committed prefix then continue
+        # emitting newly committed PUBLIC events from the still-growing log,
+        # with keep-alive heartbeats and resume-by-sequence. Uses short per-poll
+        # read transactions via the session factory; no long-held DB session.
+        session_factory = get_session_factory(request)
+
+        async def _generate_tail() -> AsyncGenerator[str, None]:
+            _sse_active[ip_hash] = _sse_active.get(ip_hash, 0) + 1
+            broadcast_active_streams.inc()
+            try:
+                async for chunk in stream_live_tail(
+                    session_factory,
+                    game_id,
+                    after=cursor,
+                    config=tail_config,
+                ):
+                    yield chunk
+                    if chunk.startswith("id:"):
+                        record_broadcast_frame()
+            finally:
+                remaining = max(0, _sse_active.get(ip_hash, 0) - 1)
+                if remaining:
+                    _sse_active[ip_hash] = remaining
+                else:
+                    _sse_active.pop(ip_hash, None)
+                broadcast_active_streams.dec()
+
+        return StreamingResponse(
+            _generate_tail(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     stmt = select(GameEvent).where(GameEvent.game_id == game_id).order_by(GameEvent.sequence)
     if cursor is not None:
@@ -1358,6 +1418,7 @@ __all__ = [
     "PublicTranscriptResponse",
     "PublicVotingAccuracyAnalytics",
     "_live_cadence",
+    "_live_tail_config",
     "_sse_active",
     "public_game_analytics",
     "public_game_live_sse",
