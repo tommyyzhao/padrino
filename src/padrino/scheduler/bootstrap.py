@@ -67,6 +67,14 @@ def build_scheduled_gauntlet_tick_hook(
                 adapter_factory=adapter_factory,
                 notifier=notifier,
             )
+        if settings.padrino_enable_retention:
+            from padrino.db.retention_executor import run_retention_executor
+
+            await run_retention_executor(
+                session_factory,
+                settings=settings,
+                now=now,
+            )
 
     return _hook
 

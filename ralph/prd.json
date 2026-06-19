@@ -130,7 +130,7 @@
       ],
       "dependencies": [],
       "priority": 116,
-      "passes": false,
+      "passes": true,
       "notes": "US-108 built the pure planner; this is the impure executor it was designed for."
     },
     {
