@@ -899,6 +899,118 @@ class HumanTuringGuess(Base):
     )
 
 
+class Lobby(Base):
+    """A private friend lobby configuring one human-multiplayer game (US-147).
+
+    A host creates a lobby and configures the game it will launch: the
+    ``ruleset_id`` (``mini7_v1`` / ``bench10_v1``), the per-game ``identity_mode``
+    (default ``ANONYMOUS``), a static ``theme_pack_id`` from the sprite library
+    (US-152), and ``stakes`` pinned to ``CASUAL`` (decision 10 — ELO infra is
+    dormant in v1). ``status`` walks ``OPEN -> LOCKED -> LAUNCHED`` (or ``CLOSED``
+    on cancel). ``lobby_seed`` is the deterministic seed the curated auto-fill
+    (US-149) consumes so seat assignment is reproducible. ``host_principal_id``
+    is the human who created it; ``league_id`` is the dormant Humans-Included
+    league (segregated from the scientific benchmark, hard rule 8). ``game_id``
+    is null until launch handoff materializes the real game.
+
+    There is NO public matchmaking in v1: lobbies are private friend lobbies
+    reachable only via an invite link (US-148).
+    """
+
+    __tablename__ = "lobbies"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    identity_mode: Mapped[str] = mapped_column(
+        String, nullable=False, default="ANONYMOUS", server_default="ANONYMOUS"
+    )
+    theme_pack_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    stakes: Mapped[str] = mapped_column(
+        String, nullable=False, default="CASUAL", server_default="CASUAL"
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="OPEN", server_default="OPEN"
+    )
+    lobby_seed: Mapped[str] = mapped_column(String, nullable=False)
+    host_principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    game_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("games.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class LobbyMember(Base):
+    """A human (host or invited friend) who is a member of a lobby (US-147).
+
+    A member links a :class:`Lobby` to the human :class:`Principal` who joined it;
+    ``is_host`` marks the creator. Membership is unique per
+    ``(lobby_id, principal_id)`` so a person joins a lobby once (US-148 enforces
+    single-use-per-person joins, ready-up, presence). The pre-seat roster lives
+    here; the concrete seat layout the game launches with lives in
+    :class:`LobbySeat`.
+    """
+
+    __tablename__ = "lobby_members"
+    __table_args__ = (UniqueConstraint("lobby_id", "principal_id", name="uq_lobby_member"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lobby_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("lobbies.id", ondelete="CASCADE"), nullable=False
+    )
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    is_host: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    ready: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LobbySeat(Base):
+    """One configured seat in a lobby's pre-launch seat layout (US-147).
+
+    Each seat has a fixed ``seat_index`` in the game-to-be. ``seat_kind``
+    (:class:`padrino.core.enums.LobbySeatKind`) marks whether the seat is reserved
+    for a HUMAN member or will be filled by an AI. A HUMAN seat may reference the
+    :class:`LobbyMember` reserving it (``member_id``); an AI seat may pin the
+    host's pre-picked human-eligible model (``agent_build_id``) or be left null for
+    curated deterministic auto-fill at launch (US-149). Seats are unique per
+    ``(lobby_id, seat_index)``.
+
+    This holds counts-only-safe configuration data; the canonical disclosed
+    composition still flows through :func:`padrino.core.composition.composition_summary`
+    so no per-seat human/AI map ever leaks (US-126/US-142).
+    """
+
+    __tablename__ = "lobby_seats"
+    __table_args__ = (UniqueConstraint("lobby_id", "seat_index", name="uq_lobby_seat_index"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    lobby_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("lobbies.id", ondelete="CASCADE"), nullable=False
+    )
+    seat_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    seat_kind: Mapped[str] = mapped_column(String, nullable=False)
+    member_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobby_members.id", ondelete="SET NULL"), nullable=True
+    )
+    agent_build_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=True
+    )
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -951,6 +1063,9 @@ __all__ = [
     "JudgeEnrichmentCard",
     "League",
     "LlmCall",
+    "Lobby",
+    "LobbyMember",
+    "LobbySeat",
     "MaterializedGameAnalytics",
     "ModelConfig",
     "ModelProvider",

@@ -83,6 +83,45 @@ class IdentityMode(StrEnum):
     TRANSPARENT = "TRANSPARENT"
 
 
+class LobbyStatus(StrEnum):
+    """Lifecycle of a private friend lobby (Wave 9, US-147).
+
+    A lobby is ``OPEN`` while members join and configure, ``LOCKED`` once the host
+    locks the roster, ``LAUNCHED`` after the lobby hands off to a real game on the
+    human worker lane, and ``CLOSED`` when cancelled/abandoned. ``OPEN`` is the
+    create-time default.
+    """
+
+    OPEN = "OPEN"
+    LOCKED = "LOCKED"
+    LAUNCHED = "LAUNCHED"
+    CLOSED = "CLOSED"
+
+
+class LobbyStakes(StrEnum):
+    """Stakes of a human-multiplayer lobby (Wave 9, US-147).
+
+    v1 is always ``CASUAL`` (decision 10): the ELO infrastructure is
+    designed-now-dormant, so a lobby's stakes are pinned to ``CASUAL`` and a
+    ranked value never ships in v1.
+    """
+
+    CASUAL = "CASUAL"
+
+
+class LobbySeatKind(StrEnum):
+    """How an empty lobby seat will be filled at launch (Wave 9, US-147).
+
+    A ``HUMAN`` seat is reserved for an invited member; an ``AI`` seat is filled
+    at launch either by the host's pre-picked human-eligible model or by curated
+    deterministic auto-fill (US-149). This is lobby-configuration data and is
+    distinct from the game-time :class:`SeatKind` provenance.
+    """
+
+    HUMAN = "HUMAN"
+    AI = "AI"
+
+
 class PhaseKind(StrEnum):
     """High-level phase type within a game."""
 

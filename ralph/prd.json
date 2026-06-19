@@ -554,7 +554,7 @@
         "US-126"
       ],
       "priority": 147,
-      "passes": false,
+      "passes": true,
       "notes": "P5. Private friend lobbies only (decision 2). No public matchmaking."
     },
     {
