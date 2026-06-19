@@ -68,6 +68,21 @@ class LeagueKind(StrEnum):
     HUMANS_INCLUDED = "HUMANS_INCLUDED"
 
 
+class IdentityMode(StrEnum):
+    """Per-game disclosure mode for human-vs-AI / model identity (Wave 9).
+
+    ``ANONYMOUS`` is the default and the fail-closed value: no live / observation
+    / spectator surface reveals which seats are human vs AI, nor model/provider
+    identity, before the endgame reveal. ``TRANSPARENT`` opts a game out of
+    stripping. The mode is frozen after game start. The pure fail-closed
+    coercion chokepoint lives in ``core.observation_privacy.coerce_identity_mode``
+    (which deliberately stays string-based so it has no dependency on this enum).
+    """
+
+    ANONYMOUS = "ANONYMOUS"
+    TRANSPARENT = "TRANSPARENT"
+
+
 class PhaseKind(StrEnum):
     """High-level phase type within a game."""
 

@@ -173,6 +173,13 @@ class Game(Base):
     is_broadcastable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # Wave 9 (US-126): per-game human-vs-AI / model-identity disclosure mode.
+    # 'ANONYMOUS' is the byte-identical legacy default (and the fail-closed
+    # value) so every pre-Wave-9 game persists/loads unchanged; frozen after
+    # game start.
+    identity_mode: Mapped[str] = mapped_column(
+        String, nullable=False, default="ANONYMOUS", server_default="ANONYMOUS"
+    )
 
 
 class GameSeat(Base):

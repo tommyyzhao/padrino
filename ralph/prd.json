@@ -114,7 +114,7 @@
       ],
       "dependencies": ["US-123"],
       "priority": 126,
-      "passes": false,
+      "passes": true,
       "notes": "P0. Review: four epics each computed composition counts independently - one canonical fn closes the drift/leak surface."
     },
     {
