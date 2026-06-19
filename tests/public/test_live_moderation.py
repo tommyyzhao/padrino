@@ -37,8 +37,11 @@ from padrino.api.human_chat import submit_chat
 from padrino.api.human_chat_moderation import (
     ChatModerationVerdict,
     ChatVerdict,
+    LiteLlmMessageGuardAdapter,
+    MessageGuardAdapter,
     RealtimeModerationHook,
     StubPassModerationHook,
+    build_message_guard_from_settings,
 )
 from padrino.api.rate_limit_store import InMemoryRateLimitStore
 from padrino.core.engine.event_log import EventLog
@@ -195,6 +198,99 @@ async def test_no_guard_uses_deterministic_only() -> None:
     assert block.verdict is ChatVerdict.BLOCK
     soft = await hook.review(public_player_id=_HUMAN_SEAT, channel="PUBLIC", text="mask_word ok")
     assert soft.verdict is ChatVerdict.SOFT_MASK
+
+
+# ---------------------------------------------------------------------------
+# Concrete LiteLLM-backed guard adapter + production wiring (US-140)
+# ---------------------------------------------------------------------------
+
+
+def test_litellm_message_guard_satisfies_protocol() -> None:
+    guard = LiteLlmMessageGuardAdapter(model="deepinfra/meta-llama/Llama-Guard-3-8B")
+    assert isinstance(guard, MessageGuardAdapter)
+
+
+def test_build_message_guard_returns_none_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from padrino.settings import Settings
+
+    monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+    settings = Settings(deepinfra_api_key=None)
+    assert build_message_guard_from_settings(settings) is None
+
+
+def test_build_message_guard_constructs_adapter_from_settings() -> None:
+    from padrino.settings import Settings
+
+    settings = Settings(
+        deepinfra_api_key="test-key",
+        padrino_guard_model="deepinfra/meta-llama/Llama-Guard-3-8B",
+        padrino_human_chat_guard_timeout_seconds=1.5,
+    )
+    guard = build_message_guard_from_settings(settings)
+    assert isinstance(guard, LiteLlmMessageGuardAdapter)
+
+
+@pytest.mark.asyncio
+async def test_litellm_message_guard_parses_safe_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The concrete adapter maps a Llama-Guard ``safe``/``unsafe`` token to bool.
+
+    Stubs ``litellm.acompletion`` so the default suite exercises the real
+    adapter's response parsing without a network call.
+    """
+    import litellm
+
+    class _Msg:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class _Choice:
+        def __init__(self, content: str) -> None:
+            self.message = _Msg(content)
+
+    class _Resp:
+        def __init__(self, content: str) -> None:
+            self.choices = [_Choice(content)]
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_safe(**kwargs: Any) -> _Resp:
+        captured.update(kwargs)
+        return _Resp("safe")
+
+    async def _fake_unsafe(**kwargs: Any) -> _Resp:
+        return _Resp("unsafe\nS1")
+
+    guard = LiteLlmMessageGuardAdapter(
+        model="deepinfra/meta-llama/Llama-Guard-3-8B", api_key="k", timeout_s=1.0
+    )
+
+    monkeypatch.setattr(litellm, "acompletion", _fake_safe)
+    assert await guard.check_message("hello town") is True
+    assert captured["model"] == "deepinfra/meta-llama/Llama-Guard-3-8B"
+    assert captured["api_key"] == "k"
+
+    monkeypatch.setattr(litellm, "acompletion", _fake_unsafe)
+    assert await guard.check_message("a bad message") is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_litellm_message_guard_real_call() -> None:
+    """Real Llama-Guard call (skipped by default; requires DEEPINFRA_API_KEY)."""
+    import os
+
+    if not os.environ.get("DEEPINFRA_API_KEY"):
+        pytest.skip("DEEPINFRA_API_KEY not set")
+
+    from padrino.settings import Settings
+
+    settings = Settings()
+    guard = build_message_guard_from_settings(settings)
+    assert guard is not None
+    # A benign message must be judged safe by the real guard model.
+    assert await guard.check_message("Good game everyone, I vote for P04.") is True
 
 
 # ---------------------------------------------------------------------------

@@ -35,7 +35,10 @@ from padrino.api.human_auth import (
     require_human,
 )
 from padrino.api.human_chat import submit_chat
-from padrino.api.human_chat_moderation import RealtimeModerationHook
+from padrino.api.human_chat_moderation import (
+    RealtimeModerationHook,
+    build_message_guard_from_settings,
+)
 from padrino.api.human_consent import (
     client_ip_hash,
     enforce_consent,
@@ -252,7 +255,8 @@ async def post_chat(
         idempotency_key=body.idempotency_key,
         now=datetime.now(UTC),
         moderation=RealtimeModerationHook(
-            timeout_s=settings.padrino_human_chat_guard_timeout_seconds
+            guard=build_message_guard_from_settings(settings),
+            timeout_s=settings.padrino_human_chat_guard_timeout_seconds,
         ),
         rate_limit=rate_limit_store,
         per_principal_limit=settings.padrino_rate_limit_human_chat_per_minute,

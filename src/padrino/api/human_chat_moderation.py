@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from padrino.core.agents.sanitizer import sanitize_visible_text
 from padrino.public.moderation import (
@@ -168,11 +168,85 @@ class RealtimeModerationHook:
         return ChatModerationVerdict(verdict=deterministic_verdict, cleaned_text=masked)
 
 
+class LiteLlmMessageGuardAdapter:
+    """Production single-message guard: a Llama-Guard-family model via LiteLLM.
+
+    This is the concrete :class:`MessageGuardAdapter` the production chat route
+    wires into :class:`RealtimeModerationHook` so the async guard arm actually
+    runs in production (not only under test stubs). It mirrors
+    ``public.moderation.LiteLlmGuardAdapter`` but for the single-message,
+    block-before-release human-chat path: ``check_message`` returns True iff the
+    (already sanitized/masked) candidate is safe to release.
+
+    The adapter never swallows its own errors — a network failure or timeout
+    propagates so :class:`RealtimeModerationHook` takes the hardened fail path
+    (the deterministic verdict stands and the game proceeds).
+    """
+
+    __slots__ = ("_api_key", "_model", "_timeout_s")
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str | None = None,
+        timeout_s: float = _DEFAULT_GUARD_TIMEOUT_S,
+    ) -> None:
+        self._model = model
+        self._api_key = api_key
+        self._timeout_s = timeout_s
+
+    async def check_message(self, text: str) -> bool:
+        import litellm  # local import: this adapter lives in the impure layer
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": text}],
+            "timeout": self._timeout_s,
+            "max_tokens": 10,
+        }
+        if self._api_key is not None:
+            kwargs["api_key"] = self._api_key
+
+        response = await litellm.acompletion(**kwargs)
+        verdict: str = (response.choices[0].message.content or "").strip().lower()
+        # Llama-Guard models answer with a first token of ``safe`` / ``unsafe``.
+        return verdict.startswith("safe")
+
+
+def build_message_guard_from_settings(settings: Any) -> LiteLlmMessageGuardAdapter | None:
+    """Construct the production single-message guard from settings, or None.
+
+    Returns None when no DeepInfra key resolves — the hook then runs the
+    deterministic-only arm (it still BLOCKs hard hits and SOFT_MASKs soft hits),
+    so a missing guard key degrades to the instant backstop rather than halting
+    the game. Mirrors ``public.moderation.build_guard_from_settings``.
+    """
+    import os
+
+    from padrino.llm.secrets import resolve_secret
+
+    raw = getattr(settings, "deepinfra_api_key", None) or os.environ.get("DEEPINFRA_API_KEY")
+    if not raw:
+        return None
+    try:
+        key = resolve_secret(raw)
+    except Exception:
+        key = raw
+    return LiteLlmMessageGuardAdapter(
+        model=settings.padrino_guard_model,
+        api_key=key,
+        timeout_s=settings.padrino_human_chat_guard_timeout_seconds,
+    )
+
+
 __all__ = [
     "ChatModerationHook",
     "ChatModerationVerdict",
     "ChatVerdict",
+    "LiteLlmMessageGuardAdapter",
     "MessageGuardAdapter",
     "RealtimeModerationHook",
     "StubPassModerationHook",
+    "build_message_guard_from_settings",
 ]
