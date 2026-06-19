@@ -533,7 +533,7 @@
         "US-143"
       ],
       "priority": 146,
-      "passes": false,
+      "passes": true,
       "notes": "P4. The two invariants enforced in CI from here on (the review's #3 top risk)."
     },
     {
