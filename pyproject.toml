@@ -37,6 +37,7 @@ dependencies = [
     "pyyaml>=6.0",
     "prometheus-client>=0.20",
     "cryptography>=42.0",
+    "authlib>=1.7.2",
 ]
 
 [project.optional-dependencies]
@@ -116,7 +117,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["src/padrino/db/migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "openskill.*", "vcr.*", "testcontainers.*"]
+module = ["litellm.*", "openskill.*", "vcr.*", "testcontainers.*", "authlib.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

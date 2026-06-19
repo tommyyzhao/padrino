@@ -645,6 +645,32 @@ class HumanSession(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class OAuthIdentity(Base):
+    """A provider account linked to an account :class:`Principal` (US-129).
+
+    Keyed by (``provider``, ``subject``) so an OAuth sign-in is find-or-create:
+    a repeat sign-in resolves the same account principal across sessions and
+    devices. Only the stable provider ``subject`` is persisted — provider access
+    tokens are NEVER stored beyond completing the exchange. There is no friends
+    graph and no multi-account merge in v1.
+    """
+
+    __tablename__ = "oauth_identities"
+    __table_args__ = (
+        UniqueConstraint("provider", "subject", name="uq_oauth_identity_provider_subject"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    subject: Mapped[str] = mapped_column(String, nullable=False)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -696,6 +722,7 @@ __all__ = [
     "MaterializedGameAnalytics",
     "ModelConfig",
     "ModelProvider",
+    "OAuthIdentity",
     "Principal",
     "PromptVersion",
     "RateLimitBucket",

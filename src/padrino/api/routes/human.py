@@ -15,10 +15,12 @@ human session via :func:`padrino.api.human_auth.require_human`.
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,9 +32,20 @@ from padrino.api.human_auth import (
     generate_session_token,
     require_human,
 )
+from padrino.api.oauth import (
+    OAuthError,
+    build_authorization_request,
+    exchange_code,
+    resolve_oauth_config,
+)
 from padrino.db.repositories import human_principals as principals_repo
+from padrino.db.repositories import oauth_identities as oauth_repo
 
 router = APIRouter()
+
+OAUTH_STATE_COOKIE = "padrino_oauth_state"
+OAUTH_VERIFIER_COOKIE = "padrino_oauth_verifier"
+_OAUTH_FLOW_TTL_SECONDS = 600
 
 
 class GuestSummary(BaseModel):
@@ -134,4 +147,139 @@ async def patch_me(
     )
 
 
-__all__ = ["DisplayNameUpdate", "GuestSummary", "router"]
+def _set_oauth_flow_cookie(response: Response, key: str, value: str, *, secure: bool) -> None:
+    response.set_cookie(
+        key=key,
+        value=value,
+        max_age=_OAUTH_FLOW_TTL_SECONDS,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+@router.get("/human/oauth/{provider}/start")
+async def oauth_start(
+    provider: str,
+    request: Request,
+) -> RedirectResponse:
+    """Begin the OAuth code flow: redirect to the provider with state + PKCE."""
+    settings = _get_auth_settings(request)
+    config = resolve_oauth_config(settings, provider)
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="oauth_not_configured",
+        )
+    auth_request = build_authorization_request(config)
+    response = RedirectResponse(
+        url=auth_request.url, status_code=status.HTTP_307_TEMPORARY_REDIRECT
+    )
+    secure = settings.padrino_human_session_cookie_secure
+    _set_oauth_flow_cookie(response, OAUTH_STATE_COOKIE, auth_request.state, secure=secure)
+    _set_oauth_flow_cookie(
+        response, OAUTH_VERIFIER_COOKIE, auth_request.code_verifier, secure=secure
+    )
+    return response
+
+
+@router.get("/human/oauth/{provider}/callback", response_model=GuestSummary)
+async def oauth_callback(
+    provider: str,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+    code: str | None = None,
+    state: str | None = None,
+) -> GuestSummary:
+    """Complete the code flow: validate CSRF state, exchange, issue an account."""
+    settings = _get_auth_settings(request)
+    config = resolve_oauth_config(settings, provider)
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="oauth_not_configured",
+        )
+
+    expected_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    code_verifier = request.cookies.get(OAUTH_VERIFIER_COOKIE)
+    if code is None or state is None or expected_state is None or code_verifier is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_missing")
+    if not secrets.compare_digest(state, expected_state):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch")
+
+    try:
+        user_info = await exchange_code(config, code=code, code_verifier=code_verifier)
+    except OAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_exchange_failed"
+        ) from exc
+
+    now = datetime.now(UTC)
+    guest_id = await _in_flight_guest_id(session, request)
+    account = await oauth_repo.find_or_create_account(
+        session,
+        provider=config.provider,
+        subject=user_info.subject,
+        display_name=user_info.display_name,
+        now=now,
+        upgrade_guest_id=guest_id,
+    )
+
+    raw_token = generate_session_token()
+    expires_at = now + timedelta(hours=settings.padrino_human_session_ttl_hours)
+    await principals_repo.create_session(
+        session,
+        principal_id=account.id,
+        raw_token=raw_token,
+        kind=principals_repo.SESSION_KIND_ACCOUNT,
+        issued_at=now,
+        expires_at=expires_at,
+    )
+
+    response.set_cookie(
+        key=HUMAN_SESSION_COOKIE,
+        value=raw_token,
+        max_age=settings.padrino_human_session_ttl_hours * 3600,
+        httponly=True,
+        secure=settings.padrino_human_session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    response.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+    response.delete_cookie(OAUTH_VERIFIER_COOKIE, path="/")
+    return GuestSummary(
+        principal_id=account.id,
+        kind=account.kind,
+        display_name=account.display_name,
+    )
+
+
+async def _in_flight_guest_id(session: AsyncSession, request: Request) -> uuid.UUID | None:
+    """Resolve the active guest principal from the in-flight session cookie.
+
+    Only an active (non-expired, non-revoked) GUEST session is upgraded; an
+    existing account session is left untouched (no multi-account merge).
+    """
+    raw = request.cookies.get(HUMAN_SESSION_COOKIE)
+    if raw is None:
+        return None
+    record = await principals_repo.get_session_by_token(session, raw.strip())
+    if record is None or record.revoked_at is not None:
+        return None
+    principal = await principals_repo.get_principal(session, record.principal_id)
+    if principal is None or principal.deleted_at is not None:
+        return None
+    if principal.kind != principals_repo.PRINCIPAL_KIND_GUEST:
+        return None
+    return principal.id
+
+
+__all__ = [
+    "OAUTH_STATE_COOKIE",
+    "OAUTH_VERIFIER_COOKIE",
+    "DisplayNameUpdate",
+    "GuestSummary",
+    "router",
+]

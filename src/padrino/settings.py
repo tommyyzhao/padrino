@@ -103,6 +103,20 @@ class Settings(BaseSettings):
     padrino_human_session_ttl_hours: int = 720
     padrino_human_session_cookie_secure: bool = True
 
+    # Optional OAuth sign-in, ONE provider (US-129). All fields default to None
+    # so the engine boots and the test suite runs WITHOUT any provider
+    # credentials (the actual OAuth app is a deploy-time human step). When the
+    # client id/secret + endpoint urls are all present the ``/human/oauth/*``
+    # routes are live; otherwise they 503. The client secret is never logged.
+    padrino_oauth_provider: str | None = None
+    padrino_oauth_client_id: str | None = None
+    padrino_oauth_client_secret: str | None = None
+    padrino_oauth_authorize_url: str | None = None
+    padrino_oauth_token_url: str | None = None
+    padrino_oauth_userinfo_url: str | None = None
+    padrino_oauth_redirect_url: str | None = None
+    padrino_oauth_scope: str = "openid email profile"
+
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any
     # scraper that can reach the process; flipping the flag requires the same
     # spectator scope as the read-only API surface.
