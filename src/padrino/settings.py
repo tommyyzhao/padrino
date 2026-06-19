@@ -235,6 +235,25 @@ class Settings(BaseSettings):
     padrino_max_games_per_day: int = 20
     padrino_max_concurrent_games: int = 3
 
+    # Human cost governance (US-151). Human play is platform-absorbed within a
+    # Moderate budget: per-user/day caps keyed on the human principal bound new
+    # lobbies/joins/launches, and a per-lobby cost cap + circuit breaker throttle
+    # NEW lobbies / new LLM turns on breach while LETTING ACTIVE GAMES FINISH
+    # (the "AI-only continuation boots humans" anti-pattern is rejected).
+    # Concrete numbers are conservative pending a PREP-v9 sign-off; override via
+    # the matching PADRINO_* env vars.
+    padrino_human_max_games_per_user_per_day: int = 10
+    padrino_human_max_joins_per_user_per_day: int = 30
+    padrino_human_max_inference_usd_per_user_per_day: float = 5.0
+    padrino_human_lobby_cost_cap_usd: float = 2.0
+    padrino_human_global_lobby_cost_breaker_usd: float = 50.0
+    # Fallback token-price table (USD per 1K tokens) used when a LiteLLM response
+    # carries no ``response_cost`` (None). Keyed by LiteLLM model string; the
+    # ``default`` key is the catch-all when a model is not listed.
+    padrino_human_fallback_token_price_per_1k: dict[str, tuple[float, float]] = {
+        "default": (0.0005, 0.0015),
+    }
+
     # Judge sampling enrichment (US-105). ``padrino_judge_sample_rate`` controls
     # the fraction of unevaluated completed games selected per batch run.
     # ``padrino_judge_max_games_per_run`` is a hard per-invocation ceiling that

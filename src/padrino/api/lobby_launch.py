@@ -42,7 +42,7 @@ from padrino.core.lobby.autofill import (
     autofill_empty_seats,
 )
 from padrino.core.rulesets import get_ruleset
-from padrino.db.models import AgentBuild, GameSeat, LobbyMember
+from padrino.db.models import GameSeat, LobbyMember
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 
@@ -77,21 +77,14 @@ def _derive_game_seed(lobby_seed: str) -> str:
 async def _curated_roster(session: AsyncSession, ruleset_id: str) -> list[str]:
     """Return the curated human-eligible build-id pool for ``ruleset_id``.
 
-    v1: every ACTIVE agent build whose prompt targets this ruleset, ordered
-    deterministically (created_at, id). A dedicated ``human_eligible`` flag /
-    curated pool table is a later-story concern (US-151); the active roster is
-    the curated pool for now.
+    Delegates to the single source of truth in
+    :func:`padrino.economics.human_cost_governance.human_eligible_pool` (US-151):
+    every ACTIVE agent build whose prompt targets this ruleset, ordered
+    deterministically (created_at, id).
     """
-    from padrino.db.models import PromptVersion
+    from padrino.economics.human_cost_governance import human_eligible_pool
 
-    stmt = (
-        select(AgentBuild.id)
-        .join(PromptVersion, AgentBuild.prompt_version_id == PromptVersion.id)
-        .where(AgentBuild.active.is_(True))
-        .where(PromptVersion.ruleset_id == ruleset_id)
-        .order_by(AgentBuild.created_at, AgentBuild.id)
-    )
-    return [str(bid) for bid in (await session.execute(stmt)).scalars()]
+    return await human_eligible_pool(session, ruleset_id)
 
 
 async def launch_lobby(session: AsyncSession, *, lobby_id: uuid.UUID) -> LaunchResult:

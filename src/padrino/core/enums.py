@@ -122,6 +122,21 @@ class LobbySeatKind(StrEnum):
     AI = "AI"
 
 
+class FundingSource(StrEnum):
+    """Who pays for a cost-tracking row's inference (Wave 9, US-151).
+
+    ``PLATFORM`` is the byte-identical default: human play is platform-absorbed
+    within a Moderate budget in v1. ``BYOK_OWNER`` (a lobby host pays with their
+    own provider key) and ``SPONSOR_POOL`` (a sponsored credit pool) are designed
+    now but dormant — no v1 code path writes them — so the cost-tracking schema
+    is forward-compatible without a later migration.
+    """
+
+    PLATFORM = "PLATFORM"
+    BYOK_OWNER = "BYOK_OWNER"
+    SPONSOR_POOL = "SPONSOR_POOL"
+
+
 class PhaseKind(StrEnum):
     """High-level phase type within a game."""
 

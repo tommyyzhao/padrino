@@ -270,6 +270,12 @@ class LlmCall(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Numeric(asdecimal=False), nullable=True)
     provider_response_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Who funds this inference (US-151). 'PLATFORM' is the byte-identical default
+    # (human play is platform-absorbed in v1); BYOK_OWNER / SPONSOR_POOL are
+    # designed-now-dormant so the cost-tracking row is forward-compatible.
+    funding_source: Mapped[str] = mapped_column(
+        String, nullable=False, default="PLATFORM", server_default="PLATFORM"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
