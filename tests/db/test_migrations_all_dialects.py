@@ -119,14 +119,18 @@ def postgres_db_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[str]:
     """Reset the container's schema between tests, then expose the URL."""
-    # `alembic downgrade base` drops everything Padrino owns; ensure we also
-    # remove the alembic_version table so each test starts from a truly empty
-    # database (no orphan revision row, no leftover tables from a prior test).
+    # The container is session-scoped and shared across the postgres tests, so a
+    # prior test can leave tables behind. Reflect and drop *every* table that
+    # actually exists (plus alembic_version) so each test starts from a truly
+    # empty database. Reflecting (rather than dropping a hardcoded list) keeps
+    # this robust as new migrations add tables — a stale drop-list previously
+    # left newer tables behind and made the second test's `upgrade head` collide.
     sync_url = _sync_url(postgres_url_for_migrations)
     engine = sync_create_engine(sync_url)
     try:
         with engine.connect() as conn:
-            for table in (*EXPECTED_TABLES, "alembic_version"):
+            existing = set(inspect(conn).get_table_names())
+            for table in existing | {"alembic_version"}:
                 conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{table}" CASCADE')
             conn.commit()
     finally:
