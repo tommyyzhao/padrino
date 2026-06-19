@@ -20,16 +20,9 @@ from collections.abc import Mapping
 
 from padrino.core.agents.coercion import coerce_response_failure
 from padrino.core.agents.contract import AgentResponse
-from padrino.core.engine.state import Phase
-from padrino.core.enums import PhaseKind
 from padrino.core.observations import Observation
 from padrino.llm.adapter import AdapterResult
-
-_PHASE_KIND_BY_PREFIX: dict[str, PhaseKind] = {
-    "SETUP": PhaseKind.SETUP,
-    "TERMINAL": PhaseKind.TERMINAL,
-    "NIGHT_0_MAFIA_INTRO": PhaseKind.NIGHT_0_MAFIA_INTRO,
-}
+from padrino.llm.observation_phase import phase_from_observation
 
 
 class DeterministicMockAdapter:
@@ -57,29 +50,6 @@ class DeterministicMockAdapter:
         )
 
 
-def _phase_from_observation(observation: Observation) -> Phase:
-    """Reconstruct enough of :class:`Phase` to drive :func:`coerce_response_failure`."""
-    return Phase(
-        kind=_phase_kind_for(observation.phase),
-        day=observation.day,
-        round=observation.round,
-    )
-
-
-def _phase_kind_for(phase_id: str) -> PhaseKind:
-    if phase_id in _PHASE_KIND_BY_PREFIX:
-        return _PHASE_KIND_BY_PREFIX[phase_id]
-    if "_DISCUSSION_ROUND_" in phase_id:
-        return PhaseKind.DAY_DISCUSSION
-    if phase_id.endswith("_VOTE"):
-        return PhaseKind.DAY_VOTE
-    if phase_id.endswith("_MAFIA_DISCUSSION"):
-        return PhaseKind.NIGHT_MAFIA_DISCUSSION
-    if phase_id.endswith("_ACTIONS"):
-        return PhaseKind.NIGHT_ACTIONS
-    raise ValueError(f"unrecognized phase id: {phase_id!r}")
-
-
 class NoopMockAdapter:
     """Returns the safe-coercion response for every phase, no script needed.
 
@@ -97,7 +67,7 @@ class NoopMockAdapter:
 
     async def complete(self, observation: Observation) -> AdapterResult:
         self.calls.append((observation.phase, observation.you.player_id))
-        phase = _phase_from_observation(observation)
+        phase = phase_from_observation(observation)
         response = coerce_response_failure(phase, "noop")
         return AdapterResult(
             raw_response=response.model_dump_json(),

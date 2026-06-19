@@ -53,7 +53,7 @@ from padrino.db.repositories import model_configs as model_configs_repo
 from padrino.db.repositories import prompt_versions as prompt_versions_repo
 from padrino.db.repositories import providers as providers_repo
 from padrino.llm.adapter import AdapterResult
-from padrino.llm.mock import _phase_kind_for
+from padrino.llm.observation_phase import phase_kind_for
 from padrino.llm.prompts import CANONICAL_RESPONSE_SCHEMA, iter_canonical_prompts
 from padrino.public.broadcast_index import BroadcastState, mark_recent
 from padrino.public.projection import (
@@ -89,7 +89,7 @@ class _ChattyMockAdapter:
 
     async def complete(self, observation: Observation) -> AdapterResult:
         self.calls.append((observation.phase, observation.you.player_id))
-        phase_kind = _phase_kind_for(observation.phase)
+        phase_kind = phase_kind_for(observation.phase)
         phase = Phase(kind=phase_kind, day=observation.day, round=observation.round)
         base = coerce_response_failure(phase, "noop")
         if phase_kind is PhaseKind.DAY_DISCUSSION:

@@ -624,3 +624,19 @@ Notes:
 - No migration: US-128 adds no schema (reuses US-127 principals/human_sessions tables).
 - The route carries NO API-scope dependency, so guest creation grants ZERO api scope (verified: api_keys table stays empty).
 - Gates (all GREEN): ruff check ., ruff format --check . (330 files), mypy src tests (297 files), pytest -m "not integration" -> 1823 passed / 40 skipped.
+
+## 2026-06-19 — US-137: HumanAdapter satisfies the LlmAdapter protocol
+Files:
+- src/padrino/llm/human_adapter.py (NEW): HumanAdapter implements the LlmAdapter Protocol. complete(observation) polls an injected PullAction source for buffered human input (the US-134 POST channel) every poll_interval_seconds until either a submission arrives or deadline_seconds elapses (measured on an injected monotonic clock). Legal submission -> AgentResponse verbatim (status ok); illegal type/target -> coerce_response_failure (status schema_violation); deadline miss -> coerce_response_failure (status provider_error). Legality reuses legal_actions (carried on the observation) with the same targeted/untargeted rules as api/human_actions.py. NO tick.py contract change.
+- src/padrino/llm/observation_phase.py (NEW): promoted mock.py's private _phase_from_observation/_phase_kind_for into public phase_from_observation/phase_kind_for so HumanAdapter and DeterministicMock/NoopMock share one phase-id->Phase reconstruction for coercion.
+- src/padrino/llm/mock.py: now imports phase_from_observation from observation_phase (behavior identical).
+- tests/llm/test_human_adapter.py (NEW, 10 tests): protocol conformance, buffered-legal-resolve (polls+sleeps then resolves), timeout-coerce (ABSTAIN on DAY_VOTE, NOOP on NIGHT_ACTIONS), illegal-type/illegal-target/targetless-with-target coerce, legal-abstain passthrough, immediate-input-no-sleep. Clock + async sleep injected (FakeClock advances only on sleep) so tests are deterministic, no wall-clock.
+- tests/public/test_broadcast_pipeline_e2e.py: updated import of the moved phase_kind_for helper.
+- ralph/prd.json (passes:true), ralph/progress.txt
+Notes:
+- No migration; no new runtime deps. The adapter owns its deadline internally and returns a valid (coerced) AdapterResult so the runner's asyncio.wait_for tick barrier (US-138) stays unchanged.
+- Avoided `# type: ignore`: _coerce's status param is typed AdapterStatus (imported from llm.adapter) so literal "schema_violation"/"provider_error" typecheck cleanly.
+- Gates (all GREEN): ruff check ., ruff format --check . (361 files), mypy src tests (323 files), pytest -m "not integration" -> 1895 passed / 40 skipped.
+
+## Codebase Patterns
+- Human seat as an adapter (US-137): a human seat is driven through the EXACT same LlmAdapter contract as an LLM. HumanAdapter(pull_action=..., deadline_seconds, poll_interval_seconds, clock, sleep) polls a buffered-input source (the POST action channel) and returns an AdapterResult: legal->verbatim AgentResponse, illegal->coerce_response_failure(schema_violation), timeout->coerce_response_failure(provider_error). Legality is checked against observation.legal_actions (targeted types VOTE/MAFIA_KILL/PROTECT/INVESTIGATE need a legal target; NOOP/ABSTAIN must carry none) — the SAME rule as api/human_actions.py. Inject clock+sleep for deterministic deadline tests (FakeClock advances only when sleep is awaited). Reconstruct the core Phase for coercion via padrino.llm.observation_phase.phase_from_observation. This keeps the tick barrier contract unchanged (the adapter resolves its own deadline and never raises).
