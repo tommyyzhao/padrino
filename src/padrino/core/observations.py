@@ -20,6 +20,7 @@ Pure function. Reads ``state``, ``seat``, ``event_log``, and the ruleset's
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -93,6 +94,27 @@ class InspectionResultEntry(BaseModel):
     phase: str
 
 
+class SeatIdentity(BaseModel):
+    """One per-seat identity disclosure entry (US-141, TRANSPARENT mode only).
+
+    Carries ONLY the human-vs-AI / model-identity facts that a TRANSPARENT-mode
+    game opts into disclosing. It deliberately carries NO ``role`` / ``faction``
+    field: even in transparent mode another seat's hidden role/faction is never
+    revealed mid-game (only its model / human identity is). In ANONYMOUS mode
+    no :class:`SeatIdentity` ever reaches a seat — the whole
+    ``identity_disclosure`` block is ``None``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    public_player_id: str
+    is_human: bool
+    seat_kind: str | None = None
+    model_id: str | None = None
+    provider: str | None = None
+    agent_build_id: str | None = None
+
+
 class Observation(BaseModel):
     """Frozen JSON observation rendered into an LLM prompt for one seat."""
 
@@ -114,6 +136,10 @@ class Observation(BaseModel):
     mafia_teammates: tuple[str, ...] | None = None
     previous_protected_target: str | None = None
     inspection_history: tuple[InspectionResultEntry, ...] | None = None
+    #: Per-seat human/model identity disclosure (US-141). ``None`` in ANONYMOUS
+    #: mode (fail closed); a tuple of :class:`SeatIdentity` (possibly empty) in
+    #: TRANSPARENT mode. Never carries another seat's role/faction.
+    identity_disclosure: tuple[SeatIdentity, ...] | None = None
 
 
 def format_phase_id(phase: Phase) -> str:
@@ -195,6 +221,43 @@ def build_observation(
         previous_protected_target=previous_protected_target,
         inspection_history=inspection_history,
     )
+
+
+def build_observation_for_mode(
+    state: GameState,
+    seat: Seat,
+    event_log: EventLog,
+    ruleset: Ruleset,
+    *,
+    identity_mode: Any,
+    seat_identities: Sequence[SeatIdentity] | None = None,
+    private_memory: str = "",
+) -> Observation:
+    """Build an identity-mode-aware per-seat observation (US-141).
+
+    In :data:`~padrino.core.observation_privacy.ANONYMOUS` mode the result is
+    byte-identical to :func:`build_observation` plus an explicit
+    ``identity_disclosure=None``: a playing seat's view carries ZERO
+    model/provider/agent-build identifiers AND zero human-vs-AI markers (the base
+    observation already carries only the seat's OWN role/faction, hard rule 3).
+
+    In :data:`~padrino.core.observation_privacy.TRANSPARENT` mode the result also
+    surfaces ``identity_disclosure`` — a tuple of :class:`SeatIdentity` (the
+    provided ``seat_identities`` or an empty tuple) carrying ONLY model / human
+    identity, never another seat's hidden role/faction.
+
+    A missing / ``None`` / unrecognised ``identity_mode`` FAILS CLOSED to
+    anonymous (no disclosure). Pure function: no DB / LLM / clock / network.
+    """
+    # Local import: ``observation_privacy`` imports ``Observation`` from this
+    # module, so a module-level import here would be circular.
+    from padrino.core.observation_privacy import is_anonymous
+
+    base = build_observation(state, seat, event_log, ruleset, private_memory)
+    if is_anonymous(identity_mode):
+        return base.model_copy(update={"identity_disclosure": None})
+    disclosure = tuple(seat_identities) if seat_identities is not None else ()
+    return base.model_copy(update={"identity_disclosure": disclosure})
 
 
 def _entry_from_stored(stored_body: dict[str, Any], sequence: int) -> EventEntry:
@@ -287,7 +350,9 @@ __all__ = [
     "MessageLimits",
     "Observation",
     "Ruleset",
+    "SeatIdentity",
     "YouInfo",
     "build_observation",
+    "build_observation_for_mode",
     "format_phase_id",
 ]
