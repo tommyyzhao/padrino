@@ -512,7 +512,7 @@
         "US-143"
       ],
       "priority": 145,
-      "passes": false,
+      "passes": true,
       "notes": "P4. Stats captured (accounts persist them); leaderboards/ELO deferred to a fast-follow."
     },
     {
