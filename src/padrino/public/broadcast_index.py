@@ -119,12 +119,21 @@ async def mark_recent(session: AsyncSession, game_id: uuid.UUID) -> Game | None:
     """Transition a game to RECENT broadcast state (broadcast complete).
 
     Returns ``None`` if the game does not exist or is not broadcastable.
+    Materializes the per-game recap analytics once here (US-120) so the public
+    recap page serves a stored row instead of re-deriving the event log per
+    request.
     """
     game = await session.get(Game, game_id)
     if game is None or not game.is_broadcastable:
         return None
     game.broadcast_state = BroadcastState.RECENT.value
     await session.flush()
+    # Imported lazily to avoid a circular import (the store imports the ORM
+    # models, which is fine, but keeping the seam local documents that
+    # materialization is a side-effect of the RECENT transition only).
+    from padrino.public.game_analytics_store import materialize_game_analytics
+
+    await materialize_game_analytics(session, game_id, ruleset_id=game.ruleset_id)
     return game
 
 

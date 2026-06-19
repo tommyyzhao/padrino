@@ -69,7 +69,12 @@ async function spawnSmoke(apiPort: number, dbPath: string, timeoutMs: number): P
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        PADRINO_CORS_ALLOW_ORIGINS: corsOrigin
+        PADRINO_CORS_ALLOW_ORIGINS: corsOrigin,
+        // The public spectator site reads the /public/* surface anonymously
+        // (the production public-surface-only deployment serves these without a
+        // key). Enable anonymous public reads so the e2e suite exercises the
+        // real public endpoints the dashboard now depends on.
+        PADRINO_PUBLIC_LEADERBOARD_ANONYMOUS: 'true'
       }
     });
     const stdoutChunks: string[] = [];

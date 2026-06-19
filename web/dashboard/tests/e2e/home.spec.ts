@@ -1,30 +1,36 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('home', () => {
-  test('renders the three KPIs and links the top-3 models to the leaderboard', async ({ page }) => {
+  test('renders public-surface KPIs and links the top-3 agents to the ladder', async ({ page }) => {
     await page.goto('/');
 
     await expect(page.getByTestId('home-kpis')).toBeVisible();
-    await expect(page.getByTestId('home-kpi-total-games')).toBeVisible();
-    await expect(page.getByTestId('home-kpi-active-gauntlets')).toBeVisible();
-    await expect(page.getByTestId('home-kpi-top-model')).toBeVisible();
+    await expect(page.getByTestId('home-kpi-live-now')).toBeVisible();
+    await expect(page.getByTestId('home-kpi-recent-games')).toBeVisible();
+    await expect(page.getByTestId('home-kpi-top-agent')).toBeVisible();
 
-    const totalGamesText = (await page.getByTestId('home-kpi-total-games').textContent()) ?? '';
-    expect(totalGamesText.trim()).toMatch(/^[0-9]+$/);
+    // Live-now count comes from /public/live total — always a non-negative integer.
+    const liveNowText = (await page.getByTestId('home-kpi-live-now').textContent()) ?? '';
+    expect(liveNowText.trim()).toMatch(/^[0-9]+$/);
 
-    const topModel = page.getByTestId('home-kpi-top-model');
-    await expect(topModel).not.toHaveText('—');
+    // Recent count comes from /public/recent total_estimate.
+    const recentText = (await page.getByTestId('home-kpi-recent-games').textContent()) ?? '';
+    expect(recentText.trim()).toMatch(/^[0-9]+$/);
 
-    const topRows = page.getByTestId('home-top-model-row');
+    // The smoke harness ingests at least one ranked game, so the ladder KPI fills in.
+    const topAgent = page.getByTestId('home-kpi-top-agent');
+    await expect(topAgent).not.toHaveText('—');
+
+    const topRows = page.getByTestId('home-top-agent-row');
     await expect(topRows.first()).toBeVisible();
     const rowCount = await topRows.count();
     expect(rowCount).toBeGreaterThan(0);
 
-    const firstLink = page.getByTestId('home-top-model-link').first();
-    await expect(firstLink).toHaveAttribute('href', '/leaderboard');
+    const firstLink = page.getByTestId('home-top-agent-link').first();
+    await expect(firstLink).toHaveAttribute('href', '/ladder');
     await firstLink.click();
-    await expect(page).toHaveURL(/\/leaderboard$/);
-    await expect(page.getByTestId('leaderboard-title')).toBeVisible();
+    await expect(page).toHaveURL(/\/ladder$/);
+    await expect(page.getByTestId('ladder-table')).toBeVisible({ timeout: 15_000 });
   });
 
   test('matches the home visual snapshot', async ({ page }) => {
@@ -33,7 +39,7 @@ test.describe('home', () => {
     await expect(page.getByTestId('home-kpis')).toBeVisible();
     await expect(page).toHaveScreenshot('home.png', {
       fullPage: true,
-      mask: [page.getByTestId('home-kpi-total-games'), page.getByTestId('home-kpi-active-gauntlets')]
+      mask: [page.getByTestId('home-kpi-live-now'), page.getByTestId('home-kpi-recent-games')]
     });
   });
 });

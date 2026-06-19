@@ -41,10 +41,11 @@ app = typer.Typer(
 
 @app.callback()
 def _configure_logging_callback() -> None:
-    """Route structlog INFO events to stderr so stdout only carries CLI payloads."""
+    """Configure structlog from settings so PADRINO_LOG_LEVEL takes effect."""
     from padrino.logging import configure_logging
+    from padrino.settings import get_settings
 
-    configure_logging("INFO")
+    configure_logging(get_settings().padrino_log_level)
 
 
 @app.command()
@@ -257,8 +258,11 @@ def scheduler(
                         "closed and NO game will be broadcastable.",
                         err=True,
                     )
+            from padrino.observability.alerts import build_alert_notifier
+
+            notifier = build_alert_notifier(settings)
             tick_hook = build_scheduled_gauntlet_tick_hook(
-                session_factory, settings=settings, guard=guard
+                session_factory, settings=settings, guard=guard, notifier=notifier
             )
 
             await run_scheduler(

@@ -1,14 +1,14 @@
 {
   "project": "Padrino",
   "branchName": "ralph/padrino-v8",
-  "description": "Wave 8 — Production Launch Hardening. Closes every loop-buildable gap between the Wave 7 feature-complete state and a public production release, under the locked product shape: the PUBLIC surface is a spectator website (lobby, live watch, ladder, recap) served exclusively from /public/* endpoints; everything else (admin, ingest, gauntlets, leagues, scheduler, metrics) runs on a PRIVATE backend that is never exposed to the internet. Build order: P0 surface split (110-111) -> P1 trust + ops rails (112-116) -> P2 verification + flake burn-down (117-118) -> P3 deploy + perf (119-120). Human-gated launch steps (key rotation, domain/TLS/CDN/Postgres provisioning, cap/cadence sign-off, legal pages, one paid integration run) are NOT stories — see the launch checklist in the session plan; the loop must reach loop-complete without any new credential.",
+  "description": "Wave 8 \u2014 Production Launch Hardening. Closes every loop-buildable gap between the Wave 7 feature-complete state and a public production release, under the locked product shape: the PUBLIC surface is a spectator website (lobby, live watch, ladder, recap) served exclusively from /public/* endpoints; everything else (admin, ingest, gauntlets, leagues, scheduler, metrics) runs on a PRIVATE backend that is never exposed to the internet. Build order: P0 surface split (110-111) -> P1 trust + ops rails (112-116) -> P2 verification + flake burn-down (117-118) -> P3 deploy + perf (119-120). Human-gated launch steps (key rotation, domain/TLS/CDN/Postgres provisioning, cap/cadence sign-off, legal pages, one paid integration run) are NOT stories \u2014 see the launch checklist in the session plan; the loop must reach loop-complete without any new credential.",
   "userStories": [
     {
       "id": "US-110",
       "title": "Public-surface-only API mode",
-      "description": "As the operator, I need the API to run in a mode that serves ONLY the public spectator surface, so the internet-facing process physically cannot expose admin, ingest, or any private route — the architectural embodiment of 'website public, everything else private'.",
+      "description": "As the operator, I need the API to run in a mode that serves ONLY the public spectator surface, so the internet-facing process physically cannot expose admin, ingest, or any private route \u2014 the architectural embodiment of 'website public, everything else private'.",
       "acceptanceCriteria": [
-        "New setting `padrino_public_surface_only: bool = False`; when True, `create_app` mounts ONLY the public router and the health router — admin, admin_keys, ingest, games, leagues, gauntlets, and scheduled_gauntlets routers are not mounted at all (404, not 401/403).",
+        "New setting `padrino_public_surface_only: bool = False`; when True, `create_app` mounts ONLY the public router and the health router \u2014 admin, admin_keys, ingest, games, leagues, gauntlets, and scheduled_gauntlets routers are not mounted at all (404, not 401/403).",
         "`/metrics` is NOT served in public-surface-only mode (scraping happens against the internal instance).",
         "`/healthz` and `/readyz` still work in public mode (the edge needs probes).",
         "Test `tests/api/test_public_surface_only.py` asserts: with the flag on, every private route prefix 404s, `/public/live`, `/public/recent`, `/public/ladder`, `/public/games/{id}/live` and `/healthz` work; with the flag off (default) behavior is unchanged.",
@@ -19,7 +19,7 @@
       ],
       "dependencies": [],
       "priority": 110,
-      "passes": false,
+      "passes": true,
       "notes": "P0. Defense in depth: even a reverse-proxy misconfiguration cannot leak a private route, because the public process never registers them."
     },
     {
@@ -27,8 +27,8 @@
       "title": "Spectator website consumes only /public endpoints",
       "description": "As a public visitor, every page I can reach must work against the public-surface-only API, so the deployed website functions with zero access to private routes.",
       "acceptanceCriteria": [
-        "Audit `web/dashboard/src/routes/**`: the home page currently calls `listGames` and `listGauntlets` (private `/games`, `/gauntlets`) for KPIs — replace home KPIs with public-surface data (e.g. live-now count from `/public/live`, recent count from `/public/recent` total_estimate, top-3 from `/public/ladder`); no public-reachable page may call a non-/public endpoint.",
-        "Private-only pages (e.g. internal games browser) are either removed from the public nav or clearly degrade when the private API is absent — no infinite spinners, no hard errors on the public site.",
+        "Audit `web/dashboard/src/routes/**`: the home page currently calls `listGames` and `listGauntlets` (private `/games`, `/gauntlets`) for KPIs \u2014 replace home KPIs with public-surface data (e.g. live-now count from `/public/live`, recent count from `/public/recent` total_estimate, top-3 from `/public/ladder`); no public-reachable page may call a non-/public endpoint.",
+        "Private-only pages (e.g. internal games browser) are either removed from the public nav or clearly degrade when the private API is absent \u2014 no infinite spinners, no hard errors on the public site.",
         "Playwright `web/dashboard/tests/e2e/home.spec.ts` updated to the new KPI set and passing against the smoke harness.",
         "pnpm -C web/dashboard lint passes",
         "pnpm -C web/dashboard check passes",
@@ -42,7 +42,7 @@
         "US-110"
       ],
       "priority": 111,
-      "passes": false,
+      "passes": true,
       "notes": "Root cause of the pre-existing home.spec e2e failure: the home page depends on auth-gated private endpoints."
     },
     {
@@ -59,18 +59,18 @@
       ],
       "dependencies": [],
       "priority": 112,
-      "passes": false,
+      "passes": true,
       "notes": "Cheap insurance: ingest is private in this deployment, but the filter makes the trust property hold by construction."
     },
     {
       "id": "US-113",
       "title": "Operational alerting: webhook notifier + alert rules",
-      "description": "As the operator of an unattended money-spending system, I need to be notified when something important happens — spend cap reached, scheduler dead, moderation gate degraded — instead of discovering it on the provider bill.",
+      "description": "As the operator of an unattended money-spending system, I need to be notified when something important happens \u2014 spend cap reached, scheduler dead, moderation gate degraded \u2014 instead of discovering it on the provider bill.",
       "acceptanceCriteria": [
         "New `src/padrino/observability/alerts.py` with `AlertNotifier` (async, posts JSON to `padrino_alert_webhook_url: str | None = None`; no-op transport when unset; always emits a structured log).",
         "Alerts fired from existing seams: `spend.cap.reached` (spend governor denial), `scheduler.heartbeat.stale` (checked in the tick against the heartbeats table), `moderation.guard.unavailable` (guard None or erroring while continuous matchmaking enabled), `admission.denied.streak` (N consecutive denials, configurable).",
         "A Prometheus alert-rules file (`docs/deployment/alert-rules.yml`) covering the same conditions from the existing metrics, shipped with the deploy config.",
-        "Tests `tests/observability/test_alerts.py` use a stub transport (httpx MockTransport) — no network, no integration marker: each trigger fires exactly once per condition transition (no alert spam every tick).",
+        "Tests `tests/observability/test_alerts.py` use a stub transport (httpx MockTransport) \u2014 no network, no integration marker: each trigger fires exactly once per condition transition (no alert spam every tick).",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
@@ -78,7 +78,7 @@
       ],
       "dependencies": [],
       "priority": 113,
-      "passes": false,
+      "passes": true,
       "notes": "Webhook URL is set by the human at deploy time (Slack/Discord/etc.); the loop builds and tests the machinery."
     },
     {
@@ -87,7 +87,7 @@
       "description": "As the operator, two scheduler replicas must never double-claim the same gauntlet, so accidental horizontal scaling (or a stuck-then-restarted instance) cannot corrupt runs.",
       "acceptanceCriteria": [
         "`claim_oldest_pending` (runner/scheduler claim path) uses `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL (`with_for_update(skip_locked=True)`); SQLite path unchanged (single-writer documented in the function docstring).",
-        "Postgres-marked test (`@pytest.mark.postgres`) asserts two concurrent claimers receive distinct rows (or one row + one None) — never the same row.",
+        "Postgres-marked test (`@pytest.mark.postgres`) asserts two concurrent claimers receive distinct rows (or one row + one None) \u2014 never the same row.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
@@ -95,13 +95,13 @@
       ],
       "dependencies": [],
       "priority": 114,
-      "passes": false,
+      "passes": true,
       "notes": "Matters exactly now that continuous matchmaking gives the scheduler a permanent workload."
     },
     {
       "id": "US-115",
       "title": "Honor PADRINO_LOG_LEVEL",
-      "description": "As the operator debugging production, the configured log level must actually take effect — cli.py currently hardcodes 'INFO'.",
+      "description": "As the operator debugging production, the configured log level must actually take effect \u2014 cli.py currently hardcodes 'INFO'.",
       "acceptanceCriteria": [
         "`padrino serve`, `padrino scheduler`, and `padrino bootstrap` configure logging from `settings.padrino_log_level` (env `PADRINO_LOG_LEVEL`), not a hardcoded literal.",
         "Unit test asserts the logging configuration call receives the settings value (e.g. DEBUG) for at least the serve and scheduler entrypoints.",
@@ -112,7 +112,7 @@
       ],
       "dependencies": [],
       "priority": 115,
-      "passes": false,
+      "passes": true,
       "notes": "Known bug: cli.py:47-ish hardcodes \"INFO\"."
     },
     {
@@ -130,16 +130,16 @@
       ],
       "dependencies": [],
       "priority": 116,
-      "passes": false,
+      "passes": true,
       "notes": "US-108 built the pure planner; this is the impure executor it was designed for."
     },
     {
       "id": "US-117",
       "title": "Broadcast pipeline end-to-end smoke test",
-      "description": "As the platform, one default-suite test must exercise the ENTIRE Wave 7 spine — matchmaking tick through SSE consumption — so a cross-boundary contract break (like the Wave 7 moderation event-type bug) can never again pass a green suite.",
+      "description": "As the platform, one default-suite test must exercise the ENTIRE Wave 7 spine \u2014 matchmaking tick through SSE consumption \u2014 so a cross-boundary contract break (like the Wave 7 moderation event-type bug) can never again pass a green suite.",
       "acceptanceCriteria": [
-        "New `tests/public/test_broadcast_pipeline_e2e.py` (mock LLM adapter, stub guard, zero cadence): run_continuous_matchmaking_tick → game COMPLETED → analytics aggregates written → moderation pass marks broadcastable → LIVE → consume the full SSE stream → every frame validates against the public_event_v1 golden contract → terminal frame is last → mark_recent → recap analytics served spoiler-free.",
-        "The test asserts at least one PublicMessageSubmitted frame's text was actually seen by the moderation gate (e.g. via a recording stub guard) — regression-guards the vacuous-gate class of bug.",
+        "New `tests/public/test_broadcast_pipeline_e2e.py` (mock LLM adapter, stub guard, zero cadence): run_continuous_matchmaking_tick \u2192 game COMPLETED \u2192 analytics aggregates written \u2192 moderation pass marks broadcastable \u2192 LIVE \u2192 consume the full SSE stream \u2192 every frame validates against the public_event_v1 golden contract \u2192 terminal frame is last \u2192 mark_recent \u2192 recap analytics served spoiler-free.",
+        "The test asserts at least one PublicMessageSubmitted frame's text was actually seen by the moderation gate (e.g. via a recording stub guard) \u2014 regression-guards the vacuous-gate class of bug.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
@@ -147,7 +147,7 @@
       ],
       "dependencies": [],
       "priority": 117,
-      "passes": false,
+      "passes": true,
       "notes": "Lesson from the Wave 7 review: per-story unit tests validated each side of an invented contract; only an end-to-end path catches lockstep-wrong seams."
     },
     {
@@ -158,7 +158,7 @@
         "`tests/db/test_migrations_all_dialects.py::test_postgres_full_cycle_upgrade_downgrade_upgrade` passes reliably in the full suite (isolate shared Postgres state per test, e.g. unique schema/database per run).",
         "`tests/runner/test_scheduler.py::test_pending_gauntlet_runs_and_finalizes_to_completed` no longer depends on wall-clock timing under load (injected clock or generous deterministic synchronization).",
         "Dashboard e2e `games.spec.ts` and `leaderboard.spec.ts` are hermetic against the smoke harness (deterministic seeded data, no dependence on machine state); `home.spec.ts` covered by US-111.",
-        "Full suite passes 3 consecutive runs locally (`uv run pytest -m \"not integration\"` ×3) — document the runs in progress.txt.",
+        "Full suite passes 3 consecutive runs locally (`uv run pytest -m \"not integration\"` \u00d73) \u2014 document the runs in progress.txt.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
@@ -168,7 +168,7 @@
         "US-111"
       ],
       "priority": 118,
-      "passes": false,
+      "passes": true,
       "notes": "Known offenders enumerated from the Wave 7 verification runs."
     },
     {
@@ -177,8 +177,8 @@
       "description": "As the operator, the compose/deploy config must encode the public/private split: a public-api (surface-only) + static dashboard exposed to the edge, and api/scheduler/Postgres reachable only on an internal network.",
       "acceptanceCriteria": [
         "`docker-compose.yml` gains a `public-api` service running with `PADRINO_PUBLIC_SURFACE_ONLY=true` and a published port; the full `api` service and `postgres` lose published ports (internal network only); `scheduler` internal; `dashboard` built against the public-api URL.",
-        "Compose networks: `edge` (public-api, dashboard) and `internal` (postgres, api, scheduler, public-api) — postgres/api/scheduler are NOT on `edge`.",
-        "`docs/deployment/v2-public.md` runbook updated for the split topology, including the reverse-proxy/CDN expectations (TLS termination, caching immutable RECENT responses) and the env vars for spend cap, guard model, alert webhook — this story MAY edit that md as explicit deploy doc.",
+        "Compose networks: `edge` (public-api, dashboard) and `internal` (postgres, api, scheduler, public-api) \u2014 postgres/api/scheduler are NOT on `edge`.",
+        "`docs/deployment/v2-public.md` runbook updated for the split topology, including the reverse-proxy/CDN expectations (TLS termination, caching immutable RECENT responses) and the env vars for spend cap, guard model, alert webhook \u2014 this story MAY edit that md as explicit deploy doc.",
         "`tests/docker/test_compose_v2.py` extended (docker-marked, opt-in): compose graph parses, public-api has the flag and a published port, postgres/api/scheduler publish no ports.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
@@ -190,7 +190,7 @@
         "US-111"
       ],
       "priority": 119,
-      "passes": false,
+      "passes": true,
       "notes": "Human provisions the actual edge (domain/TLS/CDN); the loop ships config that makes the safe topology the default."
     },
     {
@@ -209,7 +209,7 @@
       ],
       "dependencies": [],
       "priority": 120,
-      "passes": false,
+      "passes": true,
       "notes": "Review finding #14 (deliberately deferred from the --fix pass as architectural)."
     }
   ]

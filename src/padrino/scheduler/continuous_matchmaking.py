@@ -23,9 +23,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.analytics.repository import refresh_analytics_aggregates_for_game
 from padrino.core.rulesets import get_ruleset
+from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
 from padrino.economics.admission import admit
 from padrino.gauntlets.tournament import AdapterFactory, run_tournament_from_roster
 from padrino.matchmaking.matchmaker import MatchRecord, next_match
+from padrino.observability.alerts import (
+    ALERT_ADMISSION_DENIED_STREAK,
+    ALERT_MODERATION_GUARD_UNAVAILABLE,
+    ALERT_SCHEDULER_HEARTBEAT_STALE,
+    ALERT_SPEND_CAP_REACHED,
+    AlertNotifier,
+)
 from padrino.public.broadcast_index import mark_live
 from padrino.public.moderation import GuardModelAdapter, is_broadcastable
 from padrino.settings import Settings
@@ -83,6 +91,35 @@ async def _load_events_for_game(
     ]
 
 
+async def _check_heartbeat_alert(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    settings: Settings,
+    now: datetime,
+    notifier: AlertNotifier,
+) -> None:
+    """Fire/resolve ``scheduler.heartbeat.stale`` against the heartbeats table.
+
+    The tick that runs this is itself a scheduler tick that has already written
+    a fresh worker heartbeat, so a stale ``latest_beat`` here means another
+    scheduler replica (or a previously crashed worker) has gone dark.
+    """
+    async with session_factory() as session:
+        latest = await scheduler_heartbeats_repo.latest_beat(session)
+    threshold = settings.padrino_scheduler_heartbeat_stale_seconds
+    if latest is None:
+        return
+    age_s = (now - latest).total_seconds()
+    if age_s > threshold:
+        await notifier.fire(
+            ALERT_SCHEDULER_HEARTBEAT_STALE,
+            age_seconds=round(age_s, 3),
+            threshold_seconds=threshold,
+        )
+    else:
+        notifier.resolve(ALERT_SCHEDULER_HEARTBEAT_STALE)
+
+
 async def run_continuous_matchmaking_tick(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -90,18 +127,44 @@ async def run_continuous_matchmaking_tick(
     now: datetime,
     guard: GuardModelAdapter | None = None,
     adapter_factory: AdapterFactory | None = None,
+    notifier: AlertNotifier | None = None,
 ) -> bool:
     """Run one continuous matchmaking tick. Returns True if a game was executed."""
     if not settings.padrino_enable_continuous_matchmaking:
         _logger.debug("continuous_matchmaking.disabled")
         return False
 
+    if notifier is not None:
+        await _check_heartbeat_alert(session_factory, settings=settings, now=now, notifier=notifier)
+        # Guard unavailability is a standing degradation while matchmaking runs.
+        if guard is None:
+            await notifier.fire(ALERT_MODERATION_GUARD_UNAVAILABLE, reason="guard_none")
+        else:
+            notifier.resolve(ALERT_MODERATION_GUARD_UNAVAILABLE)
+
     async with session_factory() as session:
         decision = await admit(session, settings, now=now)
 
     if not decision.allowed:
         _logger.info("continuous_matchmaking.skipped", reason=decision.reason)
+        if notifier is not None:
+            if decision.reason == "spend_cap_reached":
+                await notifier.fire(ALERT_SPEND_CAP_REACHED, reason=decision.reason)
+            streak = notifier.increment(ALERT_ADMISSION_DENIED_STREAK)
+            if streak >= settings.padrino_admission_denied_streak_threshold:
+                await notifier.fire(
+                    ALERT_ADMISSION_DENIED_STREAK,
+                    streak=streak,
+                    threshold=settings.padrino_admission_denied_streak_threshold,
+                    reason=decision.reason,
+                )
         return False
+
+    if notifier is not None:
+        # A successful admission clears the denial streak and re-arms the alert.
+        notifier.reset_counter(ALERT_ADMISSION_DENIED_STREAK)
+        notifier.resolve(ALERT_ADMISSION_DENIED_STREAK)
+        notifier.resolve(ALERT_SPEND_CAP_REACHED)
 
     async with session_factory() as session:
         roster = await _load_roster(session)

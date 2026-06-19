@@ -11,8 +11,10 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from alembic import command
@@ -113,27 +115,56 @@ def sqlite_db_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         yield url
 
 
+def _with_database(url: str, database: str) -> str:
+    """Return ``url`` with its path (database name) replaced by ``database``."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, f"/{database}", parts.query, parts.fragment))
+
+
 @pytest.fixture
 def postgres_db_url(
     postgres_url_for_migrations: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[str]:
-    """Reset the container's schema between tests, then expose the URL."""
-    # `alembic downgrade base` drops everything Padrino owns; ensure we also
-    # remove the alembic_version table so each test starts from a truly empty
-    # database (no orphan revision row, no leftover tables from a prior test).
-    sync_url = _sync_url(postgres_url_for_migrations)
-    engine = sync_create_engine(sync_url)
-    try:
-        with engine.connect() as conn:
-            for table in (*EXPECTED_TABLES, "alembic_version"):
-                conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{table}" CASCADE')
-            conn.commit()
-    finally:
-        engine.dispose()
+    """Provision a UNIQUE, freshly-created Postgres database for each test.
 
-    monkeypatch.setenv("PADRINO_DB_URL", postgres_url_for_migrations)
-    yield postgres_url_for_migrations
+    US-118 flake burn-down: the container is session-scoped and shared across
+    the postgres migration tests, so the previous "reflect + drop every table"
+    reset shared a single mutable database between tests. Any leftover object
+    (or a concurrent run against the same container) made the upgrade/downgrade
+    cycle non-hermetic. Instead, each test gets its own throwaway database
+    (``padrino_mig_<uuid>``) created on the maintenance database and dropped in
+    teardown, so there is zero shared state to leak between tests.
+    """
+    sync_admin_url = _sync_url(postgres_url_for_migrations)
+    db_name = f"padrino_mig_{uuid.uuid4().hex}"
+
+    # CREATE/DROP DATABASE cannot run inside a transaction block, so use an
+    # AUTOCOMMIT connection on the container's maintenance database.
+    admin_engine = sync_create_engine(sync_admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin_engine.connect() as conn:
+            conn.exec_driver_sql(f'CREATE DATABASE "{db_name}"')
+    finally:
+        admin_engine.dispose()
+
+    test_url = _with_database(postgres_url_for_migrations, db_name)
+    monkeypatch.setenv("PADRINO_DB_URL", test_url)
+    try:
+        yield test_url
+    finally:
+        drop_engine = sync_create_engine(sync_admin_url, isolation_level="AUTOCOMMIT")
+        try:
+            with drop_engine.connect() as conn:
+                # Terminate any lingering backends so DROP DATABASE succeeds.
+                conn.exec_driver_sql(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %(db)s AND pid <> pg_backend_pid()",
+                    {"db": db_name},
+                )
+                conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{db_name}"')
+        finally:
+            drop_engine.dispose()
 
 
 def test_sqlite_upgrade_head_creates_all_tables(sqlite_db_url: str) -> None:

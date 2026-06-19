@@ -3,73 +3,44 @@
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
   import type {
-    PublicModelEntryResponse,
+    PublicLadderEntry,
     PublicLiveGameEntry,
     PublicRecentGameEntry
   } from '$lib/api/types';
 
   const RULESET = 'mini7_v1';
 
-  let totalGames = $state<number | null>(null);
-  let activeGauntlets = $state<number | null>(null);
-  let topModels = $state<PublicModelEntryResponse[]>([]);
-  let error = $state<string | null>(null);
+  // KPIs are sourced exclusively from the public spectator surface so the home
+  // page works against a public-surface-only API (no private /games, /gauntlets).
+  let liveNow = $state<number | null>(null);
+  let recentCount = $state<number | null>(null);
+  let topAgents = $state<PublicLadderEntry[]>([]);
 
   let liveGames = $state<PublicLiveGameEntry[]>([]);
   let recentGames = $state<PublicRecentGameEntry[]>([]);
 
   async function load() {
-    // The five KPI fetches are independent — run them concurrently and keep
-    // each one's degrade-on-failure semantics via allSettled.
-    const [lbResult, gamesResult, runningResult, liveResult, recentResult] =
-      await Promise.allSettled([
-        // Top models: requires a league id; pick the first available league via
-        // the public surface indirectly — for the home KPI we accept a fallback
-        // to the global public leaderboard (entity-keyed, identity-blind).
-        padrino.client.publicLeaderboard({ ruleset_id: RULESET, limit: 3 }),
-        padrino.client.listGames({ limit: 1 }),
-        padrino.client.listGauntlets({ status: 'RUNNING', limit: 50 }),
-        padrino.client.publicLiveIndex(),
-        padrino.client.publicRecentIndex({ limit: 10 })
-      ]);
-
-    if (lbResult.status === 'fulfilled') {
-      topModels = lbResult.value.entries.slice(0, 3).map((e) => ({
-        model_key: `${e.model_provider}/${e.model_name}${e.model_version ? '@' + e.model_version : ''}`,
-        display_name: e.display_name,
-        model_provider: e.model_provider,
-        model_name: e.model_name,
-        model_version: e.model_version,
-        mu: e.mu,
-        sigma: e.sigma,
-        conservative_score: e.conservative_score,
-        games: e.games,
-        wins: e.wins,
-        draws: e.draws,
-        losses: e.losses,
-        town: { mu: 0, sigma: 0, conservative_score: 0, games: 0, wins: 0, draws: 0, losses: 0 },
-        mafia: { mu: 0, sigma: 0, conservative_score: 0, games: 0, wins: 0, draws: 0, losses: 0 },
-        agent_build_count: 1
-      }));
-    } else {
-      // Anonymous mode may not be enabled; degrade silently for KPIs.
-      error = (lbResult.reason as Error).message;
-    }
-
-    totalGames =
-      gamesResult.status === 'fulfilled'
-        ? (gamesResult.value.total_estimate ?? gamesResult.value.items.length)
-        : null;
-
-    activeGauntlets = runningResult.status === 'fulfilled' ? runningResult.value.items.length : null;
+    // Three public surfaces feed both the KPIs and the lobby sections.
+    // Run them concurrently; each degrades independently on failure so a single
+    // unavailable surface never blocks the page or shows a hard error.
+    const [liveResult, recentResult, ladderResult] = await Promise.allSettled([
+      padrino.client.publicLiveIndex(),
+      padrino.client.publicRecentIndex({ limit: 10 }),
+      padrino.client.publicLadder({ ruleset_id: RULESET, limit: 3 })
+    ]);
 
     if (liveResult.status === 'fulfilled') {
       liveGames = liveResult.value.items;
+      liveNow = liveResult.value.total;
     }
-    // silent on failure: broadcast surface is optional
 
     if (recentResult.status === 'fulfilled') {
       recentGames = recentResult.value.items;
+      recentCount = recentResult.value.total_estimate;
+    }
+
+    if (ladderResult.status === 'fulfilled') {
+      topAgents = ladderResult.value.entries.slice(0, 3);
     }
   }
 
@@ -78,57 +49,57 @@
 
 <div class="grid gap-4 sm:grid-cols-3" data-testid="home-kpis">
   <Card>
-    <div class="text-xs uppercase tracking-wider text-muted-foreground">Total games</div>
-    <div class="mt-1 text-3xl font-semibold" data-testid="home-kpi-total-games">
-      {totalGames ?? '—'}
+    <div class="text-xs uppercase tracking-wider text-muted-foreground">Live now</div>
+    <div class="mt-1 text-3xl font-semibold" data-testid="home-kpi-live-now">
+      {liveNow ?? '—'}
     </div>
   </Card>
   <Card>
-    <div class="text-xs uppercase tracking-wider text-muted-foreground">Active gauntlets</div>
-    <div class="mt-1 text-3xl font-semibold" data-testid="home-kpi-active-gauntlets">
-      {activeGauntlets ?? '—'}
+    <div class="text-xs uppercase tracking-wider text-muted-foreground">Recent games</div>
+    <div class="mt-1 text-3xl font-semibold" data-testid="home-kpi-recent-games">
+      {recentCount ?? '—'}
     </div>
   </Card>
   <Card>
-    <div class="text-xs uppercase tracking-wider text-muted-foreground">Top model</div>
-    <div class="mt-1 text-xl font-semibold" data-testid="home-kpi-top-model">
-      {topModels[0]?.display_name ?? '—'}
+    <div class="text-xs uppercase tracking-wider text-muted-foreground">Top agent</div>
+    <div class="mt-1 text-xl font-semibold" data-testid="home-kpi-top-agent">
+      {topAgents[0]?.display_name ?? '—'}
     </div>
   </Card>
 </div>
 
-<section class="mt-8" data-testid="home-top-models">
-  <h2 class="mb-3 text-lg font-semibold">Top 3 models</h2>
-  {#if topModels.length === 0}
-    <p class="text-sm text-muted-foreground" data-testid="home-top-models-empty">
+<section class="mt-8" data-testid="home-top-agents">
+  <h2 class="mb-3 text-lg font-semibold">Top 3 agents</h2>
+  {#if topAgents.length === 0}
+    <p class="text-sm text-muted-foreground" data-testid="home-top-agents-empty">
       No ranked results yet.
     </p>
   {:else}
     <Card>
-      <table class="w-full text-sm" data-testid="home-top-models-table">
+      <table class="w-full text-sm" data-testid="home-top-agents-table">
         <thead class="text-left text-xs uppercase tracking-wider text-muted-foreground">
           <tr>
             <th class="pb-2">Rank</th>
-            <th class="pb-2">Model</th>
-            <th class="pb-2 text-right">Score</th>
+            <th class="pb-2">Agent</th>
+            <th class="pb-2 text-right">Ordinal</th>
             <th class="pb-2 text-right">Games</th>
           </tr>
         </thead>
         <tbody>
-          {#each topModels as model, i (model.model_key)}
-            <tr class="border-t border-border" data-testid="home-top-model-row">
+          {#each topAgents as agent, i (agent.agent_build_id)}
+            <tr class="border-t border-border" data-testid="home-top-agent-row">
               <td class="py-2">{i + 1}</td>
               <td class="py-2 font-medium">
                 <a
-                  href="/leaderboard"
+                  href="/ladder"
                   class="underline-offset-2 hover:underline"
-                  data-testid="home-top-model-link"
+                  data-testid="home-top-agent-link"
                 >
-                  {model.display_name}
+                  {agent.display_name}
                 </a>
               </td>
-              <td class="py-2 text-right">{model.conservative_score.toFixed(2)}</td>
-              <td class="py-2 text-right">{model.games}</td>
+              <td class="py-2 text-right">{agent.ordinal}</td>
+              <td class="py-2 text-right">{agent.games}</td>
             </tr>
           {/each}
         </tbody>
@@ -136,12 +107,6 @@
     </Card>
   {/if}
 </section>
-
-{#if error}
-  <p class="mt-4 text-xs text-muted-foreground">
-    Could not load all KPIs ({error}). Some endpoints may require a spectator key.
-  </p>
-{/if}
 
 <section class="mt-8" data-testid="lobby-live-section">
   <h2 class="mb-3 text-lg font-semibold">Live Now</h2>

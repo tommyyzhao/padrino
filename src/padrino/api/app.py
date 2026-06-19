@@ -94,6 +94,7 @@ def create_app(
     rate_limit_store: RateLimitStore | None = None,
     metrics_require_auth: bool | None = None,
     cors_allow_origins: Sequence[str] | None = None,
+    public_surface_only: bool | None = None,
 ) -> FastAPI:
     """Build and return the Padrino FastAPI application.
 
@@ -131,6 +132,16 @@ def create_app(
     when the sequence is non-empty. Defaults to the comma-separated list
     parsed from :attr:`Settings.padrino_cors_allow_origins`; empty leaves
     CORS off and the API behaves as wave-1.
+
+    ``public_surface_only`` (US-110) restricts the app to ONLY the public
+    spectator router plus the health probes (``/healthz``, ``/readyz``).
+    When on, the private routers (admin, admin_keys, ingest, games,
+    leagues, gauntlets, scheduled_gauntlets) and ``/metrics`` are not
+    registered at all — a request to any private prefix 404s rather than
+    401/403, because the route never exists in this process. Defaults to
+    :attr:`Settings.padrino_public_surface_only` (off). This is the
+    architectural embodiment of "website public, everything else private":
+    even a reverse-proxy misconfiguration cannot leak a private route.
     """
     settings = get_settings()
     app = FastAPI(
@@ -162,6 +173,9 @@ def create_app(
         if metrics_require_auth is None
         else metrics_require_auth
     )
+    surface_only = (
+        settings.padrino_public_surface_only if public_surface_only is None else public_surface_only
+    )
     if cors_allow_origins is None:
         origins = [o.strip() for o in settings.padrino_cors_allow_origins.split(",") if o.strip()]
     else:
@@ -176,15 +190,16 @@ def create_app(
         )
     app.middleware("http")(admin_token_deprecation_middleware)
     app.middleware("http")(metrics_middleware)
-    app.include_router(admin_router)
-    app.include_router(admin_keys_router)
-    app.include_router(leagues_router)
-    app.include_router(gauntlets_router)
-    app.include_router(games_router)
+    if not surface_only:
+        app.include_router(admin_router)
+        app.include_router(admin_keys_router)
+        app.include_router(leagues_router)
+        app.include_router(gauntlets_router)
+        app.include_router(games_router)
+        app.include_router(ingest_router)
+        app.include_router(scheduled_gauntlets_router)
     app.include_router(health_router)
-    app.include_router(ingest_router)
     app.include_router(public_router)
-    app.include_router(scheduled_gauntlets_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -226,23 +241,24 @@ def create_app(
             )
         return JSONResponse(status_code=200, content={"status": "ok", "database": "ok"})
 
-    if require_metrics_auth:
+    if not surface_only:
+        if require_metrics_auth:
 
-        @app.get("/metrics", dependencies=[Depends(require_read)])
-        def metrics_auth() -> Response:
-            return PlainTextResponse(
-                content=render_prometheus_text(),
-                media_type=CONTENT_TYPE_LATEST,
-            )
+            @app.get("/metrics", dependencies=[Depends(require_read)])
+            def metrics_auth() -> Response:
+                return PlainTextResponse(
+                    content=render_prometheus_text(),
+                    media_type=CONTENT_TYPE_LATEST,
+                )
 
-    else:
+        else:
 
-        @app.get("/metrics")
-        def metrics_open() -> Response:
-            return PlainTextResponse(
-                content=render_prometheus_text(),
-                media_type=CONTENT_TYPE_LATEST,
-            )
+            @app.get("/metrics")
+            def metrics_open() -> Response:
+                return PlainTextResponse(
+                    content=render_prometheus_text(),
+                    media_type=CONTENT_TYPE_LATEST,
+                )
 
     return app
 

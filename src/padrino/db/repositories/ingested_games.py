@@ -53,6 +53,19 @@ async def get_by_game_id(session: AsyncSession, game_id: str) -> IngestedGame | 
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def unverified_game_ids(session: AsyncSession) -> set[str]:
+    """Return the ``game_id`` of every ingested row not centrally verified.
+
+    Used by the public rating/analytics surfaces to exclude self-signed
+    ingested bundles that were never verified — a submitter-scoped key must
+    not be able to pollute the public rankings (US-112). ``game_id`` is the
+    string form of the original :class:`padrino.db.models.Game` UUID, so the
+    returned set can be diffed directly against ``str(game.id)``.
+    """
+    stmt = select(IngestedGame.game_id).where(IngestedGame.verification_status != VERIFIED)
+    return {gid for (gid,) in (await session.execute(stmt)).all()}
+
+
 async def count_by_submitter(session: AsyncSession) -> dict[uuid.UUID | None, int]:
     """Return ``{submitter_key_id: count}`` across every ingested row.
 
@@ -75,4 +88,5 @@ __all__ = [
     "count_by_submitter",
     "create",
     "get_by_game_id",
+    "unverified_game_ids",
 ]

@@ -36,7 +36,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.analytics.deterministic import compute_claim_analysis, compute_game_analytics
 from padrino.api.auth import (
     SCOPE_ADMIN,
     SCOPE_SPECTATOR,
@@ -73,6 +72,11 @@ from padrino.gauntlets.evaluation import evaluate_gauntlet, redact_for_public
 from padrino.observability.metrics import broadcast_active_streams, record_broadcast_frame
 from padrino.public.broadcast_index import BroadcastState, list_live
 from padrino.public.broadcaster import CadenceConfig, default_cadence, plan_broadcast
+from padrino.public.game_analytics_store import (
+    build_game_analytics_payload,
+    get_materialized_analytics,
+    materialize_game_analytics,
+)
 from padrino.ratings.model_rollup import (
     detail_for_model,
     rollup_by_model,
@@ -122,6 +126,24 @@ def _paginate_index(
     page = list(items[start : start + limit])
     next_cursor = encode_index_cursor(start + limit) if start + limit < len(items) else None
     return page, next_cursor
+
+
+async def _excluded_game_ids(session: AsyncSession) -> list[uuid.UUID]:
+    """Return local ``Game.id`` values that originate from unverified ingests.
+
+    The public rating/analytics surfaces must exclude games whose source is an
+    :class:`IngestedGame` row that was never centrally verified (US-112). The
+    ingested ``game_id`` is the string form of the local ``Game.id``; ids that
+    don't parse as UUIDs simply can't match a local game and are dropped.
+    """
+    raw_ids = await ingested_games_repo.unverified_game_ids(session)
+    out: list[uuid.UUID] = []
+    for raw in raw_ids:
+        try:
+            out.append(uuid.UUID(raw))
+        except ValueError:
+            continue
+    return out
 
 
 async def require_public_read(
@@ -519,9 +541,32 @@ async def public_game_analytics(
             detail="game_not_found_or_not_broadcastable",
         )
 
+    is_live = game.broadcast_state == BroadcastState.LIVE.value
+
+    if is_live:
+        # LIVE games keep the on-the-fly spoiler-safe path: never read the
+        # materialized row (it carries the outcome) and never persist while the
+        # game is still being broadcast.
+        http_response.headers["Cache-Control"] = "no-store"
+        payload = build_game_analytics_payload(await _load_game_event_dicts(session, game_id))
+        return _analytics_response_from_payload(game_id, game.ruleset_id, payload, is_live=True)
+
+    # RECENT: serve the materialized row; self-heal by computing + persisting on
+    # a stored-missing game (promoted before US-120).
+    http_response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    stored = await get_materialized_analytics(session, game_id)
+    recent_payload = (
+        stored
+        if stored is not None
+        else await materialize_game_analytics(session, game_id, ruleset_id=game.ruleset_id)
+    )
+    return _analytics_response_from_payload(game_id, game.ruleset_id, recent_payload, is_live=False)
+
+
+async def _load_game_event_dicts(session: AsyncSession, game_id: uuid.UUID) -> list[dict[str, Any]]:
     stmt = select(GameEvent).where(GameEvent.game_id == game_id).order_by(GameEvent.sequence)
     raw_events = list((await session.execute(stmt)).scalars())
-    event_dicts: list[dict[str, Any]] = [
+    return [
         {
             "sequence": e.sequence,
             "event_type": e.event_type,
@@ -535,60 +580,61 @@ async def public_game_analytics(
         for e in raw_events
     ]
 
-    analytics = compute_game_analytics(event_dicts)
-    claim_analysis = compute_claim_analysis(event_dicts)
-    is_live = game.broadcast_state == BroadcastState.LIVE.value
 
-    if is_live:
-        http_response.headers["Cache-Control"] = "no-store"
-    else:
-        http_response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-
+def _analytics_response_from_payload(
+    game_id: uuid.UUID,
+    ruleset_id: str,
+    payload: dict[str, Any],
+    *,
+    is_live: bool,
+) -> PublicGameAnalyticsResponse:
+    """Build the API response from a payload dict, nulling spoilers when LIVE."""
+    va = payload["voting_accuracy"]
     return PublicGameAnalyticsResponse(
         game_id=game_id,
-        ruleset_id=game.ruleset_id,
-        winner=None if is_live else analytics.winner,
+        ruleset_id=ruleset_id,
+        winner=None if is_live else payload["winner"],
         voting_accuracy=PublicVotingAccuracyAnalytics(
-            total_votes=analytics.voting_accuracy.total_votes,
-            accurate_votes=analytics.voting_accuracy.accurate_votes,
-            rate=analytics.voting_accuracy.rate,
+            total_votes=va["total_votes"],
+            accurate_votes=va["accurate_votes"],
+            rate=va["rate"],
         ),
         survival_curve=[
             PublicSurvivalPointAnalytics(
-                role=sp.role,
-                day=sp.day,
-                alive_count=sp.alive_count,
-                total_count=sp.total_count,
-                fraction=sp.fraction,
+                role=sp["role"],
+                day=sp["day"],
+                alive_count=sp["alive_count"],
+                total_count=sp["total_count"],
+                fraction=sp["fraction"],
             )
-            for sp in analytics.survival_curve
+            for sp in payload["survival_curve"]
         ],
         role_win_rates=None
         if is_live
         else [
             PublicRoleWinRateAnalytics(
-                role=rwr.role,
-                wins=rwr.wins,
-                games=rwr.games,
-                rate=rwr.rate,
+                role=rwr["role"],
+                wins=rwr["wins"],
+                games=rwr["games"],
+                rate=rwr["rate"],
             )
-            for rwr in analytics.role_win_rates
+            for rwr in payload["role_win_rates"]
         ],
         claims=[
             PublicClaimRecordAnalytics(
-                player_id=cr.player_id,
-                claimed_role=cr.claimed_role,
-                sequence=cr.sequence,
-                phase=cr.phase,
+                player_id=cr["player_id"],
+                claimed_role=cr["claimed_role"],
+                sequence=cr["sequence"],
+                phase=cr["phase"],
             )
-            for cr in claim_analysis.claims
+            for cr in payload["claims"]
         ],
         counter_claims=[
             PublicCounterClaimGroupAnalytics(
-                claimed_role=ccg.claimed_role,
-                claimants=list(ccg.claimants),
+                claimed_role=ccg["claimed_role"],
+                claimants=list(ccg["claimants"]),
             )
-            for ccg in claim_analysis.counter_claims
+            for ccg in payload["counter_claims"]
         ],
     )
 
@@ -1144,10 +1190,16 @@ async def public_recent_index(
         except InvalidCursorError as exc:
             raise invalid_cursor_error() from exc
 
-    recent_filter = (
+    # US-112: never surface a game that originated from an unverified ingested
+    # bundle. ``game_id`` is the string form of the local ``Game.id``; map back
+    # to UUIDs for the SQL filter (silently drop any malformed id).
+    excluded = await _excluded_game_ids(session)
+    recent_filter: tuple[Any, ...] = (
         Game.broadcast_state == BroadcastState.RECENT.value,
         Game.is_broadcastable.is_(True),
     )
+    if excluded:
+        recent_filter = (*recent_filter, Game.id.notin_(excluded))
     total = (
         await session.execute(select(func.count()).select_from(Game).where(*recent_filter))
     ).scalar_one()

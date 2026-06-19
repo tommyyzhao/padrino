@@ -102,6 +102,15 @@ class Settings(BaseSettings):
     # default for a centrally-hosted shared leaderboard.
     padrino_public_leaderboard_anonymous: bool = False
 
+    # Public-surface-only API mode (US-110). When True, ``create_app`` mounts
+    # ONLY the public spectator router and the health probes; every private
+    # router (admin, admin_keys, ingest, games, leagues, gauntlets,
+    # scheduled_gauntlets) and ``/metrics`` are not registered at all. The
+    # internet-facing process therefore cannot leak a private route even if a
+    # reverse proxy is misconfigured — defense in depth. ``/metrics`` is
+    # scraped against the internal (full-surface) instance instead.
+    padrino_public_surface_only: bool = False
+
     # CORS (US-070). Comma-separated list of allowed origins for the SvelteKit
     # dashboard (and any other browser-side consumer). Empty string disables
     # CORS entirely — the API responds without ``Access-Control-Allow-*``
@@ -171,6 +180,25 @@ class Settings(BaseSettings):
     # kept indefinitely.
     padrino_raw_payload_ttl_days: int = 30
     padrino_non_broadcastable_game_ttl_days: int = 7
+
+    # Retention executor (US-116). The executor is wired into the scheduler tick
+    # but stays inert unless ``padrino_enable_retention`` is True AND
+    # ``padrino_retention_dry_run`` is explicitly flipped to False. With the
+    # dry-run default on, the job only logs the plan and mutates nothing — both
+    # flags must be set deliberately before any destructive action.
+    padrino_enable_retention: bool = False
+    padrino_retention_dry_run: bool = True
+
+    # Operational alerting (US-113). ``padrino_alert_webhook_url`` is the
+    # Slack/Discord/etc. incoming-webhook URL the human sets at deploy time;
+    # when unset the notifier is log-only (no network call). The staleness
+    # window decides when the scheduler heartbeat is considered dead, and the
+    # streak threshold decides how many consecutive admission denials fire the
+    # ``admission.denied.streak`` alert.
+    padrino_alert_webhook_url: str | None = None
+    padrino_alert_webhook_timeout_s: float = 5.0
+    padrino_scheduler_heartbeat_stale_seconds: float = 120.0
+    padrino_admission_denied_streak_threshold: int = 5
 
     def build_routing_policy(
         self,
