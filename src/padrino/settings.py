@@ -111,6 +111,16 @@ class Settings(BaseSettings):
     # ``padrino scheduler``) with independent semaphores.
     padrino_human_lane_max_concurrent: int = 5
 
+    # Human-aware tick (US-138). A human-friendly per-phase deadline the tick
+    # barrier waits on (slow humans and slow LLMs alike are coerced to a safe
+    # action past it), plus a FIXED release delay applied symmetrically to ALL
+    # public messages — human AND AI — so message timing cannot out a seat
+    # (decision 5, simplified: a fixed delay, no seeded jitter / multi-message
+    # windows in v1). Both are wall-clock values consumed only in the impure
+    # runner; the pure core never reads them.
+    padrino_human_phase_deadline_seconds: float = 120.0
+    padrino_human_release_delay_seconds: float = 3.0
+
     # One-tap consent + 16+ age gate (US-130). The CURRENT version of each legal
     # document a human must accept before sending any action or chat. A consent
     # is "current" only when its stored ``document_version`` equals the value

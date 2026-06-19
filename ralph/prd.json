@@ -366,7 +366,7 @@
         "US-137"
       ],
       "priority": 138,
-      "passes": false,
+      "passes": true,
       "notes": "P3. Review: keep the anonymity principle, drop the elaborate buffered-cadence mechanism for v1. AI messages must wait in the buffer too (inverts 'emit at tick resolution')."
     },
     {
