@@ -44,8 +44,11 @@ FORBIDDEN_PADRINO_PREFIXES: tuple[str, ...] = (
 # the reference moment is injected, never read from the wall clock. The
 # ``test_allowed_datetime_modules_make_no_wallclock_calls`` test below enforces
 # that this exception cannot smuggle in an actual wall-clock read.
+# ``core/disconnect`` (US-150) needs ``datetime`` for pure grace-window
+# *arithmetic*: the reference ``now`` is injected, never read from the clock.
 ALLOWED_FORBIDDEN_IMPORTS: dict[str, frozenset[str]] = {
     "scheduling/__init__.py": frozenset({"datetime"}),
+    "disconnect.py": frozenset({"datetime"}),
 }
 
 # Attribute names that read the wall clock — banned even in allowlisted modules.

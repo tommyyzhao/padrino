@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     padrino_human_phase_deadline_seconds: float = 120.0
     padrino_human_release_delay_seconds: float = 3.0
 
+    # Disconnect grace + silent AI takeover (US-150). A dropped human seat gets
+    # this reconnect grace window; on expiry a curated AI silently takes the seat
+    # (SeatMultiplexAdapter swap + a SeatTakenOver event) so the game continues,
+    # invisibly in anonymous mode. A wall-clock value consumed only in the impure
+    # runner; the pure decision (WHEN to take over) reads it as plain data.
+    padrino_human_reconnect_grace_seconds: float = 90.0
+
     # Invite links, roster, ready-up, presence (US-148). A lobby member is
     # considered PRESENT only if it heartbeated within
     # ``padrino_lobby_presence_stale_seconds``; a stale member is evicted on the

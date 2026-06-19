@@ -619,7 +619,7 @@
         "US-148"
       ],
       "priority": 150,
-      "passes": false,
+      "passes": true,
       "notes": "P5. Decision 9 (v1 casual; ranked leaver penalties dormant)."
     },
     {
