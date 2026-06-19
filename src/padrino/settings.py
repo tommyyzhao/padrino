@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     padrino_human_session_ttl_hours: int = 720
     padrino_human_session_cookie_secure: bool = True
 
+    # One-tap consent + 16+ age gate (US-130). The CURRENT version of each legal
+    # document a human must accept before sending any action or chat. A consent
+    # is "current" only when its stored ``document_version`` equals the value
+    # here, so bumping any of these re-prompts every human on their next action.
+    padrino_consent_tos_version: str = "2026-06-18"
+    padrino_consent_privacy_version: str = "2026-06-18"
+    padrino_consent_age_gate_version: str = "2026-06-18"
+
     # Optional OAuth sign-in, ONE provider (US-129). All fields default to None
     # so the engine boots and the test suite runs WITHOUT any provider
     # credentials (the actual OAuth app is a deploy-time human step). When the

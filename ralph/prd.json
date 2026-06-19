@@ -202,7 +202,7 @@
         "US-127"
       ],
       "priority": 130,
-      "passes": false,
+      "passes": true,
       "notes": "P1. Decisions 17/18. Self-asserted band, not verified DOB (accepted risk)."
     },
     {

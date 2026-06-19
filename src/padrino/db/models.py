@@ -671,6 +671,37 @@ class OAuthIdentity(Base):
     )
 
 
+class HumanConsent(Base):
+    """An append-only record of a human accepting a legal document (US-130).
+
+    A human must accept Terms (``TOS``), Privacy (``PRIVACY``), and confirm they
+    are 16+ (``AGE_GATE``) before sending any action or chat. One combined tap
+    records all three kinds at their current ``document_version``. Rows are NEVER
+    updated or deleted in place — a fresh acceptance (e.g. after a document
+    version bump that re-prompts) appends new rows, so consent history is a
+    complete audit trail. ``source_ip_hash`` is an optional sha256 of the
+    accepting client's IP (never the raw IP), supporting abuse review without
+    storing PII.
+
+    Consent is enforced in the api/runner shell, NEVER in the pure core: the
+    first human action or chat submission is rejected unless a current consent
+    for every required document kind exists for the principal.
+    """
+
+    __tablename__ = "human_consents"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    subject_principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    document_kind: Mapped[str] = mapped_column(String, nullable=False)
+    document_version: Mapped[str] = mapped_column(String, nullable=False)
+    accepted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    source_ip_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -712,6 +743,7 @@ __all__ = [
     "Gauntlet",
     "GauntletRosterSlot",
     "HumanChatMessage",
+    "HumanConsent",
     "HumanRating",
     "HumanRatingEvent",
     "HumanSession",

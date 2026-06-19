@@ -32,6 +32,12 @@ from padrino.api.human_auth import (
     generate_session_token,
     require_human,
 )
+from padrino.api.human_consent import (
+    client_ip_hash,
+    has_current_consent,
+    record_consent,
+    required_consent_versions,
+)
 from padrino.api.oauth import (
     OAuthError,
     build_authorization_request,
@@ -68,6 +74,52 @@ class DisplayNameUpdate(BaseModel):
         if not stripped:
             raise ValueError("display_name must not be blank")
         return stripped
+
+
+class ConsentStatus(BaseModel):
+    """Whether the current human has accepted the CURRENT legal documents."""
+
+    consented: bool
+    required_versions: dict[str, str]
+
+
+@router.get("/human/consent", response_model=ConsentStatus)
+async def get_consent_status(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatus:
+    """Report whether the principal holds a current consent for every document."""
+    settings = _get_auth_settings(request)
+    consented = await has_current_consent(
+        session, subject_principal_id=ctx.principal_id, settings=settings
+    )
+    return ConsentStatus(
+        consented=consented,
+        required_versions=required_consent_versions(settings),
+    )
+
+
+@router.post(
+    "/human/consent",
+    response_model=ConsentStatus,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_consent(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatus:
+    """Record the one-tap combined consent (TOS + Privacy + 16+ age gate)."""
+    settings = _get_auth_settings(request)
+    versions = await record_consent(
+        session,
+        subject_principal_id=ctx.principal_id,
+        settings=settings,
+        accepted_at=datetime.now(UTC),
+        source_ip_hash=client_ip_hash(request),
+    )
+    return ConsentStatus(consented=True, required_versions=versions)
 
 
 @router.post(
@@ -279,6 +331,7 @@ async def _in_flight_guest_id(session: AsyncSession, request: Request) -> uuid.U
 __all__ = [
     "OAUTH_STATE_COOKIE",
     "OAUTH_VERIFIER_COOKIE",
+    "ConsentStatus",
     "DisplayNameUpdate",
     "GuestSummary",
     "router",
