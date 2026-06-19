@@ -112,6 +112,30 @@ FORBIDDEN_PAYLOAD_KEYS: Final[frozenset[str]] = (
     | HUMAN_IDENTITY_KEYS
 )
 
+#: Model / provider / agent-build identity markers. Unlike the seat's OWN
+#: ``role`` / ``faction`` (which a seat legitimately sees about itself, hard
+#: rule 3), these may NEVER reach a playing seat's stream in anonymous mode —
+#: they would re-identify the AI behind a seat. This is the subset of
+#: :data:`FORBIDDEN_PAYLOAD_KEYS` that is purely an *identity* leak (no
+#: legitimate self-disclosure), so a per-seat observation stream can assert
+#: their absence WITHOUT tripping on the seat's allowed ``you.role`` /
+#: ``you.faction``.
+MODEL_IDENTITY_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "agent_build_id",
+        "model_id",
+        "model_name",
+        "provider",
+        "provider_name",
+        "gauntlet_clone_index",
+        "clone_index",
+    }
+)
+
+#: Every identity marker (human-vs-AI + model/provider) that must be absent
+#: from a per-seat observation stream in anonymous mode.
+IDENTITY_MARKER_KEYS: Final[frozenset[str]] = HUMAN_IDENTITY_KEYS | MODEL_IDENTITY_KEYS
+
 FORBIDDEN_MEMORY_TOKENS: Final[frozenset[str]] = frozenset(
     {
         "agent_build_id",
@@ -368,6 +392,27 @@ def project_row_through_allowlist(
     return projected
 
 
+def assert_no_identity_markers(payload: Any) -> None:
+    """Raise :class:`AnonymityViolation` on any human-vs-AI / model marker.
+
+    A per-seat observation stream (US-136) legitimately carries the seat's OWN
+    ``role`` / ``faction`` (hard rule 3), so the broad :func:`assert_anonymous_safe`
+    deny-list (which forbids ``role`` / ``faction``) is too aggressive for it.
+    This narrower guard walks nested dicts / lists / tuples and raises only on an
+    :data:`IDENTITY_MARKER_KEYS` member (human-vs-AI or model/provider identity),
+    which a seat may never see about itself or others in anonymous mode. Keys
+    only are inspected, never values, so it never re-leaks the secret it guards.
+    """
+    if isinstance(payload, Mapping):
+        for key, sub_value in payload.items():
+            if key in IDENTITY_MARKER_KEYS:
+                raise AnonymityViolation(f"forbidden identity marker {key!r} in payload")
+            assert_no_identity_markers(sub_value)
+    elif isinstance(payload, list | tuple):
+        for item in payload:
+            assert_no_identity_markers(item)
+
+
 def project_seat_row(row: Mapping[str, Any], *, identity_mode: Any = None) -> dict[str, Any]:
     """Project a single seat row for a public / observation surface (fail-closed)."""
     return project_row_through_allowlist(row, PUBLIC_SEAT_FIELDS, identity_mode=identity_mode)
@@ -384,6 +429,8 @@ __all__ = [
     "FORBIDDEN_PAYLOAD_KEYS",
     "GAME_ID_KEYS",
     "HUMAN_IDENTITY_KEYS",
+    "IDENTITY_MARKER_KEYS",
+    "MODEL_IDENTITY_KEYS",
     "PUBLIC_GAME_FIELDS",
     "PUBLIC_SEAT_FIELDS",
     "TRANSPARENT",
@@ -391,6 +438,7 @@ __all__ = [
     "LeakFinding",
     "RankedPrivacyViolation",
     "assert_anonymous_safe",
+    "assert_no_identity_markers",
     "assert_ranked_observation_safe",
     "audit_observation_log_for_seat",
     "coerce_identity_mode",

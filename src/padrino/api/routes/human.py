@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +42,7 @@ from padrino.api.human_consent import (
     record_consent,
     required_consent_versions,
 )
+from padrino.api.human_observation import build_seat_observation_snapshot, stream_snapshot
 from padrino.api.oauth import (
     OAuthError,
     build_authorization_request,
@@ -255,6 +256,36 @@ async def post_chat(
         channel=accepted.channel,
         status=accepted.status,
         idempotent_replay=accepted.idempotent_replay,
+    )
+
+
+@router.get("/human/games/{game_id}/observation/stream")
+async def get_seat_observation_stream(
+    game_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> StreamingResponse:
+    """Stream the caller's seat observation + the current phase-deadline frame.
+
+    A seat-scoped live stream (US-136): the seat's own identity-mode-aware
+    observation projection (its private events + legal actions) followed by the
+    transport-only phase-deadline frame carrying the wall-clock deadline. The
+    deadline frame is emitted over the wire ONLY and is never written to the
+    hash-chained log (hard rule 4). In anonymous mode the stream carries no
+    human-vs-AI / model identity markers. A request for a seat the caller does
+    not occupy is rejected (403).
+    """
+    snapshot = await build_seat_observation_snapshot(
+        session, game_id=game_id, principal_id=ctx.principal_id
+    )
+    return StreamingResponse(
+        stream_snapshot(snapshot),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

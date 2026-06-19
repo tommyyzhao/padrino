@@ -325,7 +325,7 @@
         "US-126"
       ],
       "priority": 136,
-      "passes": false,
+      "passes": true,
       "notes": "P2. The wall-clock deadline frame is exactly the kind of value that must stay out of the hash chain (hard rule 4)."
     },
     {
