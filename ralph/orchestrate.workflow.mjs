@@ -136,6 +136,7 @@ Implement EXACTLY ${storyId} and nothing else. Satisfy EVERY one of its acceptan
    If ${storyId} is a FRONTEND story (its AC name the web/dashboard or pnpm gates) ALSO run:
    pnpm -C web/dashboard lint && pnpm -C web/dashboard check && pnpm -C web/dashboard test:e2e
    Integration tests (@pytest.mark.integration) are skipped by default; use mock adapters/stubs — never a real credential.
+   Once every gate passes ONE time, move STRAIGHT to the commit. Do NOT loop re-running suites to "confirm" non-flakiness — a single green run satisfies the gate. If a test is inherently flaky, make it DETERMINISTIC (pin the clock/seed/order) rather than re-running it. Budget your effort: implement + verify gates + commit; do not open-endedly grind.
 4. Fix ROOT CAUSES only. FORBIDDEN: '# type: ignore' to force green, --no-verify, git commit --amend, deleting/skipping a failing test, or weakening an assertion just to pass.
 5. Commit with EXACTLY this format (title verbatim from prd.json): feat: ${storyId} - <title>. One focused implementation commit.
 6. Set ONLY this story's "passes": true in ralph/prd.json. Leave every other story untouched.
