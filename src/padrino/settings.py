@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     padrino_human_session_ttl_hours: int = 720
     padrino_human_session_cookie_secure: bool = True
 
+    # Separate human-game worker lane (US-132). Minutes-to-hours human games run
+    # on an isolated worker lane with its OWN concurrency cap and admission
+    # accounting, so they never consume the benchmark scheduler's slots (which
+    # are sized for ~45s model turns at ``padrino_max_concurrent_games`` = 3).
+    # The two lanes are different processes (``padrino human-lane`` vs
+    # ``padrino scheduler``) with independent semaphores.
+    padrino_human_lane_max_concurrent: int = 5
+
     # One-tap consent + 16+ age gate (US-130). The CURRENT version of each legal
     # document a human must accept before sending any action or chat. A consent
     # is "current" only when its stored ``document_version`` equals the value
