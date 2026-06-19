@@ -304,7 +304,7 @@
         "US-134"
       ],
       "priority": 135,
-      "passes": false,
+      "passes": true,
       "notes": "P2. The moderation verdict itself lands in US-140; this story defines the channel + hold + sidecar routing and a stub-pass gate."
     },
     {

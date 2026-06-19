@@ -775,6 +775,56 @@ class HumanActionSubmission(Base):
     )
 
 
+class HumanChatSubmission(Base):
+    """An authenticated human's chat message in the buffered *hold* (US-135).
+
+    A human submits a public/private chat message over an authenticated POST
+    channel. The message enters this buffer hold and is gated by the
+    block-before-release moderation hook (US-140 lands the verdict) before any
+    release: a held message starts ``status='HELD'`` and is flipped to
+    ``'RELEASED'`` only after moderation passes, or ``'BLOCKED'`` and never
+    released. On release the raw text is routed to the out-of-band
+    :class:`HumanChatMessage` sidecar (US-123) — it is NEVER inlined in a
+    hash-chained event payload (the paired core event carries only an opaque
+    ``content_ref``), so it stays GDPR-redactable without breaking the chain.
+
+    ``idempotency_key`` dedupes network retries: a row is unique per
+    ``(game_id, public_player_id, phase, idempotency_key)``, so a retried POST
+    with the same key returns the already-held/released message rather than
+    inserting a duplicate. The chat firewall holds: this text drives no
+    mechanics — only a structured ``Action`` (US-134) mutates state.
+    """
+
+    __tablename__ = "human_chat_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "game_id",
+            "public_player_id",
+            "phase",
+            "idempotency_key",
+            name="uq_human_chat_idempotency",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), nullable=False
+    )
+    public_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    channel: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    raw_text: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="HELD", server_default="HELD"
+    )
+    sidecar_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -817,6 +867,7 @@ __all__ = [
     "GauntletRosterSlot",
     "HumanActionSubmission",
     "HumanChatMessage",
+    "HumanChatSubmission",
     "HumanConsent",
     "HumanGameRuntime",
     "HumanRating",

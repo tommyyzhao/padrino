@@ -18,6 +18,7 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -33,6 +34,7 @@ from padrino.api.human_auth import (
     generate_session_token,
     require_human,
 )
+from padrino.api.human_chat import submit_chat
 from padrino.api.human_consent import (
     client_ip_hash,
     enforce_consent,
@@ -184,6 +186,74 @@ async def post_action(
         phase=accepted.phase,
         action_type=accepted.action_type,
         target=accepted.target,
+        idempotent_replay=accepted.idempotent_replay,
+    )
+
+
+class ChatSubmission(BaseModel):
+    """A public/private chat message a human submits for their seat (US-135).
+
+    The chat firewall holds: this channel accepts ONLY chat (a ``channel`` +
+    ``text`` + an ``idempotency_key`` that dedupes retries). A stray structured
+    ``action`` field is a 422 (``extra='forbid'``) — only the separate action
+    channel (US-134) drives state. ``max_length`` is the ruleset message ceiling;
+    the service re-checks the per-channel limit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: Literal["PUBLIC", "PRIVATE"] = "PUBLIC"
+    text: str = Field(min_length=1, max_length=600)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class ChatResult(BaseModel):
+    """The accepted (or idempotently replayed) chat submission."""
+
+    accepted: bool
+    public_player_id: str
+    phase: str
+    channel: str
+    status: str
+    idempotent_replay: bool
+
+
+@router.post(
+    "/human/games/{game_id}/chat",
+    response_model=ChatResult,
+)
+async def post_chat(
+    game_id: uuid.UUID,
+    body: ChatSubmission,
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ChatResult:
+    """Submit a chat message into the buffered hold over the chat channel.
+
+    Gated by consent (US-130). The message enters the buffer hold and is released
+    only after the block-before-release moderation hook passes (US-140 lands the
+    verdict; US-135 ships a stub-pass gate); on release the raw text is routed to
+    the out-of-band sidecar (US-123), never inline in a hash-chained payload. An
+    idempotency key dedupes retries so a network retry never double-posts.
+    """
+    settings = _get_auth_settings(request)
+    await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
+    accepted = await submit_chat(
+        session,
+        game_id=game_id,
+        principal_id=ctx.principal_id,
+        channel=body.channel,
+        text=body.text,
+        idempotency_key=body.idempotency_key,
+        now=datetime.now(UTC),
+    )
+    return ChatResult(
+        accepted=True,
+        public_player_id=accepted.public_player_id,
+        phase=accepted.phase,
+        channel=accepted.channel,
+        status=accepted.status,
         idempotent_replay=accepted.idempotent_replay,
     )
 
@@ -399,6 +469,8 @@ __all__ = [
     "OAUTH_VERIFIER_COOKIE",
     "ActionResult",
     "ActionSubmission",
+    "ChatResult",
+    "ChatSubmission",
     "ConsentStatus",
     "DisplayNameUpdate",
     "GuestSummary",
