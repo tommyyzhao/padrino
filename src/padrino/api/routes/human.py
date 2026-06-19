@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.auth import _get_auth_settings
 from padrino.api.deps import get_session
+from padrino.api.human_actions import submit_action
 from padrino.api.human_auth import (
     HUMAN_SESSION_COOKIE,
     HumanPrincipalContext,
@@ -34,6 +35,7 @@ from padrino.api.human_auth import (
 )
 from padrino.api.human_consent import (
     client_ip_hash,
+    enforce_consent,
     has_current_consent,
     record_consent,
     required_consent_versions,
@@ -44,6 +46,7 @@ from padrino.api.oauth import (
     exchange_code,
     resolve_oauth_config,
 )
+from padrino.core.engine.actions import Action
 from padrino.db.repositories import human_principals as principals_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
 
@@ -120,6 +123,69 @@ async def post_consent(
         source_ip_hash=client_ip_hash(request),
     )
     return ConsentStatus(consented=True, required_versions=versions)
+
+
+class ActionSubmission(BaseModel):
+    """A structured action a human submits for their seat (US-134).
+
+    Exactly mirrors :class:`padrino.core.engine.actions.Action` (``type`` +
+    optional ``target``) plus an ``idempotency_key`` that dedupes retries. No
+    chat field is accepted here — chat is a separate channel (US-135) and only
+    the structured action drives state (chat firewall).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Action
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class ActionResult(BaseModel):
+    """The accepted (or idempotently replayed) action submission."""
+
+    accepted: bool
+    public_player_id: str
+    phase: str
+    action_type: str
+    target: str | None
+    idempotent_replay: bool
+
+
+@router.post(
+    "/human/games/{game_id}/actions",
+    response_model=ActionResult,
+)
+async def post_action(
+    game_id: uuid.UUID,
+    body: ActionSubmission,
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ActionResult:
+    """Submit a structured action for the caller's seat over the action channel.
+
+    Gated by consent (US-130). The action is validated server-side against the
+    seat's legal actions in the current phase and buffered; an idempotency key
+    dedupes retries so a network retry never double-votes.
+    """
+    settings = _get_auth_settings(request)
+    await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
+    accepted = await submit_action(
+        session,
+        game_id=game_id,
+        principal_id=ctx.principal_id,
+        action=body.action,
+        idempotency_key=body.idempotency_key,
+        now=datetime.now(UTC),
+    )
+    return ActionResult(
+        accepted=True,
+        public_player_id=accepted.public_player_id,
+        phase=accepted.phase,
+        action_type=accepted.action_type,
+        target=accepted.target,
+        idempotent_replay=accepted.idempotent_replay,
+    )
 
 
 @router.post(
@@ -331,6 +397,8 @@ async def _in_flight_guest_id(session: AsyncSession, request: Request) -> uuid.U
 __all__ = [
     "OAUTH_STATE_COOKIE",
     "OAUTH_VERIFIER_COOKIE",
+    "ActionResult",
+    "ActionSubmission",
     "ConsentStatus",
     "DisplayNameUpdate",
     "GuestSummary",

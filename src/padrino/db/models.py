@@ -731,6 +731,50 @@ class HumanGameRuntime(Base):
     )
 
 
+class HumanActionSubmission(Base):
+    """An authenticated human's structured action for one seat/phase (US-134).
+
+    A human submits a structured ``Action`` (``type`` + optional ``target``,
+    exactly :class:`padrino.core.engine.actions.Action`) over an authenticated
+    POST channel. The submission is validated server-side against
+    ``legal_actions_for`` and stored here so the human-aware tick (US-137/138) can
+    later resolve the seat's turn from buffered input.
+
+    ``idempotency_key`` dedupes network retries: a row is unique per
+    ``(game_id, public_player_id, phase, idempotency_key)``, so a retried POST
+    with the same key returns the already-recorded action rather than
+    double-voting. A later submission for the same seat+phase with a *different*
+    key overwrites the seat's pending action (the human changed their mind),
+    keyed off ``(game_id, public_player_id, phase)``.
+
+    Raw chat text never lives here — this table holds only the mechanical action.
+    """
+
+    __tablename__ = "human_action_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "game_id",
+            "public_player_id",
+            "phase",
+            "idempotency_key",
+            name="uq_human_action_idempotency",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), nullable=False
+    )
+    public_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    action_type: Mapped[str] = mapped_column(String, nullable=False)
+    target: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -771,6 +815,7 @@ __all__ = [
     "GameSeat",
     "Gauntlet",
     "GauntletRosterSlot",
+    "HumanActionSubmission",
     "HumanChatMessage",
     "HumanConsent",
     "HumanGameRuntime",

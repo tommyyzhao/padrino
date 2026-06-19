@@ -104,7 +104,7 @@ def _event_body(event: GameEvent) -> dict[str, object]:
     }
 
 
-def _replay_state_from_rows(rows: list[GameEvent]) -> tuple[GameState, EventLog]:
+def replay_state_from_rows(rows: list[GameEvent]) -> tuple[GameState, EventLog]:
     """Rebuild ``(GameState, EventLog)`` from persisted event rows.
 
     The chain is verified: :func:`replay_event_log` re-seals each body and raises
@@ -166,7 +166,7 @@ async def rehydrate_active_human_games(
             if not rows:
                 continue
 
-            state, event_log = _replay_state_from_rows(rows)
+            state, event_log = replay_state_from_rows(rows)
             if state.terminal_result is not None:
                 # The event log shows the game already ended; never resume it.
                 continue
@@ -195,4 +195,5 @@ async def rehydrate_active_human_games(
 __all__ = [
     "RehydratedHumanGame",
     "rehydrate_active_human_games",
+    "replay_state_from_rows",
 ]
