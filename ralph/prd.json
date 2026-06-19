@@ -95,7 +95,7 @@
       ],
       "dependencies": [],
       "priority": 125,
-      "passes": false,
+      "passes": true,
       "notes": "P0. Review consensus: commit to a sibling table; do NOT relax the scientific Rating constraint (risks the sacred row shape)."
     },
     {

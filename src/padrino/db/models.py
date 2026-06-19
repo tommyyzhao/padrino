@@ -3,7 +3,8 @@
 Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``agent_builds``, ``leagues``, ``gauntlets``, ``gauntlet_roster_slots``,
 ``games``, ``game_seats``, ``game_events``, ``llm_calls``, ``ratings``,
-``rating_events``.
+``rating_events``, and the dormant human-lane siblings ``human_rating`` /
+``human_rating_event`` (Wave 9, US-125).
 """
 
 from __future__ import annotations
@@ -105,6 +106,12 @@ class League(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
     ranked: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # Discriminator (Wave 9): SCIENTIFIC owns the sacred Rating tables;
+    # HUMANS_INCLUDED is the dormant casual human lane. Server-defaults to
+    # SCIENTIFIC so every existing league row is byte-identical after upgrade.
+    kind: Mapped[str] = mapped_column(
+        String, nullable=False, default="SCIENTIFIC", server_default="SCIENTIFIC"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -367,6 +374,76 @@ class RatingEvent(Base):
     )
 
 
+class HumanRating(Base):
+    """Dormant sibling of :class:`Rating` for the humans-included league (US-125).
+
+    Mirrors the scientific ``ratings`` row shape but is keyed by
+    ``human_player_id`` (a human principal reference) instead of an agent build,
+    and is NEVER written in v1 (casual). It exists so future activation of human
+    ELO is a flag-flip, not a migration. Writing a human-lane game touches
+    neither this table nor the scientific ``ratings`` table in v1.
+    """
+
+    __tablename__ = "human_rating"
+    __table_args__ = (
+        UniqueConstraint(
+            "league_id",
+            "human_player_id",
+            "scope_type",
+            "scope_value",
+            name="uq_human_rating_scope",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    human_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_value: Mapped[str] = mapped_column(String, nullable=False)
+    mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    conservative_score: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    games: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_game_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class HumanRatingEvent(Base):
+    """Dormant sibling of :class:`RatingEvent` for the humans-included league (US-125).
+
+    Mirrors the scientific ``rating_events`` audit-row shape but is keyed by
+    ``human_player_id`` instead of an agent build. NEVER written in v1.
+    """
+
+    __tablename__ = "human_rating_event"
+    __table_args__ = (
+        UniqueConstraint(
+            "game_id",
+            "human_player_id",
+            "scope_type",
+            "scope_value",
+            name="uq_human_rating_event_scope",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    human_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    public_player_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_value: Mapped[str] = mapped_column(String, nullable=False)
+    before_mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    before_sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    after_mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    after_sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class ScheduledGauntlet(Base):
     """A cron-scheduled recurring heterogeneous tournament (US-085)."""
 
@@ -547,6 +624,8 @@ __all__ = [
     "Gauntlet",
     "GauntletRosterSlot",
     "HumanChatMessage",
+    "HumanRating",
+    "HumanRatingEvent",
     "IngestedGame",
     "JudgeEnrichmentCard",
     "League",

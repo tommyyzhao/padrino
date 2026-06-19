@@ -54,6 +54,20 @@ class SeatKind(StrEnum):
     AI_TAKEOVER = "AI_TAKEOVER"
 
 
+class LeagueKind(StrEnum):
+    """Discriminator separating the scientific benchmark from the human lane.
+
+    A ``SCIENTIFIC`` league owns the sacred ``Rating`` / ``RatingEvent`` tables.
+    A ``HUMANS_INCLUDED`` league is the dormant, casual, humans-included league
+    (Wave 9): its games write ZERO scientific rating rows and its ELO lives in
+    the sibling ``human_rating`` / ``human_rating_event`` tables (not written in
+    v1). ``SCIENTIFIC`` is the legacy default so existing leagues are unchanged.
+    """
+
+    SCIENTIFIC = "SCIENTIFIC"
+    HUMANS_INCLUDED = "HUMANS_INCLUDED"
+
+
 class PhaseKind(StrEnum):
     """High-level phase type within a game."""
 
