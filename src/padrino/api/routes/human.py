@@ -47,6 +47,7 @@ from padrino.api.human_consent import (
     required_consent_versions,
 )
 from padrino.api.human_observation import build_seat_observation_snapshot, stream_snapshot
+from padrino.api.human_turing import get_own_result, submit_guess
 from padrino.api.oauth import (
     OAuthError,
     build_authorization_request,
@@ -302,6 +303,102 @@ async def get_seat_observation_stream(
     )
 
 
+class TuringGuessSubmission(BaseModel):
+    """A human's post-terminal spot-the-AI guess (US-144).
+
+    ``guess`` maps every OTHER seat's ``public_player_id`` to ``"HUMAN"`` or
+    ``"AI"``. This is a thin post-terminal step over the existing human channel,
+    not a new FSM phase. No chat / action fields are accepted (``extra='forbid'``)
+    - the imitation-game guess drives no game mechanics.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    guess: dict[str, Literal["HUMAN", "AI"]] = Field(min_length=0)
+
+
+class TuringGuessResult(BaseModel):
+    """The caller's personal spot-the-AI detection accuracy (no leaderboard)."""
+
+    guesser_public_id: str
+    total: int
+    correct: int
+    accuracy: str
+    idempotent_replay: bool
+
+
+@router.post(
+    "/human/games/{game_id}/turing-guess",
+    response_model=TuringGuessResult,
+)
+async def post_turing_guess(
+    game_id: uuid.UUID,
+    body: TuringGuessSubmission,
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> TuringGuessResult:
+    """Submit the post-terminal spot-the-AI guess and return personal accuracy.
+
+    Gated by consent (US-130). The caller must occupy a seat in the game (403)
+    and the game must be terminal (409). The guess is scored by the pure
+    :func:`padrino.core.turing.scoring.score_guess` and persisted with the
+    guesser's detection accuracy; a re-submission returns the stored result (a
+    guesser guesses once). There is NO competitive leaderboard in v1.
+    """
+    settings = _get_auth_settings(request)
+    await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
+    outcome = await submit_guess(
+        session,
+        game_id=game_id,
+        principal_id=ctx.principal_id,
+        guess=dict(body.guess),
+        now=datetime.now(UTC),
+    )
+    return TuringGuessResult(
+        guesser_public_id=outcome.guesser_public_id,
+        total=outcome.total,
+        correct=outcome.correct,
+        accuracy=outcome.accuracy,
+        idempotent_replay=outcome.idempotent_replay,
+    )
+
+
+@router.get(
+    "/human/games/{game_id}/turing-guess",
+    response_model=TuringGuessResult,
+)
+async def get_turing_guess(
+    game_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> TuringGuessResult:
+    """Return the caller's own spot-the-AI accuracy, gated behind their guess.
+
+    The personal accuracy result is disclosed ONLY after the viewer has submitted
+    their guess: a caller who has not yet guessed gets a 404 (``guess_not_found``)
+    so the reveal never hands out an accuracy stat for a guess that was not made.
+    A caller who occupies no seat in the game is rejected (403).
+    """
+    outcome = await get_own_result(
+        session,
+        game_id=game_id,
+        principal_id=ctx.principal_id,
+    )
+    if outcome is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="guess_not_found",
+        )
+    return TuringGuessResult(
+        guesser_public_id=outcome.guesser_public_id,
+        total=outcome.total,
+        correct=outcome.correct,
+        accuracy=outcome.accuracy,
+        idempotent_replay=outcome.idempotent_replay,
+    )
+
+
 @router.post(
     "/human/guest",
     response_model=GuestSummary,
@@ -518,5 +615,7 @@ __all__ = [
     "ConsentStatus",
     "DisplayNameUpdate",
     "GuestSummary",
+    "TuringGuessResult",
+    "TuringGuessSubmission",
     "router",
 ]

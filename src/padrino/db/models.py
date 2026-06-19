@@ -825,6 +825,40 @@ class HumanChatSubmission(Base):
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class HumanTuringGuess(Base):
+    """One human's post-terminal spot-the-AI guess + personal score (US-144).
+
+    After a human game terminates, each human submits ONE guess assigning
+    HUMAN/AI to every OTHER seat over the existing human channel (a thin
+    post-terminal step, not a new FSM phase). The pure
+    :func:`padrino.core.turing.scoring.score_guess` computes the guesser's
+    detection accuracy; the guess (``guess`` JSON: ``{public_player_id: label}``)
+    and the result (``total`` / ``correct`` / ``accuracy``) persist here.
+
+    Exactly one guess per ``(game_id, guesser_public_id)`` (a guesser guesses
+    once); a retry returns the stored row rather than re-scoring. There is NO
+    leaderboard - this row holds one guesser's personal stat only.
+    """
+
+    __tablename__ = "human_turing_guesses"
+    __table_args__ = (
+        UniqueConstraint("game_id", "guesser_public_id", name="uq_human_turing_guess"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), nullable=False
+    )
+    guesser_public_id: Mapped[str] = mapped_column(String, nullable=False)
+    guess: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    total: Mapped[int] = mapped_column(Integer, nullable=False)
+    correct: Mapped[int] = mapped_column(Integer, nullable=False)
+    accuracy: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
