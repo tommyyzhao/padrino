@@ -19,7 +19,7 @@
       ],
       "dependencies": [],
       "priority": 110,
-      "passes": false,
+      "passes": true,
       "notes": "P0. Defense in depth: even a reverse-proxy misconfiguration cannot leak a private route, because the public process never registers them."
     },
     {

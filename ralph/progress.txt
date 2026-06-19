@@ -2,6 +2,17 @@
 Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
+## 2026-06-18T01:00 - US-110
+- Added `padrino_public_surface_only: bool = False` to `Settings` and a `public_surface_only: bool | None = None` keyword to `create_app` (kwarg overrides the setting, else falls back to it).
+- When surface-only is on, `create_app` mounts ONLY `public_router` + `health_router`; the private routers (admin, admin_keys, leagues, gauntlets, games, ingest, scheduled_gauntlets) and the `/metrics` route are skipped entirely, so private prefixes return 404 not 401/403. `/healthz` and `/readyz` are defined inline in `app.py` (not on a router) so they always work.
+- Created `tests/api/test_public_surface_only.py` (20 tests): flag-on → every private prefix 404s, `/metrics` 404s, `/public/{live,recent,ladder,games/{id}/live}` + `/healthz`/`/readyz` work; flag-off (default) → private routes mounted (non-404), `/metrics` 200, public + health work; default setting is False. Uses anonymous public reads (`app.state.auth_settings = Settings(padrino_public_leaderboard_anonymous=True, ...)`) + `_live_cadence` zero-cadence override.
+- Files changed: `src/padrino/settings.py`, `src/padrino/api/app.py`, `tests/api/test_public_surface_only.py`
+- Gates: ruff check + format clean, mypy clean (273 files), pytest `-m "not integration"` 1641 passed / 29 skipped.
+- **Learnings for future iterations:**
+  - GET on a POST-only mounted path returns 405 (not 404); use `!= 404` for the flag-off "route exists" assertion and `== 404` for the flag-on "route absent" assertion to cover all method/auth permutations cleanly.
+  - `/public/ladder` requires a `ruleset_id` query param (422 without it); always pass `?ruleset_id=mini7_v1` when smoke-testing it.
+---
+
 ## 2026-06-10T30:00 - US-109
 - Extended `docker-compose.yml` with Wave 7 env vars in the `x-padrino-env` anchor: `DEEPINFRA_API_KEY`, `PADRINO_GLOBAL_SPEND_CAP_USD`, `PADRINO_ENABLE_CONTINUOUS_MATCHMAKING`, `PADRINO_BROADCAST_CADENCE_CHAT_MS`, `PADRINO_RAW_PAYLOAD_TTL_DAYS`, `PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS`.
 - Added `Cache-Control` headers to RECENT game analytics (`immutable`), model analytics (`300s`), and recent-game-list (`60s`) endpoints via FastAPI `Response` parameter injection.
@@ -42,6 +53,7 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ## Codebase Patterns
 
+- `create_app(public_surface_only=True)` (or `PADRINO_PUBLIC_SURFACE_ONLY=true`) builds the internet-facing process: only the public router + health router are mounted; private routers and `/metrics` are NOT registered, so private prefixes 404 (route absent), never 401/403. The flag resolves like the other `create_app` knobs: explicit kwarg wins, else `settings.padrino_public_surface_only`. Note `scheduled_gauntlets_router` carries BOTH private CRUD and one public route (`/public/scheduled-gauntlets`); gating the whole router (per AC) drops that public route too — the must-work public surface is the enumerated set (`/public/live`, `/public/recent`, `/public/ladder`, `/public/games/{id}/live`).
 - `src/padrino/public/` is the new module for Wave 7 public surface. Start each new public module here.
 - `padrino.core.spectator_projection.project_event_for_spectator` is the identity-blind filter for PUBLIC events; always build on top of it rather than reimplementing visibility filtering.
 - `padrino.core.observation_privacy.FORBIDDEN_PAYLOAD_KEYS` is the canonical deny list for identity/role/faction leaks — shared across spectator, ranked-observation, and public_event_v1.
