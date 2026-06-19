@@ -431,6 +431,30 @@ class AnalyticsAggregate(Base):
     )
 
 
+class MaterializedGameAnalytics(Base):
+    """Per-game deterministic analytics + claim analysis, computed once at RECENT (US-120).
+
+    Keyed by ``game_id`` (one row per game).  The stored ``analytics_json`` is
+    the full, outcome-revealing ``PublicGameAnalyticsResponse`` payload (winner
+    and role_win_rates included) — it is only served for RECENT games, whose
+    outcome is already public, so persisting the spoiler fields is safe.  LIVE
+    games keep the existing on-the-fly spoiler-safe path and never read this row.
+    Materialized on ``mark_recent`` instead of re-deriving the full event log on
+    every recap request.
+    """
+
+    __tablename__ = "materialized_game_analytics"
+
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), primary_key=True
+    )
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    analytics_json: Mapped[str] = mapped_column(String, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class JudgeEnrichmentCard(Base):
     """Per-agent-role judge enrichment trend card aggregated from BehavioralEvaluation rows (US-105).
 
@@ -475,6 +499,7 @@ __all__ = [
     "JudgeEnrichmentCard",
     "League",
     "LlmCall",
+    "MaterializedGameAnalytics",
     "ModelConfig",
     "ModelProvider",
     "PromptVersion",

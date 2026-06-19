@@ -209,7 +209,7 @@
       ],
       "dependencies": [],
       "priority": 120,
-      "passes": false,
+      "passes": true,
       "notes": "Review finding #14 (deliberately deferred from the --fix pass as architectural)."
     }
   ]
