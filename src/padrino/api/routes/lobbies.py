@@ -21,19 +21,40 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.api.deps import get_session
+from padrino.api.deps import get_session, get_session_factory
 from padrino.api.human_auth import HumanPrincipalContext, require_human
+from padrino.api.lobby_presence import (
+    MemberView,
+    roster_view,
+    should_auto_cancel,
+    stale_member_ids,
+)
+from padrino.api.lobby_state import stream_lobby_state
 from padrino.core.composition import CompositionSummary, composition_summary
-from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStakes
+from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStakes, LobbyStatus
 from padrino.core.rulesets import get_ruleset
+from padrino.db.models import Lobby
 from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 
 router = APIRouter()
+
+
+def _stale_seconds() -> float:
+    from padrino.settings import get_settings
+
+    return get_settings().padrino_lobby_presence_stale_seconds
+
+
+def _idle_seconds() -> float:
+    from padrino.settings import get_settings
+
+    return get_settings().padrino_lobby_idle_cancel_seconds
 
 
 class LobbyCreate(BaseModel):
@@ -60,6 +81,7 @@ class LobbySummary(BaseModel):
     theme_pack_id: str | None
     stakes: str
     status: str
+    invite_token: str
     host_principal_id: uuid.UUID
     league_id: uuid.UUID
     game_id: uuid.UUID | None
@@ -106,6 +128,7 @@ async def create_lobby(
         identity_mode=body.identity_mode.value,
         theme_pack_id=body.theme_pack_id,
         lobby_seed=secrets.token_hex(16),
+        invite_token=secrets.token_urlsafe(24),
         host_principal_id=ctx.principal_id,
         league_id=league.id,
         now=now,
@@ -154,17 +177,280 @@ async def get_lobby(
 
     A caller who is not a member of the lobby is rejected (404, so a non-member
     cannot even probe lobby existence). The disclosed composition is counts only
-    — never a per-seat human/AI map.
+    — never a per-seat human/AI map. A read first reconciles the presence /
+    idle-auto-cancel lifecycle (evicts stale members, closes an idle/abandoned
+    lobby).
     """
-    lobby = await lobbies_repo.get_lobby(session, lobby_id)
+    lobby = await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    await _reconcile_lifecycle(session, lobby)
+    summary = await _summary(session, lobby_id=lobby_id)
+    await session.commit()
+    return summary
+
+
+class RosterMember(BaseModel):
+    """Identity-blind roster entry: no principal id, seat_kind, or human/AI map."""
+
+    member_id: uuid.UUID
+    is_host: bool
+    ready: bool
+    present: bool
+
+
+class LobbyRoster(BaseModel):
+    """A member-scoped roster + counts-only composition (US-148)."""
+
+    id: uuid.UUID
+    status: str
+    member_count: int
+    composition: CompositionSummary
+    members: list[RosterMember]
+
+
+class ReadyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ready: bool
+
+
+@router.post("/lobbies/join/{invite_token}", response_model=LobbySummary)
+async def join_lobby(
+    invite_token: str,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbySummary:
+    """Join a lobby via its invite link (guest- or account-joinable).
+
+    Single-use-per-person is enforced by membership: re-joining returns the
+    existing membership (idempotent), never a duplicate row. Joining a
+    LOCKED/LAUNCHED/CLOSED lobby is rejected. The join records presence and
+    resets the lobby's idle clock.
+    """
+    lobby = await lobbies_repo.get_lobby_by_invite_token(session, invite_token)
     if lobby is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="lobby_not_found")
+
+    now = datetime.now(UTC)
+    existing = await lobbies_repo.get_member(
+        session, lobby_id=lobby.id, principal_id=ctx.principal_id
+    )
+    if existing is None:
+        if lobby.status != LobbyStatus.OPEN.value:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="lobby_not_open")
+        member = await lobbies_repo.add_member(
+            session,
+            lobby_id=lobby.id,
+            principal_id=ctx.principal_id,
+            is_host=False,
+            now=now,
+        )
+        await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
+    else:
+        await lobbies_repo.touch_member_presence(session, member_id=existing.id, now=now)
+    await lobbies_repo.touch_lobby(session, lobby_id=lobby.id, now=now)
+    summary = await _summary(session, lobby_id=lobby.id)
+    await session.commit()
+    return summary
+
+
+@router.get("/lobbies/{lobby_id}/roster", response_model=LobbyRoster)
+async def get_roster(
+    lobby_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbyRoster:
+    """Return the member-scoped, identity-blind roster after reconciling presence."""
+    lobby = await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    await _reconcile_lifecycle(session, lobby)
+    roster = await _roster(session, lobby_id=lobby_id)
+    await session.commit()
+    return roster
+
+
+@router.post("/lobbies/{lobby_id}/ready", response_model=LobbyRoster)
+async def set_ready(
+    lobby_id: uuid.UUID,
+    body: ReadyUpdate,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbyRoster:
+    """Set the caller's ready flag; counts as presence."""
+    lobby = await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
     member = await lobbies_repo.get_member(
         session, lobby_id=lobby_id, principal_id=ctx.principal_id
     )
+    assert member is not None
+    now = datetime.now(UTC)
+    await lobbies_repo.set_member_ready(session, member_id=member.id, ready=body.ready)
+    await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
+    await lobbies_repo.touch_lobby(session, lobby_id=lobby.id, now=now)
+    roster = await _roster(session, lobby_id=lobby_id)
+    await session.commit()
+    return roster
+
+
+@router.post("/lobbies/{lobby_id}/heartbeat", response_model=LobbyRoster)
+async def heartbeat(
+    lobby_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbyRoster:
+    """Record the caller's presence and reset the lobby idle clock."""
+    lobby = await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    member = await lobbies_repo.get_member(
+        session, lobby_id=lobby_id, principal_id=ctx.principal_id
+    )
+    assert member is not None
+    now = datetime.now(UTC)
+    await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
+    await lobbies_repo.touch_lobby(session, lobby_id=lobby.id, now=now)
+    roster = await _roster(session, lobby_id=lobby_id)
+    await session.commit()
+    return roster
+
+
+@router.post("/lobbies/{lobby_id}/lock", response_model=LobbySummary)
+async def lock_lobby(
+    lobby_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbySummary:
+    """Host-only: lock the roster (OPEN -> LOCKED)."""
+    lobby = await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    if lobby.status != LobbyStatus.OPEN.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="lobby_not_open")
+    now = datetime.now(UTC)
+    await lobbies_repo.set_lobby_status(
+        session, lobby_id=lobby_id, status=LobbyStatus.LOCKED.value, now=now
+    )
+    summary = await _summary(session, lobby_id=lobby_id)
+    await session.commit()
+    return summary
+
+
+@router.post("/lobbies/{lobby_id}/kick/{member_id}", response_model=LobbySummary)
+async def kick_member(
+    lobby_id: uuid.UUID,
+    member_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbySummary:
+    """Host-only: remove a member from the lobby."""
+    await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    target = await lobbies_repo.get_member_by_id(session, member_id)
+    if target is None or target.lobby_id != lobby_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="member_not_found")
+    if target.is_host:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cannot_kick_host")
+    now = datetime.now(UTC)
+    await lobbies_repo.remove_member(session, member_id=member_id)
+    await lobbies_repo.touch_lobby(session, lobby_id=lobby_id, now=now)
+    summary = await _summary(session, lobby_id=lobby_id)
+    await session.commit()
+    return summary
+
+
+@router.post("/lobbies/{lobby_id}/transfer/{member_id}", response_model=LobbyRoster)
+async def transfer_host(
+    lobby_id: uuid.UUID,
+    member_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbyRoster:
+    """Host-only: hand the host role to another member."""
+    await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    target = await lobbies_repo.get_member_by_id(session, member_id)
+    if target is None or target.lobby_id != lobby_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="member_not_found")
+    now = datetime.now(UTC)
+    await lobbies_repo.set_host(
+        session,
+        lobby_id=lobby_id,
+        new_host_member_id=member_id,
+        new_host_principal_id=target.principal_id,
+        now=now,
+    )
+    roster = await _roster(session, lobby_id=lobby_id)
+    await session.commit()
+    return roster
+
+
+@router.get("/lobbies/{lobby_id}/stream")
+async def stream_lobby(
+    lobby_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+) -> StreamingResponse:
+    """Member-scoped lobby state SSE channel (roster/ready/presence, identity-blind).
+
+    Membership is resolved in the route body FIRST so a non-member is a real 404,
+    not a half-open stream. The frames are counts-only and carry no per-seat
+    human/AI map.
+    """
+    await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    return StreamingResponse(
+        stream_lobby_state(session_factory, lobby_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _require_member_lobby(
+    session: AsyncSession, *, lobby_id: uuid.UUID, principal_id: uuid.UUID
+) -> Lobby:
+    lobby = await lobbies_repo.get_lobby(session, lobby_id)
+    if lobby is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="lobby_not_found")
+    member = await lobbies_repo.get_member(session, lobby_id=lobby_id, principal_id=principal_id)
     if member is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="lobby_not_found")
-    return await _summary(session, lobby_id=lobby_id)
+    return lobby
+
+
+async def _require_host_lobby(
+    session: AsyncSession, *, lobby_id: uuid.UUID, principal_id: uuid.UUID
+) -> Lobby:
+    lobby = await _require_member_lobby(session, lobby_id=lobby_id, principal_id=principal_id)
+    if lobby.host_principal_id != principal_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not_host")
+    return lobby
+
+
+async def _reconcile_lifecycle(session: AsyncSession, lobby: Lobby) -> None:
+    """Evict stale members and auto-cancel an idle/abandoned non-terminal lobby."""
+    if lobby.status not in (LobbyStatus.OPEN.value, LobbyStatus.LOCKED.value):
+        return
+    now = datetime.now(UTC)
+    members = await lobbies_repo.list_members(session, lobby.id)
+    if should_auto_cancel(
+        lobby_updated_at=_as_aware(lobby.updated_at),
+        members=members,
+        now=now,
+        idle_seconds=_idle_seconds(),
+        stale_seconds=_stale_seconds(),
+    ):
+        await lobbies_repo.set_lobby_status(
+            session, lobby_id=lobby.id, status=LobbyStatus.CLOSED.value, now=now
+        )
+        return
+    for member_id in stale_member_ids(members, now=now, stale_seconds=_stale_seconds()):
+        # The host is never silently evicted (abandonment is handled above by
+        # the auto-cancel path); only non-host stale members are dropped.
+        member = await lobbies_repo.get_member_by_id(session, member_id)
+        if member is not None and not member.is_host:
+            await lobbies_repo.remove_member(session, member_id=member_id)
+
+
+def _as_aware(value: datetime) -> datetime:
+    """Coerce a SQLite-naive ``DateTime(timezone=True)`` back to UTC-aware."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummary:
@@ -185,6 +471,7 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
         theme_pack_id=lobby.theme_pack_id,
         stakes=LobbyStakes(lobby.stakes).value,
         status=lobby.status,
+        invite_token=lobby.invite_token,
         host_principal_id=lobby.host_principal_id,
         league_id=lobby.league_id,
         game_id=lobby.game_id,
@@ -193,4 +480,36 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
     )
 
 
-__all__ = ["LobbyCreate", "LobbySummary", "router"]
+async def _roster(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbyRoster:
+    lobby = await lobbies_repo.get_lobby(session, lobby_id)
+    assert lobby is not None
+    members = await lobbies_repo.list_members(session, lobby_id)
+    seats = await lobbies_repo.list_seats(session, lobby_id)
+    composition = composition_summary({"seat_kind": seat.seat_kind} for seat in seats)
+    now = datetime.now(UTC)
+    views: list[MemberView] = roster_view(members, now=now, stale_seconds=_stale_seconds())
+    return LobbyRoster(
+        id=lobby.id,
+        status=lobby.status,
+        member_count=len(members),
+        composition=composition,
+        members=[
+            RosterMember(
+                member_id=v.member_id,
+                is_host=v.is_host,
+                ready=v.ready,
+                present=v.present,
+            )
+            for v in views
+        ],
+    )
+
+
+__all__ = [
+    "LobbyCreate",
+    "LobbyRoster",
+    "LobbySummary",
+    "ReadyUpdate",
+    "RosterMember",
+    "router",
+]

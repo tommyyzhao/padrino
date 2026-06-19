@@ -128,6 +128,22 @@ class Settings(BaseSettings):
     padrino_human_phase_deadline_seconds: float = 120.0
     padrino_human_release_delay_seconds: float = 3.0
 
+    # Invite links, roster, ready-up, presence (US-148). A lobby member is
+    # considered PRESENT only if it heartbeated within
+    # ``padrino_lobby_presence_stale_seconds``; a stale member is evicted on the
+    # next roster/state read. A lobby whose last activity (any member action or
+    # heartbeat) is older than ``padrino_lobby_idle_cancel_seconds`` (and any
+    # OPEN/LOCKED lobby the host has abandoned) auto-cancels to CLOSED. The
+    # member-scoped lobby state SSE channel polls every
+    # ``padrino_lobby_stream_poll_ms`` and closes after
+    # ``padrino_lobby_stream_idle_timeout_ms`` of no change (tests flip the idle
+    # timeout near-zero so the snapshot-then-close stream returns immediately).
+    padrino_lobby_presence_stale_seconds: float = 60.0
+    padrino_lobby_idle_cancel_seconds: float = 1800.0
+    padrino_lobby_stream_poll_ms: int = 1000
+    padrino_lobby_stream_heartbeat_ms: int = 15000
+    padrino_lobby_stream_idle_timeout_ms: int = 300000
+
     # One-tap consent + 16+ age gate (US-130). The CURRENT version of each legal
     # document a human must accept before sending any action or chat. A consent
     # is "current" only when its stored ``document_version`` equals the value

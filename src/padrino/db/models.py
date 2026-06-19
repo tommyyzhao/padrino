@@ -924,6 +924,11 @@ class Lobby(Base):
     identity_mode: Mapped[str] = mapped_column(
         String, nullable=False, default="ANONYMOUS", server_default="ANONYMOUS"
     )
+    #: Opaque single-use-per-person invite token (US-148). A friend joins via
+    #: ``POST /lobbies/join/{invite_token}``; membership is what makes a join
+    #: single-use-per-person (re-joining is idempotent), so the token itself is a
+    #: shareable, reusable address for the lobby, not a one-time code.
+    invite_token: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     theme_pack_id: Mapped[str | None] = mapped_column(String, nullable=True)
     stakes: Mapped[str] = mapped_column(
         String, nullable=False, default="CASUAL", server_default="CASUAL"
