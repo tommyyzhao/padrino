@@ -284,3 +284,194 @@ export interface GauntletReport {
   average_actions_per_seat: number;
   rating_deltas: RatingDelta[];
 }
+
+// ---------------------------------------------------------------------------
+// Human multiplayer (Wave 9) — live play transport, lobby, reveal, guess, stats.
+// Source of truth: src/padrino/api/routes/human.py, lobbies.py, public.py and
+// src/padrino/core/{reveal,composition}.py. Keep aligned with the pydantic
+// definitions. These surfaces are identity-blind in anonymous mode: a live
+// frame never carries a human-vs-AI / model-identity marker before the reveal.
+
+/** Counts-only composition disclosure (US-126/142): never a per-seat map. */
+export interface CompositionSummary {
+  human_count: number;
+  ai_count: number;
+  total: number;
+}
+
+/** A human principal summary (guest or account); no PII beyond a display name. */
+export interface GuestSummary {
+  principal_id: string;
+  kind: string;
+  display_name: string | null;
+}
+
+/** Whether the current human holds a current consent for every legal document. */
+export interface ConsentStatus {
+  consented: boolean;
+  required_versions: Record<string, string>;
+}
+
+/** A structured action a human submits for their seat (US-134). */
+export interface ActionInput {
+  type: string;
+  target?: string | null;
+}
+
+/** The accepted (or idempotently replayed) action submission (US-134). */
+export interface ActionResult {
+  accepted: boolean;
+  public_player_id: string;
+  phase: string;
+  action_type: string;
+  target: string | null;
+  idempotent_replay: boolean;
+}
+
+export type ChatChannel = 'PUBLIC' | 'PRIVATE';
+
+/** The accepted (or idempotently replayed) chat submission (US-135). */
+export interface ChatResult {
+  accepted: boolean;
+  public_player_id: string;
+  phase: string;
+  channel: string;
+  status: string;
+  idempotent_replay: boolean;
+}
+
+export type SeatGuess = 'HUMAN' | 'AI';
+
+/** The caller's personal spot-the-AI detection accuracy (US-144). */
+export interface TuringGuessResult {
+  guesser_public_id: string;
+  total: number;
+  correct: number;
+  accuracy: string;
+  idempotent_replay: boolean;
+}
+
+/** Exact model identity for an AI (or taken-over) seat at the reveal (US-143). */
+export interface RevealModel {
+  provider: string;
+  model_name: string;
+  model_version: string | null;
+  agent_build_id: string;
+  display_name: string | null;
+}
+
+/** The full per-seat truth disclosed at the endgame reveal (US-143). */
+export interface SeatReveal {
+  public_player_id: string;
+  seat_index: number;
+  is_human: boolean;
+  role: string;
+  faction: string;
+  alive: boolean;
+  takeover_provenance: string;
+  taken_over_at_phase: string | null;
+  model: RevealModel | null;
+}
+
+/** The canonical endgame reveal: every seat's full truth (US-143). */
+export interface EndgameReveal {
+  game_id: string;
+  ruleset_id: string;
+  winner: string | null;
+  seats: SeatReveal[];
+}
+
+/** Counts-only composition of a broadcastable game (US-142). */
+export interface PublicCompositionResponse {
+  game_id: string;
+  ruleset_id: string;
+  composition: CompositionSummary;
+}
+
+/** Member-scoped view of a lobby: config + counts-only composition (US-147). */
+export interface LobbySummary {
+  id: string;
+  ruleset_id: string;
+  identity_mode: string;
+  theme_pack_id: string | null;
+  stakes: string;
+  status: string;
+  invite_token: string;
+  host_principal_id: string;
+  league_id: string;
+  game_id: string | null;
+  member_count: number;
+  composition: CompositionSummary;
+}
+
+/** Identity-blind roster entry: no principal id, seat_kind, or human/AI map. */
+export interface RosterMember {
+  member_id: string;
+  is_host: boolean;
+  ready: boolean;
+  present: boolean;
+}
+
+/** A member-scoped roster + counts-only composition (US-148). */
+export interface LobbyRoster {
+  id: string;
+  status: string;
+  member_count: number;
+  composition: CompositionSummary;
+  members: RosterMember[];
+}
+
+/** Result of a launch handoff: the materialized game and lobby status (US-149). */
+export interface LaunchResponse {
+  lobby_id: string;
+  game_id: string;
+  status: string;
+  created: boolean;
+}
+
+/** Per-human deterministic play stats (US-145); no leaderboard / ELO in v1. */
+export interface HumanPlayerStats {
+  ruleset_id: string;
+  principal_id: string;
+  games: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  role_win_rates: RoleWinRateAnalytics[];
+  survival_rate: number;
+  voting_accuracy: VotingAccuracyAnalytics;
+  detection_accuracy: string;
+}
+
+// ---- live transport frames (SSE-out) -------------------------------------
+
+/** One released PUBLIC frame from the live-tail SSE (public_event_v1, US-133). */
+export interface LiveEventFrame {
+  schema_version: string;
+  sequence: number;
+  phase: string;
+  event_type: string;
+  visibility: string;
+  actor_player_id: string | null;
+  payload: Record<string, unknown>;
+  prev_event_hash: string;
+  event_hash: string;
+}
+
+/** SSE discriminators for the per-seat observation stream (US-136). */
+export type SeatStreamFrameType = 'observation' | 'phase_deadline';
+
+/** The seat's own identity-mode-aware observation projection frame (US-136). */
+export interface SeatObservationFrame {
+  type: 'observation';
+  [key: string]: unknown;
+}
+
+/** Transport-only phase-deadline frame; never in the hash-chained log (US-136). */
+export interface PhaseDeadlineFrame {
+  type: 'phase_deadline';
+  phase: string;
+  deadline_at: string | null;
+}
+
+export type SeatStreamFrame = SeatObservationFrame | PhaseDeadlineFrame;

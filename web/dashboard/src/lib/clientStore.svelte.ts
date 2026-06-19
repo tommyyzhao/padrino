@@ -7,6 +7,10 @@ import {
 
 function createClientStore() {
   let apiKey = $state<string | null>(null);
+  // Human-session mode (Wave 9): the play client authenticates via the backend's
+  // http-only session cookie rather than the spectator API key. The cookie is
+  // never readable here, so the store only tracks whether to send credentials.
+  let humanSession = $state(false);
   const baseUrl = resolveBaseUrl();
   const client = new PadrinoClient({ baseUrl, apiKey: null });
 
@@ -25,6 +29,11 @@ function createClientStore() {
     saveApiKeyToSession(key);
   }
 
+  function setHumanSession(enabled: boolean) {
+    humanSession = enabled;
+    client.setHumanSession(enabled);
+  }
+
   return {
     get client() {
       return client;
@@ -32,11 +41,15 @@ function createClientStore() {
     get apiKey() {
       return apiKey;
     },
+    get humanSession() {
+      return humanSession;
+    },
     get baseUrl() {
       return baseUrl;
     },
     init,
-    setKey
+    setKey,
+    setHumanSession
   };
 }
 
