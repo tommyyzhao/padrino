@@ -70,7 +70,10 @@ build-backend = "hatchling.build"
 packages = ["src/padrino"]
 # Bundle canonical prompt markdown alongside the package so `importlib.resources`
 # can read them at runtime in installed wheels (US-052).
-artifacts = ["src/padrino/llm/prompts/**/*.md"]
+artifacts = [
+    "src/padrino/llm/prompts/**/*.md",
+    "src/padrino/assets/sprites/**/*.svg",
+]
 
 [tool.ruff]
 line-length = 100

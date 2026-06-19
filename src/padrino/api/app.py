@@ -34,6 +34,7 @@ from padrino.api.routes.leagues import router as leagues_router
 from padrino.api.routes.lobbies import router as lobbies_router
 from padrino.api.routes.public import router as public_router
 from padrino.api.routes.scheduled_gauntlets import router as scheduled_gauntlets_router
+from padrino.api.routes.sprites import router as sprites_router
 from padrino.observability.metrics import (
     CONTENT_TYPE_LATEST,
     api_requests_total,
@@ -210,6 +211,9 @@ def create_app(
     # so they mount alongside the human router and are reachable under
     # auth_required=True and the public-surface-only deployment.
     app.include_router(lobbies_router)
+    # Static themed sprite library (US-152): read-only, identity-blind art served
+    # with an immutable cache. Always mounted (reachable on the public surface).
+    app.include_router(sprites_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
