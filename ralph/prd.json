@@ -1,216 +1,690 @@
 {
   "project": "Padrino",
-  "branchName": "ralph/padrino-v8",
-  "description": "Wave 8 \u2014 Production Launch Hardening. Closes every loop-buildable gap between the Wave 7 feature-complete state and a public production release, under the locked product shape: the PUBLIC surface is a spectator website (lobby, live watch, ladder, recap) served exclusively from /public/* endpoints; everything else (admin, ingest, gauntlets, leagues, scheduler, metrics) runs on a PRIVATE backend that is never exposed to the internet. Build order: P0 surface split (110-111) -> P1 trust + ops rails (112-116) -> P2 verification + flake burn-down (117-118) -> P3 deploy + perf (119-120). Human-gated launch steps (key rotation, domain/TLS/CDN/Postgres provisioning, cap/cadence sign-off, legal pages, one paid integration run) are NOT stories \u2014 see the launch checklist in the session plan; the loop must reach loop-complete without any new credential.",
+  "branchName": "ralph/padrino-v9",
+  "description": "Wave 9 - Human Multiplayer v1 (the trimmed 'prove-the-fun' slice from prd-v3.md). Humans play with/against the models in PRIVATE FRIEND LOBBIES, default ANONYMOUS ('guess who is the AI'), always CASUAL (ELO infra designed-now-dormant), WITHOUT compromising the scientific benchmark. Build order: P0 foundations + invariants (121-126) -> P1 identity/consent/durable-state/worker-lane (127-132) -> P2 live transport spine (133-136) -> P3 human-play loop + moderation (137-140) -> P4 disclosure/endgame/stats + CI invariants (141-146) -> P5 lobbies/takeover/cost/sprites/frontend + e2e (147-157). NON-NEGOTIABLE INVARIANTS enforced from US-124/125 onward and gated in CI by US-146: (a) ANONYMITY - no human-vs-AI or model-identity leak on any live/observation/spectator surface before the endgame reveal; guards fail closed to ANONYMOUS. (b) SEGREGATION - a human game writes ZERO rows to the scientific Rating/RatingEvent tables. Human-gated prep (Wave 8 merged to main first; durable-state + worker-lane architecture sign-off; OAuth app credentials; static sprite-library generation; AGENTS.md + prompt.md refresh for this wave; concrete cap/deadline numbers) is NOT stories - see ralph/PREP-v9-human-multiplayer.md. The loop must reach loop-complete without any new credential (tests use mock adapters; OAuth/guard/image keys are deploy-time, not test-time). Several stories (131 durable state, 132 worker lane, 133 live-tail, 140 moderation) are architecturally heavy - if an acceptance criterion proves wrong, fix it in this file and note it in progress.txt rather than silently skipping.",
   "userStories": [
     {
-      "id": "US-110",
-      "title": "Public-surface-only API mode",
-      "description": "As the operator, I need the API to run in a mode that serves ONLY the public spectator surface, so the internet-facing process physically cannot expose admin, ingest, or any private route \u2014 the architectural embodiment of 'website public, everything else private'.",
+      "id": "US-121",
+      "title": "GameSeat human-occupant schema + seat_kind",
+      "description": "As the platform, a game seat must be occupiable by a human OR an agent build OR an AI that took over a human seat, so humans and AIs coexist in one game without faking an agent build for a human or polluting agent_build-keyed analytics.",
       "acceptanceCriteria": [
-        "New setting `padrino_public_surface_only: bool = False`; when True, `create_app` mounts ONLY the public router and the health router \u2014 admin, admin_keys, ingest, games, leagues, gauntlets, and scheduled_gauntlets routers are not mounted at all (404, not 401/403).",
-        "`/metrics` is NOT served in public-surface-only mode (scraping happens against the internal instance).",
-        "`/healthz` and `/readyz` still work in public mode (the edge needs probes).",
-        "Test `tests/api/test_public_surface_only.py` asserts: with the flag on, every private route prefix 404s, `/public/live`, `/public/recent`, `/public/ladder`, `/public/games/{id}/live` and `/healthz` work; with the flag off (default) behavior is unchanged.",
+        "src/padrino/db/models.py GameSeat: make agent_build_id nullable; add seat_kind str ('AI'|'HUMAN'|'AI_TAKEOVER', NOT NULL, server_default 'AI'); add nullable taken_over_at_phase and takeover_agent_build_id.",
+        "ONE Alembic migration after head 0021 begins the Wave 9 chain (all later v9 schema stories chain off it); upgrade/downgrade round-trips on SQLite and Postgres; existing AI-only games are byte-identical (seat_kind='AI', agent_build_id populated).",
+        "core/engine/state.py Seat carries an optional seat_kind as pure data with NO change to mechanics; replaying an existing event log reproduces identical state.",
+        "Test tests/db/test_game_seat_human_occupant.py asserts schema round-trip, that a legacy AI-only game persists/loads unchanged, and that core replay is unaffected.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
       "dependencies": [],
-      "priority": 110,
-      "passes": true,
-      "notes": "P0. Defense in depth: even a reverse-proxy misconfiguration cannot leak a private route, because the public process never registers them."
+      "priority": 121,
+      "passes": false,
+      "notes": "P0 schema lock. Resolves the agent_build_id NOT NULL conflict the review flagged across 4 epics: ONE owner, ONE migration. occupant_principal_id FK is added in US-127 alongside the principals table (kept out of here to avoid a forward dependency)."
     },
     {
-      "id": "US-111",
-      "title": "Spectator website consumes only /public endpoints",
-      "description": "As a public visitor, every page I can reach must work against the public-surface-only API, so the deployed website functions with zero access to private routes.",
+      "id": "US-122",
+      "title": "SeatTakenOver pure core event",
+      "description": "As the platform, a silent AI takeover of a human seat must be recorded as a single canonical, hash-chained, replay-stable core event, so provenance is reconstructable and the imitation game is never broken mid-play.",
       "acceptanceCriteria": [
-        "Audit `web/dashboard/src/routes/**`: the home page currently calls `listGames` and `listGauntlets` (private `/games`, `/gauntlets`) for KPIs \u2014 replace home KPIs with public-surface data (e.g. live-now count from `/public/live`, recent count from `/public/recent` total_estimate, top-3 from `/public/ladder`); no public-reachable page may call a non-/public endpoint.",
-        "Private-only pages (e.g. internal games browser) are either removed from the public nav or clearly degrade when the private API is absent \u2014 no infinite spinners, no hard errors on the public site.",
-        "Playwright `web/dashboard/tests/e2e/home.spec.ts` updated to the new KPI set and passing against the smoke harness.",
+        "core/engine/events.py: add SeatTakenOver (visibility=SYSTEM; payload public_player_id, day, phase, reason, replacement_agent_build_ref) to the Event discriminated union, EVENT_TYPES, EventAdapter, and __all__; NO wall-clock or random in the payload.",
+        "core/engine/reducer.py apply_event folds SeatTakenOver as provenance-only (state-preserving, no mechanics mutation); a pure helper compute_seat_provenance(event_log) -> {public_player_id: 'HUMAN'|'AI'|'HUMAN_THEN_AI'}.",
+        "Folding a log containing SeatTakenOver reproduces identical state and a valid hash chain; the purity-firewall test covers the new code (no random/datetime/IO under core/).",
+        "Test tests/core/test_seat_takeover_event.py covers the fold, provenance derivation, and replay/hash stability.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 122,
+      "passes": false,
+      "notes": "P0. One canonical takeover event - the review found 3 epics inventing it under different names."
+    },
+    {
+      "id": "US-123",
+      "title": "Out-of-band human-chat sidecar (off the hash chain)",
+      "description": "As the platform, human free-text chat (PII) must live outside the hash-chained event log so GDPR erasure can redact it WITHOUT breaking deterministic replay - which is mathematically impossible if the raw text is inside a hashed event.",
+      "acceptanceCriteria": [
+        "New table human_chat_messages (db/models.py): id, game_id FK, sequence (pairs with the GameEvent sequence), public_player_id, raw_text, cleaned_text, redacted bool default false, created_at. Raw human chat text lives ONLY here.",
+        "For human seats, the paired PublicMessageSubmitted/PrivateMessageSubmitted core event carries only a content reference/hash, not the raw text, so redacting the sidecar never changes any event_hash; the chat-firewall (chat drives no mechanics) is preserved.",
+        "A redact(game_id, sequence) operation nulls raw/cleaned text and sets redacted=true without touching game_events; verify_chain still passes afterward.",
+        "Migration chains after US-121; test tests/db/test_human_chat_sidecar.py asserts the hash chain is unchanged before/after redaction and that raw human text never appears in game_events.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-121"],
+      "priority": 123,
+      "passes": false,
+      "notes": "P0. Fixes the GDPR-vs-hash-chain impossibility all three reviewers independently flagged."
+    },
+    {
+      "id": "US-124",
+      "title": "Anonymity guard: human markers + column-level projection guard",
+      "description": "As the platform, no human-vs-AI or model-identity signal may leak on any observation/public surface before the endgame reveal, and the guard must catch new identity DB COLUMNS, not only payload keys.",
+      "acceptanceCriteria": [
+        "core/observation_privacy.py: extend FORBIDDEN_PAYLOAD_KEYS (and the spectator_projection alias) with the human-identity set: is_human, controller_type, seat_kind, occupant_principal_id, occupant_user_id, human_player_id, takeover, taken_over_at_phase, takeover_agent_build_id.",
+        "Add an allowlist-based DB-column projection guard so any seat/game row reaching a public or observation surface is projected through a field allowlist - a new identity COLUMN cannot leak even though it is not a payload key; assert_anonymous_safe(payload) raises on any forbidden key.",
+        "Guards FAIL CLOSED: a missing/None identity_mode coerces to ANONYMOUS (strip), never TRANSPARENT.",
+        "Property-test scaffold tests/core/test_anonymity_property.py (hypothesis) scans representative observation + public frames for forbidden keys and runs in the default suite.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 124,
+      "passes": false,
+      "notes": "P0. Review: the payload-key guard does not yet cover human markers and new DB columns bypass it entirely."
+    },
+    {
+      "id": "US-125",
+      "title": "Segregation: dormant sibling human_rating + zero-write guard",
+      "description": "As the platform, human games must NEVER touch the sacred scientific benchmark ELO, and the human ELO schema must exist (dormant) so future activation is a flag-flip, not a migration.",
+      "acceptanceCriteria": [
+        "New sibling tables human_rating and human_rating_event (db/models.py) keyed by (league_id, human_player_id, scope_type, scope_value), mirroring Rating/RatingEvent shape but NEVER written in v1; the existing Rating/RatingEvent tables and their byte-shape are untouched.",
+        "Seed/define a single 'Humans-Included League' League row (ranked=false) plus a discriminator so scientific vs human leagues are queryable; human games reference it.",
+        "A hard segregation test tests/ratings/test_segregation.py proves completing a human-lane game writes ZERO rows to scientific Rating/RatingEvent and ZERO to human_rating (casual/dormant in v1).",
+        "Migration chains after US-123.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": [],
+      "priority": 125,
+      "passes": false,
+      "notes": "P0. Review consensus: commit to a sibling table; do NOT relax the scientific Rating constraint (risks the sacred row shape)."
+    },
+    {
+      "id": "US-126",
+      "title": "IdentityMode enum + canonical composition-count function",
+      "description": "As the platform, identity mode must be a per-game value defaulting to ANONYMOUS, and composition counts must come from ONE canonical function so 'counts only, never the seat map' cannot drift between surfaces.",
+      "acceptanceCriteria": [
+        "core/enums.py: IdentityMode {ANONYMOUS (default), TRANSPARENT}.",
+        "db Game gains identity_mode (NOT NULL, server_default 'ANONYMOUS'), frozen after game start; legacy AI games default ANONYMOUS with no behavior change.",
+        "A single pure function composition_summary(seats) -> {human_count, ai_count, total} (data-in, no IO) is the ONLY producer of composition counts consumed by lobby, live, spectator, and observation surfaces.",
+        "Migration chains after US-123; test tests/core/test_identity_mode_composition.py covers the enum, the column default, and the pure function.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-123"],
+      "priority": 126,
+      "passes": false,
+      "notes": "P0. Review: four epics each computed composition counts independently - one canonical fn closes the drift/leak surface."
+    },
+    {
+      "id": "US-127",
+      "title": "Human principals, sessions, and get_human_context",
+      "description": "As the platform, browser humans need an identity/session layer that is completely separate from the existing API-key auth, and a game seat must be linkable to a human principal.",
+      "acceptanceCriteria": [
+        "New tables principals (id, kind 'guest'|'account', display_name nullable, deleted_at nullable, created_at/updated_at) and human_sessions (id, principal_id FK, session_hash sha256 only, kind, issued_at, expires_at, revoked_at, last_seen_at); add nullable occupant_principal_id (FK principals.id) to game_seats.",
+        "New src/padrino/api/human_auth.py: HumanPrincipalContext + get_human_context resolving the session/guest cookie WITHOUT consulting api_keys; require_human()/require_account() (401 vs 403). api/auth.py get_auth_context is unchanged and provably non-overlapping (a guest cookie grants zero API scope and vice-versa).",
+        "Per-human-principal rate limiting reuses RateLimitStore with a new ceiling padrino_rate_limit_human_per_minute.",
+        "Migration chains after US-126; tests/api/test_human_auth.py covers guest/account/expired/revoked, guest-on-account-only-route (403), and non-overlap with API keys in both directions.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-121"],
+      "priority": 127,
+      "passes": false,
+      "notes": "P1. Foundation every human story keys off. Friends graph, blocking, and lossless multi-guest merge are CUT from v1."
+    },
+    {
+      "id": "US-128",
+      "title": "Guest quickplay (no signup)",
+      "description": "As an invited friend with no account, I want to join from an invite link and immediately get a usable identity, so I can play without any signup.",
+      "acceptanceCriteria": [
+        "POST /human/guest (new router src/padrino/api/routes/human.py) creates a guest principal, issues an http-only+Secure+SameSite=Lax cookie holding an opaque token (persisted only as sha256, constant-time compared), and returns a guest summary; reachable even when create_app(auth_required=True).",
+        "PATCH /human/me sets a per-session display_name (validated, not globally unique); GET /human/me returns the current principal.",
+        "Creating a guest never touches api_keys and grants no scope; the plaintext token never appears in any DB column.",
+        "tests/api/test_guest_quickplay.py covers creation, cookie attributes, display-name set, and absence of plaintext token.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-127"],
+      "priority": 128,
+      "passes": false,
+      "notes": "P1. Decision 4 (guest quickplay)."
+    },
+    {
+      "id": "US-129",
+      "title": "Optional OAuth sign-in (one provider)",
+      "description": "As a returning player, I want to sign in with one provider so my stats persist across sessions/devices - without any friends graph or multi-account merge in v1.",
+      "acceptanceCriteria": [
+        "GET /human/oauth/{provider}/start and /callback (Authlib server-side code flow, ONE provider e.g. Google) with CSRF state + PKCE; find-or-create an account principal keyed by (provider, subject); issue an account session.",
+        "Provider client id/secret read from settings (optional/None so the engine boots and tests run without them) and never logged; no provider tokens persisted beyond completing the exchange.",
+        "A signed-in guest is upgraded in place: the single active guest principal's sessions and in-flight lobby membership re-point to the account; NO multi-guest merge, NO friends graph.",
+        "authlib added to deps with justification in progress.txt; tests/api/test_oauth_signin.py uses a stubbed provider (no network).",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-127"],
+      "priority": 129,
+      "passes": false,
+      "notes": "P1. One provider only. The actual OAuth app/credentials are a deploy-time human step (PREP-v9); the loop builds + tests the machinery with a stub."
+    },
+    {
+      "id": "US-130",
+      "title": "One-tap consent + 16+ age gate",
+      "description": "As the platform, a human must accept Terms+Privacy and confirm 16+ before sending any action or chat, captured with minimal friction.",
+      "acceptanceCriteria": [
+        "New append-only table human_consents (subject_principal_id, document_kind 'TOS'|'PRIVACY'|'AGE_GATE', document_version, accepted_at, source_ip_hash nullable); one combined tap records all three.",
+        "The first human action OR chat submission is rejected (HTTP 412/409) unless a current consent + 16+ acknowledgement exists for that principal; enforced in api/runner, never in core; a document_version bump re-prompts.",
+        "tests/api/test_consent_gate.py: pre-consent action rejected, post-consent allowed, version bump re-prompts.",
+        "Migration chains after US-127.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-127"],
+      "priority": 130,
+      "passes": false,
+      "notes": "P1. Decisions 17/18. Self-asserted band, not verified DOB (accepted risk)."
+    },
+    {
+      "id": "US-131",
+      "title": "Durable, rehydratable human-game state",
+      "description": "As the operator, a process restart must not lose an in-progress human game - which can last minutes to hours - so human-lane game state must be durable and rehydratable from the database.",
+      "acceptanceCriteria": [
+        "New table human_game_runtime (game_id, phase, deadline_at, buffer_snapshot JSON, updated_at) holding ONLY impure live scaffolding; deterministic core state is always reconstructed from the hash-chained event log, never from the snapshot.",
+        "rehydrate_active_human_games() rebuilds runner state for every in-progress human game from the event log + the runtime row and resumes the current phase; uses the existing async DB (NO new Redis dependency - stack rule).",
+        "tests/runner/test_human_game_durability.py: simulate a mid-game restart and assert core-state replay equality and phase resumption with no lost events.",
+        "Migration chains after US-130.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-121"],
+      "priority": 131,
+      "passes": false,
+      "notes": "P1. Review top-risk: the current runner is in-memory. Architecture sign-off is a PREP-v9 item; this story implements the agreed Postgres-snapshot approach."
+    },
+    {
+      "id": "US-132",
+      "title": "Separate human-game worker lane",
+      "description": "As the operator, minutes-long human games must not starve the benchmark scheduler (concurrency cap 3, sized for ~45s model turns), so human games run on an isolated worker lane.",
+      "acceptanceCriteria": [
+        "Human-lane games run under a dedicated runner/scheduler path with its own concurrency setting padrino_human_lane_max_concurrent and separate admission accounting; the benchmark scheduler path is unchanged.",
+        "The CLI gains an entrypoint (padrino human-lane, or a flag) to run the human lane as its own process.",
+        "tests/runner/test_human_lane_isolation.py asserts human games consume human-lane slots only and that many waiting human lobbies do not reduce benchmark concurrency.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-131"],
+      "priority": 132,
+      "passes": false,
+      "notes": "P1. Review: separate worker pool, not just separate accounting. Topology sign-off is a PREP-v9 item (compose service)."
+    },
+    {
+      "id": "US-133",
+      "title": "Live-tail SSE for in-progress games",
+      "description": "As the platform, the SSE spine must stream an IN-PROGRESS game (today it only paces a finished game's committed log then ends), so humans and spectators see the game as it happens.",
+      "acceptanceCriteria": [
+        "A live-tail mode streams the committed prefix then continues emitting newly committed PUBLIC events as produced, with keep-alive heartbeats and Last-Event-ID/?after= resume on a still-growing log; mid-game mark_live works (today mark_live only runs post-completion); uses short read transactions / poll-append, no long-held DB session.",
+        "Reuses the existing public_event_v1 projection + FORBIDDEN_PAYLOAD_KEYS (identity-blind); a LIVE game never exposes terminal_result.",
+        "tests/public/test_live_tail.py: a growing log is tailed, resume-by-sequence yields no gaps/dupes, the terminal frame closes the stream.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-132"],
+      "priority": 133,
+      "passes": false,
+      "notes": "P2. Review top-risk: the current SSE is post-hoc paced replay, not live tailing. This is the foundational transport lift the whole feature assumes."
+    },
+    {
+      "id": "US-134",
+      "title": "Authenticated POST action channel",
+      "description": "As a human player, I submit structured actions (vote/protect/investigate/etc.) over an authenticated POST channel, validated server-side, with safe retries.",
+      "acceptanceCriteria": [
+        "An authenticated POST (human session) submits a structured Action {type, target?} (exactly core/engine/actions.py) for the caller's seat; validated against legal_actions_for and the chat firewall (only Action mutates state); illegal/out-of-phase/wrong-seat rejected.",
+        "An idempotency key dedupes retries (lightweight store keyed by game+seat+phase+key) so a network retry never double-votes.",
+        "tests/api/test_human_action_channel.py covers accept-once-idempotent, illegal-rejected, out-of-phase-rejected, wrong-seat-rejected.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-127", "US-131"],
+      "priority": 134,
+      "passes": false,
+      "notes": "P2."
+    },
+    {
+      "id": "US-135",
+      "title": "Authenticated POST chat channel into the buffer hold",
+      "description": "As a human player, I submit chat over an authenticated POST channel; the message enters the buffered hold and is released only after moderation passes.",
+      "acceptanceCriteria": [
+        "An authenticated POST submits a public/private chat message respecting message_limits; the message enters the buffer hold and is gated by the block-before-release moderation hook (US-140) before any release; idempotency key dedupes retries.",
+        "Raw human chat text is routed to the sidecar (US-123), never inline in a hash-chained payload.",
+        "tests/api/test_human_chat_channel.py covers over-limit-rejected, held-then-released, idempotent.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-134"],
+      "priority": 135,
+      "passes": false,
+      "notes": "P2. The moderation verdict itself lands in US-140; this story defines the channel + hold + sidecar routing and a stub-pass gate."
+    },
+    {
+      "id": "US-136",
+      "title": "Per-seat live observation stream + phase-deadline frame",
+      "description": "As a human player, my client receives my seat's own observation (private info + legal actions) plus the current phase deadline, identity-blind in anonymous mode.",
+      "acceptanceCriteria": [
+        "An authenticated, seat-scoped live stream delivers that seat's identity-mode-aware observation projection (its own private_events, legal_actions) plus a phase-deadline frame carrying the wall-clock deadline; the deadline frame is transport-only and is NEVER written to the hash-chained log.",
+        "Reuses build_observation from the impure layer (no new branching in core); in anonymous mode the stream contains no forbidden keys.",
+        "tests/api/test_seat_observation_stream.py: a seat sees only its own private info + legal actions, the deadline frame is present, and no forbidden keys appear in anonymous mode.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-133", "US-126"],
+      "priority": 136,
+      "passes": false,
+      "notes": "P2. The wall-clock deadline frame is exactly the kind of value that must stay out of the hash chain (hard rule 4)."
+    },
+    {
+      "id": "US-137",
+      "title": "HumanAdapter satisfies the LlmAdapter protocol",
+      "description": "As the runner, a human seat must be drivable through the exact same adapter contract as an LLM, so the tick barrier is unchanged.",
+      "acceptanceCriteria": [
+        "New src/padrino/llm/human_adapter.py implements the LlmAdapter Protocol: complete(observation) resolves the seat's turn from buffered human input (the POST channels) within the per-phase deadline, or coerces to a safe action (NOOP/ABSTAIN) on timeout - exactly like a misbehaving LLM; no tick.py contract change.",
+        "Illegal human submissions are coerced to a safe action against legal_actions_for, same as a malformed LLM response.",
+        "tests/llm/test_human_adapter.py covers buffered-resolve, timeout-coerce, illegal-coerce.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-134", "US-136"],
+      "priority": 137,
+      "passes": false,
+      "notes": "P3. The human player seam named in CLAUDE.md."
+    },
+    {
+      "id": "US-138",
+      "title": "Human-aware tick + symmetric fixed release delay",
+      "description": "As the platform, the tick must wait on slow humans under human-friendly deadlines and release ALL public messages (human and AI) on the same fixed delay, so message timing cannot out a seat.",
+      "acceptanceCriteria": [
+        "A human-aware tick awaits HumanAdapter and LLM seats under per-phase deadlines, then applies a FIXED release delay symmetrically to ALL public messages - humans AND AI - so no per-side timing signal exists (decision 5, simplified: fixed delay, NO seeded jitter / multi-message windows in v1). Settings: padrino_human_phase_deadline_seconds, padrino_human_release_delay_seconds.",
+        "All delay/clock logic lives in the impure runner (injected clock); core stays pure and the purity-firewall test passes.",
+        "tests/runner/test_human_tick_symmetry.py asserts AI and human public messages release on the same schedule and the phase always settles within deadline+delay.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-137"],
+      "priority": 138,
+      "passes": false,
+      "notes": "P3. Review: keep the anonymity principle, drop the elaborate buffered-cadence mechanism for v1. AI messages must wait in the buffer too (inverts 'emit at tick resolution')."
+    },
+    {
+      "id": "US-139",
+      "title": "Mixed human+AI seats + replay determinism",
+      "description": "As the platform, one game may mix human and AI seats and must still replay bit-for-bit from its event log.",
+      "acceptanceCriteria": [
+        "SeatMultiplexAdapter wires a single game with a per-seat mix of HumanAdapter and LLM adapters; an AI takeover swaps a seat's adapter between ticks.",
+        "All human non-determinism (submissions, release ordering, takeover) is captured as committed events; clocks/RNG stay in the runner.",
+        "tests/runner/test_mixed_seat_replay.py asserts a completed mixed human+AI game replays to an identical hash-chained state.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-138", "US-122"],
+      "priority": 139,
+      "passes": false,
+      "notes": "P3."
+    },
+    {
+      "id": "US-140",
+      "title": "Block-before-release moderation (hardened fail path)",
+      "description": "As the platform, every human message must pass moderation inside the buffer hold window before any other player sees it, and a moderation outage must never halt the game.",
+      "acceptanceCriteria": [
+        "A real-time gate runs inside the hold window: deterministic first-pass (extract public/moderation.deterministic_first_pass as a pure single-message verdict) + async guard model, under a hard latency budget; the pure sanitizer (core/agents/sanitizer.py) is wired to live human input; verdict taxonomy ALLOW/SOFT_MASK/BLOCK with a pure deterministic span-mask.",
+        "HARDENED fail path: the deterministic first-pass is the instant backstop; on guard timeout/error, fall back to the deterministic-only verdict for THAT message (or hold only that message) - the game NEVER halts; a BLOCK is never released and never chained; release timing follows the symmetric delay independent of the moderation path (no timing leak).",
+        "Per-user and per-game/phase message rate limits via RateLimitStore; released/masked text persists to the sidecar (US-123); raw text never reaches another seat or spectator.",
+        "tests/public/test_live_moderation.py: blocked message never released; guard-timeout falls back and the game proceeds; a recording stub proves the gate actually saw the message (guards the Wave-7 vacuous-gate class of bug).",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-135", "US-123"],
+      "priority": 140,
+      "passes": false,
+      "notes": "P3. Decision 12 preserved; the fail path the reviewers flagged is hardened. Latency hides inside the existing buffer window."
+    },
+    {
+      "id": "US-141",
+      "title": "Identity-mode-aware observation + projection",
+      "description": "As the platform, a playing seat's view must reveal model/human identity only in transparent mode and never in anonymous mode, defaulting closed.",
+      "acceptanceCriteria": [
+        "An identity-mode-aware build_observation variant: in ANONYMOUS a playing seat's view has ZERO model/provider/agent-build identifiers AND zero human-vs-AI markers; in TRANSPARENT it may surface them while still hiding other seats' roles/factions; the spectator/public projection is likewise mode-aware.",
+        "A missing/None mode coerces to ANONYMOUS (fail closed).",
+        "tests/core/test_mode_aware_observation.py: anonymous leaks nothing, transparent surfaces allowed fields, None coerces to anonymous.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-124", "US-126"],
+      "priority": 141,
+      "passes": false,
+      "notes": "P4."
+    },
+    {
+      "id": "US-142",
+      "title": "Composition-counts disclosure (counts only, frozen)",
+      "description": "As a player/spectator, I see only how many humans vs AI are present, never which seat is which, and the counts do not change on a silent takeover.",
+      "acceptanceCriteria": [
+        "Every player/spectator/lobby surface that shows composition uses the single canonical composition_summary (US-126): counts only, frozen at game start, never a per-seat map; a silent AI takeover does NOT change displayed counts.",
+        "tests/api/test_composition_counts.py asserts counts-only across lobby + live + spectator surfaces and frozen counts across a takeover.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-126", "US-141"],
+      "priority": 142,
+      "passes": false,
+      "notes": "P4. Decision 7."
+    },
+    {
+      "id": "US-143",
+      "title": "Endgame reveal projection + terminal-gated endpoint",
+      "description": "As a player, at the end of a game I always see the full truth: which seats were human, each seat's role/faction, the exact models, and any takeover - and never one event early.",
+      "acceptanceCriteria": [
+        "A terminal-only reveal projection assembles per-seat {is_human, role, faction, exact model for AI seats, takeover provenance HUMAN/AI/HUMAN_THEN_AI + phase} from seat data + event log; ONE canonical reveal schema (the review found 5 divergent definitions).",
+        "GET /public/games/{id}/reveal returns it ONLY when the game is terminal/RECENT; 404/empty while LIVE; always reveals even in anonymous mode (decision 11).",
+        "tests/api/test_endgame_reveal.py: LIVE returns no reveal; terminal returns full per-seat truth including takeover provenance.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-141", "US-125"],
+      "priority": 143,
+      "passes": false,
+      "notes": "P4."
+    },
+    {
+      "id": "US-144",
+      "title": "Spot-the-AI guess + pure scorer + personal stat",
+      "description": "As a human player, after the game I guess which seats were AI and see my detection accuracy - the core imitation-game hook - without any competitive leaderboard in v1.",
+      "acceptanceCriteria": [
+        "After terminal, each human submits one guess assigning HUMAN/AI to every other seat over the existing human channel (a thin post-terminal step, NOT a heavyweight new FSM phase); core/turing/scoring.py (pure, no clock/random/IO) computes per-guesser detection accuracy; guess + result persist.",
+        "The reveal endpoint gates the viewer's own accuracy result behind their submitted guess; NO cross-player/cross-model leaderboards in v1.",
+        "tests/core/test_turing_scoring.py + tests/api/test_guess_flow.py cover scoring and the guess-then-reveal gating.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-143"],
+      "priority": 144,
+      "passes": false,
+      "notes": "P4. Keep the hook + personal stat (decision 6); competitive Turing leaderboards deferred per the review."
+    },
+    {
+      "id": "US-145",
+      "title": "Per-human stats from the event log",
+      "description": "As a signed-in player, my play history yields stats (win rate by role/faction, survival, voting accuracy, detection accuracy) computed deterministically - with no leaderboard or ELO in v1.",
+      "acceptanceCriteria": [
+        "Extend padrino.analytics.deterministic (pure) with a participant-keyed extractor taking an injected {public_player_id -> principal_id} map; persist a human_player_stats aggregate keyed by (ruleset_id, principal_id): games, wins/draws/losses, role/faction win rates, survival rate, voting accuracy, detection accuracy.",
+        "Never written for scientific leagues; no leaderboard/ELO surface in v1.",
+        "tests/analytics/test_human_stats.py covers deterministic computation and that scientific leagues are untouched.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-125", "US-143"],
+      "priority": 145,
+      "passes": false,
+      "notes": "P4. Stats captured (accounts persist them); leaderboards/ELO deferred to a fast-follow."
+    },
+    {
+      "id": "US-146",
+      "title": "Anonymity + segregation CI gates",
+      "description": "As the platform, the two non-negotiable invariants must be suite-blocking so no future change can regress anonymity or pollute the benchmark.",
+      "acceptanceCriteria": [
+        "Promote the anonymity property test (US-124) and segregation test (US-125) to comprehensive gates covering every live frame, observation, pre-terminal reveal, and export path: a completed human game provably leaks zero human-vs-AI/model markers pre-reveal and writes zero scientific rating rows.",
+        "tests/test_invariants_human_mp.py aggregates the property + segregation checks and runs in the default suite.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-141", "US-142", "US-143"],
+      "priority": 146,
+      "passes": false,
+      "notes": "P4. The two invariants enforced in CI from here on (the review's #3 top risk)."
+    },
+    {
+      "id": "US-147",
+      "title": "Lobby tables + create/configure",
+      "description": "As a host, I create a private lobby and configure its game (ruleset/size, identity mode, theme, bot pre-pick vs auto-fill, casual stakes).",
+      "acceptanceCriteria": [
+        "New tables lobbies, lobby_members, lobby_seats (per the schema in prd-v3.md): lobby holds ruleset_id, identity_mode, theme_pack_id, stakes pinned CASUAL, status OPEN|LOCKED|LAUNCHED|CLOSED, lobby_seed, host, league_id (Humans-Included), nullable game_id.",
+        "POST /lobbies (create + host config: ruleset/size in {mini7_v1, bench10_v1}, identity_mode, theme_pack_id from the static library, pre-pick human_eligible models OR curated auto-fill, stakes=CASUAL); GET /lobbies/{id} member-scoped with count-only composition.",
+        "Migration chains after the latest v9 schema head; tests/api/test_lobby_create.py.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-127", "US-126"],
+      "priority": 147,
+      "passes": false,
+      "notes": "P5. Private friend lobbies only (decision 2). No public matchmaking."
+    },
+    {
+      "id": "US-148",
+      "title": "Invite links, roster, ready-up, presence",
+      "description": "As a host, I share an invite link; friends (guest or signed-in) join, ready up, and I can lock and launch; idle lobbies auto-cancel.",
+      "acceptanceCriteria": [
+        "POST /lobbies/join/{invite_token} (guest- and account-joinable, single-use-per-person via membership), roster read, ready-up, host lock/kick/transfer; heartbeat presence with stale-member eviction; idle/host-abandon auto-cancel lifecycle.",
+        "A member-scoped lobby state channel streams roster/ready/presence deltas, identity-blind (never per-seat human/AI in anonymous mode).",
+        "tests/api/test_lobby_invite_presence.py covers join, ready, presence eviction, and auto-cancel.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-147", "US-128"],
+      "priority": 148,
+      "passes": false,
+      "notes": "P5."
+    },
+    {
+      "id": "US-149",
+      "title": "Deterministic curated auto-fill + launch handoff",
+      "description": "As the platform, empty seats fill deterministically from a curated cheap-model pool and the lobby launches a real game on the human worker lane.",
+      "acceptanceCriteria": [
+        "Pure src/padrino/core/lobby/autofill.py deterministically assigns curated human_eligible AgentBuild ids to EMPTY seats given (lobby_seed, reserved map, curated roster), SeededRng only (no random/clock/IO), raising when the pool is smaller than the empty seats.",
+        "Launch handoff materializes a Game + GameSeat rows (humans -> occupant_principal_id with seat_kind HUMAN, AI -> agent_build_id with seat_kind AI) on the human worker lane (US-132); launch is single-fire/idempotent.",
+        "tests/core/test_lobby_autofill.py (purity + determinism) and tests/api/test_lobby_launch.py (idempotent handoff).",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-147", "US-132", "US-121"],
+      "priority": 149,
+      "passes": false,
+      "notes": "P5."
+    },
+    {
+      "id": "US-150",
+      "title": "Disconnect grace + silent AI takeover",
+      "description": "As a player, if I drop I get a short grace window to reconnect; otherwise an AI silently takes my seat so the game continues, invisibly in anonymous mode.",
+      "acceptanceCriteria": [
+        "Per-seat presence over the human transport; a reconnect grace window with identity-blind full-state replay; on grace expiry a curated AI silently takes over (SeatMultiplexAdapter swap; emit SeatTakenOver; reveal-only). Reconnect before takeover returns the seat; after takeover returns an identity-blind spectator.",
+        "In anonymous mode, other-seat presence/reconnecting state is never exposed (AIs do not disconnect); takeover is invisible mid-game and appears only in the endgame reveal provenance.",
+        "tests/runner/test_disconnect_takeover.py: the game progresses through a takeover, no mid-game leak, provenance shown at reveal.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-139", "US-122", "US-148"],
+      "priority": 150,
+      "passes": false,
+      "notes": "P5. Decision 9 (v1 casual; ranked leaver penalties dormant)."
+    },
+    {
+      "id": "US-151",
+      "title": "Cost governance: caps + throttle-not-kill breaker",
+      "description": "As the operator, human play is platform-absorbed within a Moderate budget; caps and a circuit breaker bound spend by stopping NEW lobbies, never by killing an active game.",
+      "acceptanceCriteria": [
+        "Per-user/day game + join caps and a per-user/day inference-$ cap keyed on principal (OAuth account else hashed guest token), enforced at lobby create/join/launch admission; curated human_eligible model pool; fallback token-price table when LiteLLM response_cost is None.",
+        "A per-lobby cost cap + circuit breaker that, on breach, STOPS new lobbies / new LLM turns but LETS ACTIVE GAMES FINISH (never boots humans); add a funding_source column (PLATFORM|BYOK_OWNER|SPONSOR_POOL, default PLATFORM) to the cost-tracking row (BYOK/sponsor otherwise dormant).",
+        "tests/economics/test_human_cost_governance.py: admission denies past caps, the breaker throttles new lobbies but never kills an active game, funding_source is recorded.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-149"],
+      "priority": 151,
+      "passes": false,
+      "notes": "P5. Decisions 14/19/20. The reviewers' 'AI-only continuation boots humans' anti-pattern is explicitly rejected. Concrete cap numbers are a PREP-v9 sign-off."
+    },
+    {
+      "id": "US-152",
+      "title": "Static themed sprite library",
+      "description": "As a player, seats show themed sprites from a curated static library - no runtime image generation - and in anonymous mode the sprite can never encode role or human/AI.",
+      "acceptanceCriteria": [
+        "A curated set of pre-generated themed sprite assets (3-5 theme packs) shipped as static files + a manifest, served read-only with immutable Cache-Control via a new asset route; anonymous mode maps every seat to a role-agnostic archetype per theme; deterministic placeholder fallback.",
+        "NO runtime image generation in v1 (the gemini-3.1-flash-image authoring step is offline/human - see PREP-v9).",
+        "tests/api/test_sprite_library.py: the manifest serves, anonymous archetypes are role-agnostic, an unknown key 404s.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes"
+      ],
+      "dependencies": ["US-126"],
+      "priority": 152,
+      "passes": false,
+      "notes": "P5. Decision 13 delivered as a static library; the review cut the runtime pipeline."
+    },
+    {
+      "id": "US-153",
+      "title": "Frontend live transport client",
+      "description": "As the dashboard, I gain a bidirectional play client (SSE-out + authenticated POST-in) with reconnect-by-sequence and a human session credential, turning the observe-only app interactive.",
+      "acceptanceCriteria": [
+        "web/dashboard: a liveClient (SSE-out + authenticated POST-in) with reconnect-by-sequence + idempotency keys, and a play-session store (Svelte 5 runes) deriving board/votes/chat from the released frame stream; PadrinoClient gains a human session/guest credential mode alongside the existing spectator API key.",
+        "web/dashboard/src/lib/api gains types + client methods for the live seat stream, action POST, chat POST, lobby, reveal, guess, and human stats; vitest unit coverage parallels the existing client tests.",
+        "uv run ruff check . passes",
+        "uv run ruff format --check . passes",
+        "uv run mypy src tests passes",
+        "uv run pytest -m \"not integration\" passes",
         "pnpm -C web/dashboard lint passes",
         "pnpm -C web/dashboard check passes",
-        "pnpm -C web/dashboard test:e2e passes (Playwright)",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
+        "pnpm -C web/dashboard test:e2e passes (Playwright)"
       ],
-      "dependencies": [
-        "US-110"
-      ],
-      "priority": 111,
-      "passes": true,
-      "notes": "Root cause of the pre-existing home.spec e2e failure: the home page depends on auth-gated private endpoints."
+      "dependencies": ["US-133", "US-134", "US-135"],
+      "priority": 153,
+      "passes": false,
+      "notes": "P5 / frontend. SSE+POST (decision: not raw WebSocket) - fits the adapter-static SPA."
     },
     {
-      "id": "US-112",
-      "title": "Public surfaces exclude unverified ingested games",
-      "description": "As the platform, the public ladder/leaderboards must never include results from self-signed ingested bundles that were not centrally verified, so a submitter-scoped key can never pollute the public rankings.",
+      "id": "US-154",
+      "title": "Frontend lobby UI",
+      "description": "As a host/guest, I create or join a lobby from an invite link, set it up, accept the one-tap consent, and ready up.",
       "acceptanceCriteria": [
-        "Every public rating/analytics surface (public leaderboard, model rollup, ladder, recent index) excludes games originating from `IngestedGame` rows whose `verification_status` is not 'verified'; house-run (non-ingested) games are unaffected.",
-        "Test `tests/api/test_public_excludes_unverified.py` seeds one house game, one verified ingest, one unverified ingest, and asserts the unverified one is absent from each public surface while remaining visible on the private/admin surface.",
+        "/lobby routes: create form (ruleset/size, identity mode, theme pack, bot pre-pick vs auto-fill, stakes shown CASUAL), invite-link share, guest-quickplay join with no signup + optional sign-in CTA + the one-tap consent + 16+ gate, live roster with count-only composition, ready/host controls, start.",
+        "Playwright web/dashboard/tests/e2e/lobby.spec.ts covers guest-join -> consent -> ready against the smoke harness.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
+        "uv run pytest -m \"not integration\" passes",
+        "pnpm -C web/dashboard lint passes",
+        "pnpm -C web/dashboard check passes",
+        "pnpm -C web/dashboard test:e2e passes (Playwright)"
       ],
-      "dependencies": [],
-      "priority": 112,
-      "passes": true,
-      "notes": "Cheap insurance: ingest is private in this deployment, but the filter makes the trust property hold by construction."
+      "dependencies": ["US-147", "US-148", "US-153"],
+      "priority": 154,
+      "passes": false,
+      "notes": "P5 / frontend."
     },
     {
-      "id": "US-113",
-      "title": "Operational alerting: webhook notifier + alert rules",
-      "description": "As the operator of an unattended money-spending system, I need to be notified when something important happens \u2014 spend cap reached, scheduler dead, moderation gate degraded \u2014 instead of discovering it on the provider bill.",
+      "id": "US-155",
+      "title": "Frontend in-game play surface",
+      "description": "As a player, I see the board, my legal actions, the phase timer, and a buffered chat that shows messages only after release - all identity-blind in anonymous mode.",
       "acceptanceCriteria": [
-        "New `src/padrino/observability/alerts.py` with `AlertNotifier` (async, posts JSON to `padrino_alert_webhook_url: str | None = None`; no-op transport when unset; always emits a structured log).",
-        "Alerts fired from existing seams: `spend.cap.reached` (spend governor denial), `scheduler.heartbeat.stale` (checked in the tick against the heartbeats table), `moderation.guard.unavailable` (guard None or erroring while continuous matchmaking enabled), `admission.denied.streak` (N consecutive denials, configurable).",
-        "A Prometheus alert-rules file (`docs/deployment/alert-rules.yml`) covering the same conditions from the existing metrics, shipped with the deploy config.",
-        "Tests `tests/observability/test_alerts.py` use a stub transport (httpx MockTransport) \u2014 no network, no integration marker: each trigger fires exactly once per condition transition (no alert spam every tick).",
+        "/play/[gameId]: seat board (identity-blind, count-only composition, themed static sprites), phase + countdown header (non-precise so it does not leak timing), legal-action-gated action panel + vote panel + role-conditional night panel, a buffered chat composer with pending/blocked/released states and a feed fed ONLY by released frames; reconnect with full-state replay.",
+        "Playwright web/dashboard/tests/e2e/play.spec.ts covers a scripted game turn (vote + a released chat message) and asserts no identity leak in anonymous mode.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
+        "uv run pytest -m \"not integration\" passes",
+        "pnpm -C web/dashboard lint passes",
+        "pnpm -C web/dashboard check passes",
+        "pnpm -C web/dashboard test:e2e passes (Playwright)"
       ],
-      "dependencies": [],
-      "priority": 113,
-      "passes": true,
-      "notes": "Webhook URL is set by the human at deploy time (Slack/Discord/etc.); the loop builds and tests the machinery."
+      "dependencies": ["US-153", "US-136", "US-152"],
+      "priority": 155,
+      "passes": false,
+      "notes": "P5 / frontend."
     },
     {
-      "id": "US-114",
-      "title": "Scheduler claim hardening (SKIP LOCKED)",
-      "description": "As the operator, two scheduler replicas must never double-claim the same gauntlet, so accidental horizontal scaling (or a stuck-then-restarted instance) cannot corrupt runs.",
+      "id": "US-156",
+      "title": "Frontend endgame reveal + guess + profile",
+      "description": "As a player, at game end I see the full reveal, submit my spot-the-AI guess, see my detection accuracy, and (if signed in) view my stats.",
       "acceptanceCriteria": [
-        "`claim_oldest_pending` (runner/scheduler claim path) uses `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL (`with_for_update(skip_locked=True)`); SQLite path unchanged (single-writer documented in the function docstring).",
-        "Postgres-marked test (`@pytest.mark.postgres`) asserts two concurrent claimers receive distinct rows (or one row + one None) \u2014 never the same row.",
+        "Endgame reveal screen (per-seat human/AI, role, faction, exact model, takeover provenance, themed sprite); the spot-the-AI guess UI (per-seat HUMAN/AI toggles, single submit, gating the reveal of own accuracy); a minimal profile/stats page for signed-in accounts (casual framing, no live ELO).",
+        "Playwright web/dashboard/tests/e2e/reveal.spec.ts covers guess-then-reveal and the stats page.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
+        "uv run pytest -m \"not integration\" passes",
+        "pnpm -C web/dashboard lint passes",
+        "pnpm -C web/dashboard check passes",
+        "pnpm -C web/dashboard test:e2e passes (Playwright)"
       ],
-      "dependencies": [],
-      "priority": 114,
-      "passes": true,
-      "notes": "Matters exactly now that continuous matchmaking gives the scheduler a permanent workload."
+      "dependencies": ["US-144", "US-145", "US-155"],
+      "priority": 156,
+      "passes": false,
+      "notes": "P5 / frontend."
     },
     {
-      "id": "US-115",
-      "title": "Honor PADRINO_LOG_LEVEL",
-      "description": "As the operator debugging production, the configured log level must actually take effect \u2014 cli.py currently hardcodes 'INFO'.",
+      "id": "US-157",
+      "title": "End-to-end human-game smoke test",
+      "description": "As the platform, one default-suite test must exercise the ENTIRE human spine - lobby through reveal - so a cross-boundary contract break can never pass a green suite (the Wave-7 lesson).",
       "acceptanceCriteria": [
-        "`padrino serve`, `padrino scheduler`, and `padrino bootstrap` configure logging from `settings.padrino_log_level` (env `PADRINO_LOG_LEVEL`), not a hardcoded literal.",
-        "Unit test asserts the logging configuration call receives the settings value (e.g. DEBUG) for at least the serve and scheduler entrypoints.",
+        "tests/integration/test_human_game_e2e.py (default suite; mock LLM adapter + a scripted human client driving the POST channels; zero/short delays): create lobby -> guest join -> consent -> ready -> auto-fill -> play a full game through votes + night actions + one moderated chat message -> terminal -> endgame reveal exposes models + human seats -> a spot-the-AI guess scores.",
+        "The test asserts anonymity held on every live frame (no forbidden keys) and that ZERO scientific Rating/RatingEvent rows were written.",
         "uv run ruff check . passes",
         "uv run ruff format --check . passes",
         "uv run mypy src tests passes",
         "uv run pytest -m \"not integration\" passes"
       ],
-      "dependencies": [],
-      "priority": 115,
-      "passes": true,
-      "notes": "Known bug: cli.py:47-ish hardcodes \"INFO\"."
-    },
-    {
-      "id": "US-116",
-      "title": "Retention executor job (guarded, dry-run default)",
-      "description": "As the operator, the retention planner from US-108 needs an actual executor wired into the scheduler so the compounding game bank stays bounded without manual intervention.",
-      "acceptanceCriteria": [
-        "Scheduler tick gains a retention step gated by `padrino_enable_retention: bool = False` and `padrino_retention_dry_run: bool = True` (both must be explicitly flipped for destructive action).",
-        "Executor applies `plan_retention` output: deletes expired non-broadcastable games (cascade), scrubs heavy `llm_calls` payloads past TTL; emits structured logs with counts; dry-run logs the plan without touching rows.",
-        "Tests `tests/db/test_retention_executor.py`: dry-run mutates nothing; enabled run deletes/scrubs exactly the planned candidates and NEVER touches broadcastable games, ratings, or public replay data; idempotent on re-run.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [],
-      "priority": 116,
-      "passes": true,
-      "notes": "US-108 built the pure planner; this is the impure executor it was designed for."
-    },
-    {
-      "id": "US-117",
-      "title": "Broadcast pipeline end-to-end smoke test",
-      "description": "As the platform, one default-suite test must exercise the ENTIRE Wave 7 spine \u2014 matchmaking tick through SSE consumption \u2014 so a cross-boundary contract break (like the Wave 7 moderation event-type bug) can never again pass a green suite.",
-      "acceptanceCriteria": [
-        "New `tests/public/test_broadcast_pipeline_e2e.py` (mock LLM adapter, stub guard, zero cadence): run_continuous_matchmaking_tick \u2192 game COMPLETED \u2192 analytics aggregates written \u2192 moderation pass marks broadcastable \u2192 LIVE \u2192 consume the full SSE stream \u2192 every frame validates against the public_event_v1 golden contract \u2192 terminal frame is last \u2192 mark_recent \u2192 recap analytics served spoiler-free.",
-        "The test asserts at least one PublicMessageSubmitted frame's text was actually seen by the moderation gate (e.g. via a recording stub guard) \u2014 regression-guards the vacuous-gate class of bug.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [],
-      "priority": 117,
-      "passes": true,
-      "notes": "Lesson from the Wave 7 review: per-story unit tests validated each side of an invented contract; only an end-to-end path catches lockstep-wrong seams."
-    },
-    {
-      "id": "US-118",
-      "title": "Flake burn-down: migrations, scheduler timing, dashboard e2e",
-      "description": "As the operator, the gates must be trustworthy: every known-flaky or environment-dependent test either becomes hermetic or is properly isolated, so a red CI means a real problem.",
-      "acceptanceCriteria": [
-        "`tests/db/test_migrations_all_dialects.py::test_postgres_full_cycle_upgrade_downgrade_upgrade` passes reliably in the full suite (isolate shared Postgres state per test, e.g. unique schema/database per run).",
-        "`tests/runner/test_scheduler.py::test_pending_gauntlet_runs_and_finalizes_to_completed` no longer depends on wall-clock timing under load (injected clock or generous deterministic synchronization).",
-        "Dashboard e2e `games.spec.ts` and `leaderboard.spec.ts` are hermetic against the smoke harness (deterministic seeded data, no dependence on machine state); `home.spec.ts` covered by US-111.",
-        "Full suite passes 3 consecutive runs locally (`uv run pytest -m \"not integration\"` \u00d73) \u2014 document the runs in progress.txt.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-111"
-      ],
-      "priority": 118,
-      "passes": true,
-      "notes": "Known offenders enumerated from the Wave 7 verification runs."
-    },
-    {
-      "id": "US-119",
-      "title": "Deploy topology: public edge vs private backend",
-      "description": "As the operator, the compose/deploy config must encode the public/private split: a public-api (surface-only) + static dashboard exposed to the edge, and api/scheduler/Postgres reachable only on an internal network.",
-      "acceptanceCriteria": [
-        "`docker-compose.yml` gains a `public-api` service running with `PADRINO_PUBLIC_SURFACE_ONLY=true` and a published port; the full `api` service and `postgres` lose published ports (internal network only); `scheduler` internal; `dashboard` built against the public-api URL.",
-        "Compose networks: `edge` (public-api, dashboard) and `internal` (postgres, api, scheduler, public-api) \u2014 postgres/api/scheduler are NOT on `edge`.",
-        "`docs/deployment/v2-public.md` runbook updated for the split topology, including the reverse-proxy/CDN expectations (TLS termination, caching immutable RECENT responses) and the env vars for spend cap, guard model, alert webhook \u2014 this story MAY edit that md as explicit deploy doc.",
-        "`tests/docker/test_compose_v2.py` extended (docker-marked, opt-in): compose graph parses, public-api has the flag and a published port, postgres/api/scheduler publish no ports.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-110",
-        "US-111"
-      ],
-      "priority": 119,
-      "passes": true,
-      "notes": "Human provisions the actual edge (domain/TLS/CDN); the loop ships config that makes the safe topology the default."
-    },
-    {
-      "id": "US-120",
-      "title": "Materialize per-game analytics at RECENT promotion",
-      "description": "As the platform serving a public recap page, per-game analytics for finished games should be computed once when the game becomes RECENT instead of re-deriving the full event log on every request.",
-      "acceptanceCriteria": [
-        "On `mark_recent` (or completion of broadcast), the deterministic per-game analytics + claim analysis are computed once and persisted (new table or JSON column keyed by game_id).",
-        "`GET /public/games/{id}/analytics` serves the stored result for RECENT games (immutable Cache-Control already in place); LIVE games keep the existing on-the-fly spoiler-safe path; behavior identical from the client's perspective (existing tests keep passing unchanged).",
-        "Backfill path: a stored-missing RECENT game falls back to on-the-fly compute and persists the result (self-healing for games promoted before this story).",
-        "Test `tests/api/test_game_analytics_materialized.py` asserts the stored row is created at promotion, served on GET, and the fallback persists.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [],
-      "priority": 120,
-      "passes": true,
-      "notes": "Review finding #14 (deliberately deferred from the --fix pass as architectural)."
+      "dependencies": ["US-146", "US-150", "US-151", "US-156"],
+      "priority": 157,
+      "passes": false,
+      "notes": "P5 verification. The single end-to-end guard for the whole human lane; closes the wave."
     }
   ]
 }
