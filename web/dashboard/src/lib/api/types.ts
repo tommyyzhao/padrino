@@ -461,9 +461,22 @@ export interface LiveEventFrame {
 /** SSE discriminators for the per-seat observation stream (US-136). */
 export type SeatStreamFrameType = 'observation' | 'phase_deadline';
 
+/**
+ * The legal action types + targets for the seat in the current phase (US-134).
+ * Mirrors `padrino.core.engine.legal_actions.LegalActions`. Drives the
+ * legal-action-gated action / vote / night panels on the play surface (US-155).
+ */
+export interface LegalActionsView {
+  allowed_action_types: string[];
+  legal_targets: string[];
+}
+
 /** The seat's own identity-mode-aware observation projection frame (US-136). */
 export interface SeatObservationFrame {
   type: 'observation';
+  phase?: string;
+  alive_players?: string[];
+  legal_actions?: LegalActionsView;
   [key: string]: unknown;
 }
 

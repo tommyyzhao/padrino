@@ -1,0 +1,405 @@
+<script lang="ts">
+  // US-155: In-game play surface.
+  //
+  // /play/[gameId]: an identity-blind, count-only play board with a non-precise
+  // phase countdown, legal-action-gated action / vote / night panels, and a
+  // buffered chat composer whose feed is fed ONLY by RELEASED frames. The
+  // buffered hold + symmetric release delay + moderation live server-side
+  // (US-138/140), so a frame that reaches this client is already released. The
+  // seat sprite key is resolved server-side to a role-agnostic archetype in
+  // anonymous mode (US-152), so this surface can never encode role or human/AI
+  // (AGENTS.md rule 7).
+  import { page } from '$app/stores';
+  import { onMount, onDestroy } from 'svelte';
+  import Card from '$lib/components/Card.svelte';
+  import Button from '$lib/components/Button.svelte';
+  import { padrino } from '$lib/clientStore.svelte';
+  import { createPlaySession, type PlaySession } from '$lib/playSession.svelte';
+  import { newIdempotencyKey } from '$lib/api/liveClient';
+  import {
+    composerStatusFromChat,
+    countdownBucket,
+    countdownLabel,
+    isNightActionPhase,
+    isVotePhase,
+    secondsUntil,
+    spriteUrl,
+    type ComposerStatus
+  } from '$lib/api/playSurface';
+  import type {
+    CompositionSummary,
+    LegalActionsView,
+    PhaseDeadlineFrame,
+    SeatObservationFrame,
+    SeatStreamFrame
+  } from '$lib/api/types';
+
+  let gameId = $derived($page.params.gameId);
+
+  let session = $state<PlaySession | null>(null);
+  let composition = $state<CompositionSummary | null>(null);
+  let themePackId = $state<string | null>(null);
+  let spriteByKey = $state<Record<string, string>>({});
+
+  // Seat-scoped observation (legal actions) + transport-only phase deadline.
+  let legal = $state<LegalActionsView | null>(null);
+  let mySeatId = $state<string | null>(null);
+  let deadlineIso = $state<string | null>(null);
+  let nowMs = $state<number>(Date.now());
+
+  let chatText = $state('');
+  let composerStatus = $state<ComposerStatus>('idle');
+  let actionBusy = $state(false);
+  let actionNote = $state<string | null>(null);
+  let error = $state<string | null>(null);
+
+  let obsSse: EventSource | null = null;
+  let tickTimer: ReturnType<typeof setInterval> | null = null;
+
+  const secondsRemaining = $derived(secondsUntil(deadlineIso, nowMs));
+  const bucket = $derived(countdownBucket(secondsRemaining));
+  const voteTarget = $state<{ value: string | null }>({ value: null });
+  const nightTarget = $state<{ value: string | null }>({ value: null });
+
+  // Seat board: derived from the released frame stream (identity-blind). The
+  // sprite KEY is resolved server-side to a role-agnostic archetype; here we
+  // only map a stable key per seat for a deterministic placeholder render.
+  const board = $derived(session?.seats ?? []);
+  const chat = $derived(session?.chat ?? []);
+  const phase = $derived(session?.phase ?? '—');
+  const terminal = $derived(session?.terminal ?? false);
+  const winner = $derived(session?.winner ?? null);
+
+  function seatSpriteUrl(publicPlayerId: string): string {
+    return spriteUrl(padrino.baseUrl, themePackId, spriteByKey[publicPlayerId] ?? null);
+  }
+
+  async function loadComposition(): Promise<void> {
+    if (!gameId) return;
+    try {
+      padrino.setHumanSession(true);
+      const c = await padrino.client.publicGameComposition(gameId);
+      composition = c.composition;
+    } catch {
+      // Composition is best-effort header data; keep the board usable without it.
+    }
+  }
+
+  function handleObservationFrame(frame: SeatStreamFrame): void {
+    if (frame.type === 'observation') {
+      const obs = frame as SeatObservationFrame;
+      if (obs.legal_actions) legal = obs.legal_actions;
+      const you = obs['you'] as { player_id?: string } | undefined;
+      if (you?.player_id) mySeatId = you.player_id;
+    } else if (frame.type === 'phase_deadline') {
+      const dl = frame as PhaseDeadlineFrame;
+      deadlineIso = dl.deadline_at;
+    }
+  }
+
+  function connectObservation(): void {
+    if (!gameId) return;
+    obsSse?.close();
+    const url = padrino.client.seatObservationUrl(gameId);
+    obsSse = new EventSource(url, { withCredentials: true });
+    obsSse.onmessage = (evt: MessageEvent) => {
+      try {
+        const frame = JSON.parse(evt.data as string) as SeatStreamFrame;
+        handleObservationFrame(frame);
+      } catch {
+        // ignore malformed frames
+      }
+    };
+    obsSse.onerror = () => {
+      // The observation stream is a per-snapshot half-open stream; on error we
+      // simply re-fetch the snapshot on the next phase tick rather than spin.
+      obsSse?.close();
+    };
+  }
+
+  async function submitVote(): Promise<void> {
+    if (!gameId) return;
+    actionBusy = true;
+    actionNote = null;
+    error = null;
+    try {
+      const target = voteTarget.value;
+      await padrino.client.submitAction(gameId, {
+        action: target ? { type: 'VOTE', target } : { type: 'ABSTAIN' },
+        idempotency_key: newIdempotencyKey()
+      });
+      actionNote = target ? 'Vote submitted.' : 'Abstained.';
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  function nightActionType(): string | null {
+    if (legal === null) return null;
+    for (const t of ['INVESTIGATE', 'PROTECT', 'MAFIA_KILL']) {
+      if (legal.allowed_action_types.includes(t)) return t;
+    }
+    return null;
+  }
+
+  async function submitNightAction(): Promise<void> {
+    if (!gameId) return;
+    const type = nightActionType();
+    if (type === null) return;
+    actionBusy = true;
+    actionNote = null;
+    error = null;
+    try {
+      const target = nightTarget.value;
+      await padrino.client.submitAction(gameId, {
+        action: target ? { type, target } : { type: 'NOOP' },
+        idempotency_key: newIdempotencyKey()
+      });
+      actionNote = 'Night action submitted.';
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      actionBusy = false;
+    }
+  }
+
+  async function sendChat(): Promise<void> {
+    if (!gameId) return;
+    const text = chatText.trim();
+    if (text === '') return;
+    composerStatus = 'pending';
+    error = null;
+    try {
+      const result = await padrino.client.submitChat(gameId, {
+        channel: 'PUBLIC',
+        text,
+        idempotency_key: newIdempotencyKey()
+      });
+      composerStatus = composerStatusFromChat(result.status);
+      // A released message arrives back over the live-tail feed; clear the box.
+      chatText = '';
+    } catch (e) {
+      composerStatus = 'error';
+      error = (e as Error).message;
+    }
+  }
+
+  onMount(() => {
+    if (!gameId) return;
+    padrino.setHumanSession(true);
+    session = createPlaySession({ client: padrino.client, gameId });
+    session.start();
+    void loadComposition();
+    connectObservation();
+    tickTimer = setInterval(() => {
+      nowMs = Date.now();
+    }, 1000);
+  });
+
+  onDestroy(() => {
+    session?.close();
+    obsSse?.close();
+    if (tickTimer) clearInterval(tickTimer);
+  });
+</script>
+
+<div class="mb-4">
+  <a class="text-sm underline" href="/">← Home</a>
+</div>
+
+<div class="mb-2 flex items-center gap-3">
+  <h1 class="text-xl font-semibold" data-testid="play-title">Play</h1>
+  <span
+    class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
+    data-testid="play-phase"
+  >
+    {phase}
+  </span>
+  <span
+    class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
+    data-testid="play-countdown"
+    data-bucket={bucket}
+  >
+    {countdownLabel(bucket)}
+  </span>
+</div>
+
+<p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="play-composition">
+  {#if composition}
+    {composition.human_count} humans · {composition.ai_count} AI · {composition.total} seats
+  {:else}
+    —
+  {/if}
+</p>
+
+{#if terminal}
+  <div
+    class="mb-4 rounded-md border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm"
+    data-testid="play-terminal"
+    data-winner={String(winner ?? '')}
+  >
+    <span class="font-semibold">Game over.</span>
+    {#if winner}Winner: <strong data-testid="play-winner">{winner}</strong>{/if}
+  </div>
+{/if}
+
+<div class="grid gap-3 md:grid-cols-[220px_1fr_300px]" data-testid="play-shell">
+  <div class="flex flex-col gap-3">
+    <Card>
+      <h2 class="mb-2 text-sm font-semibold">Seats</h2>
+      {#if board.length === 0}
+        <p class="text-xs text-muted-foreground" data-testid="play-seats-empty">Waiting…</p>
+      {:else}
+        <ul class="flex flex-col gap-1" data-testid="play-seat-grid">
+          {#each board as seat (seat.public_player_id)}
+            <li
+              class={'flex items-center gap-2 rounded px-1 py-0.5 text-xs ' +
+                (seat.alive ? '' : 'text-muted-foreground line-through')}
+              data-testid="play-seat-row"
+              data-player-id={seat.public_player_id}
+              data-alive={String(seat.alive)}
+            >
+              <img
+                class="h-5 w-5 rounded"
+                alt="seat"
+                src={seatSpriteUrl(seat.public_player_id)}
+                data-testid="play-seat-sprite"
+              />
+              <span class="font-mono">{seat.public_player_id.slice(0, 8)}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </Card>
+  </div>
+
+  <div class="flex flex-col gap-3">
+    <Card>
+      <h2 class="mb-2 text-sm font-semibold">Your move</h2>
+      {#if terminal}
+        <p class="text-xs text-muted-foreground" data-testid="play-action-ended">
+          The game has ended.
+        </p>
+      {:else if isVotePhase(legal)}
+        <div class="flex flex-col gap-2" data-testid="play-vote-panel">
+          <label class="flex flex-col gap-1 text-xs">
+            <span class="font-medium">Vote to eliminate</span>
+            <select
+              class="rounded border border-border bg-background px-2 py-1 text-sm"
+              data-testid="play-vote-target"
+              bind:value={voteTarget.value}
+            >
+              <option value={null}>Abstain</option>
+              {#each legal?.legal_targets ?? [] as t (t)}
+                <option value={t}>{t.slice(0, 8)}</option>
+              {/each}
+            </select>
+          </label>
+          <Button testid="play-vote-submit" disabled={actionBusy} onclick={() => void submitVote()}>
+            {actionBusy ? 'Submitting…' : 'Submit vote'}
+          </Button>
+        </div>
+      {:else if isNightActionPhase(legal)}
+        <div class="flex flex-col gap-2" data-testid="play-night-panel">
+          <label class="flex flex-col gap-1 text-xs">
+            <span class="font-medium">Night action</span>
+            <select
+              class="rounded border border-border bg-background px-2 py-1 text-sm"
+              data-testid="play-night-target"
+              bind:value={nightTarget.value}
+            >
+              <option value={null}>Skip</option>
+              {#each legal?.legal_targets ?? [] as t (t)}
+                <option value={t}>{t.slice(0, 8)}</option>
+              {/each}
+            </select>
+          </label>
+          <Button
+            testid="play-night-submit"
+            disabled={actionBusy}
+            onclick={() => void submitNightAction()}
+          >
+            {actionBusy ? 'Submitting…' : 'Submit action'}
+          </Button>
+        </div>
+      {:else}
+        <p class="text-xs text-muted-foreground" data-testid="play-action-none">
+          No action to take right now.
+        </p>
+      {/if}
+      {#if actionNote}
+        <p class="mt-2 text-xs text-emerald-600" data-testid="play-action-note">{actionNote}</p>
+      {/if}
+      {#if error}
+        <p class="mt-2 text-xs text-red-500" data-testid="play-action-error">{error}</p>
+      {/if}
+    </Card>
+
+    <Card>
+      <h2 class="mb-2 text-sm font-semibold">Chat</h2>
+      {#if chat.length === 0}
+        <p class="text-xs text-muted-foreground" data-testid="play-chat-empty">No chat yet.</p>
+      {:else}
+        <ol class="mb-3 flex flex-col gap-2" data-testid="play-chat-feed">
+          {#each chat as line (line.sequence)}
+            <li class="text-xs" data-testid="play-chat-line">
+              <span class="font-mono text-muted-foreground">[{line.phase}]</span>
+              {#if line.public_player_id}
+                <span class="mx-1 font-semibold">{line.public_player_id.slice(0, 8)}</span>
+              {/if}
+              <span>{line.text}</span>
+            </li>
+          {/each}
+        </ol>
+      {/if}
+
+      <div class="flex flex-col gap-2" data-testid="play-chat-composer">
+        <textarea
+          class="rounded border border-border bg-background px-2 py-1 text-sm"
+          rows="2"
+          placeholder="Say something…"
+          data-testid="play-chat-input"
+          bind:value={chatText}
+          disabled={terminal}
+        ></textarea>
+        <div class="flex items-center gap-2">
+          <Button
+            testid="play-chat-send"
+            disabled={terminal || composerStatus === 'pending' || chatText.trim() === ''}
+            onclick={() => void sendChat()}
+          >
+            Send
+          </Button>
+          <span
+            class="text-xs text-muted-foreground"
+            data-testid="play-chat-status"
+            data-status={composerStatus}
+          >
+            {#if composerStatus === 'pending'}Holding for release…
+            {:else if composerStatus === 'released'}Released
+            {:else if composerStatus === 'blocked'}Blocked by moderation
+            {:else if composerStatus === 'error'}Failed to send
+            {:else}&nbsp;{/if}
+          </span>
+        </div>
+      </div>
+    </Card>
+  </div>
+
+  <div class="flex flex-col gap-3">
+    <Card>
+      <h2 class="mb-2 text-sm font-semibold">This game</h2>
+      <p class="text-xs text-muted-foreground">
+        Seats are shown identity-blind: you only ever see how many humans vs AI are present, never
+        which seat is which, until the endgame reveal.
+      </p>
+      {#if mySeatId}
+        <p class="mt-2 font-mono text-xs text-muted-foreground" data-testid="play-my-seat">
+          You: {mySeatId.slice(0, 8)}
+        </p>
+      {/if}
+    </Card>
+  </div>
+</div>
