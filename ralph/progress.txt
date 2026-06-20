@@ -918,3 +918,48 @@ Notes:
 
 ## Codebase Patterns (append)
 - Frontend in-game play surface (US-155): the /play/[gameId] page composes TWO SSE streams — the game-wide live-tail (released PUBLIC frames -> `createPlaySession` board/chat, reconnect-by-sequence) AND the seat-scoped observation snapshot (`seatObservationUrl`, US-136) for the caller's legal_actions + transport-only phase-deadline. Keep ALL load-bearing UI logic in a PURE helper module (playSurface.ts: status mapping, countdown bucketing, legal-action gating, sprite URL) and unit-test it without the runes runtime; the .svelte page is a thin reactive shell. NON-PRECISE countdown is a rule-7 requirement: bucket seconds-remaining into coarse labels (none/plenty/soon/ending) from an injected clock and render ONLY the bucket — never the exact seconds (a precise per-seat timer is a timing leak). The buffered chat composer maps the chat POST status (HELD/RELEASED/BLOCKED) to a pending/released/blocked badge; the feed is fed ONLY by released frames so the surface never shows an un-moderated message. E2E mocks SSE via page.route returning `text/event-stream` bodies (`id: <seq>\ndata: <json>\n\n`), aborting reconnects to avoid dup frames.
+
+---
+
+## 2026-06-19 — US-156: Frontend endgame reveal + guess + profile
+
+Implemented the post-terminal frontend surfaces (P5 / frontend).
+
+Files:
+- web/dashboard/src/routes/play/[gameId]/reveal/+page.svelte (new) — guess-then-reveal page
+- web/dashboard/src/routes/profile/+page.svelte (new) — minimal signed-in stats page
+- web/dashboard/src/lib/api/reveal.ts (new) — pure role-derived themed-sprite key resolver
+- web/dashboard/tests/e2e/reveal.spec.ts (new) — Playwright: guess-then-reveal + stats page
+- ralph/prd.json (passes: true), ralph/progress.txt
+
+What it does:
+- /play/[gameId]/reveal: the spot-the-AI guess UI (per-seat HUMAN/AI toggle buttons + a
+  SINGLE submit) is shown FIRST and GATES the disclosure of BOTH the viewer's own detection
+  accuracy AND the canonical endgame reveal. After submit, the per-seat truth is shown
+  (human/AI badge, role+faction, exact model, takeover provenance, themed sprite) + the
+  accuracy banner. The viewer's own seat is excluded from the guess list (resolved from the
+  observation snapshot pre-guess, confirmed by the scored result's guesser_public_id).
+- /profile: a minimal stats page for a signed-in ACCOUNT (kind=='account'); a guest sees a
+  sign-in prompt. Casual framing only — the rendered stats block contains NO elo/rating/
+  leaderboard wording (asserted by the e2e). Reuses the existing client.getHumanStats /
+  getHumanMe and the existing TS types.
+
+Gates (all GREEN): ruff check ., ruff format --check . (406 files), mypy src tests (363
+files), pytest -m "not integration" -> 2113 passed / 40 skipped; pnpm -C web/dashboard lint,
+check (0 errors/0 warnings), test:e2e -> 20 passed / 3 skipped (visual snapshots) Playwright.
+
+## Codebase Patterns (append)
+- Gated guess-then-reveal (US-156): the reveal page reuses the EXISTING client methods
+  (publicGameReveal US-143, submitTuringGuess/getTuringGuess US-144) — NO new client/type
+  code was needed; the full EndgameReveal/SeatReveal/RevealModel/TuringGuessResult/SeatGuess
+  types already shipped. The imitation-game hook is purely a frontend gate: `guessed` =
+  `accuracy !== null`, and the {#if !guessed} branch shows the guess UI while the {:else}
+  branch shows the accuracy + reveal board — so neither the per-seat truth nor the accuracy
+  is rendered before submit. On mount the page calls getTuringGuess and treats a PadrinoApiError
+  status===404 as the NORMAL pre-guess state (not an error) so a returning guesser sees the
+  reveal immediately. The viewer's OWN seat (which a guesser never guesses) is resolved
+  pre-guess from a single seatObservationUrl frame's `you.player_id` (the play-surface pattern)
+  and post-guess from the scored result's `guesser_public_id`. E2E mocks /turing-guess for
+  BOTH GET (404 before, 200 after) and POST (capturing the submitted guess map), /reveal,
+  and a one-shot observation SSE; the stats spec mocks /human/me (kind=='account') + /human/stats
+  and asserts the rendered block has no elo/rating/leaderboard substring (casual framing).
