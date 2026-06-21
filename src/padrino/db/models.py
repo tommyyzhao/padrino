@@ -5,18 +5,20 @@ Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``games``, ``game_seats``, ``game_events``, ``llm_calls``, ``ratings``,
 ``rating_events``, the dormant human-lane siblings ``human_rating`` /
 ``human_rating_event`` (Wave 9, US-125), and the browser-human identity layer
-``principals`` / ``human_sessions`` (Wave 9, US-127).
+``principals`` / ``human_sessions`` (Wave 9, US-127), plus human-lane cost
+admission slots.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -277,6 +279,33 @@ class LlmCall(Base):
         String, nullable=False, default="PLATFORM", server_default="PLATFORM"
     )
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class HumanCostAdmission(Base):
+    """Finite per-principal/day admission slot claimed before human-lane writes."""
+
+    __tablename__ = "human_cost_admissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "principal_id",
+            "admission_day",
+            "bucket",
+            "slot_index",
+            name="uq_human_cost_admission_slot",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    admission_day: Mapped[date] = mapped_column(Date, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    bucket: Mapped[str] = mapped_column(String, nullable=False)
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    admitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
@@ -1096,6 +1125,7 @@ __all__ = [
     "HumanChatMessage",
     "HumanChatSubmission",
     "HumanConsent",
+    "HumanCostAdmission",
     "HumanGameRuntime",
     "HumanRating",
     "HumanRatingEvent",

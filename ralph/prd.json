@@ -122,7 +122,7 @@
         "All backend gates pass."
       ],
       "notes": "Sized to the Moderate $500-$2k/mo envelope; the breaker must remain throttle-not-kill (never boots an active game).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-166",

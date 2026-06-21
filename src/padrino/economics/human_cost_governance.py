@@ -34,14 +34,15 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import structlog
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import FundingSource
-from padrino.db.models import Game, GameSeat, LlmCall, Lobby
+from padrino.db.models import Game, GameSeat, HumanCostAdmission, LlmCall, Lobby
 from padrino.settings import Settings
 
 _logger = structlog.get_logger("padrino.economics.human_cost_governance")
@@ -69,6 +70,10 @@ class HumanAdmitDecision:
 ACTION_CREATE = "create"
 ACTION_JOIN = "join"
 ACTION_LAUNCH = "launch"
+
+_ADMISSION_BUCKET_GAME = "game"
+_ADMISSION_BUCKET_JOIN = "join"
+_HUMAN_LANE_SEAT_KINDS = ("HUMAN", "AI_TAKEOVER")
 
 
 def price_turn_usd(
@@ -163,21 +168,22 @@ async def _principal_inference_usd_today(
     today_start: datetime,
     tomorrow_start: datetime,
 ) -> float:
-    """Sum inference $ attributed to this principal's games created today.
+    """Sum inference $ attributed to this principal's games charged today.
 
     Cost is attributed to a principal through the games they occupy a seat in:
     an ``LlmCall`` belongs to the principal when its game has a ``GameSeat`` the
-    principal occupies. Null costs coalesce to zero.
+    principal occupies. The day boundary is the cost row's ``created_at`` so a
+    game spanning UTC midnight charges spend to the day the LLM call occurred.
+    Null costs coalesce to zero.
     """
     seat_games = (
-        select(GameSeat.game_id).where(GameSeat.occupant_principal_id == principal_id).subquery()
+        select(GameSeat.game_id).where(GameSeat.occupant_principal_id == principal_id).distinct()
     )
     stmt = (
         select(func.coalesce(func.sum(LlmCall.cost_usd), 0.0))
-        .join(Game, Game.id == LlmCall.game_id)
-        .where(LlmCall.game_id.in_(select(seat_games.c.game_id)))
-        .where(Game.created_at >= today_start)
-        .where(Game.created_at < tomorrow_start)
+        .where(LlmCall.game_id.in_(seat_games))
+        .where(LlmCall.created_at >= today_start)
+        .where(LlmCall.created_at < tomorrow_start)
     )
     value = (await session.execute(stmt)).scalar_one()
     return float(value) if value is not None else 0.0
@@ -186,10 +192,12 @@ async def _principal_inference_usd_today(
 async def global_human_lane_spend_usd(session: AsyncSession) -> float:
     """Return cumulative inference $ across all human-lane games.
 
-    A human-lane game is one with at least one HUMAN ``GameSeat``. Null costs
-    coalesce to zero.
+    A human-lane game is one with at least one HUMAN or AI_TAKEOVER
+    ``GameSeat``. Null costs coalesce to zero.
     """
-    human_games = select(GameSeat.game_id).where(GameSeat.seat_kind == "HUMAN").subquery()
+    human_games = (
+        select(GameSeat.game_id).where(GameSeat.seat_kind.in_(_HUMAN_LANE_SEAT_KINDS)).distinct()
+    ).subquery()
     stmt = select(func.coalesce(func.sum(LlmCall.cost_usd), 0.0)).where(
         LlmCall.game_id.in_(select(human_games.c.game_id))
     )
@@ -248,6 +256,81 @@ async def lobby_breaker_open(session: AsyncSession, settings: Settings, lobby: L
     return False
 
 
+def _admission_bucket(action: str) -> str:
+    if action == ACTION_JOIN:
+        return _ADMISSION_BUCKET_JOIN
+    return _ADMISSION_BUCKET_GAME
+
+
+async def _reserved_admission_slots(
+    session: AsyncSession,
+    principal_id: uuid.UUID,
+    *,
+    admission_day: date,
+    bucket: str,
+) -> set[int]:
+    stmt = select(HumanCostAdmission.slot_index).where(
+        HumanCostAdmission.principal_id == principal_id,
+        HumanCostAdmission.admission_day == admission_day,
+        HumanCostAdmission.bucket == bucket,
+    )
+    return {int(slot) for slot in (await session.execute(stmt)).scalars()}
+
+
+async def _claim_admission_slot(
+    session: AsyncSession,
+    principal_id: uuid.UUID,
+    *,
+    action: str,
+    admission_day: date,
+    admitted_at: datetime,
+    legacy_count: int,
+    cap: int,
+) -> int | None:
+    """Atomically claim one finite per-principal/day admission slot.
+
+    Existing pre-US-165 game/member rows are treated as implicit slots so legacy
+    data still counts. New admissions are explicit rows protected by
+    ``uq_human_cost_admission_slot``; concurrent callers that race for the same
+    slot retry until no slots remain.
+    """
+    if cap <= 0:
+        return None
+
+    bucket = _admission_bucket(action)
+    implicit_slots = set(range(min(max(legacy_count, 0), cap)))
+    for _ in range(cap + 1):
+        occupied = implicit_slots | {
+            slot
+            for slot in await _reserved_admission_slots(
+                session, principal_id, admission_day=admission_day, bucket=bucket
+            )
+            if 0 <= slot < cap
+        }
+        slot_index = next((slot for slot in range(cap) if slot not in occupied), None)
+        if slot_index is None:
+            return None
+
+        try:
+            async with session.begin_nested():
+                session.add(
+                    HumanCostAdmission(
+                        principal_id=principal_id,
+                        admission_day=admission_day,
+                        action=action,
+                        bucket=bucket,
+                        slot_index=slot_index,
+                        admitted_at=admitted_at,
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            continue
+        return slot_index
+
+    return None
+
+
 async def admit_human(
     session: AsyncSession,
     settings: Settings,
@@ -290,7 +373,16 @@ async def admit_human(
         joins = await _principal_joins_today(
             session, principal_id, today_start=today_start, tomorrow_start=tomorrow_start
         )
-        if joins >= settings.padrino_human_max_joins_per_user_per_day:
+        slot = await _claim_admission_slot(
+            session,
+            principal_id,
+            action=action,
+            admission_day=today_start.date(),
+            admitted_at=now,
+            legacy_count=joins,
+            cap=settings.padrino_human_max_joins_per_user_per_day,
+        )
+        if slot is None:
             _logger.warning(
                 "human_cost.admission.denied",
                 reason="daily_join_cap_reached",
@@ -302,7 +394,16 @@ async def admit_human(
         games = await _principal_games_today(
             session, principal_id, today_start=today_start, tomorrow_start=tomorrow_start
         )
-        if games >= settings.padrino_human_max_games_per_user_per_day:
+        slot = await _claim_admission_slot(
+            session,
+            principal_id,
+            action=action,
+            admission_day=today_start.date(),
+            admitted_at=now,
+            legacy_count=games,
+            cap=settings.padrino_human_max_games_per_user_per_day,
+        )
+        if slot is None:
             _logger.warning(
                 "human_cost.admission.denied",
                 reason="daily_game_cap_reached",

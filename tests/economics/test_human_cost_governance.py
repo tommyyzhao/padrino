@@ -11,8 +11,10 @@ Covers the acceptance criteria:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -39,6 +41,7 @@ from padrino.economics.human_cost_governance import (
     HumanAdmitDecision,
     admit_human,
     global_breaker_open,
+    global_human_lane_spend_usd,
     human_eligible_pool,
     lobby_breaker_open,
     price_turn_usd,
@@ -106,14 +109,19 @@ async def _game(
 
 
 async def _human_seat(
-    session: AsyncSession, *, game_id: uuid.UUID, principal_id: uuid.UUID, seat_index: int = 0
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    principal_id: uuid.UUID,
+    seat_index: int = 0,
+    seat_kind: str = "HUMAN",
 ) -> None:
     session.add(
         GameSeat(
             game_id=game_id,
             public_player_id=f"P{seat_index:02d}",
             seat_index=seat_index,
-            seat_kind="HUMAN",
+            seat_kind=seat_kind,
             occupant_principal_id=principal_id,
             role="VILLAGER",
             faction="TOWN",
@@ -129,6 +137,7 @@ async def _call(
     game_id: uuid.UUID,
     cost: float | None,
     funding_source: str | None = None,
+    created_at: datetime | None = None,
 ) -> uuid.UUID:
     kwargs = {}
     if funding_source is not None:
@@ -143,6 +152,8 @@ async def _call(
         cost_usd=cost,
         **kwargs,
     )
+    if created_at is not None:
+        call.created_at = created_at
     session.add(call)
     await session.flush()
     return call.id
@@ -237,6 +248,62 @@ async def test_admit_all_clear(session_factory: async_sessionmaker[AsyncSession]
     assert decision == HumanAdmitDecision(allowed=True, reason="admitted")
 
 
+@pytest.mark.parametrize(
+    ("action", "cap_setting"),
+    [
+        pytest.param(ACTION_CREATE, "games_per_day", id="create"),
+        pytest.param(ACTION_JOIN, "joins_per_day", id="join"),
+        pytest.param(ACTION_LAUNCH, "games_per_day", id="launch"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_admit_human_is_atomic_under_concurrent_requests(
+    tmp_path: Path,
+    *,
+    action: str,
+    cap_setting: str,
+) -> None:
+    """Concurrent admissions must claim finite per-day slots, not stale counts."""
+    from padrino.db.base import Base, create_engine, create_session_factory
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / f'admit-{action}.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = create_session_factory(engine)
+
+    try:
+        async with session_factory() as session, session.begin():
+            pid = await _principal(session)
+
+        settings_kwargs = {"games_per_day": 100, "joins_per_day": 100}
+        settings_kwargs[cap_setting] = 2
+        settings = _settings(**settings_kwargs)
+        ready = asyncio.Event()
+
+        async def attempt() -> HumanAdmitDecision:
+            await ready.wait()
+            async with session_factory() as session, session.begin():
+                return await admit_human(
+                    session, settings, principal_id=pid, action=action, now=_NOW
+                )
+
+        tasks = [asyncio.create_task(attempt()) for _ in range(10)]
+        ready.set()
+        decisions = await asyncio.gather(*tasks)
+    finally:
+        await engine.dispose()
+
+    allowed = [decision for decision in decisions if decision.allowed]
+    denied = [decision for decision in decisions if not decision.allowed]
+    assert len(allowed) == 2
+    assert {decision.reason for decision in allowed} == {"admitted"}
+    assert len(denied) == 8
+    expected_reason = (
+        "daily_join_cap_reached" if action == ACTION_JOIN else "daily_game_cap_reached"
+    )
+    assert {decision.reason for decision in denied} == {expected_reason}
+
+
 @pytest.mark.asyncio
 async def test_daily_game_cap_denies(session_factory: async_sessionmaker[AsyncSession]) -> None:
     """At the games/day cap, create/launch is denied; joins are unaffected."""
@@ -315,7 +382,29 @@ async def test_daily_inference_cap_denies(
         pid = await _principal(session)
         gid = await _game(session, created_at=_TODAY_START + timedelta(hours=1))
         await _human_seat(session, game_id=gid, principal_id=pid)
-        await _call(session, game_id=gid, cost=5.0)
+        await _call(session, game_id=gid, cost=5.0, created_at=_TODAY_START + timedelta(hours=2))
+
+    async with session_factory() as session:
+        decision = await admit_human(
+            session,
+            _settings(inference_per_day=5.0),
+            principal_id=pid,
+            action=ACTION_CREATE,
+            now=_NOW,
+        )
+    assert decision == HumanAdmitDecision(allowed=False, reason="daily_inference_cap_reached")
+
+
+@pytest.mark.asyncio
+async def test_daily_inference_cap_uses_charge_time_not_game_created_at(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A game spanning UTC midnight is charged to the LLM-call day."""
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        gid = await _game(session, created_at=_YESTERDAY + timedelta(hours=23))
+        await _human_seat(session, game_id=gid, principal_id=pid)
+        await _call(session, game_id=gid, cost=5.0, created_at=_TODAY_START + timedelta(hours=1))
 
     async with session_factory() as session:
         decision = await admit_human(
@@ -403,6 +492,21 @@ async def test_lobby_breaker_opens_on_per_lobby_cap(
         loaded = await session.get(Lobby, lobby_id)
         assert loaded is not None
         assert await lobby_breaker_open(session, s, loaded) is True
+
+
+@pytest.mark.asyncio
+async def test_global_human_lane_spend_counts_ai_takeover_seats(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The human-lane global breaker includes seats silently taken over by AI."""
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        gid = await _game(session)
+        await _human_seat(session, game_id=gid, principal_id=pid, seat_kind="AI_TAKEOVER")
+        await _call(session, game_id=gid, cost=3.25)
+
+    async with session_factory() as session:
+        assert await global_human_lane_spend_usd(session) == 3.25
 
 
 @pytest.mark.asyncio
