@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.human_actions import _enforce_action_rate_limits, _hash_key
@@ -30,8 +31,10 @@ from padrino.api.human_chat import _enforce_chat_rate_limits
 from padrino.api.rate_limit_store import (
     DatabaseRateLimitStore,
     InMemoryRateLimitStore,
+    RateLimitBucketSpec,
     RateLimitDecision,
 )
+from padrino.db.models import RateLimitBucket
 
 RateLimitCall = Callable[[], Awaitable[None]]
 
@@ -50,8 +53,10 @@ class _BarrierDatabaseRateLimitStore:
         self._barrier_key = barrier_key
         self._participants = participants
         self._peeked = 0
+        self._recording = 0
         self._lock = asyncio.Lock()
         self._all_peeked = asyncio.Event()
+        self._all_recording = asyncio.Event()
 
     async def peek_request(
         self,
@@ -90,12 +95,115 @@ class _BarrierDatabaseRateLimitStore:
             window_seconds=window_seconds,
         )
 
+    async def record_requests(
+        self,
+        buckets: Sequence[RateLimitBucketSpec],
+        *,
+        now: float,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        if any(bucket.key_hash == self._barrier_key for bucket in buckets):
+            async with self._lock:
+                self._recording += 1
+                if self._recording == self._participants:
+                    self._all_recording.set()
+            await self._all_recording.wait()
+        return await self._inner.record_requests(
+            buckets,
+            now=now,
+            window_seconds=window_seconds,
+        )
+
+
+class _SaturatingDatabaseRateLimitStore:
+    """Store wrapper that fills one bucket after its peek admits.
+
+    This simulates another worker winning the TOCTOU window between this
+    request's multi-bucket preflight and commit.
+    """
+
+    def __init__(
+        self,
+        *,
+        inner: DatabaseRateLimitStore,
+        saturate_key: str,
+    ) -> None:
+        self._inner = inner
+        self._saturate_key = saturate_key
+        self._saturated = False
+
+    async def peek_request(
+        self,
+        key_hash: str,
+        *,
+        now: float,
+        limit_per_minute: int,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        decision = await self._inner.peek_request(
+            key_hash,
+            now=now,
+            limit_per_minute=limit_per_minute,
+            window_seconds=window_seconds,
+        )
+        if key_hash == self._saturate_key and decision.allowed and not self._saturated:
+            self._saturated = True
+            seeded = await self._inner.record_request(
+                key_hash,
+                now=now,
+                limit_per_minute=limit_per_minute,
+                window_seconds=window_seconds,
+            )
+            assert seeded.allowed
+        return decision
+
+    async def record_request(
+        self,
+        key_hash: str,
+        *,
+        now: float,
+        limit_per_minute: int,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        return await self._inner.record_request(
+            key_hash,
+            now=now,
+            limit_per_minute=limit_per_minute,
+            window_seconds=window_seconds,
+        )
+
+    async def record_requests(
+        self,
+        buckets: Sequence[RateLimitBucketSpec],
+        *,
+        now: float,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        return await self._inner.record_requests(
+            buckets,
+            now=now,
+            window_seconds=window_seconds,
+        )
+
 
 def _principal_bucket_count(
     store: InMemoryRateLimitStore, *, namespace: str, principal_id: uuid.UUID, window: int
 ) -> int:
     key = _hash_key(f"{namespace}:user:{principal_id}")
     return store._counts.get((key, window), 0)
+
+
+async def _database_bucket_count(
+    session_factory: async_sessionmaker[AsyncSession], *, key_hash: str, window: int
+) -> int:
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(RateLimitBucket.count).where(
+                RateLimitBucket.key_hash == key_hash,
+                RateLimitBucket.window_start == window,
+            )
+        )
+    return int(count or 0)
 
 
 async def _admitted_or_429(call: RateLimitCall) -> bool:
@@ -230,6 +338,76 @@ async def test_action_principal_rejection_does_not_double_count_phase() -> None:
     phase_key = _hash_key(f"human-action:game-phase-principal:{game_id}:day-1:{principal_id}")
     # The phase bucket was committed exactly once (the first, admitted request).
     assert store._counts.get((phase_key, window), 0) == 1
+
+
+async def test_action_late_phase_rejection_does_not_burn_database_principal_bucket(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    inner = DatabaseRateLimitStore(session_factory=session_factory)
+    principal_id = uuid.uuid4()
+    game_id = uuid.uuid4()
+    phase = "day-1"
+    now = datetime(2026, 6, 21, 12, 0, 0, tzinfo=UTC)
+    window = int(now.timestamp() - (now.timestamp() % 60))
+    principal_key = _hash_key(f"human-action:user:{principal_id}")
+    game_phase_key = _hash_key(
+        f"human-action:game-phase-principal:{game_id}:{phase}:{principal_id}"
+    )
+    store = _SaturatingDatabaseRateLimitStore(
+        inner=inner,
+        saturate_key=game_phase_key,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _enforce_action_rate_limits(
+            store,
+            principal_id=principal_id,
+            game_id=game_id,
+            phase=phase,
+            now=now,
+            per_principal_limit=10,
+            per_game_phase_limit=1,
+        )
+
+    assert exc_info.value.status_code == 429
+    assert await _database_bucket_count(session_factory, key_hash=principal_key, window=window) == 0
+    assert (
+        await _database_bucket_count(session_factory, key_hash=game_phase_key, window=window) == 1
+    )
+
+
+async def test_chat_late_phase_rejection_does_not_burn_database_principal_bucket(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    inner = DatabaseRateLimitStore(session_factory=session_factory)
+    principal_id = uuid.uuid4()
+    game_id = uuid.uuid4()
+    phase = "day-1"
+    now = datetime(2026, 6, 21, 12, 0, 0, tzinfo=UTC)
+    window = int(now.timestamp() - (now.timestamp() % 60))
+    principal_key = _hash_key(f"human-chat:user:{principal_id}")
+    game_phase_key = _hash_key(f"human-chat:game-phase-principal:{game_id}:{phase}:{principal_id}")
+    store = _SaturatingDatabaseRateLimitStore(
+        inner=inner,
+        saturate_key=game_phase_key,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _enforce_chat_rate_limits(
+            store,
+            principal_id=principal_id,
+            game_id=game_id,
+            phase=phase,
+            now=now,
+            per_principal_limit=10,
+            per_game_phase_limit=1,
+        )
+
+    assert exc_info.value.status_code == 429
+    assert await _database_bucket_count(session_factory, key_hash=principal_key, window=window) == 0
+    assert (
+        await _database_bucket_count(session_factory, key_hash=game_phase_key, window=window) == 1
+    )
 
 
 async def test_action_database_commit_honors_atomic_record_rejection(

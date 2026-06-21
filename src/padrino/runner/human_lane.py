@@ -42,6 +42,7 @@ from padrino.core.agents.contract import AgentResponse
 from padrino.core.disconnect import SeatPresence, seats_past_grace
 from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog, StoredEvent
+from padrino.core.engine.hashing import compute_event_hash
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
@@ -392,6 +393,11 @@ def _resync_committed_takeover(
     replacement_adapter: LlmAdapter,
 ) -> StoredEvent:
     """Mirror an already-committed takeover row into the in-memory structures."""
+    if not mux.has_seat(seat_id):
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for unknown seat {seat_id!r} cannot be mirrored into memory"
+        )
+
     events = event_log.events
     if event.sequence < len(events):
         existing = events[event.sequence]
@@ -414,6 +420,11 @@ def _resync_committed_takeover(
     if event.prev_event_hash != event_log.head_hash:
         raise TakeoverApplyRecoveryError(
             f"committed takeover for seat {seat_id!r} does not chain from the in-memory log head"
+        )
+    expected_hash = compute_event_hash(event.prev_event_hash, event.body)
+    if expected_hash != event.event_hash:
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} re-sealed to a different hash"
         )
 
     mux.force_swap_seat(seat_id, replacement_adapter)

@@ -17,10 +17,12 @@ from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.events import EventAdapter
+from padrino.core.engine.hashing import compute_event_hash
 from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.engine.reducer import compute_seat_provenance
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import ActionType, Faction, Role, SeatKind
+from padrino.core.engine.state import GameState, Phase
+from padrino.core.enums import ActionType, Faction, PhaseKind, Role, SeatKind
 from padrino.core.observations import Observation
 from padrino.core.reveal import (
     PROVENANCE_HUMAN_THEN_AI,
@@ -47,9 +49,12 @@ from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.llm.multiplex import SeatMultiplexAdapter
+from padrino.runner.disconnect_takeover import build_takeover_event
 from padrino.runner.human_durability import replay_state_from_rows
 from padrino.runner.human_lane import (
     AiAdapterFactory,
+    TakeoverApplyRecoveryError,
+    _apply_committed_takeover,
     _default_human_game_executor,
     _run_human_tick_responses,
     _take_over_expired_human_seats,
@@ -881,3 +886,87 @@ async def test_takeover_apply_failure_resyncs_committed_event(
         next_event.sequence - 1,
         next_event.sequence,
     ]
+
+
+def test_takeover_apply_recovery_surfaces_unknown_mux_seat() -> None:
+    """US-211: recovery must not fabricate routing for an unknown seat desync."""
+    event_log = EventLog()
+    state = GameState(
+        ruleset_id=mini7_v1.RULESET_ID,
+        game_id="G-UNKNOWN-TAKEOVER",
+        game_seed="unknown-seat-recovery",
+        current_phase=Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0),
+        seats=(),
+        day=1,
+    )
+    event = build_takeover_event(
+        event_log=event_log,
+        state=state,
+        seat_id="P99",
+        replacement_agent_build_ref="curated-autofill",
+    )
+    mux = SeatMultiplexAdapter({"P01": _ScriptedSeatAdapter("P01", {})})
+    known_seats_before = set(mux._adapters)
+
+    with pytest.raises(TakeoverApplyRecoveryError, match="unknown seat"):
+        _apply_committed_takeover(
+            mux=mux,
+            event_log=event_log,
+            event=event,
+            seat_id="P99",
+            replacement_adapter=_ScriptedSeatAdapter("P99", {}),
+        )
+
+    assert set(mux._adapters) == known_seats_before
+    assert "P99" not in mux._adapters
+    assert event_log.events == ()
+
+
+def test_takeover_apply_recovery_hash_mismatch_leaves_memory_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """US-212: reject a corrupt committed row before mutating mux or log."""
+    event_log = EventLog()
+    state = GameState(
+        ruleset_id=mini7_v1.RULESET_ID,
+        game_id="G-CORRUPT-TAKEOVER",
+        game_seed="corrupt-takeover-recovery",
+        current_phase=Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0),
+        seats=(),
+        day=1,
+    )
+    event = build_takeover_event(
+        event_log=event_log,
+        state=state,
+        seat_id=_HUMAN_SEAT,
+        replacement_agent_build_ref="curated-autofill",
+    )
+    corrupt_event = event.model_copy(update={"event_hash": "f" * 64})
+    assert corrupt_event.event_hash != compute_event_hash(
+        corrupt_event.prev_event_hash,
+        corrupt_event.body,
+    )
+
+    original_adapter = _ScriptedSeatAdapter(_HUMAN_SEAT, {})
+    replacement_adapter = _ScriptedSeatAdapter(_HUMAN_SEAT, {})
+    mux = SeatMultiplexAdapter({_HUMAN_SEAT: original_adapter})
+    events_before = event_log.events
+    head_before = event_log.head_hash
+
+    def _raise_apply_failure(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("simulated post-commit apply failure")
+
+    monkeypatch.setattr(human_lane, "apply_takeover", _raise_apply_failure)
+
+    with pytest.raises(TakeoverApplyRecoveryError, match="re-sealed"):
+        _apply_committed_takeover(
+            mux=mux,
+            event_log=event_log,
+            event=corrupt_event,
+            seat_id=_HUMAN_SEAT,
+            replacement_adapter=replacement_adapter,
+        )
+
+    assert mux._adapters[_HUMAN_SEAT] is original_adapter
+    assert event_log.events == events_before
+    assert event_log.head_hash == head_before

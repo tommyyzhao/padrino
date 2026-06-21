@@ -16,7 +16,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Evidence: human_actions.py:200-222, human_chat.py:252-274, rate_limit_store.py:68-74/150-238. The robust fix is the atomic multi-bucket record_all noted in US-204's own notes. Add a refund/decrement to the RateLimitStore Protocol only if not doing record_all.",
-      "passes": true
+      "passes": false
     },
     {
       "id": "US-211",
@@ -31,7 +31,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: human_lane.py:436-460/403-424, disconnect_takeover.py:124-132, multiplex.py:73-83. Add a mux membership check (has_seat / expose keys) before force_swap_seat, or catch KeyError separately.",
-      "passes": true
+      "passes": false
     },
     {
       "id": "US-212",
@@ -46,7 +46,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: human_lane.py:419-424, core/engine/hashing.py compute_event_hash (pure sha256). Validate-before-mutate; the only trigger is an already-broken hash chain upstream, so severity low.",
-      "passes": true
+      "passes": false
     },
     {
       "id": "US-213",
@@ -61,7 +61,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: routes/human.py:599-617/658-674, oauth.py exchange_code OAuthError mapping. This is a UX refinement of the intended US-208 hardening, not a security regression; keep the replay gap closed. Lowest priority of the batch.",
-      "passes": true
+      "passes": false
     }
   ]
 }

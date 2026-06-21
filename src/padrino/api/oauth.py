@@ -34,6 +34,7 @@ from typing import Any, Final
 
 import httpx
 from authlib.common.security import generate_token
+from authlib.integrations.base_client.errors import OAuthError as AuthlibOAuthError
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from authlib.jose import JsonWebKey, jwt
 from authlib.jose.errors import JoseError
@@ -43,6 +44,9 @@ from padrino.settings import Settings
 _STATE_VERSION: Final[int] = 1
 # Small clock-skew tolerance for id_token exp/iat validation (US-193).
 _CLAIMS_LEEWAY_SECONDS: Final[int] = 60
+_TRANSIENT_PROVIDER_ERROR_CLASSES: Final[frozenset[str]] = frozenset(
+    {"server_error", "temporarily_unavailable"}
+)
 
 # Impure clock seam for the id_token max-age check (US-201). The api lane is
 # outside the pure-core firewall, so a real wall-clock read is allowed here; the
@@ -252,7 +256,11 @@ async def _default_resolve_user_info(
     except OAuthError:
         raise
     except Exception as exc:
-        raise OAuthError("OAuth provider exchange failed") from exc
+        raise OAuthError(
+            "OAuth provider exchange failed",
+            error_class=exc.__class__.__name__,
+            transient=True,
+        ) from exc
     id_token = token.get("id_token")
     if not isinstance(id_token, str) or not id_token.strip():
         raise OAuthError("OAuth provider token response is missing id_token")
@@ -265,11 +273,32 @@ async def _default_exchange_token(
     """Exchange an authorization code for a token set."""
     client = _client_for(config)
     try:
-        token = await client.fetch_token(
-            config.token_url,
-            code=code,
-            code_verifier=code_verifier,
-        )
+        try:
+            token = await client.fetch_token(
+                config.token_url,
+                code=code,
+                code_verifier=code_verifier,
+            )
+        except AuthlibOAuthError as exc:
+            error_class = str(exc.error or "oauth_error")
+            raise OAuthError(
+                "OAuth provider token exchange failed",
+                error_class=error_class,
+                transient=error_class in _TRANSIENT_PROVIDER_ERROR_CLASSES,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            raise OAuthError(
+                "OAuth provider token endpoint failed",
+                error_class=f"http_{status_code}",
+                transient=status_code >= 500,
+            ) from exc
+        except httpx.TransportError as exc:
+            raise OAuthError(
+                "OAuth provider token endpoint unavailable",
+                error_class=exc.__class__.__name__,
+                transient=True,
+            ) from exc
         return dict(token)
     finally:
         await client.aclose()
@@ -277,10 +306,30 @@ async def _default_exchange_token(
 
 async def _default_fetch_jwks(config: OAuthConfig) -> dict[str, Any]:
     """Fetch the provider's JWKS document."""
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(config.jwks_url)
-        resp.raise_for_status()
-        payload = resp.json()
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(config.jwks_url)
+            resp.raise_for_status()
+            payload = resp.json()
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        raise OAuthError(
+            "OAuth provider JWKS endpoint failed",
+            error_class=f"http_{status_code}",
+            transient=status_code >= 500,
+        ) from exc
+    except httpx.TransportError as exc:
+        raise OAuthError(
+            "OAuth provider JWKS endpoint unavailable",
+            error_class=exc.__class__.__name__,
+            transient=True,
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise OAuthError(
+            "OAuth provider JWKS response is invalid JSON",
+            error_class="jwks_invalid_json",
+            transient=True,
+        ) from exc
     if not isinstance(payload, dict):
         raise OAuthError("OAuth provider JWKS response is invalid")
     return payload
@@ -422,6 +471,18 @@ def _client_for(config: OAuthConfig) -> AsyncOAuth2Client:
 
 class OAuthError(Exception):
     """Raised when the OAuth exchange cannot produce a usable identity."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: str | None = None,
+        transient: bool = False,
+    ) -> None:
+        """Create an OAuth failure with retryability metadata."""
+        super().__init__(message)
+        self.error_class = error_class or ("transient" if transient else "terminal")
+        self.transient = transient
 
 
 def _encode_state(config: OAuthConfig, *, nonce: str, session_binding: str) -> str:

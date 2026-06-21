@@ -45,7 +45,11 @@ from padrino.api.human_chat_moderation import (
     RealtimeModerationHook,
 )
 from padrino.api.human_seat_auth import resolve_human_game_seat
-from padrino.api.rate_limit_store import InMemoryRateLimitStore, RateLimitStore
+from padrino.api.rate_limit_store import (
+    InMemoryRateLimitStore,
+    RateLimitBucketSpec,
+    RateLimitStore,
+)
 from padrino.core.engine.state import Seat
 from padrino.core.enums import Faction, PhaseKind
 from padrino.core.observations import format_phase_id
@@ -250,28 +254,31 @@ async def _enforce_chat_rate_limits(
     principal_key = _hash_key(f"human-chat:user:{principal_id}")
     game_phase_key = _hash_key(f"human-chat:game-phase-principal:{game_id}:{phase}:{principal_id}")
     buckets = (
-        (principal_key, per_principal_limit),
-        (game_phase_key, per_game_phase_limit),
+        RateLimitBucketSpec(principal_key, per_principal_limit),
+        RateLimitBucketSpec(game_phase_key, per_game_phase_limit),
     )
-    # Peek-then-commit: verify every bucket would admit the request BEFORE
-    # incrementing any. A later bucket's rejection must not burn an earlier
-    # bucket's per-minute budget across the seat's other games/phases.
-    for key_hash, limit in buckets:
-        decision = await rate_limit.peek_request(key_hash, now=epoch, limit_per_minute=limit)
+    # Fast preflight avoids the common reject path; record_requests is still the
+    # authoritative atomic commit in case another worker fills a bucket after the
+    # peeks complete.
+    for bucket in buckets:
+        decision = await rate_limit.peek_request(
+            bucket.key_hash,
+            now=epoch,
+            limit_per_minute=bucket.limit_per_minute,
+        )
         if not decision.allowed:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=RATE_LIMITED_DETAIL,
                 headers={"Retry-After": str(int(decision.retry_after_seconds))},
             )
-    for key_hash, limit in buckets:
-        decision = await rate_limit.record_request(key_hash, now=epoch, limit_per_minute=limit)
-        if not decision.allowed:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=RATE_LIMITED_DETAIL,
-                headers={"Retry-After": str(int(decision.retry_after_seconds))},
-            )
+    decision = await rate_limit.record_requests(buckets, now=epoch)
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=RATE_LIMITED_DETAIL,
+            headers={"Retry-After": str(int(decision.retry_after_seconds))},
+        )
 
 
 def _hash_key(raw: str) -> str:
