@@ -538,6 +538,53 @@ async def release_admission_for_member(
     )
 
 
+async def release_inference_reservations_for_lobby(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    released_at: datetime,
+) -> None:
+    """Release every UNRELEASED inference reservation bound to a lobby.
+
+    Once a lobby's game is materialized its inference spend is tracked as charged
+    ``LlmCall`` rows (``_implicit_budget_used`` rounds that spend up into slots).
+    The reservation rows held during admission must then be released so the held
+    reservation and the charged accounting never count the SAME dollars twice
+    (US-198). The per-day game COUNT slot is left untouched — the games/day cap
+    still counts the launched game.
+    """
+    await session.execute(
+        update(HumanInferenceReservation)
+        .where(
+            HumanInferenceReservation.lobby_id == lobby_id,
+            HumanInferenceReservation.released_at.is_(None),
+        )
+        .values(released_at=released_at)
+    )
+
+
+async def rollback_admission_decision(
+    session: AsyncSession,
+    decision: HumanAdmitDecision,
+) -> None:
+    """Hard-delete the slots a freshly admitted decision claimed.
+
+    Used when the admitted action did not, in fact, materialize anything new
+    (e.g. an idempotent re-launch that did not create a game, or a launch that
+    failed): the just-claimed count slot + inference reservations are removed so
+    they leak no cap budget (US-198). The rows are deleted (not merely released)
+    because they were never bound to a real lobby/member.
+    """
+    if decision.count_slot_id is not None:
+        await session.execute(
+            delete(HumanCostAdmission).where(HumanCostAdmission.id == decision.count_slot_id)
+        )
+    for reservation_id in decision.inference_reservation_ids:
+        await session.execute(
+            delete(HumanInferenceReservation).where(HumanInferenceReservation.id == reservation_id)
+        )
+
+
 async def admit_human(
     session: AsyncSession,
     settings: Settings,
@@ -688,4 +735,6 @@ __all__ = [
     "price_turn_usd",
     "release_admission_for_lobby",
     "release_admission_for_member",
+    "release_inference_reservations_for_lobby",
+    "rollback_admission_decision",
 ]
