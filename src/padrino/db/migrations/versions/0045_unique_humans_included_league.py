@@ -1,4 +1,4 @@
-"""Unique dormant humans-included league per ruleset (US-195, US-199).
+"""Unique dormant humans-included league per ruleset (US-195, US-199, US-205).
 
 A partial unique index scoped to ``kind = 'HUMANS_INCLUDED'`` prevents a
 concurrent ``get_or_create_humans_included`` from materializing duplicate dormant
@@ -10,9 +10,10 @@ with no DB constraint, so a deployed DB can already contain duplicate
 ``HUMANS_INCLUDED`` leagues for the same ``ruleset_id``. Creating the unique index
 on such a DB would raise a duplicate-key error and abort the upgrade. So
 ``upgrade()`` first deduplicates: per ``ruleset_id`` it keeps the earliest
-``(created_at, id)`` row, repoints every dependent FK to that keeper, then deletes
-the duplicates — making the upgrade succeed even on a DB that already has
-duplicates. (Existing single-league rows stay byte-identical.)
+``(created_at, id)`` row, removes loser-side league-scoped rating rows that would
+collide under the keeper, repoints every remaining dependent FK to that keeper,
+then deletes the duplicates — making the upgrade succeed even on a DB that
+already has duplicates. (Existing single-league rows stay byte-identical.)
 
 Revision ID: 0045
 Revises: 0044
@@ -48,13 +49,20 @@ _DEPENDENT_LEAGUE_FKS: tuple[tuple[str, str], ...] = (
     ("lobbies", "league_id"),
 )
 
+_LEAGUE_SCOPED_UNIQUE_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ratings", ("agent_build_id", "scope_type", "scope_value")),
+    ("human_rating", ("human_player_id", "scope_type", "scope_value")),
+)
+
 
 def _dedup_humans_included_leagues(bind: sa.engine.Connection) -> None:
     """Collapse duplicate HUMANS_INCLUDED leagues to one keeper per ruleset_id.
 
-    Keeper = earliest ``(created_at, id)``. Dependent FK rows are repointed to the
-    keeper, then the loser rows are deleted. Runs identically on every dialect by
-    using only portable SQLAlchemy core selects/updates/deletes.
+    Keeper = earliest ``(created_at, id)``. Loser-side rows whose scope would
+    duplicate a keeper-side row are deleted before remaining dependent FK rows
+    are repointed to the keeper, then the loser league rows are deleted. Runs
+    identically on every dialect by using only portable SQLAlchemy core
+    selects/updates/deletes.
     """
     rows = bind.execute(
         sa.text("SELECT id, ruleset_id, created_at FROM leagues WHERE kind = 'HUMANS_INCLUDED'")
@@ -73,6 +81,7 @@ def _dedup_humans_included_leagues(bind: sa.engine.Connection) -> None:
         losers = [r.id for r in ordered[1:]]
 
         for loser_id in losers:
+            _delete_loser_scope_collisions(bind, keeper_id=keeper.id, loser_id=loser_id)
             for table, column in _DEPENDENT_LEAGUE_FKS:
                 if not _table_exists(bind, table):
                     continue
@@ -86,6 +95,35 @@ def _dedup_humans_included_leagues(bind: sa.engine.Connection) -> None:
                 sa.text("DELETE FROM leagues WHERE id = :loser"),
                 {"loser": loser_id},
             )
+
+
+def _delete_loser_scope_collisions(
+    bind: sa.engine.Connection, *, keeper_id: object, loser_id: object
+) -> None:
+    """Remove loser rating rows that would violate league-scoped unique keys."""
+    for table, scope_columns in _LEAGUE_SCOPED_UNIQUE_TABLES:
+        if not _table_exists(bind, table):
+            continue
+        scope_match = " AND ".join(
+            f"keeper_rows.{column} = {table}.{column}" for column in scope_columns
+        )
+        # table/column names come from the fixed _LEAGUE_SCOPED_UNIQUE_TABLES
+        # allowlist, never user input, so the f-string is safe.
+        bind.execute(
+            sa.text(
+                f"""
+                DELETE FROM {table}
+                WHERE league_id = :loser
+                AND EXISTS (
+                    SELECT 1
+                    FROM {table} AS keeper_rows
+                    WHERE keeper_rows.league_id = :keeper
+                    AND {scope_match}
+                )
+                """
+            ),
+            {"keeper": keeper_id, "loser": loser_id},
+        )
 
 
 def _table_exists(bind: sa.engine.Connection, table: str) -> bool:

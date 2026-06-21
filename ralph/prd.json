@@ -260,7 +260,7 @@
         "All backend gates pass (including test_migrations_all_dialects)."
       ],
       "notes": "Evidence: 0045_*.py:42-49/81-84, 0003_ratings.py uq_rating_scope, 0025_human_rating_siblings.py uq_human_rating_scope, models.py:390-396/511-517, tests/db/test_migration_0045_dedup.py:96-105. Per AGENTS.md rule 8 these tables are dormant in v1 so the collision is not reachable on a pure-v1 DB, but the migration must be defensively correct (fixtures / forward-port / v2 human-ELO activation make it live). A delete-loser-duplicate-scope-row is sufficient; merging stats into the keeper is optional.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-206",

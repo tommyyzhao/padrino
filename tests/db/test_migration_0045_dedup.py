@@ -1,11 +1,11 @@
-"""US-199: Migration 0045 dedups duplicate dormant HUMANS_INCLUDED leagues.
+"""US-199/US-205: Migration 0045 dedups duplicate HUMANS_INCLUDED leagues.
 
 The pre-0045 ``get_or_create_humans_included`` had no DB constraint, so a deployed
 DB can already contain duplicate ``HUMANS_INCLUDED`` leagues for the same
 ``ruleset_id``. ``CREATE UNIQUE INDEX`` on such a DB would abort the upgrade.
 0045 must first collapse duplicates to one keeper per ruleset (earliest
-``(created_at, id)``), repoint dependents, then create the index — so the upgrade
-succeeds even on a dirty DB.
+``(created_at, id)``), resolve league-scoped rating collisions, repoint
+dependents, then create the index — so the upgrade succeeds even on a dirty DB.
 """
 
 from __future__ import annotations
@@ -55,10 +55,39 @@ def _seed_duplicate_humans_leagues(url: str) -> dict[str, object]:
     loser_id = uuid.uuid4().hex
     other_ruleset_id = uuid.uuid4().hex
     gauntlet_id = uuid.uuid4().hex
+    provider_id = uuid.uuid4().hex
+    model_config_id = uuid.uuid4().hex
     prompt_version_id = uuid.uuid4().hex
+    agent_build_id = uuid.uuid4().hex
+    keeper_rating_id = uuid.uuid4().hex
+    loser_rating_id = uuid.uuid4().hex
+    loser_survivor_rating_id = uuid.uuid4().hex
+    keeper_human_rating_id = uuid.uuid4().hex
+    loser_human_rating_id = uuid.uuid4().hex
+    loser_survivor_human_rating_id = uuid.uuid4().hex
     try:
         with engine.begin() as conn:
-            # A prompt_version is needed for the gauntlet FK chain.
+            # An agent build is needed for the ratings FK chain; a prompt_version
+            # is also needed for the gauntlet FK chain.
+            conn.execute(
+                text(
+                    "INSERT INTO model_providers "
+                    "(id, name, base_url, auth_secret_ref, created_at) "
+                    "VALUES (:id, 'provider', NULL, 'secret', '2026-01-01 00:00:00')"
+                ),
+                {"id": provider_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO model_configs "
+                    "(id, provider_id, model_name, model_version, default_temperature, "
+                    "default_top_p, default_max_output_tokens, supports_structured_outputs, "
+                    "created_at) "
+                    "VALUES (:id, :provider_id, 'model', NULL, 0.7, 1.0, 256, 1, "
+                    "'2026-01-01 00:00:00')"
+                ),
+                {"id": model_config_id, "provider_id": provider_id},
+            )
             conn.execute(
                 text(
                     "INSERT INTO prompt_versions "
@@ -68,6 +97,20 @@ def _seed_duplicate_humans_leagues(url: str) -> dict[str, object]:
                     "'2026-01-01 00:00:00')"
                 ),
                 {"id": prompt_version_id, "hash": uuid.uuid4().hex[:16]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO agent_builds "
+                    "(id, display_name, model_config_id, prompt_version_id, adapter_version, "
+                    "inference_params, active, created_at) "
+                    "VALUES (:id, 'agent', :model_config_id, :prompt_version_id, 'adapter', "
+                    "'{}', 1, '2026-01-01 00:00:00')"
+                ),
+                {
+                    "id": agent_build_id,
+                    "model_config_id": model_config_id,
+                    "prompt_version_id": prompt_version_id,
+                },
             )
             # keeper has the earlier created_at -> should survive.
             conn.execute(
@@ -103,6 +146,49 @@ def _seed_duplicate_humans_leagues(url: str) -> dict[str, object]:
                 ),
                 {"id": gauntlet_id, "league_id": loser_id, "pv": prompt_version_id},
             )
+            conn.execute(
+                text(
+                    "INSERT INTO ratings "
+                    "(id, league_id, agent_build_id, scope_type, scope_value, mu, sigma, "
+                    "conservative_score, games, updated_at) "
+                    "VALUES "
+                    "(:keeper_id, :keeper_league_id, :agent_build_id, 'GLOBAL', 'all', "
+                    "25.0, 8.0, 1.0, 3, '2026-03-01 00:00:00'), "
+                    "(:loser_id, :loser_league_id, :agent_build_id, 'GLOBAL', 'all', "
+                    "10.0, 9.0, -17.0, 1, '2026-03-02 00:00:00'), "
+                    "(:survivor_id, :loser_league_id, :agent_build_id, 'FACTION', 'Town', "
+                    "11.0, 7.0, -10.0, 2, '2026-03-03 00:00:00')"
+                ),
+                {
+                    "keeper_id": keeper_rating_id,
+                    "loser_id": loser_rating_id,
+                    "survivor_id": loser_survivor_rating_id,
+                    "keeper_league_id": keeper_id,
+                    "loser_league_id": loser_id,
+                    "agent_build_id": agent_build_id,
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO human_rating "
+                    "(id, league_id, human_player_id, scope_type, scope_value, mu, sigma, "
+                    "conservative_score, games, updated_at) "
+                    "VALUES "
+                    "(:keeper_id, :keeper_league_id, 'player1', 'GLOBAL', 'all', "
+                    "25.0, 8.0, 1.0, 3, '2026-03-01 00:00:00'), "
+                    "(:loser_id, :loser_league_id, 'player1', 'GLOBAL', 'all', "
+                    "10.0, 9.0, -17.0, 1, '2026-03-02 00:00:00'), "
+                    "(:survivor_id, :loser_league_id, 'player1', 'FACTION', 'Town', "
+                    "11.0, 7.0, -10.0, 2, '2026-03-03 00:00:00')"
+                ),
+                {
+                    "keeper_id": keeper_human_rating_id,
+                    "loser_id": loser_human_rating_id,
+                    "survivor_id": loser_survivor_human_rating_id,
+                    "keeper_league_id": keeper_id,
+                    "loser_league_id": loser_id,
+                },
+            )
     finally:
         engine.dispose()
     return {
@@ -110,6 +196,12 @@ def _seed_duplicate_humans_leagues(url: str) -> dict[str, object]:
         "loser_id": loser_id,
         "other_ruleset_id": other_ruleset_id,
         "gauntlet_id": gauntlet_id,
+        "keeper_rating_id": keeper_rating_id,
+        "loser_rating_id": loser_rating_id,
+        "loser_survivor_rating_id": loser_survivor_rating_id,
+        "keeper_human_rating_id": keeper_human_rating_id,
+        "loser_human_rating_id": loser_human_rating_id,
+        "loser_survivor_human_rating_id": loser_survivor_human_rating_id,
     }
 
 
@@ -146,6 +238,50 @@ def test_0045_dedups_duplicate_humans_leagues(sqlite_db_url: str) -> None:
                 {"id": seeded["gauntlet_id"]},
             ).scalar_one()
             assert str(gl) == str(seeded["keeper_id"])
+
+            # League-scoped duplicate ratings are deleted before repointing, so
+            # the keeper's scope row survives and the loser's colliding row does
+            # not trip uq_rating_scope / uq_human_rating_scope.
+            rating_rows = conn.execute(
+                text("SELECT id, league_id, scope_type, scope_value FROM ratings")
+            ).all()
+            assert {
+                (str(r.id), str(r.league_id), r.scope_type, r.scope_value) for r in rating_rows
+            } == {
+                (
+                    str(seeded["keeper_rating_id"]),
+                    str(seeded["keeper_id"]),
+                    "GLOBAL",
+                    "all",
+                ),
+                (
+                    str(seeded["loser_survivor_rating_id"]),
+                    str(seeded["keeper_id"]),
+                    "FACTION",
+                    "Town",
+                ),
+            }
+
+            human_rating_rows = conn.execute(
+                text("SELECT id, league_id, scope_type, scope_value FROM human_rating")
+            ).all()
+            assert {
+                (str(r.id), str(r.league_id), r.scope_type, r.scope_value)
+                for r in human_rating_rows
+            } == {
+                (
+                    str(seeded["keeper_human_rating_id"]),
+                    str(seeded["keeper_id"]),
+                    "GLOBAL",
+                    "all",
+                ),
+                (
+                    str(seeded["loser_survivor_human_rating_id"]),
+                    str(seeded["keeper_id"]),
+                    "FACTION",
+                    "Town",
+                ),
+            }
 
             # The unique index exists.
             idx = conn.execute(
