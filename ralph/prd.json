@@ -151,7 +151,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: lobbies.py:154/194-201/302/314/429/465/562/569, human_cost_governance.py:275-278/358/384-392/417/440/541-672/581-600/600-618, lobby_launch.py:101-103. bind_admission_slots, release_admission_for_lobby/_member. Prefer: short-circuit the already-LAUNCHED case BEFORE _enforce_admission (mirroring join_lobby's existing-guard), bind on result.created, and add a launch/completion reservation-release path analogous to release_admission_for_lobby.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-199",
