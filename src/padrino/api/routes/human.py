@@ -25,7 +25,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.api.auth import _get_auth_settings
+from padrino.api.auth import _get_auth_settings, _get_rate_limiter
 from padrino.api.deps import get_session
 from padrino.api.human_actions import submit_action
 from padrino.api.human_auth import (
@@ -249,8 +249,7 @@ async def post_chat(
     """
     settings = _get_auth_settings(request)
     await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
-    rate_limiter = getattr(request.app.state, "rate_limiter", None)
-    rate_limit_store = getattr(rate_limiter, "store", None)
+    rate_limit_store = _get_rate_limiter(request).store
     accepted = await submit_chat(
         session,
         game_id=game_id,

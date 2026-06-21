@@ -95,10 +95,10 @@ class Settings(BaseSettings):
     # same RateLimitStore, keyed by the session hash so it shares no bucket with
     # any api_key.
     padrino_rate_limit_human_per_minute: int = 120
-    # Block-before-release human chat moderation (US-140). Two message ceilings,
-    # both via RateLimitStore: a per-human-principal chat ceiling and a
-    # per-game/phase chat ceiling (so one phase cannot be flooded even by many
-    # principals). The guard-model latency budget hides inside the buffer hold.
+    # Block-before-release human chat moderation (US-140/US-167). Two message
+    # ceilings, both via RateLimitStore: a per-human-principal chat ceiling and a
+    # per-game/phase/principal ceiling so one seat cannot exhaust another seat's
+    # phase-local budget. The guard-model latency budget hides inside the buffer hold.
     padrino_rate_limit_human_chat_per_minute: int = 30
     padrino_rate_limit_human_chat_per_game_phase_per_minute: int = 120
     padrino_human_chat_guard_timeout_seconds: float = 2.0

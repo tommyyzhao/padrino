@@ -150,7 +150,7 @@
         "All backend gates pass."
       ],
       "notes": "Security controls fail closed (mirrors the anonymity-guard convention).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-168",

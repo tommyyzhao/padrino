@@ -346,8 +346,14 @@ def _discussion_phase_bodies(human_seat: str) -> list[dict[str, Any]]:
 
 
 async def _seed_human_game(
-    session: AsyncSession, *, principal_id: uuid.UUID | None, human_seat: str = _HUMAN_SEAT
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID | None,
+    human_seat: str = _HUMAN_SEAT,
+    principal_ids_by_seat: dict[str, uuid.UUID] | None = None,
 ) -> uuid.UUID:
+    if principal_ids_by_seat is None:
+        principal_ids_by_seat = {} if principal_id is None else {human_seat: principal_id}
     game = Game(
         gauntlet_id=None,
         ruleset_id=mini7_v1.RULESET_ID,
@@ -375,7 +381,7 @@ async def _seed_human_game(
         )
 
     for s in assign_roles(_GAME_SEED, mini7_v1):
-        is_human = s.public_player_id == human_seat
+        is_human = s.public_player_id in principal_ids_by_seat
         session.add(
             GameSeat(
                 game_id=game.id,
@@ -386,7 +392,7 @@ async def _seed_human_game(
                 role=s.role.value,
                 faction=s.faction.value,
                 alive=True,
-                occupant_principal_id=principal_id if is_human else None,
+                occupant_principal_id=principal_ids_by_seat.get(s.public_player_id),
             )
         )
     await session.flush()
@@ -503,6 +509,100 @@ async def test_per_principal_rate_limit_429(
             )
     assert excinfo.value.status_code == 429
     assert excinfo.value.detail == "chat_rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_none_rate_limit_store_still_enforces_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    pid = uuid.uuid4()
+    async with session_factory() as session, session.begin():
+        session.add(Principal(id=pid, kind="guest"))
+        game_id = await _seed_human_game(session, principal_id=pid)
+
+    from datetime import UTC, datetime
+
+    from fastapi import HTTPException
+
+    async with session_factory() as session, session.begin():
+        await submit_chat(
+            session,
+            game_id=game_id,
+            principal_id=pid,
+            channel="PUBLIC",
+            text="first message",
+            idempotency_key="k1",
+            now=datetime.now(UTC),
+            moderation=StubPassModerationHook(),
+            rate_limit=None,
+            per_principal_limit=1,
+            per_game_phase_limit=100,
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            await submit_chat(
+                session,
+                game_id=game_id,
+                principal_id=pid,
+                channel="PUBLIC",
+                text="second message",
+                idempotency_key="k2",
+                now=datetime.now(UTC),
+                moderation=StubPassModerationHook(),
+                rate_limit=None,
+                per_principal_limit=1,
+                per_game_phase_limit=100,
+            )
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.detail == "chat_rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_game_phase_chat_limit_is_fair_across_principals(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    pid_a = uuid.uuid4()
+    pid_b = uuid.uuid4()
+    async with session_factory() as session, session.begin():
+        session.add_all([Principal(id=pid_a, kind="guest"), Principal(id=pid_b, kind="guest")])
+        game_id = await _seed_human_game(
+            session,
+            principal_id=None,
+            principal_ids_by_seat={"P03": pid_a, "P04": pid_b},
+        )
+
+    from datetime import UTC, datetime
+
+    store = InMemoryRateLimitStore()
+    async with session_factory() as session, session.begin():
+        await submit_chat(
+            session,
+            game_id=game_id,
+            principal_id=pid_a,
+            channel="PUBLIC",
+            text="first from A",
+            idempotency_key="a1",
+            now=datetime.now(UTC),
+            moderation=StubPassModerationHook(),
+            rate_limit=store,
+            per_principal_limit=100,
+            per_game_phase_limit=1,
+        )
+
+        allowed = await submit_chat(
+            session,
+            game_id=game_id,
+            principal_id=pid_b,
+            channel="PUBLIC",
+            text="first from B",
+            idempotency_key="b1",
+            now=datetime.now(UTC),
+            moderation=StubPassModerationHook(),
+            rate_limit=store,
+            per_principal_limit=100,
+            per_game_phase_limit=1,
+        )
+    assert allowed.public_player_id == "P04"
+    assert allowed.idempotent_replay is False
 
 
 @pytest.mark.asyncio

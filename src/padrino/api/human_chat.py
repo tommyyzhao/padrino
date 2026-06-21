@@ -44,7 +44,7 @@ from padrino.api.human_chat_moderation import (
     ChatVerdict,
     RealtimeModerationHook,
 )
-from padrino.api.rate_limit_store import RateLimitStore
+from padrino.api.rate_limit_store import InMemoryRateLimitStore, RateLimitStore
 from padrino.core.engine.state import Seat
 from padrino.core.enums import Faction, PhaseKind
 from padrino.core.observations import format_phase_id
@@ -69,6 +69,7 @@ RATE_LIMITED_DETAIL = "chat_rate_limited"
 # the night mafia channel. This mirrors the engine's chat-emitting phases.
 _PUBLIC_CHAT_PHASES = frozenset({PhaseKind.DAY_DISCUSSION, PhaseKind.DAY_VOTE})
 _PRIVATE_CHAT_PHASES = frozenset({PhaseKind.NIGHT_0_MAFIA_INTRO, PhaseKind.NIGHT_MAFIA_DISCUSSION})
+_DEFAULT_CHAT_RATE_LIMIT_STORE = InMemoryRateLimitStore()
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,19 +182,19 @@ async def submit_chat(
             idempotent_replay=True,
         )
 
-    # Per-user AND per-game/phase chat rate limits (US-140). Checked only on a
-    # genuinely new message (after the idempotency check) so a retry never
-    # consumes a slot. Both keys flow through the shared RateLimitStore.
-    if rate_limit is not None:
-        await _enforce_chat_rate_limits(
-            rate_limit,
-            principal_id=principal_id,
-            game_id=game_id,
-            phase=phase,
-            now=now,
-            per_principal_limit=per_principal_limit,
-            per_game_phase_limit=per_game_phase_limit,
-        )
+    # Per-user AND per-game/phase chat rate limits (US-140/US-167). Checked only
+    # on a genuinely new message (after the idempotency check) so a retry never
+    # consumes a slot. A missing injected store falls back to a process-local
+    # limiter instead of silently allowing unlimited chat.
+    await _enforce_chat_rate_limits(
+        rate_limit if rate_limit is not None else _DEFAULT_CHAT_RATE_LIMIT_STORE,
+        principal_id=principal_id,
+        game_id=game_id,
+        phase=phase,
+        now=now,
+        per_principal_limit=per_principal_limit,
+        per_game_phase_limit=per_game_phase_limit,
+    )
 
     held = await holds_repo.record_held(
         session,
@@ -253,12 +254,14 @@ async def _enforce_chat_rate_limits(
     """Enforce the per-principal and per-game/phase chat ceilings, or 429.
 
     Both ceilings flow through the shared :class:`RateLimitStore`; the keys are
-    namespaced (``human-chat:user`` vs ``human-chat:game-phase``) and hashed so a
-    chat bucket never collides with an API-key or session bucket.
+    namespaced (``human-chat:user`` vs ``human-chat:game-phase-principal``) and
+    hashed so a chat bucket never collides with an API-key or session bucket.
+    The phase bucket includes the principal so one seat cannot exhaust another
+    seat's phase-local budget.
     """
     epoch = now.timestamp()
     principal_key = _hash_key(f"human-chat:user:{principal_id}")
-    game_phase_key = _hash_key(f"human-chat:game-phase:{game_id}:{phase}")
+    game_phase_key = _hash_key(f"human-chat:game-phase-principal:{game_id}:{phase}:{principal_id}")
     for key_hash, limit in (
         (principal_key, per_principal_limit),
         (game_phase_key, per_game_phase_limit),
