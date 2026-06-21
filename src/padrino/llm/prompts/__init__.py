@@ -143,7 +143,7 @@ def canonical_prompts_by_role(
 
     ruleset = get_ruleset(ruleset_id)
     out: dict[Role, str] = {}
-    for role in Role:
+    for role in ruleset.ROLE_COUNTS:
         role_family = ruleset.role_family_for(role)
         out[role] = load_canonical(ruleset_id, role_family).system_prompt
     return out

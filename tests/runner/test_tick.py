@@ -245,6 +245,22 @@ async def test_invalid_json_with_no_details_records_empty_validation_errors() ->
     assert log.events[0].body["payload"]["validation_errors"] == ()
 
 
+async def test_known_but_illegal_action_coerces_to_safe_action() -> None:
+    state = _state(Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    log = EventLog()
+    adapter = _ScriptedAdapter({"P01": _ok_result(ActionType.MAFIA_KILL, "P03")})
+
+    out = await run_tick(state, log, [SEATS[0]], adapter, timeout_s=1.0, ruleset=mini7_v1)
+
+    assert out["P01"].action == Action(type=ActionType.ABSTAIN, target=None)
+    assert len(log.events) == 1
+    body = log.events[0].body
+    assert body["event_type"] == "OutputInvalid"
+    assert body["actor_player_id"] == "P01"
+    assert body["payload"]["reason"] == "ILLEGAL_ACTION"
+    assert body["payload"]["validation_errors"] == ("MAFIA_KILL is illegal in DAY_1_VOTE",)
+
+
 # --- mixed-mode run + no-early-return ---------------------------------------
 
 

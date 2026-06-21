@@ -85,6 +85,9 @@ def test_resolution_matrix_declares_tier_order_and_rows() -> None:
     assert RESOLUTION_MATRIX[NightActionKind.FACTIONAL_KILL].tier is (NarTier.KILL_PROTECT_VISIT)
     assert RESOLUTION_MATRIX[NightActionKind.PROTECT].protected is (MatrixEffect.PREVENTS_DEATH)
     assert RESOLUTION_MATRIX[NightActionKind.INVESTIGATE].tier is NarTier.INVESTIGATION
+    assert RESOLUTION_MATRIX[NightActionKind.FRAME].tier is NarTier.INVESTIGATION
+    assert RESOLUTION_MATRIX[NightActionKind.TRACK].tier is NarTier.INVESTIGATION
+    assert RESOLUTION_MATRIX[NightActionKind.WATCH].tier is NarTier.INVESTIGATION
     assert RESOLUTION_MATRIX[NightActionKind.CLEAN].tier is NarTier.DEATH_REVEAL
 
 
@@ -167,6 +170,28 @@ def test_protection_feedback_is_structured_and_deterministic() -> None:
     assert [(f.recipient, f.target, f.message) for f in feedback] == [
         ("P04", "P05", "Your protection prevented a kill.")
     ]
+
+
+def test_track_and_watch_feedback_use_public_player_ids_only() -> None:
+    result = resolve_night_actions(
+        _state(),
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P03", NightActionKind.TRACK, "P01"),
+            _intent("P04", NightActionKind.WATCH, "P05"),
+        ),
+    )
+
+    track = result.feedback_by_code("TRACK_RESULT")[0]
+    watch = result.feedback_by_code("WATCH_RESULT")[0]
+    assert track.recipient == "P03"
+    assert track.target == "P01"
+    assert track.visited_player_ids == ("P05",)
+    assert track.visitor_player_ids == ()
+    assert watch.recipient == "P04"
+    assert watch.target == "P05"
+    assert watch.visitor_player_ids == ("P01",)
+    assert watch.visited_player_ids == ()
 
 
 def test_cleaned_death_suppresses_death_reveal_only() -> None:

@@ -16,13 +16,16 @@ from __future__ import annotations
 
 from padrino.core.engine.events import (
     ActionTimedOut,
+    CleanSubmitted,
     DayVoteResolved,
     DetectiveResultDelivered,
     Event,
+    FrameSubmitted,
     GameCreated,
     GameTerminated,
     InvestigateSubmitted,
     MafiaKillVoteSubmitted,
+    NightFeedbackDelivered,
     NightResolved,
     OutputInvalid,
     OutputTruncated,
@@ -32,9 +35,12 @@ from padrino.core.engine.events import (
     PrivateMessageSubmitted,
     ProtectSubmitted,
     PublicMessageSubmitted,
+    RoleblockSubmitted,
     RolesAssigned,
     SeatTakenOver,
+    TrackSubmitted,
     VoteSubmitted,
+    WatchSubmitted,
 )
 from padrino.core.engine.state import GameState, Phase, QueuedInspection, Seat
 from padrino.core.enums import PhaseKind
@@ -47,6 +53,12 @@ _RECORDED_ONLY: tuple[type[Event], ...] = (
     VoteSubmitted,
     MafiaKillVoteSubmitted,
     InvestigateSubmitted,
+    RoleblockSubmitted,
+    FrameSubmitted,
+    TrackSubmitted,
+    WatchSubmitted,
+    CleanSubmitted,
+    NightFeedbackDelivered,
     ActionTimedOut,
     OutputTruncated,
     OutputInvalid,

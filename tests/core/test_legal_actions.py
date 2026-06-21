@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from padrino.core.engine.canonical_json import canonical_dumps
 from padrino.core.engine.legal_actions import LegalActions, legal_actions_for
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role
+from padrino.core.rulesets import bench10_v1, mini7_v1
 
 
 def _seat(
@@ -236,6 +238,29 @@ def test_night_actions_detective_targets_living_others_including_mafia() -> None
     assert legal.legal_targets == ["P01", "P02", "P04", "P05", "P06", "P07"]
 
 
+@pytest.mark.parametrize(
+    ("role", "faction", "action_type"),
+    [
+        (Role.MAFIA_ROLEBLOCKER, Faction.MAFIA, ActionType.ROLEBLOCK),
+        (Role.FRAMER, Faction.MAFIA, ActionType.FRAME),
+        (Role.TRACKER, Faction.TOWN, ActionType.TRACK),
+        (Role.WATCHER, Faction.TOWN, ActionType.WATCH),
+        (Role.JANITOR, Faction.MAFIA, ActionType.CLEAN),
+    ],
+)
+def test_night_actions_emit_new_active_role_actions(
+    role: Role,
+    faction: Faction,
+    action_type: ActionType,
+) -> None:
+    actor = _seat("P08", 7, role, faction)
+    seats = (*SEATS, actor)
+    phase = Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0)
+    legal = legal_actions_for(_state(phase, seats), actor)
+    assert legal.allowed_action_types == [action_type]
+    assert legal.legal_targets == ["P01", "P02", "P03", "P04", "P05", "P06", "P07"]
+
+
 def test_night_actions_villager_only_noop() -> None:
     phase = Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0)
     villager = SEATS[4]
@@ -271,3 +296,61 @@ def test_legal_actions_model_is_constructable() -> None:
     )
     assert legal.allowed_action_types == [ActionType.VOTE, ActionType.ABSTAIN]
     assert legal.legal_targets == ["P01", "P02"]
+
+
+def test_new_action_type_members_are_parseable() -> None:
+    assert ActionType("ROLEBLOCK") is ActionType.ROLEBLOCK
+    assert ActionType("FRAME") is ActionType.FRAME
+    assert ActionType("TRACK") is ActionType.TRACK
+    assert ActionType("WATCH") is ActionType.WATCH
+    assert ActionType("CLEAN") is ActionType.CLEAN
+
+
+def _canonical_seats(ruleset_id: str) -> tuple[Seat, ...]:
+    if ruleset_id == mini7_v1.RULESET_ID:
+        role_counts = mini7_v1.ROLE_COUNTS
+        role_factions = mini7_v1.ROLE_FACTIONS
+    else:
+        role_counts = bench10_v1.ROLE_COUNTS
+        role_factions = bench10_v1.ROLE_FACTIONS
+
+    seats: list[Seat] = []
+    for role, count in role_counts.items():
+        for _ in range(count):
+            pid = f"P{len(seats) + 1:02d}"
+            seats.append(
+                _seat(
+                    pid,
+                    len(seats),
+                    role,
+                    role_factions[role],
+                )
+            )
+    return tuple(seats)
+
+
+@pytest.mark.parametrize(
+    ("ruleset_id", "expected"),
+    [
+        (
+            mini7_v1.RULESET_ID,
+            '{"P01":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P03","P04","P05","P06","P07"]},"P02":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P03","P04","P05","P06","P07"]},"P03":{"allowed_action_types":["INVESTIGATE"],"legal_targets":["P01","P02","P04","P05","P06","P07"]},"P04":{"allowed_action_types":["PROTECT"],"legal_targets":["P01","P02","P03","P04","P05","P06","P07"]},"P05":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P06":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P07":{"allowed_action_types":["NOOP"],"legal_targets":[]}}',
+        ),
+        (
+            bench10_v1.RULESET_ID,
+            '{"P01":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10"]},"P02":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10"]},"P03":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10"]},"P04":{"allowed_action_types":["INVESTIGATE"],"legal_targets":["P01","P02","P03","P05","P06","P07","P08","P09","P10"]},"P05":{"allowed_action_types":["PROTECT"],"legal_targets":["P01","P02","P03","P04","P05","P06","P07","P08","P09","P10"]},"P06":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P07":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P08":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P09":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P10":{"allowed_action_types":["NOOP"],"legal_targets":[]}}',
+        ),
+    ],
+)
+def test_canonical_night_action_spaces_are_byte_unchanged(
+    ruleset_id: str,
+    expected: str,
+) -> None:
+    seats = _canonical_seats(ruleset_id)
+    phase = Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0)
+    state = _state(phase, seats)
+    snapshot = {
+        seat.public_player_id: legal_actions_for(state, seat).model_dump(mode="json")
+        for seat in seats
+    }
+    assert canonical_dumps(snapshot).decode("utf-8") == expected

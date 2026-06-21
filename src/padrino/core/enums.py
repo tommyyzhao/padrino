@@ -16,8 +16,13 @@ class Role(StrEnum):
     """Specific role assigned to a seat."""
 
     MAFIA_GOON = "MAFIA_GOON"
+    MAFIA_ROLEBLOCKER = "MAFIA_ROLEBLOCKER"
+    FRAMER = "FRAMER"
+    JANITOR = "JANITOR"
     DETECTIVE = "DETECTIVE"
     DOCTOR = "DOCTOR"
+    TRACKER = "TRACKER"
+    WATCHER = "WATCHER"
     VILLAGER = "VILLAGER"
 
 
@@ -39,6 +44,11 @@ class ActionType(StrEnum):
     MAFIA_KILL = "MAFIA_KILL"
     PROTECT = "PROTECT"
     INVESTIGATE = "INVESTIGATE"
+    ROLEBLOCK = "ROLEBLOCK"
+    FRAME = "FRAME"
+    TRACK = "TRACK"
+    WATCH = "WATCH"
+    CLEAN = "CLEAN"
 
 
 class SeatKind(StrEnum):

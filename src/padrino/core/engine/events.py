@@ -95,6 +95,34 @@ class InvestigateSubmittedPayload(_FrozenModel):
     target: str | None
 
 
+class RoleblockSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class FrameSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class TrackSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class WatchSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class CleanSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class NightFeedbackDeliveredPayload(_FrozenModel):
+    code: str
+    target: str | None = None
+    finding: Literal["MAFIA", "TOWN"] | None = None
+    visited_player_ids: tuple[str, ...] = ()
+    visitor_player_ids: tuple[str, ...] = ()
+
+
 class ActionTimedOutPayload(_FrozenModel):
     expected_action_type: str
     defaulted_to: str
@@ -249,6 +277,60 @@ class InvestigateSubmitted(_FrozenModel):
     payload: InvestigateSubmittedPayload
 
 
+class RoleblockSubmitted(_FrozenModel):
+    event_type: Literal["RoleblockSubmitted"] = "RoleblockSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: RoleblockSubmittedPayload
+
+
+class FrameSubmitted(_FrozenModel):
+    event_type: Literal["FrameSubmitted"] = "FrameSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: FrameSubmittedPayload
+
+
+class TrackSubmitted(_FrozenModel):
+    event_type: Literal["TrackSubmitted"] = "TrackSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: TrackSubmittedPayload
+
+
+class WatchSubmitted(_FrozenModel):
+    event_type: Literal["WatchSubmitted"] = "WatchSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: WatchSubmittedPayload
+
+
+class CleanSubmitted(_FrozenModel):
+    event_type: Literal["CleanSubmitted"] = "CleanSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: CleanSubmittedPayload
+
+
+class NightFeedbackDelivered(_FrozenModel):
+    event_type: Literal["NightFeedbackDelivered"] = "NightFeedbackDelivered"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: NightFeedbackDeliveredPayload
+
+
 class ActionTimedOut(_FrozenModel):
     event_type: Literal["ActionTimedOut"] = "ActionTimedOut"
     sequence: int
@@ -362,6 +444,12 @@ Event = Annotated[
     | MafiaKillVoteSubmitted
     | ProtectSubmitted
     | InvestigateSubmitted
+    | RoleblockSubmitted
+    | FrameSubmitted
+    | TrackSubmitted
+    | WatchSubmitted
+    | CleanSubmitted
+    | NightFeedbackDelivered
     | ActionTimedOut
     | OutputTruncated
     | OutputInvalid
@@ -388,6 +476,12 @@ EVENT_TYPES: tuple[str, ...] = (
     "MafiaKillVoteSubmitted",
     "ProtectSubmitted",
     "InvestigateSubmitted",
+    "RoleblockSubmitted",
+    "FrameSubmitted",
+    "TrackSubmitted",
+    "WatchSubmitted",
+    "CleanSubmitted",
+    "NightFeedbackDelivered",
     "ActionTimedOut",
     "OutputTruncated",
     "OutputInvalid",
@@ -406,12 +500,16 @@ __all__ = [
     "EVENT_TYPES",
     "ActionTimedOut",
     "ActionTimedOutPayload",
+    "CleanSubmitted",
+    "CleanSubmittedPayload",
     "DayVoteResolved",
     "DayVoteResolvedPayload",
     "DetectiveResultDelivered",
     "DetectiveResultDeliveredPayload",
     "Event",
     "EventAdapter",
+    "FrameSubmitted",
+    "FrameSubmittedPayload",
     "GameCreated",
     "GameCreatedPayload",
     "GameTerminated",
@@ -420,6 +518,8 @@ __all__ = [
     "InvestigateSubmittedPayload",
     "MafiaKillVoteSubmitted",
     "MafiaKillVoteSubmittedPayload",
+    "NightFeedbackDelivered",
+    "NightFeedbackDeliveredPayload",
     "NightResolved",
     "NightResolvedPayload",
     "OutputInvalid",
@@ -440,12 +540,18 @@ __all__ = [
     "PublicMessageSubmittedPayload",
     "RoleClaimed",
     "RoleClaimedPayload",
+    "RoleblockSubmitted",
+    "RoleblockSubmittedPayload",
     "RolesAssigned",
     "RolesAssignedPayload",
     "SeatAssignment",
     "SeatTakenOver",
     "SeatTakenOverPayload",
+    "TrackSubmitted",
+    "TrackSubmittedPayload",
     "Visibility",
     "VoteSubmitted",
     "VoteSubmittedPayload",
+    "WatchSubmitted",
+    "WatchSubmittedPayload",
 ]

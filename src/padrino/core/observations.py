@@ -94,6 +94,19 @@ class InspectionResultEntry(BaseModel):
     phase: str
 
 
+class RoleFeedbackEntry(BaseModel):
+    """One structured night-feedback row visible only to its recipient."""
+
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    phase: str
+    target: str | None = None
+    finding: Literal["MAFIA", "TOWN"] | None = None
+    visited_player_ids: tuple[str, ...] = ()
+    visitor_player_ids: tuple[str, ...] = ()
+
+
 class SeatIdentity(BaseModel):
     """One per-seat identity disclosure entry (US-141, TRANSPARENT mode only).
 
@@ -136,6 +149,7 @@ class Observation(BaseModel):
     mafia_teammates: tuple[str, ...] | None = None
     previous_protected_target: str | None = None
     inspection_history: tuple[InspectionResultEntry, ...] | None = None
+    role_feedback: tuple[RoleFeedbackEntry, ...] = ()
     #: Per-seat human/model identity disclosure (US-141). ``None`` in ANONYMOUS
     #: mode (fail closed); a tuple of :class:`SeatIdentity` (possibly empty) in
     #: TRANSPARENT mode. Never carries another seat's role/faction.
@@ -220,6 +234,7 @@ def build_observation(
         mafia_teammates=mafia_teammates,
         previous_protected_target=previous_protected_target,
         inspection_history=inspection_history,
+        role_feedback=_role_feedback(seat, event_log),
     )
 
 
@@ -343,12 +358,35 @@ def _inspection_history(seat: Seat, event_log: EventLog) -> tuple[InspectionResu
     return tuple(out)
 
 
+def _role_feedback(seat: Seat, event_log: EventLog) -> tuple[RoleFeedbackEntry, ...]:
+    out: list[RoleFeedbackEntry] = []
+    for stored in event_log.events:
+        body = stored.body
+        if body.get("event_type") != "NightFeedbackDelivered":
+            continue
+        if body.get("actor_player_id") != seat.public_player_id:
+            continue
+        payload = body["payload"]
+        out.append(
+            RoleFeedbackEntry(
+                code=payload["code"],
+                phase=body["phase"],
+                target=payload.get("target"),
+                finding=payload.get("finding"),
+                visited_player_ids=tuple(payload.get("visited_player_ids", ())),
+                visitor_player_ids=tuple(payload.get("visitor_player_ids", ())),
+            )
+        )
+    return tuple(out)
+
+
 __all__ = [
     "DeadPlayerInfo",
     "EventEntry",
     "InspectionResultEntry",
     "MessageLimits",
     "Observation",
+    "RoleFeedbackEntry",
     "Ruleset",
     "SeatIdentity",
     "YouInfo",

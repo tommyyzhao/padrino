@@ -33,8 +33,7 @@ from collections.abc import Awaitable, Callable
 from padrino.core.agents.coercion import coerce_response_failure
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
-from padrino.core.engine.legal_actions import LegalActions
-from padrino.core.enums import ActionType
+from padrino.core.engine.legal_actions import LegalActions, action_requires_target
 from padrino.core.observations import Observation
 from padrino.llm.adapter import AdapterResult, AdapterStatus
 from padrino.llm.observation_phase import phase_from_observation
@@ -50,13 +49,6 @@ Clock = Callable[[], float]
 #: Async sleep. Injected so tests advance a fake clock instead of blocking.
 Sleep = Callable[[float], Awaitable[None]]
 
-# Targeted actions require a legal ``target``; the rest must carry no target.
-# Mirrors the validation in :mod:`padrino.api.human_actions` so the adapter's
-# legality check matches the POST channel's.
-_TARGETED_ACTION_TYPES = frozenset(
-    {ActionType.VOTE, ActionType.MAFIA_KILL, ActionType.PROTECT, ActionType.INVESTIGATE}
-)
-
 _DEFAULT_DEADLINE_SECONDS = 120.0
 _DEFAULT_POLL_INTERVAL_SECONDS = 0.5
 
@@ -68,7 +60,7 @@ def _is_legal(action: Action, legal: LegalActions) -> bool:
     """Return whether ``action`` is legal given the seat's ``legal_actions``."""
     if action.type not in legal.allowed_action_types:
         return False
-    if action.type in _TARGETED_ACTION_TYPES:
+    if action_requires_target(action.type):
         return action.target is not None and action.target in legal.legal_targets
     # NOOP / ABSTAIN must not carry a target.
     return action.target is None

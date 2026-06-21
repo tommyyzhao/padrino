@@ -135,11 +135,12 @@ def test_every_role_family_resolves_to_a_distinct_prompt() -> None:
 
 def test_canonical_prompts_by_role_covers_every_role() -> None:
     prompts = canonical_prompts_by_role()
-    assert set(prompts.keys()) == set(Role)
+    assert set(prompts.keys()) == set(mini7_v1.ROLE_COUNTS)
     # MAFIA_GOON → DECEPTIVE; DETECTIVE → INVESTIGATIVE; DOCTOR → PROTECTIVE;
     # VILLAGER → VANILLA_TOWN. Confirm via the bundled markdown content.
     expected = {
-        role: load_canonical(mini7_v1.RULESET_ID, mini7_v1.role_family_for(role)) for role in Role
+        role: load_canonical(mini7_v1.RULESET_ID, mini7_v1.role_family_for(role))
+        for role in mini7_v1.ROLE_COUNTS
     }
     for role, template in expected.items():
         assert prompts[role] == template.system_prompt

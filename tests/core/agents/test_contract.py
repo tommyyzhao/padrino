@@ -55,6 +55,19 @@ def test_parse_noop_action_with_null_messages() -> None:
     assert result.action.target is None
 
 
+@pytest.mark.parametrize(
+    "action_type",
+    ["ROLEBLOCK", "FRAME", "TRACK", "WATCH", "CLEAN"],
+)
+def test_parse_new_night_action_types(action_type: str) -> None:
+    payload = _valid_payload()
+    payload["action"] = {"type": action_type, "target": "P03"}
+    result = parse_agent_response(json.dumps(payload))
+    assert isinstance(result, AgentResponse)
+    assert result.action.type is ActionType(action_type)
+    assert result.action.target == "P03"
+
+
 def test_parse_invalid_json_returns_response_error() -> None:
     result = parse_agent_response("{not valid json")
     assert isinstance(result, ResponseError)

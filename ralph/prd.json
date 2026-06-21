@@ -84,7 +84,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Keystone prerequisite the review flagged: every active-role story silently assumed these actions exist.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-215",

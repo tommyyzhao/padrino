@@ -72,20 +72,27 @@ _ARCHETYPE_KEYS: tuple[str, ...] = (
     "archetype_d",
 )
 
+_SHIPPED_ROLE_SPRITES: tuple[Role, ...] = (
+    Role.MAFIA_GOON,
+    Role.DETECTIVE,
+    Role.DOCTOR,
+    Role.VILLAGER,
+)
+
 
 def _theme_pack(pack_id: str, display_name: str) -> SpriteThemePack:
     """Build a theme pack with the standard archetype pool + role sprites.
 
     Every pack ships the SAME set of role-agnostic archetypes and one sprite per
-    :class:`Role`; the sprite *keys* are namespaced by ``pack_id`` so a client
-    fetches ``/<pack_id>/<key>`` from the asset route. Keeping the shape uniform
-    means ANONYMOUS resolution is identical across themes (only the art differs).
+    currently shipped role; the sprite *keys* are namespaced by ``pack_id`` so a
+    client fetches ``/<pack_id>/<key>`` from the asset route. Keeping the shape
+    uniform means ANONYMOUS resolution is identical across themes.
     """
     return SpriteThemePack(
         id=pack_id,
         display_name=display_name,
         archetypes=list(_ARCHETYPE_KEYS),
-        role_sprites={role.value: f"role_{role.value.lower()}" for role in Role},
+        role_sprites={role.value: f"role_{role.value.lower()}" for role in _SHIPPED_ROLE_SPRITES},
     )
 
 

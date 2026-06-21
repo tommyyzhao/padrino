@@ -36,8 +36,9 @@ import structlog
 
 from padrino.core.agents.coercion import coerce_response_failure, coerce_to_safe_action
 from padrino.core.agents.contract import AgentResponse, ResponseError
+from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog
-from padrino.core.engine.legal_actions import legal_actions_for
+from padrino.core.engine.legal_actions import action_requires_target, legal_actions_for
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType
 from padrino.core.observation_privacy import assert_ranked_observation_safe
@@ -53,6 +54,7 @@ from padrino.observability.metrics import record_invalid_action
 
 _REASON_TIMEOUT = "TIMEOUT"
 _REASON_LLM_EXHAUSTED = "llm_exhausted"
+_REASON_ILLEGAL_ACTION = "ILLEGAL_ACTION"
 _logger = structlog.get_logger("padrino.llm")
 
 
@@ -202,6 +204,20 @@ async def _call_one_seat(
                 },
             )
 
+        illegal_reason = _illegal_action_reason(state, seat, parsed.action, phase_id)
+        if illegal_reason is not None:
+            return _build_failure_outcome(
+                state=state,
+                seat=seat,
+                phase_id=phase_id,
+                reason=_REASON_ILLEGAL_ACTION,
+                event_type="OutputInvalid",
+                payload={
+                    "reason": _REASON_ILLEGAL_ACTION,
+                    "validation_errors": (illegal_reason,),
+                },
+            )
+
         return _SeatOutcome(seat_id=seat.public_player_id, response=parsed, failure_event=None)
     finally:
         structlog.contextvars.reset_contextvars(**tokens)
@@ -233,6 +249,26 @@ def _expected_action_type(state: GameState, seat: Seat) -> str:
     if not legal.allowed_action_types:
         return ActionType.NOOP.value
     return legal.allowed_action_types[0].value
+
+
+def _illegal_action_reason(
+    state: GameState,
+    seat: Seat,
+    action: Action,
+    phase_id: str,
+) -> str | None:
+    legal = legal_actions_for(state, seat)
+    action_type = action.type
+    if action == coerce_to_safe_action(state.current_phase, _REASON_ILLEGAL_ACTION):
+        return None
+    if action_type not in legal.allowed_action_types:
+        return f"{action_type.value} is illegal in {phase_id}"
+    if action_requires_target(action_type):
+        if action.target is None or action.target not in legal.legal_targets:
+            return f"{action_type.value} target is illegal in {phase_id}"
+    elif action.target is not None:
+        return f"{action_type.value} must not include a target in {phase_id}"
+    return None
 
 
 __all__ = ["run_tick"]

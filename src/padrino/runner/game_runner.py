@@ -75,6 +75,9 @@ MAFIA_CHANNEL_ID: Final[str] = "mafia"
 CAUSE_DAY_VOTE: Final[str] = "day_vote"
 CAUSE_NIGHT_KILL: Final[str] = "night_kill"
 STATUS_COMPLETED: Final[str] = "COMPLETED"
+OBSERVATION_FEEDBACK_CODES: Final[frozenset[str]] = frozenset(
+    {"ACTION_BLOCKED", "TRACK_RESULT", "WATCH_RESULT"}
+)
 
 _RULESETS: Final[dict[str, Any]] = {
     mini7_v1.RULESET_ID: mini7_v1,
@@ -591,6 +594,56 @@ def _submission_events_for(
                     "payload": {"target": action.target},
                 }
             )
+        elif action.type is ActionType.ROLEBLOCK:
+            events.append(
+                {
+                    "event_type": "RoleblockSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.FRAME:
+            events.append(
+                {
+                    "event_type": "FrameSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.TRACK:
+            events.append(
+                {
+                    "event_type": "TrackSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.WATCH:
+            events.append(
+                {
+                    "event_type": "WatchSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.CLEAN:
+            events.append(
+                {
+                    "event_type": "CleanSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
 
     return events
 
@@ -685,6 +738,24 @@ def _resolve_night_events(
                     "payload": {"target": target, "finding": finding},
                 }
             )
+    for feedback in night.feedback:
+        if feedback.code not in OBSERVATION_FEEDBACK_CODES:
+            continue
+        events.append(
+            {
+                "event_type": "NightFeedbackDelivered",
+                "phase": phase_id,
+                "visibility": "PRIVATE",
+                "actor_player_id": feedback.recipient,
+                "payload": {
+                    "code": feedback.code,
+                    "target": feedback.target,
+                    "finding": feedback.finding,
+                    "visited_player_ids": feedback.visited_player_ids,
+                    "visitor_player_ids": feedback.visitor_player_ids,
+                },
+            }
+        )
     return events
 
 

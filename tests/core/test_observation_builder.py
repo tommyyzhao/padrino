@@ -14,6 +14,8 @@ from padrino.core.engine.events import (
     Event,
     MafiaKillVoteSubmitted,
     MafiaKillVoteSubmittedPayload,
+    NightFeedbackDelivered,
+    NightFeedbackDeliveredPayload,
     PhaseStarted,
     PhaseStartedPayload,
     PlayerEliminated,
@@ -406,6 +408,53 @@ def test_detective_sees_own_inspection_results() -> None:
     # Mafia should not see the detective's delivery even though it's PRIVATE.
     obs_mafia = build_observation(state, state.seats[0], log, mini7_v1)
     assert obs_mafia.private_events == ()
+
+
+def test_role_feedback_lists_only_own_structured_public_id_results() -> None:
+    state = _state(Phase(kind=PhaseKind.DAY_DISCUSSION, day=2, round=1))
+    log = EventLog()
+    _append(
+        log,
+        NightFeedbackDelivered(
+            sequence=0,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P03",
+            payload=NightFeedbackDeliveredPayload(
+                code="TRACK_RESULT",
+                target="P01",
+                visited_player_ids=("P05", "P06"),
+            ),
+        ),
+    )
+    _append(
+        log,
+        NightFeedbackDelivered(
+            sequence=1,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P04",
+            payload=NightFeedbackDeliveredPayload(
+                code="ACTION_BLOCKED",
+                target="P05",
+            ),
+        ),
+    )
+
+    obs = build_observation(state, state.seats[2], log, mini7_v1)
+    assert [entry.model_dump(mode="json") for entry in obs.role_feedback] == [
+        {
+            "code": "TRACK_RESULT",
+            "phase": "NIGHT_1_ACTIONS",
+            "target": "P01",
+            "finding": None,
+            "visited_player_ids": ["P05", "P06"],
+            "visitor_player_ids": [],
+        }
+    ]
+    assert [event.sequence for event in obs.private_events] == [0]
+
+    other = build_observation(state, state.seats[4], log, mini7_v1)
+    assert other.role_feedback == ()
+    assert other.private_events == ()
 
 
 # --------------------------------------------------------------------------- #

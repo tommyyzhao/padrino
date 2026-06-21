@@ -74,6 +74,7 @@ class NightActionKind(StrEnum):
     FACTIONAL_KILL = "FACTIONAL_KILL"
     PROTECT = "PROTECT"
     INVESTIGATE = "INVESTIGATE"
+    FRAME = "FRAME"
     TRACK = "TRACK"
     WATCH = "WATCH"
     CLEAN = "CLEAN"
@@ -169,6 +170,18 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         records_visit=True,
         records_visit_when_blocked=False,
     ),
+    NightActionKind.FRAME: ResolutionMatrixRow(
+        action_kind=NightActionKind.FRAME,
+        tier=NarTier.INVESTIGATION,
+        blocked=MatrixEffect.NULLIFIES_ACTION,
+        protected=MatrixEffect.UNAFFECTED,
+        killed=MatrixEffect.READS_RESOLVED_STATE,
+        redirected=MatrixEffect.RETARGETS_ACTION,
+        watched_tracked=MatrixEffect.RECORDS_VISIT,
+        cleaned=MatrixEffect.UNAFFECTED,
+        records_visit=True,
+        records_visit_when_blocked=False,
+    ),
     NightActionKind.TRACK: ResolutionMatrixRow(
         action_kind=NightActionKind.TRACK,
         tier=NarTier.INVESTIGATION,
@@ -240,6 +253,8 @@ class NightFeedback(BaseModel):
     message: str
     target: str | None = None
     finding: Literal["MAFIA", "TOWN"] | None = None
+    visited_player_ids: tuple[str, ...] = ()
+    visitor_player_ids: tuple[str, ...] = ()
 
 
 class DeathReveal(BaseModel):
@@ -365,6 +380,7 @@ def _valid_target_for_kind(
         return _alive_seat(state, redirect_target_id) is not None
     return kind in {
         NightActionKind.ROLEBLOCK,
+        NightActionKind.FRAME,
         NightActionKind.TRACK,
         NightActionKind.WATCH,
         NightActionKind.CLEAN,
@@ -600,6 +616,47 @@ def _resolve_investigations(
     return detective_finding, outcomes, tuple(feedback)
 
 
+def _resolve_visit_graph_feedback(
+    state: GameState,
+    intents: Sequence[NightActionIntent],
+    visits: Sequence[VisitRecord],
+) -> tuple[NightFeedback, ...]:
+    feedback: list[NightFeedback] = []
+    for intent in _tier_intents(intents, NightActionKind.TRACK):
+        assert intent.target is not None
+        visited = {
+            visit.target
+            for visit in visits
+            if visit.actor == intent.target and visit.target != intent.actor
+        }
+        feedback.append(
+            NightFeedback(
+                recipient=intent.actor,
+                code="TRACK_RESULT",
+                message=f"Track result: {intent.target} visited {len(visited)} player(s).",
+                target=intent.target,
+                visited_player_ids=_sort_ids(state, visited),
+            )
+        )
+    for intent in _tier_intents(intents, NightActionKind.WATCH):
+        assert intent.target is not None
+        visitors = {
+            visit.actor
+            for visit in visits
+            if visit.target == intent.target and visit.actor != intent.actor
+        }
+        feedback.append(
+            NightFeedback(
+                recipient=intent.actor,
+                code="WATCH_RESULT",
+                message=f"Watch result: {intent.target} was visited by {len(visitors)} player(s).",
+                target=intent.target,
+                visitor_player_ids=_sort_ids(state, visitors),
+            )
+        )
+    return tuple(feedback)
+
+
 def _resolve_cleaned_deaths(
     intents: Sequence[NightActionIntent],
     eliminated: str | None,
@@ -676,6 +733,7 @@ def resolve_night_actions(
         eliminated,
     )
     feedback.extend(investigation_feedback)
+    feedback.extend(_resolve_visit_graph_feedback(state, active_intents, visits))
 
     cleaned_deaths = _resolve_cleaned_deaths(active_intents, eliminated)
     death_reveals = _death_reveals(state, eliminated, cleaned_deaths)
@@ -721,6 +779,26 @@ def _intents_from_current_submissions(
                     kind=NightActionKind.INVESTIGATE,
                     target=action.target,
                 )
+            )
+        elif action.type is ActionType.ROLEBLOCK:
+            intents.append(
+                NightActionIntent(actor=actor, kind=NightActionKind.ROLEBLOCK, target=action.target)
+            )
+        elif action.type is ActionType.FRAME:
+            intents.append(
+                NightActionIntent(actor=actor, kind=NightActionKind.FRAME, target=action.target)
+            )
+        elif action.type is ActionType.TRACK:
+            intents.append(
+                NightActionIntent(actor=actor, kind=NightActionKind.TRACK, target=action.target)
+            )
+        elif action.type is ActionType.WATCH:
+            intents.append(
+                NightActionIntent(actor=actor, kind=NightActionKind.WATCH, target=action.target)
+            )
+        elif action.type is ActionType.CLEAN:
+            intents.append(
+                NightActionIntent(actor=actor, kind=NightActionKind.CLEAN, target=action.target)
             )
     return tuple(intents)
 
