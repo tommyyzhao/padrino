@@ -180,7 +180,7 @@
         "All backend gates pass."
       ],
       "notes": "Both reviewers: do NOT put the quartet in mini7; role-heavy scored ladders want 10p+. Keep canonical ladders narrow and well-tested. US-178 is a build-order dependency (conditional-Framer include).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-180",

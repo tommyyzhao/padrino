@@ -120,6 +120,35 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 
 ---
 
+## 2026-06-21T16:40 PDT - US-179
+- Added `deception13_v1` as a canonical 13-player, two-faction ruleset:
+  4 Mafia (Godfather, Roleblocker, one-shot Janitor, Goon) and 9 Town
+  (Detective, Doctor, 7 Villagers).
+- Registered the ruleset through `get_ruleset` and `BUILTIN_RULESET_IDS`, and
+  mapped its canonical prompt loading to the existing bench10 prompt pack so
+  bootstrap can seed canonical role-family prompts for the new ruleset.
+- Pinned acceptance coverage for exact role counts, vanilla-town majority,
+  canonical-team declaration, US-172 canonicality introspection, seeded role
+  assignment, and the byte-stable night action space for the composed roles.
+- Balance note: Town:Scum is 9:4 (30.8% scum). Power roles are 5/13 seats
+  (38.5%: Godfather, Roleblocker, Janitor, Detective, Doctor), keeping power
+  roles below a seat majority and vanilla Town at 7/13. Framer remains excluded
+  because the current US-178 variance gate has 0 mirror-paired games and fails
+  with `insufficient_mirror_pairs`, so no unmeasured frame-target RNG variance
+  is admitted into this canonical ladder.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/rulesets/deception13_v1.py`,
+  `src/padrino/core/rulesets/__init__.py`,
+  `src/padrino/llm/prompts/__init__.py`,
+  `tests/core/test_deception13_constants.py`,
+  `tests/core/test_rating_context_rulesets.py`,
+  `tests/core/test_role_assignment.py`, `tests/core/test_legal_actions.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused US-179 suite; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2368 passed / 47 skipped /
+  10 deselected.
+
 ## 2026-06-21T16:33 PDT - US-178
 - Implemented Framer as a deterministic one-shot NAR active mark. A resolved
   `FRAME` marks the target for that night's investigation tier, makes Detective

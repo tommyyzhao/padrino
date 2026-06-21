@@ -7,7 +7,7 @@ from collections import Counter
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import Seat
 from padrino.core.enums import Faction, Role
-from padrino.core.rulesets import bench10_v1, mini7_v1, roleblock10_v1
+from padrino.core.rulesets import bench10_v1, deception13_v1, mini7_v1, roleblock10_v1
 
 
 def test_returns_seven_seats() -> None:
@@ -58,6 +58,20 @@ def test_roleblock10_role_counts_include_one_mafia_roleblocker() -> None:
         assert counts[Role.DETECTIVE] == 1
         assert counts[Role.DOCTOR] == 1
         assert counts[Role.VILLAGER] == 5
+
+
+def test_deception13_role_counts_include_vetted_scum_skills() -> None:
+    for i in range(50):
+        seats = assign_roles(f"deception-trial-{i}", deception13_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.GODFATHER] == 1
+        assert counts[Role.MAFIA_ROLEBLOCKER] == 1
+        assert counts[Role.JANITOR] == 1
+        assert counts[Role.MAFIA_GOON] == 1
+        assert counts[Role.FRAMER] == 0
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.VILLAGER] == 7
 
 
 def test_public_player_ids_are_p01_through_p07() -> None:
