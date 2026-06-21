@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from http.cookies import SimpleCookie
 from time import time
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -118,6 +119,8 @@ def _signed_id_token(
     nonce: str,
     aud: str = "client-id-123",
     iss: str = "https://provider.example",
+    exp: int | None = None,
+    include_exp: bool = True,
 ) -> str:
     claims = {
         "iss": iss,
@@ -125,9 +128,10 @@ def _signed_id_token(
         "aud": aud,
         "nonce": nonce,
         "name": "Token Alice",
-        "exp": int(time()) + 3600,
         "iat": int(time()),
     }
+    if include_exp:
+        claims["exp"] = exp if exp is not None else int(time()) + 3600
     token = jwt.encode({"alg": "RS256", "kid": "test-key"}, claims, _OIDC_KEY)
     assert isinstance(token, bytes)
     return token.decode("ascii")
@@ -372,7 +376,7 @@ async def test_callback_rejects_id_token_claim_mismatch(
     client: AsyncClient, override: str, value: str
 ) -> None:
     state, verifier, nonce = await _callback_cookies(client)
-    claims = {"nonce": nonce}
+    claims: dict[str, Any] = {"nonce": nonce}
     claims[override] = value
 
     async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
@@ -391,6 +395,80 @@ async def test_callback_rejects_id_token_claim_mismatch(
     )
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_id_token_without_exp(client: AsyncClient) -> None:
+    """An id_token with no bounded lifetime is rejected fail-closed (US-193)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": _signed_id_token(nonce=nonce, include_exp=False)}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_expired_id_token(client: AsyncClient) -> None:
+    """An expired (past exp) id_token is rejected (US-193)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": _signed_id_token(nonce=nonce, exp=int(time()) - 3600)}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_state_signing_key_is_not_the_client_secret() -> None:
+    """The state HMAC uses a dedicated signing key, not the client secret (US-193)."""
+    from padrino.api.oauth import resolve_oauth_config
+
+    settings = get_settings()
+    config = resolve_oauth_config(settings, "google")
+    assert config is not None
+    assert config.state_signing_key != config.client_secret
+    assert config.state_signing_key
+
+
+def test_explicit_state_signing_key_overrides_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit server signing key is used verbatim for the state HMAC (US-193)."""
+    from padrino.api.oauth import resolve_oauth_config
+
+    monkeypatch.setenv("PADRINO_OAUTH_STATE_SIGNING_KEY", "dedicated-server-key")
+    get_settings.cache_clear()
+    try:
+        config = resolve_oauth_config(get_settings(), "google")
+        assert config is not None
+        assert config.state_signing_key == "dedicated-server-key"
+        assert config.state_signing_key != config.client_secret
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

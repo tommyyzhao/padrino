@@ -2,13 +2,15 @@
 
 ONE provider (e.g. Google) via Authlib's :class:`AsyncOAuth2Client`. The
 authorization-code flow is protected with a signed, session-bound CSRF
-``state`` plus PKCE (``code_challenge_method=S256``). The provider client
+``state`` plus PKCE (``code_challenge_method=S256``); the state HMAC uses a
+dedicated server signing key (US-193), not the provider client secret. The provider client
 id/secret, endpoints, issuer, and JWKS URL come from
 :class:`padrino.settings.Settings` and are optional/None so the engine boots and
 the test suite runs without them; the client secret is never logged. No provider
 tokens are persisted beyond completing the exchange — only the stable
 ``(provider, subject)`` identity is stored after validating the provider
-``id_token`` signature, audience, issuer, and nonce.
+``id_token`` signature, audience, issuer, nonce, and a bounded lifetime
+(``exp``/``iat`` essential; a token with no ``exp`` is rejected fail-closed).
 
 Tests stub the network entirely via the ``resolve_user_info`` indirection or the
 lower-level token/JWKS seams, so no live provider is contacted.
@@ -33,6 +35,8 @@ from authlib.jose.errors import JoseError
 from padrino.settings import Settings
 
 _STATE_VERSION: Final[int] = 1
+# Small clock-skew tolerance for id_token exp/iat validation (US-193).
+_CLAIMS_LEEWAY_SECONDS: Final[int] = 60
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,7 @@ class OAuthConfig:
     issuer: str
     jwks_url: str
     scope: str
+    state_signing_key: str
 
 
 @dataclass(frozen=True)
@@ -111,7 +116,29 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         issuer=settings.padrino_oauth_issuer,
         jwks_url=settings.padrino_oauth_jwks_url,
         scope=settings.padrino_oauth_scope,
+        state_signing_key=_resolve_state_signing_key(settings),
     )
+
+
+def _resolve_state_signing_key(settings: Settings) -> str:
+    """Return the dedicated OAuth state-signing key (US-193).
+
+    Uses the explicit server signing key when configured. Otherwise derives a
+    key from the client secret via a domain-separated HMAC so the state HMAC is
+    never keyed directly on ``client_secret`` (a leaked client secret cannot be
+    used to forge state tokens without also knowing the derivation), while the
+    flow still works with no extra deploy configuration.
+    """
+    explicit = settings.padrino_oauth_state_signing_key
+    if explicit is not None and explicit.strip():
+        return explicit
+    secret = settings.padrino_oauth_client_secret or ""
+    derived = hmac.new(
+        secret.encode("utf-8"),
+        b"padrino.oauth.state-signing-key.v1",
+        hashlib.sha256,
+    ).digest()
+    return _base64url_encode(derived)
 
 
 def build_authorization_request(
@@ -224,9 +251,16 @@ def _user_info_from_id_token(
                 "aud": {"essential": True, "value": config.client_id},
                 "sub": {"essential": True},
                 "nonce": {"essential": True, "value": nonce},
+                # A signature-valid token with no bounded lifetime must be
+                # REJECTED fail-closed (US-193): mark ``exp`` essential so a
+                # missing ``exp`` fails validation rather than being treated as a
+                # permanent, non-expiring login assertion. ``iat`` is also
+                # required so an issued-at can be sanity-checked.
+                "exp": {"essential": True},
+                "iat": {"essential": True},
             },
         )
-        claims.validate()
+        claims.validate(leeway=_CLAIMS_LEEWAY_SECONDS)
     except (JoseError, TypeError, ValueError) as exc:
         raise OAuthError("OAuth provider id_token validation failed") from exc
     return _user_info_from_payload(dict(claims))
@@ -329,7 +363,7 @@ def _decode_state(config: OAuthConfig, state: str) -> dict[str, Any]:
 
 def _state_signature(config: OAuthConfig, body: str) -> str:
     digest = hmac.new(
-        config.client_secret.encode("utf-8"),
+        config.state_signing_key.encode("utf-8"),
         body.encode("ascii"),
         hashlib.sha256,
     ).digest()

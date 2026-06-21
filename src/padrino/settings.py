@@ -179,6 +179,12 @@ class Settings(BaseSettings):
     padrino_oauth_issuer: str | None = None
     padrino_oauth_jwks_url: str | None = None
     padrino_oauth_scope: str = "openid email profile"
+    # Dedicated server signing key for the CSRF/session-binding OAuth ``state``
+    # HMAC (US-193). Keeping this distinct from the provider client secret means
+    # a leaked client secret does not also forge state tokens. When unset the
+    # state signature falls back to a key DERIVED from (but not equal to) the
+    # client secret so the flow still works without extra deploy config.
+    padrino_oauth_state_signing_key: str | None = None
 
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any
     # scraper that can reach the process; flipping the flag requires the same
