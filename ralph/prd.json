@@ -46,7 +46,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: human_lane.py:419-424, core/engine/hashing.py compute_event_hash (pure sha256). Validate-before-mutate; the only trigger is an already-broken hash chain upstream, so severity low.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-213",
