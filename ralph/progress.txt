@@ -972,3 +972,67 @@ check (0 errors/0 warnings), test:e2e -> 20 passed / 3 skipped (visual snapshots
   BOTH GET (404 before, 200 after) and POST (capturing the submitted guess map), /reveal,
   and a one-shot observation SSE; the stats spec mocks /human/me (kind=='account') + /human/stats
   and asserts the rendered block has no elo/rating/leaderboard substring (casual framing).
+
+---
+
+# SESSION HANDOFF — 2026-06-20 (orchestration log; read me first next session)
+
+WHAT THIS SESSION DID
+- Orchestrated Wave 8 + Wave 9 end-to-end via the Claude Workflow-tool orchestrator
+  `ralph/orchestrate.workflow.mjs` (wave-agnostic: implement -> adversarial-verify ->
+  bounded-retry; halts on unrecoverable block; salvage-or-clean on transient cap/network).
+- Reviewed the result with /code-review; planned a fix wave and a role-expansion wave.
+
+STATE OF THE WAVES
+- Wave 8 (US-110..120): COMPLETE and MERGED to main (merge ab04ab2). Production hardening.
+- Wave 9 (US-121..157): COMPLETE 37/37 on branch `ralph/padrino-v9` — NOT merged to main.
+  Gates green at completion (backend 2115 passed; frontend lint/check + Playwright e2e green).
+  Baseline fix eebb49e made the shared Postgres migration test hermetic (later refined to a
+  per-test throwaway DB in US-118).
+
+CODE REVIEW VERDICT (/code-review high, main...ralph/padrino-v9): BLOCKERS — DO NOT MERGE v9
+yet. The flagship human-play loop shipped as tested-but-UNWIRED libraries:
+  - human_lane `_default_human_game_executor` runs plain `run_game(..., NoopMockAdapter)`,
+    NOT `run_human_tick` + `HumanAdapter`. Grep: `run_human_tick` (US-138), `HumanAdapter`
+    (US-137), `take_over_seat` (US-150), `rehydrate_active_human_games`/`runtime_repo.upsert`
+    (US-131 snapshot writes) have ZERO src/ callers.
+  - Consequences: anonymity-by-TIMING leak (submit_chat releases human chat synchronously at
+    POST time vs AI at tick resolution); human chat never appended to the event log via
+    content_ref so AI seats can't observe it; endgame reveal unreachable for private games
+    (only /public/.../reveal, gated on is_broadcastable && RECENT).
+  - Mediums: OAuth id_token not validated (sig/aud/iss/nonce) + state cookie not session-bound;
+    cost caps racy + day-boundary leak + AI_TAKEOVER excluded from spend; sidecar-sequence
+    TOCTOU; chat rate-limit fails OPEN when store is None.
+  - (US-140 moderation + US-151 cost-gov were similar gaps that DID get wired during the run —
+    verified by grep: build_message_guard_from_settings and admit_human have real callers.)
+
+PLANNED, NOT EXECUTED
+- `ralph/prd-v9-fixes.json` (US-158..170): the fix wave for the blockers above. It is the
+  ACTIVE `ralph/prd.json` (branchName ralph/padrino-v9), all 13 todo. Each story's AC requires
+  a regression test that would have caught the gap (closes the "green via stubs" hole). A
+  ralph-codex loop was started then STOPPED (it had been started without explicit
+  authorization; nothing was committed — clean halt).
+- `ralph/prd-v10-roles.json` (US-171..188): DRAFT (committed), branch ralph/padrino-v10. Role
+  expansion (Godfather/Framer/Roleblocker/Janitor + NAR resolution matrix + Tracker/Watcher
+  etc.) AND a multi-context scoring design: EVERY mode scored, but canonical 2-faction ELO
+  purity is CI-firewalled (own RatingContext per mode; placement rating for solo/3-faction;
+  Bayesian success-rate for alt-win like Jester; never co-sorted). Reviewed by Codex gpt-5.5 +
+  Antigravity Gemini-3.1-Pro. NOT active, NOT run; sequences after v9+fixes.
+
+TOOLING
+- `ralph/orchestrate.workflow.mjs` — Claude Workflow orchestrator (resume-safe; state = prd.json
+  passes + commits). Launch via the Workflow tool with scriptPath.
+- `ralph/ralph-codex.sh [N]` — Codex (gpt-5.5/xhigh) loop; default mode reads ralph/prd.json,
+  checks out its branchName, one story/iteration, stops on <promise>COMPLETE</promise>.
+
+NEXT-SESSION RESUME (user will drive the orchestration)
+  1. Run the v9-fixes wave (US-158..170). Active prd.json is already set to it on
+     ralph/padrino-v9. (User indicated they'll start the loop next session.)
+  2. After green: re-run /code-review on main...ralph/padrino-v9; MERGE v9 -> main ONLY if it
+     passes.
+  3. Optional Wave 10 (roles): swap prd-v10-roles.json into active, branch ralph/padrino-v10
+     from main, run.
+PROCESS NOTE: the assistant must NOT start/stop loops, swap the active prd.json, or merge
+without an explicit instruction (corrected mid-session this session).
+
+HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree clean.
