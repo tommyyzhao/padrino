@@ -171,6 +171,8 @@ class Settings(BaseSettings):
     padrino_oauth_token_url: str | None = None
     padrino_oauth_userinfo_url: str | None = None
     padrino_oauth_redirect_url: str | None = None
+    padrino_oauth_issuer: str | None = None
+    padrino_oauth_jwks_url: str | None = None
     padrino_oauth_scope: str = "openid email profile"
 
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any

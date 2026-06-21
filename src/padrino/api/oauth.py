@@ -1,28 +1,38 @@
 """Server-side OAuth code flow for optional account sign-in (US-129).
 
 ONE provider (e.g. Google) via Authlib's :class:`AsyncOAuth2Client`. The
-authorization-code flow is protected with a CSRF ``state`` and PKCE
-(``code_challenge_method=S256``). The provider client id/secret and endpoint
-urls come from :class:`padrino.settings.Settings` and are optional/None so the
-engine boots and the test suite runs without them; the client secret is never
-logged. No provider tokens are persisted beyond completing the exchange — only
-the stable ``(provider, subject)`` identity is stored.
+authorization-code flow is protected with a signed, session-bound CSRF
+``state`` plus PKCE (``code_challenge_method=S256``). The provider client
+id/secret, endpoints, issuer, and JWKS URL come from
+:class:`padrino.settings.Settings` and are optional/None so the engine boots and
+the test suite runs without them; the client secret is never logged. No provider
+tokens are persisted beyond completing the exchange — only the stable
+``(provider, subject)`` identity is stored after validating the provider
+``id_token`` signature, audience, issuer, and nonce.
 
-Tests stub the network entirely by overriding :data:`exchange_code` via the
-``resolve_user_info`` indirection (``_RESOLVE_USER_INFO``), so no live provider
-is contacted.
+Tests stub the network entirely via the ``resolve_user_info`` indirection or the
+lower-level token/JWKS seams, so no live provider is contacted.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
+import httpx
 from authlib.common.security import generate_token
 from authlib.integrations.httpx_client import AsyncOAuth2Client
+from authlib.jose import JsonWebKey, jwt
+from authlib.jose.errors import JoseError
 
 from padrino.settings import Settings
+
+_STATE_VERSION: Final[int] = 1
 
 
 @dataclass(frozen=True)
@@ -36,6 +46,8 @@ class OAuthConfig:
     token_url: str
     userinfo_url: str
     redirect_url: str
+    issuer: str
+    jwks_url: str
     scope: str
 
 
@@ -54,6 +66,7 @@ class AuthorizationRequest:
     url: str
     state: str
     code_verifier: str
+    nonce: str
 
 
 def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | None:
@@ -74,6 +87,8 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         settings.padrino_oauth_token_url,
         settings.padrino_oauth_userinfo_url,
         settings.padrino_oauth_redirect_url,
+        settings.padrino_oauth_issuer,
+        settings.padrino_oauth_jwks_url,
     )
     if any(value is None for value in required):
         return None
@@ -83,6 +98,8 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
     assert settings.padrino_oauth_token_url is not None
     assert settings.padrino_oauth_userinfo_url is not None
     assert settings.padrino_oauth_redirect_url is not None
+    assert settings.padrino_oauth_issuer is not None
+    assert settings.padrino_oauth_jwks_url is not None
     return OAuthConfig(
         provider=settings.padrino_oauth_provider,
         client_id=settings.padrino_oauth_client_id,
@@ -91,33 +108,128 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         token_url=settings.padrino_oauth_token_url,
         userinfo_url=settings.padrino_oauth_userinfo_url,
         redirect_url=settings.padrino_oauth_redirect_url,
+        issuer=settings.padrino_oauth_issuer,
+        jwks_url=settings.padrino_oauth_jwks_url,
         scope=settings.padrino_oauth_scope,
     )
 
 
-def build_authorization_request(config: OAuthConfig) -> AuthorizationRequest:
+def build_authorization_request(
+    config: OAuthConfig, *, session_binding: str = ""
+) -> AuthorizationRequest:
     """Build the provider authorization URL with a fresh CSRF state + PKCE."""
     code_verifier = generate_token(48)
+    nonce = generate_token(32)
+    state = _encode_state(config, nonce=nonce, session_binding=session_binding)
     client = _client_for(config)
-    url, state = client.create_authorization_url(config.authorize_url, code_verifier=code_verifier)
-    return AuthorizationRequest(url=url, state=state, code_verifier=code_verifier)
+    url, state = client.create_authorization_url(
+        config.authorize_url,
+        state=state,
+        code_verifier=code_verifier,
+        nonce=nonce,
+    )
+    return AuthorizationRequest(url=url, state=state, code_verifier=code_verifier, nonce=nonce)
+
+
+def oauth_session_binding(raw_session_token: str | None) -> str:
+    """Return the stable binding value for the current human session cookie."""
+    raw = (raw_session_token or "").strip()
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def validate_authorization_state(
+    config: OAuthConfig,
+    *,
+    received_state: str,
+    expected_state: str,
+    session_binding: str,
+) -> str:
+    """Validate the signed OAuth state and return its expected ID-token nonce."""
+    if not hmac.compare_digest(received_state, expected_state):
+        raise OAuthError("OAuth state mismatch")
+    try:
+        payload = _decode_state(config, received_state)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OAuthError("OAuth state is invalid") from exc
+    if payload.get("v") != _STATE_VERSION:
+        raise OAuthError("OAuth state version mismatch")
+    nonce = payload.get("nonce")
+    stored_binding = payload.get("session_binding")
+    if not isinstance(nonce, str) or not nonce:
+        raise OAuthError("OAuth state nonce missing")
+    if not isinstance(stored_binding, str):
+        raise OAuthError("OAuth state session binding missing")
+    if not hmac.compare_digest(stored_binding, session_binding):
+        raise OAuthError("OAuth state session mismatch")
+    return nonce
 
 
 async def _default_resolve_user_info(
-    config: OAuthConfig, *, code: str, code_verifier: str
+    config: OAuthConfig, *, code: str, code_verifier: str, nonce: str
 ) -> OAuthUserInfo:
-    """Exchange the code for a token and fetch userinfo (live provider path)."""
+    """Exchange the code and validate the provider ID token (live path)."""
+    try:
+        token = await _EXCHANGE_TOKEN(config, code=code, code_verifier=code_verifier)
+        jwks = await _FETCH_JWKS(config)
+    except OAuthError:
+        raise
+    except Exception as exc:
+        raise OAuthError("OAuth provider exchange failed") from exc
+    id_token = token.get("id_token")
+    if not isinstance(id_token, str) or not id_token.strip():
+        raise OAuthError("OAuth provider token response is missing id_token")
+    return _user_info_from_id_token(config, id_token=id_token, jwks=jwks, nonce=nonce)
+
+
+async def _default_exchange_token(
+    config: OAuthConfig, *, code: str, code_verifier: str
+) -> dict[str, Any]:
+    """Exchange an authorization code for a token set."""
     client = _client_for(config)
-    await client.fetch_token(
-        config.token_url,
-        code=code,
-        code_verifier=code_verifier,
-    )
-    resp = await client.get(config.userinfo_url)
-    resp.raise_for_status()
-    payload: dict[str, Any] = resp.json()
-    await client.aclose()
-    return _user_info_from_payload(payload)
+    try:
+        token = await client.fetch_token(
+            config.token_url,
+            code=code,
+            code_verifier=code_verifier,
+        )
+        return dict(token)
+    finally:
+        await client.aclose()
+
+
+async def _default_fetch_jwks(config: OAuthConfig) -> dict[str, Any]:
+    """Fetch the provider's JWKS document."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(config.jwks_url)
+        resp.raise_for_status()
+        payload = resp.json()
+    if not isinstance(payload, dict):
+        raise OAuthError("OAuth provider JWKS response is invalid")
+    return payload
+
+
+def _user_info_from_id_token(
+    config: OAuthConfig, *, id_token: str, jwks: dict[str, Any], nonce: str
+) -> OAuthUserInfo:
+    """Validate an OIDC ID token and extract the stable account identity."""
+    try:
+        key_set = JsonWebKey.import_key_set(jwks)
+        claims = jwt.decode(
+            id_token,
+            key_set,
+            claims_options={
+                "iss": {"essential": True, "value": config.issuer},
+                "aud": {"essential": True, "value": config.client_id},
+                "sub": {"essential": True},
+                "nonce": {"essential": True, "value": nonce},
+            },
+        )
+        claims.validate()
+    except (JoseError, TypeError, ValueError) as exc:
+        raise OAuthError("OAuth provider id_token validation failed") from exc
+    return _user_info_from_payload(dict(claims))
 
 
 def _user_info_from_payload(payload: dict[str, Any]) -> OAuthUserInfo:
@@ -131,6 +243,10 @@ def _user_info_from_payload(payload: dict[str, Any]) -> OAuthUserInfo:
 # Indirection so tests can stub the entire network round-trip (no live provider).
 ResolveUserInfo = Callable[..., Awaitable[OAuthUserInfo]]
 _RESOLVE_USER_INFO: ResolveUserInfo = _default_resolve_user_info
+ExchangeToken = Callable[..., Awaitable[dict[str, Any]]]
+FetchJwks = Callable[..., Awaitable[dict[str, Any]]]
+_EXCHANGE_TOKEN: ExchangeToken = _default_exchange_token
+_FETCH_JWKS: FetchJwks = _default_fetch_jwks
 
 
 def set_resolve_user_info(fn: ResolveUserInfo) -> None:
@@ -145,9 +261,30 @@ def reset_resolve_user_info() -> None:
     _RESOLVE_USER_INFO = _default_resolve_user_info
 
 
-async def exchange_code(config: OAuthConfig, *, code: str, code_verifier: str) -> OAuthUserInfo:
+def set_exchange_token(fn: ExchangeToken) -> None:
+    """Override the code->token-set exchange (test-only seam)."""
+    global _EXCHANGE_TOKEN
+    _EXCHANGE_TOKEN = fn
+
+
+def set_fetch_jwks(fn: FetchJwks) -> None:
+    """Override provider JWKS retrieval (test-only seam)."""
+    global _FETCH_JWKS
+    _FETCH_JWKS = fn
+
+
+def reset_oauth_io() -> None:
+    """Restore the live provider token/JWKS I/O helpers."""
+    global _EXCHANGE_TOKEN, _FETCH_JWKS
+    _EXCHANGE_TOKEN = _default_exchange_token
+    _FETCH_JWKS = _default_fetch_jwks
+
+
+async def exchange_code(
+    config: OAuthConfig, *, code: str, code_verifier: str, nonce: str
+) -> OAuthUserInfo:
     """Resolve the user identity for an authorization ``code``."""
-    return await _RESOLVE_USER_INFO(config, code=code, code_verifier=code_verifier)
+    return await _RESOLVE_USER_INFO(config, code=code, code_verifier=code_verifier, nonce=nonce)
 
 
 def _client_for(config: OAuthConfig) -> AsyncOAuth2Client:
@@ -164,6 +301,50 @@ class OAuthError(Exception):
     """Raised when the OAuth exchange cannot produce a usable identity."""
 
 
+def _encode_state(config: OAuthConfig, *, nonce: str, session_binding: str) -> str:
+    payload = {
+        "v": _STATE_VERSION,
+        "flow": generate_token(32),
+        "nonce": nonce,
+        "session_binding": session_binding,
+    }
+    body = _base64url_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signature = _state_signature(config, body)
+    return f"{body}.{signature}"
+
+
+def _decode_state(config: OAuthConfig, state: str) -> dict[str, Any]:
+    body, signature = state.split(".", 1)
+    expected_signature = _state_signature(config, body)
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ValueError("invalid OAuth state signature")
+    decoded = _base64url_decode(body)
+    payload = json.loads(decoded.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("invalid OAuth state payload")
+    return payload
+
+
+def _state_signature(config: OAuthConfig, body: str) -> str:
+    digest = hmac.new(
+        config.client_secret.encode("utf-8"),
+        body.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return _base64url_encode(digest)
+
+
+def _base64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
+
+
 __all__ = [
     "AuthorizationRequest",
     "OAuthConfig",
@@ -171,7 +352,12 @@ __all__ = [
     "OAuthUserInfo",
     "build_authorization_request",
     "exchange_code",
+    "oauth_session_binding",
+    "reset_oauth_io",
     "reset_resolve_user_info",
     "resolve_oauth_config",
+    "set_exchange_token",
+    "set_fetch_jwks",
     "set_resolve_user_info",
+    "validate_authorization_state",
 ]

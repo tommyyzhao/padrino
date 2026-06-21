@@ -107,7 +107,7 @@
         "Regression tests cover each path (tampered/missing id_token, mismatched/replayed state, expired guest). All backend gates pass."
       ],
       "notes": "Real provider credentials remain a deploy-time step; validate the LOGIC against a stubbed signed token/JWKS, no live provider needed in tests.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-165",

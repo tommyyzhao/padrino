@@ -52,7 +52,9 @@ from padrino.api.oauth import (
     OAuthError,
     build_authorization_request,
     exchange_code,
+    oauth_session_binding,
     resolve_oauth_config,
+    validate_authorization_state,
 )
 from padrino.api.reveal import build_participant_reveal
 from padrino.core.engine.actions import Action
@@ -526,7 +528,10 @@ async def oauth_start(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="oauth_not_configured",
         )
-    auth_request = build_authorization_request(config)
+    auth_request = build_authorization_request(
+        config,
+        session_binding=oauth_session_binding(request.cookies.get(HUMAN_SESSION_COOKIE)),
+    )
     response = RedirectResponse(
         url=auth_request.url, status_code=status.HTTP_307_TEMPORARY_REDIRECT
     )
@@ -562,9 +567,25 @@ async def oauth_callback(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_missing")
     if not secrets.compare_digest(state, expected_state):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch")
+    try:
+        nonce = validate_authorization_state(
+            config,
+            received_state=state,
+            expected_state=expected_state,
+            session_binding=oauth_session_binding(request.cookies.get(HUMAN_SESSION_COOKIE)),
+        )
+    except OAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch"
+        ) from exc
 
     try:
-        user_info = await exchange_code(config, code=code, code_verifier=code_verifier)
+        user_info = await exchange_code(
+            config,
+            code=code,
+            code_verifier=code_verifier,
+            nonce=nonce,
+        )
     except OAuthError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_exchange_failed"
@@ -621,6 +642,11 @@ async def _in_flight_guest_id(session: AsyncSession, request: Request) -> uuid.U
         return None
     record = await principals_repo.get_session_by_token(session, raw.strip())
     if record is None or record.revoked_at is not None:
+        return None
+    expires_at = record.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= datetime.now(UTC):
         return None
     principal = await principals_repo.get_principal(session, record.principal_id)
     if principal is None or principal.deleted_at is not None:

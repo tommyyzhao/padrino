@@ -12,9 +12,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
 from http.cookies import SimpleCookie
+from time import time
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import pytest_asyncio
+from authlib.jose import JsonWebKey, jwt
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,11 +26,15 @@ from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.api.oauth import (
     OAuthUserInfo,
+    reset_oauth_io,
     reset_resolve_user_info,
+    set_exchange_token,
+    set_fetch_jwks,
     set_resolve_user_info,
 )
 from padrino.api.routes.human import OAUTH_STATE_COOKIE, OAUTH_VERIFIER_COOKIE
 from padrino.db.models import OAuthIdentity, Principal
+from padrino.db.repositories import human_principals as principals_repo
 from padrino.settings import get_settings
 
 _OAUTH_ENV = {
@@ -38,9 +45,13 @@ _OAUTH_ENV = {
     "PADRINO_OAUTH_TOKEN_URL": "https://provider.example/token",
     "PADRINO_OAUTH_USERINFO_URL": "https://provider.example/userinfo",
     "PADRINO_OAUTH_REDIRECT_URL": "https://app.example/human/oauth/google/callback",
+    "PADRINO_OAUTH_ISSUER": "https://provider.example",
+    "PADRINO_OAUTH_JWKS_URL": "https://provider.example/jwks.json",
     "PADRINO_HUMAN_SESSION_COOKIE_SECURE": "false",
     "CEREBRAS_API_KEY": "test-cerebras-key",
 }
+
+_OIDC_KEY = JsonWebKey.generate_key("RSA", 2048, {"kid": "test-key"}, is_private=True)
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +67,7 @@ def _oauth_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _restore_resolver() -> Iterator[None]:
     yield
     reset_resolve_user_info()
+    reset_oauth_io()
 
 
 @pytest_asyncio.fixture
@@ -82,10 +94,66 @@ def _cookie(resp_headers: object, name: str) -> str | None:
 
 
 def _stub_subject(subject: str, *, name: str | None = "Alice") -> None:
-    async def _resolve(config: object, *, code: str, code_verifier: str) -> OAuthUserInfo:
+    async def _resolve(
+        config: object, *, code: str, code_verifier: str, nonce: str
+    ) -> OAuthUserInfo:
         return OAuthUserInfo(subject=subject, display_name=name)
 
     set_resolve_user_info(_resolve)
+
+
+def _query_param(location: str, name: str) -> str:
+    values = parse_qs(urlsplit(location).query)[name]
+    assert len(values) == 1
+    return values[0]
+
+
+def _jwks() -> dict[str, object]:
+    return {"keys": [_OIDC_KEY.as_dict(is_private=False)]}
+
+
+def _signed_id_token(
+    *,
+    subject: str = "subject-token",
+    nonce: str,
+    aud: str = "client-id-123",
+    iss: str = "https://provider.example",
+) -> str:
+    claims = {
+        "iss": iss,
+        "sub": subject,
+        "aud": aud,
+        "nonce": nonce,
+        "name": "Token Alice",
+        "exp": int(time()) + 3600,
+        "iat": int(time()),
+    }
+    token = jwt.encode({"alg": "RS256", "kid": "test-key"}, claims, _OIDC_KEY)
+    assert isinstance(token, bytes)
+    return token.decode("ascii")
+
+
+async def _callback_cookies(
+    client: AsyncClient, *, human_session: str | None = None
+) -> tuple[str, str, str]:
+    cookies = {HUMAN_SESSION_COOKIE: human_session} if human_session is not None else None
+    start = await client.get("/human/oauth/google/start", cookies=cookies)
+    state = _cookie(start.headers, OAUTH_STATE_COOKIE)
+    verifier = _cookie(start.headers, OAUTH_VERIFIER_COOKIE)
+    assert state is not None and verifier is not None
+    nonce = _query_param(start.headers["location"], "nonce")
+    return state, verifier, nonce
+
+
+def _stub_valid_token(nonce: str, *, subject: str = "subject-token") -> None:
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": _signed_id_token(subject=subject, nonce=nonce)}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
 
 
 @pytest.mark.asyncio
@@ -214,6 +282,161 @@ async def test_callback_rejects_state_mismatch(client: AsyncClient) -> None:
         cookies={OAUTH_STATE_COOKIE: "real-state", OAUTH_VERIFIER_COOKIE: verifier},
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_state_replayed_from_another_guest_session(
+    client: AsyncClient,
+) -> None:
+    guest_a = await client.post("/human/guest")
+    guest_a_token = _cookie(guest_a.headers, HUMAN_SESSION_COOKIE)
+    assert guest_a_token is not None
+    state, verifier, _ = await _callback_cookies(client, human_session=guest_a_token)
+
+    guest_b = await client.post("/human/guest")
+    guest_b_token = _cookie(guest_b.headers, HUMAN_SESSION_COOKIE)
+    assert guest_b_token is not None
+    _stub_subject("subject-replayed")
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={
+            OAUTH_STATE_COOKIE: state,
+            OAUTH_VERIFIER_COOKIE: verifier,
+            HUMAN_SESSION_COOKIE: guest_b_token,
+        },
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_missing_id_token(client: AsyncClient) -> None:
+    state, verifier, _ = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"access_token": "access-only"}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_tampered_id_token(client: AsyncClient) -> None:
+    state, verifier, nonce = await _callback_cookies(client)
+    token = _signed_id_token(nonce=nonce)
+    header, payload, signature = token.split(".")
+    bad_signature = f"{'a' if signature[0] != 'a' else 'b'}{signature[1:]}"
+    tampered = f"{header}.{payload}.{bad_signature}"
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": tampered}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "value"),
+    [
+        ("aud", "wrong-client"),
+        ("iss", "https://evil.example"),
+        ("nonce", "wrong-nonce"),
+    ],
+)
+async def test_callback_rejects_id_token_claim_mismatch(
+    client: AsyncClient, override: str, value: str
+) -> None:
+    state, verifier, nonce = await _callback_cookies(client)
+    claims = {"nonce": nonce}
+    claims[override] = value
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": _signed_id_token(**claims)}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_expired_guest_session_is_not_upgraded(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    raw_token = "expired-guest-token"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        guest = await principals_repo.create_principal(
+            session, kind=principals_repo.PRINCIPAL_KIND_GUEST
+        )
+        await principals_repo.create_session(
+            session,
+            principal_id=guest.id,
+            raw_token=raw_token,
+            kind=principals_repo.SESSION_KIND_GUEST,
+            issued_at=now - timedelta(hours=2),
+            expires_at=now - timedelta(hours=1),
+        )
+        await session.commit()
+        guest_id = guest.id
+
+    state, verifier, _ = await _callback_cookies(client, human_session=raw_token)
+    _stub_subject("subject-expired-guest")
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={
+            OAUTH_STATE_COOKIE: state,
+            OAUTH_VERIFIER_COOKIE: verifier,
+            HUMAN_SESSION_COOKIE: raw_token,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["principal_id"] != str(guest_id)
+    async with session_factory() as session:
+        guest_after = await session.get(Principal, guest_id)
+        principals = (await session.execute(select(Principal))).scalars().all()
+    assert guest_after is not None
+    assert guest_after.kind == "guest"
+    assert len(principals) == 2
 
 
 @pytest.mark.asyncio
