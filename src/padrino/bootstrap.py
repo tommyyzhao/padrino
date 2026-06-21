@@ -35,7 +35,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.auth import SCOPE_ADMIN, generate_raw_key
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import BUILTIN_RULESET_IDS, mini7_v1
 from padrino.db.base import create_engine, create_session_factory
 from padrino.db.models import League, PromptVersion
 from padrino.db.repositories import api_keys as api_keys_repo
@@ -150,9 +150,7 @@ def _run_migrations(db_url: str) -> StepReport:
 
 
 async def _seed_canonical_prompts(session: AsyncSession) -> StepReport:
-    from padrino.core.rulesets import bench10_v1
-
-    ruleset_ids = [mini7_v1.RULESET_ID, bench10_v1.RULESET_ID]
+    ruleset_ids = BUILTIN_RULESET_IDS
     inserted: list[str] = []
 
     for rid in ruleset_ids:
@@ -197,9 +195,7 @@ async def _seed_canonical_prompts(session: AsyncSession) -> StepReport:
 
 
 async def _seed_default_league(session: AsyncSession) -> StepReport:
-    from padrino.core.rulesets import bench10_v1
-
-    ruleset_ids = [mini7_v1.RULESET_ID, bench10_v1.RULESET_ID]
+    ruleset_ids = BUILTIN_RULESET_IDS
     inserted: list[str] = []
     skipped: list[str] = []
 

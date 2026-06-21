@@ -27,7 +27,7 @@ from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role, RoleFamily
 from padrino.core.observations import build_observation
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import mini7_v1, roleblock10_v1
 from padrino.llm.adapter import AgentBuild, RoutingPolicy
 from padrino.llm.litellm_adapter import DEFAULT_SYSTEM_PROMPT, LiteLlmAdapter
 from padrino.llm.prompts import (
@@ -144,6 +144,19 @@ def test_canonical_prompts_by_role_covers_every_role() -> None:
     }
     for role, template in expected.items():
         assert prompts[role] == template.system_prompt
+
+
+def test_roleblock10_uses_deceptive_prompt_for_mafia_roleblocker() -> None:
+    prompts = canonical_prompts_by_role(roleblock10_v1.RULESET_ID)
+
+    assert set(prompts) == set(roleblock10_v1.ROLE_COUNTS)
+    assert (
+        prompts[Role.MAFIA_ROLEBLOCKER]
+        == load_canonical(
+            roleblock10_v1.RULESET_ID,
+            RoleFamily.DECEPTIVE,
+        ).system_prompt
+    )
 
 
 @pytest.mark.parametrize(

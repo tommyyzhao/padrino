@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, LeagueKind, RatingContextKind, Role
-from padrino.core.rulesets import bench10_v1, mini7_v1
+from padrino.core.rulesets import bench10_v1, mini7_v1, roleblock10_v1
 from padrino.core.rulesets.canonicality import (
     assert_ruleset_canonical_pure,
     canonical_team_ranks_for_outcome,
@@ -443,7 +443,7 @@ async def test_non_canonical_context_writes_zero_scientific_rows(
 
 def test_canonical_ruleset_purity_gate_introspects_builtin_rulesets() -> None:
     """Canonical ladders admit exactly Town/Mafia outcomes, with draw as a tie."""
-    for ruleset in (mini7_v1, bench10_v1):
+    for ruleset in (mini7_v1, bench10_v1, roleblock10_v1):
         assert_ruleset_canonical_pure(ruleset)
 
     assert canonical_team_ranks_for_outcome("TOWN") == {"TOWN": 1, "MAFIA": 2}

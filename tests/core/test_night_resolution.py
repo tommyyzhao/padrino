@@ -65,6 +65,10 @@ def _investigate(target: str) -> Action:
     return Action(type=ActionType.INVESTIGATE, target=target)
 
 
+def _roleblock(target: str) -> Action:
+    return Action(type=ActionType.ROLEBLOCK, target=target)
+
+
 def test_protect_saves_target() -> None:
     state = _state(_all_living_seats())
     submissions = {
@@ -211,6 +215,72 @@ def test_town_submissions_to_kill_ignored() -> None:
     result = resolve_night(state, submissions)
     assert result.mafia_kill_target is None
     assert result.eliminated is None
+
+
+def test_non_roleblocker_submission_to_roleblock_is_ignored() -> None:
+    seats = (
+        _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+        _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+        _seat("P03", 2, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+        _seat("P04", 3, Role.DETECTIVE, Faction.TOWN),
+        _seat("P05", 4, Role.DOCTOR, Faction.TOWN),
+        _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+        _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+        _seat("P08", 7, Role.VILLAGER, Faction.TOWN),
+        _seat("P09", 8, Role.VILLAGER, Faction.TOWN),
+        _seat("P10", 9, Role.VILLAGER, Faction.TOWN),
+    )
+    state = _state(seats)
+    submissions = {
+        "P01": _kill("P06"),
+        "P02": _kill("P06"),
+        "P04": _roleblock("P05"),  # detective is not a roleblocker; ignored
+        "P05": _protect("P06"),
+    }
+
+    result = resolve_night(state, submissions)
+
+    assert result.blocked_actor_ids == ()
+    assert result.eliminated is None
+    assert result.protected == "P06"
+
+
+def test_mafia_roleblocker_blocks_active_doctor_action() -> None:
+    seats = (
+        _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+        _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+        _seat("P03", 2, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+        _seat("P04", 3, Role.DETECTIVE, Faction.TOWN),
+        _seat("P05", 4, Role.DOCTOR, Faction.TOWN),
+        _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+        _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+        _seat("P08", 7, Role.VILLAGER, Faction.TOWN),
+        _seat("P09", 8, Role.VILLAGER, Faction.TOWN),
+        _seat("P10", 9, Role.VILLAGER, Faction.TOWN),
+    )
+    state = _state(seats)
+    submissions = {
+        "P01": _kill("P06"),
+        "P02": _kill("P06"),
+        "P03": _roleblock("P05"),
+        "P05": _protect("P06"),
+    }
+
+    result = resolve_night(state, submissions)
+
+    assert result.blocked_actor_ids == ("P05",)
+    assert result.protected is None
+    assert result.eliminated == "P06"
+    feedback = result.feedback_by_code("ACTION_BLOCKED")[0]
+    assert feedback.model_dump() == {
+        "recipient": "P05",
+        "code": "ACTION_BLOCKED",
+        "message": "Your night action was blocked.",
+        "target": "P06",
+        "finding": None,
+        "visited_player_ids": (),
+        "visitor_player_ids": (),
+    }
 
 
 def test_chat_field_is_never_read() -> None:

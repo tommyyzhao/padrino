@@ -15,6 +15,8 @@ from typing import Protocol
 from padrino.core.engine.win_conditions import WinCondition
 from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
 
+BUILTIN_RULESET_IDS: tuple[str, ...] = ("mini7_v1", "bench10_v1", "roleblock10_v1")
+
 
 class Ruleset(Protocol):
     """Full structural contract for a ruleset module (e.g. ``mini7_v1``)."""
@@ -55,5 +57,9 @@ def get_ruleset(ruleset_id: str) -> Ruleset:
         from padrino.core.rulesets import bench10_v1
 
         return bench10_v1
+    elif ruleset_id == "roleblock10_v1":
+        from padrino.core.rulesets import roleblock10_v1
+
+        return roleblock10_v1
     else:
         raise ValueError(f"Unknown ruleset_id: {ruleset_id!r}")

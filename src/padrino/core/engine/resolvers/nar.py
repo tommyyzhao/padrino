@@ -378,10 +378,11 @@ def _valid_target_for_kind(
         return actor.role is Role.DOCTOR and target_id != actor.last_protected_target
     if kind is NightActionKind.INVESTIGATE:
         return actor.role is Role.DETECTIVE and target_id != actor.public_player_id
+    if kind is NightActionKind.ROLEBLOCK:
+        return actor.role is Role.MAFIA_ROLEBLOCKER and target_id != actor.public_player_id
     if kind is NightActionKind.REDIRECT:
         return _alive_seat(state, redirect_target_id) is not None
     return kind in {
-        NightActionKind.ROLEBLOCK,
         NightActionKind.FRAME,
         NightActionKind.TRACK,
         NightActionKind.WATCH,

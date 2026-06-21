@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
-from padrino.core.rulesets import Ruleset, bench10_v1, get_ruleset, mini7_v1
+from padrino.core.rulesets import Ruleset, bench10_v1, get_ruleset, mini7_v1, roleblock10_v1
 from padrino.core.rulesets.canonicality import (
     CanonicalRulesetError,
     assert_ruleset_canonical_pure,
@@ -14,7 +14,11 @@ from padrino.core.rulesets.canonicality import (
 
 
 def test_builtin_rulesets_declare_canonical_team_context() -> None:
-    for ruleset_id in (mini7_v1.RULESET_ID, bench10_v1.RULESET_ID):
+    for ruleset_id in (
+        mini7_v1.RULESET_ID,
+        bench10_v1.RULESET_ID,
+        roleblock10_v1.RULESET_ID,
+    ):
         ruleset = get_ruleset(ruleset_id)
 
         assert ruleset.RATING_CONTEXT_KIND is RatingContextKind.CANONICAL_TEAM
@@ -23,7 +27,11 @@ def test_builtin_rulesets_declare_canonical_team_context() -> None:
 
 
 def test_builtin_canonical_rulesets_are_canonical_pure() -> None:
-    for ruleset_id in (mini7_v1.RULESET_ID, bench10_v1.RULESET_ID):
+    for ruleset_id in (
+        mini7_v1.RULESET_ID,
+        bench10_v1.RULESET_ID,
+        roleblock10_v1.RULESET_ID,
+    ):
         assert_ruleset_canonical_pure(get_ruleset(ruleset_id))
 
 

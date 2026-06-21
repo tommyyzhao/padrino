@@ -71,12 +71,20 @@ class PromptTemplate(BaseModel):
     prompt_hash: str
 
 
+_BUNDLED_PROMPT_DIRS: Final[dict[str, str]] = {
+    "mini7_v1": "mini7_v1",
+    "bench10_v1": "bench10_v1",
+    "roleblock10_v1": "bench10_v1",
+}
+
+
 def _bundled_dir(ruleset_id: str) -> str:
-    if ruleset_id not in ("mini7_v1", "bench10_v1"):
+    bundled = _BUNDLED_PROMPT_DIRS.get(ruleset_id)
+    if bundled is None:
         raise UnknownCanonicalPromptError(
             f"no canonical prompts bundled for ruleset_id={ruleset_id!r}"
         )
-    return ruleset_id
+    return bundled
 
 
 class UnknownCanonicalPromptError(LookupError):

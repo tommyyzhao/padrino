@@ -7,7 +7,7 @@ from collections import Counter
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import Seat
 from padrino.core.enums import Faction, Role
-from padrino.core.rulesets import bench10_v1, mini7_v1
+from padrino.core.rulesets import bench10_v1, mini7_v1, roleblock10_v1
 
 
 def test_returns_seven_seats() -> None:
@@ -49,6 +49,17 @@ def test_bench10_role_counts_include_one_godfather() -> None:
         assert counts[Role.VILLAGER] == 5
 
 
+def test_roleblock10_role_counts_include_one_mafia_roleblocker() -> None:
+    for i in range(50):
+        seats = assign_roles(f"roleblock-trial-{i}", roleblock10_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.MAFIA_GOON] == 2
+        assert counts[Role.MAFIA_ROLEBLOCKER] == 1
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.VILLAGER] == 5
+
+
 def test_public_player_ids_are_p01_through_p07() -> None:
     seats = assign_roles("ids", mini7_v1)
     ids = [s.public_player_id for s in seats]
@@ -76,7 +87,7 @@ def test_all_seats_alive_initially() -> None:
 def test_factions_match_roles() -> None:
     seats = assign_roles("factions", mini7_v1)
     for seat in seats:
-        if seat.role in {Role.MAFIA_GOON, Role.GODFATHER}:
+        if seat.role in {Role.MAFIA_GOON, Role.GODFATHER, Role.MAFIA_ROLEBLOCKER}:
             assert seat.faction == Faction.MAFIA
         else:
             assert seat.faction == Faction.TOWN

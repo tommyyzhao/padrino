@@ -48,8 +48,9 @@ from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED, check_win
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role
-from padrino.core.observations import Observation, Ruleset, format_phase_id
-from padrino.core.rulesets import bench10_v1, mini7_v1
+from padrino.core.observations import Observation, format_phase_id
+from padrino.core.rulesets import Ruleset as CoreRuleset
+from padrino.core.rulesets import get_ruleset, mini7_v1
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
@@ -79,10 +80,14 @@ OBSERVATION_FEEDBACK_CODES: Final[frozenset[str]] = frozenset(
     {"ACTION_BLOCKED", "TRACK_RESULT", "WATCH_RESULT"}
 )
 
-_RULESETS: Final[dict[str, Any]] = {
-    mini7_v1.RULESET_ID: mini7_v1,
-    bench10_v1.RULESET_ID: bench10_v1,
-}
+_RULESETS: dict[str, Any] = {}
+
+
+def _ruleset_for(ruleset_id: str) -> CoreRuleset:
+    override = _RULESETS.get(ruleset_id)
+    if override is not None:
+        return cast(CoreRuleset, override)
+    return get_ruleset(ruleset_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +146,7 @@ class GameConfig(BaseModel):
 
 
 TickRunner = Callable[
-    [GameState, EventLog, Sequence[Seat], LlmAdapter, Ruleset, bool, float],
+    [GameState, EventLog, Sequence[Seat], LlmAdapter, CoreRuleset, bool, float],
     Awaitable[dict[str, AgentResponse]],
 ]
 
@@ -477,7 +482,7 @@ async def _default_tick_runner(
     event_log: EventLog,
     eligible_seats: Sequence[Seat],
     adapter: LlmAdapter,
-    ruleset: Ruleset,
+    ruleset: CoreRuleset,
     ranked: bool,
     timeout_s: float,
 ) -> dict[str, AgentResponse]:
@@ -779,7 +784,7 @@ async def drive_game_loop(
     ``tick_runner`` defaults to the benchmark tick barrier. The human lane uses
     the same deterministic game loop but supplies a human-aware tick wrapper.
     """
-    ruleset = _RULESETS[config.ruleset_id]
+    ruleset = _ruleset_for(config.ruleset_id)
     event_log = resume.event_log if resume is not None else EventLog()
     llm_calls: list[AdapterResult] = []
     recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls, persistence)

@@ -20,7 +20,7 @@ from padrino.core.engine.replay import replay_event_log, replay_events
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED
 from padrino.core.enums import ActionType, Faction, Role
-from padrino.core.rulesets import Ruleset, bench10_v1, mini7_v1
+from padrino.core.rulesets import Ruleset, bench10_v1, mini7_v1, roleblock10_v1
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.runner.game_runner import GameConfig, GameOutcome, run_game
 from tests.conftest import (
@@ -49,6 +49,16 @@ def _adapter(script: Mapping[tuple[str, str], AgentResponse]) -> DeterministicMo
 
 def _config() -> GameConfig:
     return GameConfig(game_id="G-RUNNER", game_seed=_GAME_SEED, timeout_s=1.0)
+
+
+def _response(action_type: ActionType, target: str | None = None) -> AgentResponse:
+    return AgentResponse(
+        public_message=None,
+        private_message=None,
+        action=Action(type=action_type, target=target),
+        memory_update="",
+        rationale_summary=None,
+    )
 
 
 def _phase_ids_for(ruleset: Ruleset) -> tuple[str, ...]:
@@ -118,7 +128,7 @@ async def test_draw_scenario_terminates_at_max_days() -> None:
 
 
 async def test_passive_day_cap_hash_chain_stable_for_canonical_rulesets() -> None:
-    for ruleset in (mini7_v1, bench10_v1):
+    for ruleset in (mini7_v1, bench10_v1, roleblock10_v1):
         ruleset_id = ruleset.RULESET_ID
         first = await _passive_draw_outcome(
             ruleset, seed=f"{ruleset_id}-day-cap", game_id=f"G-{ruleset_id}"
@@ -139,6 +149,70 @@ async def test_passive_day_cap_hash_chain_stable_for_canonical_rulesets() -> Non
         assert [event.event_hash for event in first.event_log.events] == [
             event.event_hash for event in second.event_log.events
         ]
+
+
+async def test_roleblock10_runner_blocks_detective_with_structured_feedback() -> None:
+    seed = "roleblock-runner-001"
+    seats = assign_roles(seed, roleblock10_v1)
+    seat_ids = [seat.public_player_id for seat in seats]
+    goons = [s.public_player_id for s in seats if s.role is Role.MAFIA_GOON]
+    roleblocker = next(s.public_player_id for s in seats if s.role is Role.MAFIA_ROLEBLOCKER)
+    detective = next(s.public_player_id for s in seats if s.role is Role.DETECTIVE)
+    target = next(
+        s.public_player_id for s in seats if s.faction is Faction.TOWN and s.role is Role.VILLAGER
+    )
+    phase_ids = _phase_ids_for(roleblock10_v1)
+    script = make_villager_script(seat_ids, phase_ids)
+    for goon in goons:
+        script[("NIGHT_1_ACTIONS", goon)] = _response(ActionType.MAFIA_KILL, target)
+    script[("NIGHT_1_ACTIONS", roleblocker)] = _response(ActionType.ROLEBLOCK, detective)
+    script[("NIGHT_1_ACTIONS", detective)] = _response(ActionType.INVESTIGATE, goons[0])
+
+    outcome = await run_game(
+        GameConfig(
+            game_id="G-ROLEBLOCK-RUNNER",
+            game_seed=seed,
+            ruleset_id=roleblock10_v1.RULESET_ID,
+            timeout_s=1.0,
+        ),
+        _adapter(script),
+        ranked=False,
+    )
+    bodies = [stored.body for stored in outcome.event_log.events]
+
+    assert any(
+        body["event_type"] == "RoleblockSubmitted"
+        and body["actor_player_id"] == roleblocker
+        and body["payload"] == {"target": detective}
+        for body in bodies
+    )
+    assert any(
+        body["event_type"] == "PlayerEliminated"
+        and body["phase"] == "NIGHT_1_ACTIONS"
+        and body["payload"]["public_player_id"] == target
+        for body in bodies
+    )
+    assert not any(
+        body["event_type"] == "DetectiveResultDelivered"
+        and body["phase"] == "NIGHT_1_ACTIONS"
+        and body["actor_player_id"] == detective
+        for body in bodies
+    )
+    feedback = [
+        body
+        for body in bodies
+        if body["event_type"] == "NightFeedbackDelivered" and body["actor_player_id"] == detective
+    ]
+    assert len(feedback) == 1
+    assert feedback[0]["phase"] == "NIGHT_1_ACTIONS"
+    assert feedback[0]["visibility"] == "PRIVATE"
+    assert feedback[0]["payload"] == {
+        "code": "ACTION_BLOCKED",
+        "target": goons[0],
+        "finding": None,
+        "visited_player_ids": (),
+        "visitor_player_ids": (),
+    }
 
 
 # --- log shape & invariants -------------------------------------------------

@@ -131,7 +131,7 @@
         "All backend gates pass."
       ],
       "notes": "Codex: 'useful but dangerous... add Roleblocker in a dedicated setup.'",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-177",

@@ -92,8 +92,21 @@ def test_resolution_matrix_declares_tier_order_and_rows() -> None:
 
 
 def test_roleblock_vs_roleblock_both_blocks_apply() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
     result = resolve_night_actions(
-        _state(),
+        state,
         (
             _intent("P01", NightActionKind.ROLEBLOCK, "P02"),
             _intent("P02", NightActionKind.ROLEBLOCK, "P01"),
@@ -108,11 +121,24 @@ def test_roleblock_vs_roleblock_both_blocks_apply() -> None:
 
 
 def test_roleblocked_factional_killer_fails_without_backup_carry() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
     result = resolve_night_actions(
-        _state(),
+        state,
         (
             _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
-            _intent("P04", NightActionKind.ROLEBLOCK, "P01"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P01"),
         ),
     )
 
@@ -123,17 +149,61 @@ def test_roleblocked_factional_killer_fails_without_backup_carry() -> None:
 
 
 def test_blocked_action_does_not_count_as_visit_but_roleblock_does() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
     result = resolve_night_actions(
-        _state(),
+        state,
         (
-            _intent("P04", NightActionKind.ROLEBLOCK, "P03"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P03"),
             _intent("P03", NightActionKind.INVESTIGATE, "P01"),
         ),
     )
 
     assert result.blocked_actor_ids == ("P03",)
-    assert {(v.actor, v.target) for v in result.visits} == {("P04", "P03")}
+    assert {(v.actor, v.target) for v in result.visits} == {("P02", "P03")}
     assert result.detective_finding is None
+
+
+def test_roleblock_nullifies_active_action_but_not_godfather_passive() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.GODFATHER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P01"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P01"),
+        ),
+    )
+
+    assert result.blocked_actor_ids == ("P01",)
+    assert result.mafia_kill_target is None
+    assert result.eliminated is None
+    assert result.detective_finding == ("P01", "TOWN")
+    assert result.feedback_by_code("ACTION_BLOCKED")[0].recipient == "P01"
 
 
 def test_investigation_of_target_killed_same_night_still_returns_result() -> None:
