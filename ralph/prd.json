@@ -67,7 +67,7 @@
         "All backend gates pass."
       ],
       "notes": "Codex: 'You need a resolution matrix, not prose.' Gemini: 'standard Natural Action Resolution (NAR) tier system' + redirect-vs-block + blocked-as-visit ambiguity. This story must merge BEFORE any new role.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-214",

@@ -17,15 +17,15 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict
 
 from padrino.core.engine.actions import Action
-from padrino.core.engine.state import GameState, Seat
-from padrino.core.enums import ActionType, Role
+from padrino.core.engine.resolvers import nar as _nar
+from padrino.core.engine.state import GameState
 
-REASON_PROTECTED = "protected"
-REASON_REPEAT_VIOLATION = "REPEAT_VIOLATION"
-REASON_INVALID_TARGET = "invalid_target"
-REASON_NO_SUBMISSION = "no_submission"
-REASON_DEAD_DOCTOR = "dead_doctor"
-REASON_NO_DOCTOR = "no_doctor"
+REASON_PROTECTED = _nar.REASON_PROTECTED
+REASON_REPEAT_VIOLATION = _nar.REASON_REPEAT_VIOLATION
+REASON_INVALID_TARGET = _nar.REASON_INVALID_TARGET
+REASON_NO_SUBMISSION = _nar.REASON_NO_SUBMISSION
+REASON_DEAD_DOCTOR = _nar.REASON_DEAD_DOCTOR
+REASON_NO_DOCTOR = _nar.REASON_NO_DOCTOR
 
 
 class DoctorProtectResult(BaseModel):
@@ -37,37 +37,10 @@ class DoctorProtectResult(BaseModel):
     reason: str
 
 
-def _find_doctor(state: GameState) -> Seat | None:
-    for seat in state.seats:
-        if seat.role is Role.DOCTOR:
-            return seat
-    return None
-
-
 def resolve_doctor_protect(
     state: GameState,
     doctor_submission: Action | None,
 ) -> DoctorProtectResult:
     """Resolve the doctor's night protect and return the outcome."""
-    doctor = _find_doctor(state)
-    if doctor is None:
-        return DoctorProtectResult(protected=None, reason=REASON_NO_DOCTOR)
-    if not doctor.alive:
-        return DoctorProtectResult(protected=None, reason=REASON_DEAD_DOCTOR)
-    if doctor_submission is None:
-        return DoctorProtectResult(protected=None, reason=REASON_NO_SUBMISSION)
-    if doctor_submission.type is not ActionType.PROTECT:
-        return DoctorProtectResult(protected=None, reason=REASON_INVALID_TARGET)
-
-    target_id = doctor_submission.target
-    if target_id is None:
-        return DoctorProtectResult(protected=None, reason=REASON_INVALID_TARGET)
-
-    target_seat = state.seat_by_public_id(target_id)
-    if target_seat is None or not target_seat.alive:
-        return DoctorProtectResult(protected=None, reason=REASON_INVALID_TARGET)
-
-    if target_id == doctor.last_protected_target:
-        return DoctorProtectResult(protected=None, reason=REASON_REPEAT_VIOLATION)
-
-    return DoctorProtectResult(protected=target_id, reason=REASON_PROTECTED)
+    result = _nar.resolve_current_doctor_protect(state, doctor_submission)
+    return DoctorProtectResult(protected=result.protected, reason=result.reason)
