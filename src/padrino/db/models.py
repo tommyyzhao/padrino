@@ -777,6 +777,35 @@ class HumanGameRuntime(Base):
     )
 
 
+class HumanSeatPresence(Base):
+    """Per-seat human presence heartbeat for disconnect-grace takeover (US-162).
+
+    This row is live transport metadata only. The game remains replayable from
+    the hash-chained event log; presence only lets the impure human worker lane
+    decide when a dropped human seat has exceeded the reconnect grace window and
+    should be silently taken over by a curated AI.
+    """
+
+    __tablename__ = "human_seat_presence"
+    __table_args__ = (
+        UniqueConstraint("game_id", "public_player_id", name="uq_human_seat_presence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), nullable=False
+    )
+    public_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    connected: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class HumanActionSubmission(Base):
     """An authenticated human's structured action for one seat/phase (US-134).
 
@@ -1070,6 +1099,7 @@ __all__ = [
     "HumanGameRuntime",
     "HumanRating",
     "HumanRatingEvent",
+    "HumanSeatPresence",
     "HumanSession",
     "IngestedGame",
     "JudgeEnrichmentCard",

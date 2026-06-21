@@ -52,6 +52,7 @@ from padrino.core.rulesets import get_ruleset
 from padrino.db.models import GameSeat
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_chat_submissions as holds_repo
+from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_durability import replay_state_from_rows
 
 CHANNEL_PUBLIC = "PUBLIC"
@@ -123,6 +124,12 @@ async def submit_chat(
     message without inserting a duplicate.
     """
     seat_row = await _resolve_seat(session, game_id=game_id, principal_id=principal_id)
+    await presence_repo.record_heartbeat(
+        session,
+        game_id=game_id,
+        public_player_id=seat_row.public_player_id,
+        seen_at=now,
+    )
 
     cleaned = text.strip()
     if not cleaned:

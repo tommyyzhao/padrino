@@ -77,7 +77,7 @@
         "All backend gates pass."
       ],
       "notes": "ELO penalty hooks stay dormant (v1 casual).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-163",

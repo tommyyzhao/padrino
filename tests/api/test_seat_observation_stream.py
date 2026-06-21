@@ -42,6 +42,7 @@ from padrino.db.models import Game, GameSeat, Principal
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_chat as human_chat_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
+from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_durability import replay_state_from_rows
 
 _GAME_SEED = "obs-seed"
@@ -290,6 +291,18 @@ async def test_seat_sees_own_observation_legal_actions_and_deadline(
     deadline = next(f for f in frames if f["type"] == DEADLINE_FRAME)
     assert deadline["deadline_at"] == _DEADLINE.isoformat()
     assert deadline["phase"] == _PHASE
+
+    async with session_factory() as session:
+        presence = await presence_repo.get(
+            session,
+            game_id=game_id,
+            public_player_id=_HUMAN_SEAT,
+        )
+
+    assert presence is not None
+    assert presence.connected is True
+    assert presence.last_seen_at is not None
+    assert presence.disconnected_at is None
 
 
 @pytest.mark.asyncio

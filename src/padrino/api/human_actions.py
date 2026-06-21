@@ -35,6 +35,7 @@ from padrino.core.observations import format_phase_id
 from padrino.db.models import GameSeat
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_action_submissions as submissions_repo
+from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_durability import replay_state_from_rows
 
 # Targeted actions require a legal ``target``; the rest must carry no target.
@@ -97,6 +98,12 @@ async def submit_action(
     action without inserting a duplicate (no double-vote).
     """
     seat_row = await _resolve_seat(session, game_id=game_id, principal_id=principal_id)
+    await presence_repo.record_heartbeat(
+        session,
+        game_id=game_id,
+        public_player_id=seat_row.public_player_id,
+        seen_at=now,
+    )
 
     rows = await events_repo.list_events(session, game_id)
     if not rows:

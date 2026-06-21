@@ -39,8 +39,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.agents.contract import AgentResponse
+from padrino.core.disconnect import SeatPresence, seats_past_grace
 from padrino.core.engine.actions import Action
-from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
@@ -48,13 +49,15 @@ from padrino.db.models import Game, GameSeat, HumanActionSubmission, HumanChatSu
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_action_submissions as human_actions_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
-from padrino.economics.human_cost_governance import global_breaker_open
+from padrino.db.repositories import human_seat_presence as presence_repo
+from padrino.economics.human_cost_governance import global_breaker_open, human_eligible_pool
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
+from padrino.runner.disconnect_takeover import take_over_seat
 from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, drive_game_loop
 from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
 from padrino.runner.human_chat_release import release_held_chat_for_phase
@@ -85,6 +88,7 @@ AdapterFactory = Callable[[], LlmAdapter]
 AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
 HumanChatRelease = Callable[[str, float, EventLog], Awaitable[None]]
+BeforeTakeoverRevalidate = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +108,15 @@ class HumanLaneAdmission:
     @property
     def available(self) -> int:
         return max(0, self.capacity - self.in_flight)
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedTakeover:
+    """One disconnect-grace takeover applied by the human worker lane."""
+
+    seat_id: str
+    replacement_agent_build_id: uuid.UUID
+    event: StoredEvent
 
 
 class _InjectedExecutorAdapter:
@@ -160,6 +173,256 @@ def _is_human_controlled(seat: GameSeat) -> bool:
 
 def _agent_build_id_for_ai_seat(seat: GameSeat) -> uuid.UUID | None:
     return seat.takeover_agent_build_id or seat.agent_build_id
+
+
+def _as_aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _presence_from_row(
+    *,
+    public_player_id: str,
+    row: object | None,
+    now: datetime,
+    grace_seconds: float,
+) -> SeatPresence:
+    connected = bool(getattr(row, "connected", False)) if row is not None else False
+    last_seen_at = _as_aware(getattr(row, "last_seen_at", None)) if row is not None else None
+    disconnected_at = _as_aware(getattr(row, "disconnected_at", None)) if row is not None else None
+    if row is None:
+        return SeatPresence(public_player_id=public_player_id, connected=False, disconnected_at=now)
+    if connected:
+        if last_seen_at is None:
+            return SeatPresence(public_player_id=public_player_id, connected=True)
+        cutoff = now - timedelta(seconds=grace_seconds)
+        if last_seen_at >= cutoff:
+            return SeatPresence(public_player_id=public_player_id, connected=True)
+        return SeatPresence(
+            public_player_id=public_player_id,
+            connected=False,
+            disconnected_at=last_seen_at,
+        )
+    return SeatPresence(
+        public_player_id=public_player_id,
+        connected=False,
+        disconnected_at=disconnected_at,
+    )
+
+
+async def _human_presence_snapshot(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    now: datetime,
+    grace_seconds: float,
+) -> list[SeatPresence]:
+    seat_rows = list(
+        (
+            await session.execute(
+                select(GameSeat)
+                .where(GameSeat.game_id == game_id)
+                .where(GameSeat.seat_kind == SeatKind.HUMAN.value)
+                .order_by(GameSeat.seat_index)
+            )
+        ).scalars()
+    )
+    presence_rows = {
+        row.public_player_id: row
+        for row in await presence_repo.list_for_game(session, game_id=game_id)
+    }
+    return [
+        _presence_from_row(
+            public_player_id=seat.public_player_id,
+            row=presence_rows.get(seat.public_player_id),
+            now=now,
+            grace_seconds=grace_seconds,
+        )
+        for seat in seat_rows
+    ]
+
+
+async def _expired_human_seat_for_update(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    seat_id: str,
+    now: datetime,
+    grace_seconds: float,
+) -> GameSeat | None:
+    stmt = (
+        select(GameSeat)
+        .where(GameSeat.game_id == game_id)
+        .where(GameSeat.public_player_id == seat_id)
+        .with_for_update()
+    )
+    seat = (await session.execute(stmt)).scalar_one_or_none()
+    if seat is None or seat.seat_kind != SeatKind.HUMAN.value:
+        return None
+    row = await presence_repo.get(session, game_id=game_id, public_player_id=seat_id)
+    presence = _presence_from_row(
+        public_player_id=seat_id,
+        row=row,
+        now=now,
+        grace_seconds=grace_seconds,
+    )
+    if seats_past_grace([presence], now=now, grace_seconds=grace_seconds) != [seat_id]:
+        return None
+    return seat
+
+
+async def _replacement_build_id(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    ruleset_id: str,
+    seat: GameSeat,
+) -> uuid.UUID | None:
+    if seat.takeover_agent_build_id is not None:
+        return seat.takeover_agent_build_id
+
+    roster = [uuid.UUID(raw) for raw in await human_eligible_pool(session, ruleset_id)]
+    if not roster:
+        return None
+
+    current_builds = list(
+        (
+            await session.execute(
+                select(GameSeat.agent_build_id, GameSeat.takeover_agent_build_id).where(
+                    GameSeat.game_id == game_id
+                )
+            )
+        ).all()
+    )
+    used = {bid for pair in current_builds for bid in pair if bid is not None}
+    return next((bid for bid in roster if bid not in used), roster[0])
+
+
+async def _takeover_replacement_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    settings: Settings,
+    seat_id: str,
+    build_id: uuid.UUID,
+    ai_adapter_factory: AiAdapterFactory | None,
+) -> LlmAdapter:
+    async with session_factory() as session:
+        build = await project_agent_build(session, build_id)
+    inner = (
+        ai_adapter_factory({seat_id: build})
+        if ai_adapter_factory is not None
+        else build_heterogeneous_adapter({seat_id: build}, settings=settings)
+    )
+    return HumanChatHydratingAdapter(
+        inner=inner,
+        session_factory=session_factory,
+        game_id=game_id,
+    )
+
+
+async def _take_over_expired_human_seats(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    mux: SeatMultiplexAdapter,
+    event_log: EventLog,
+    state: GameState,
+    settings: Settings,
+    ai_adapter_factory: AiAdapterFactory | None = None,
+    now: datetime | None = None,
+    before_revalidate: BeforeTakeoverRevalidate | None = None,
+) -> list[AppliedTakeover]:
+    """Apply disconnect-grace takeovers before the phase tick dispatches.
+
+    The initial scan is advisory. Each candidate is re-read inside a transaction
+    immediately before the adapter swap and DB seat update, so a reconnecting
+    heartbeat that races the worker cancels the takeover.
+    """
+    checked_at = now or datetime.now(UTC)
+    grace = settings.padrino_human_reconnect_grace_seconds
+    async with session_factory() as session:
+        presences = await _human_presence_snapshot(
+            session,
+            game_id=game_id,
+            now=checked_at,
+            grace_seconds=grace,
+        )
+        expired = seats_past_grace(presences, now=checked_at, grace_seconds=grace)
+
+    applied: list[AppliedTakeover] = []
+    for seat_id in expired:
+        if before_revalidate is not None:
+            await before_revalidate()
+
+        async with session_factory() as session, session.begin():
+            game = await games_repo.get(session, game_id)
+            if game is None or game.status == STATUS_COMPLETED:
+                continue
+            seat = await _expired_human_seat_for_update(
+                session,
+                game_id=game_id,
+                seat_id=seat_id,
+                now=checked_at,
+                grace_seconds=grace,
+            )
+            if seat is None:
+                continue
+            build_id = await _replacement_build_id(
+                session,
+                game_id=game_id,
+                ruleset_id=game.ruleset_id,
+                seat=seat,
+            )
+            if build_id is None:
+                _logger.warning(
+                    "human_lane.takeover.no_replacement",
+                    game_id=str(game_id),
+                    seat_id=seat_id,
+                )
+                continue
+
+        replacement = await _takeover_replacement_adapter(
+            session_factory,
+            game_id=game_id,
+            settings=settings,
+            seat_id=seat_id,
+            build_id=build_id,
+            ai_adapter_factory=ai_adapter_factory,
+        )
+
+        async with session_factory() as session, session.begin():
+            seat = await _expired_human_seat_for_update(
+                session,
+                game_id=game_id,
+                seat_id=seat_id,
+                now=checked_at,
+                grace_seconds=grace,
+            )
+            if seat is None:
+                continue
+            result = take_over_seat(
+                mux=mux,
+                event_log=event_log,
+                state=state,
+                seat_id=seat_id,
+                replacement_adapter=replacement,
+                replacement_agent_build_ref=str(build_id),
+            )
+            phase = str(result.event.body["phase"])
+            seat.seat_kind = SeatKind.AI_TAKEOVER.value
+            seat.taken_over_at_phase = phase
+            seat.takeover_agent_build_id = build_id
+            applied.append(
+                AppliedTakeover(
+                    seat_id=seat_id,
+                    replacement_agent_build_id=build_id,
+                    event=result.event,
+                )
+            )
+
+    return applied
 
 
 async def build_human_lane_adapter(
@@ -403,7 +666,11 @@ def _game_resume_from_rehydrated(rehydrated: RehydratedHumanGame) -> GameResume:
     )
 
 
-def _default_human_game_executor(settings: Settings) -> HumanGameExecutor:
+def _default_human_game_executor(
+    settings: Settings,
+    *,
+    ai_adapter_factory: AiAdapterFactory | None = None,
+) -> HumanGameExecutor:
     tick_config = HumanTickConfig(
         phase_deadline_seconds=settings.padrino_human_phase_deadline_seconds,
         release_delay_seconds=settings.padrino_human_release_delay_seconds,
@@ -435,6 +702,16 @@ def _default_human_game_executor(settings: Settings) -> HumanGameExecutor:
             ranked: bool,
             timeout_s: float,
         ) -> dict[str, AgentResponse]:
+            if isinstance(adapter, SeatMultiplexAdapter):
+                await _take_over_expired_human_seats(
+                    persistence.session_factory,
+                    game_id=persistence.game_id,
+                    mux=adapter,
+                    event_log=event_log,
+                    state=state,
+                    settings=settings,
+                    ai_adapter_factory=ai_adapter_factory,
+                )
             return await _run_human_tick_responses(
                 state,
                 event_log,
@@ -642,7 +919,10 @@ async def run_human_lane(
     sem = semaphore or asyncio.Semaphore(concurrency)
     cfg = settings or get_settings()
     use_default_executor = game_executor is None
-    executor = game_executor or _default_human_game_executor(cfg)
+    executor = game_executor or _default_human_game_executor(
+        cfg,
+        ai_adapter_factory=ai_adapter_factory,
+    )
 
     tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
     rehydrated_by_game = {

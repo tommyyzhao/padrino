@@ -51,6 +51,7 @@ from padrino.core.rulesets import get_ruleset
 from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
+from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_chat_observation import (
     hydrate_observation_human_chat,
     load_released_human_chat_texts,
@@ -139,6 +140,12 @@ async def build_seat_observation_snapshot(
     mode the observation is asserted free of identity markers.
     """
     seat_row = await _resolve_seat(session, game_id=game_id, principal_id=principal_id)
+    await presence_repo.record_heartbeat(
+        session,
+        game_id=game_id,
+        public_player_id=seat_row.public_player_id,
+        seen_at=datetime.now(UTC),
+    )
 
     game = await session.get(Game, game_id)
     if game is None:
