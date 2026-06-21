@@ -45,7 +45,7 @@ from padrino.core.engine.reducer import apply_event, initial_state
 from padrino.core.engine.resolvers.day_vote import resolve_day_vote
 from padrino.core.engine.resolvers.night import resolve_night
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.engine.state import GameState, Seat
+from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED, check_win
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role
 from padrino.core.observations import Observation, Ruleset, format_phase_id
@@ -83,6 +83,23 @@ _RULESETS: Final[dict[str, Any]] = {
 
 
 @dataclass(frozen=True, slots=True)
+class GameResume:
+    """Durable state for resuming a previously-started game loop.
+
+    The event log remains authoritative for deterministic core state. ``phase`` /
+    ``deadline_at`` / ``buffer_snapshot`` are the impure runtime scaffolding read
+    from ``human_game_runtime`` so the human lane can resume a live phase without
+    re-emitting setup or losing buffered input.
+    """
+
+    state: GameState
+    event_log: EventLog
+    phase: str
+    deadline_at: Any = None
+    buffer_snapshot: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class GamePersistence:
     """Optional persistence target for :func:`run_game`.
 
@@ -106,6 +123,7 @@ class GamePersistence:
     game_id: uuid.UUID
     agent_builds: Mapping[str, uuid.UUID] = field(default_factory=dict)
     league_id: uuid.UUID | None = None
+    resume: GameResume | None = None
 
 
 class GameConfig(BaseModel):
@@ -123,6 +141,8 @@ TickRunner = Callable[
     [GameState, EventLog, Sequence[Seat], LlmAdapter, Ruleset, bool, float],
     Awaitable[dict[str, AgentResponse]],
 ]
+
+PhaseSnapshotHook = Callable[[GameState, EventLog, str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +407,35 @@ def _eligible_seats(state: GameState) -> list[Seat]:
     ]
 
 
+def _phase_started_without_resolution(event_log: EventLog, phase_id: str) -> bool:
+    """Return whether ``phase_id`` has a committed start but no resolution yet.
+
+    Rehydrated human games may restart after ``PhaseStarted`` has already been
+    persisted. In that case the loop must resume the tick for that phase, not
+    append a second ``PhaseStarted`` row at the existing hash-chain head.
+    """
+    for stored in reversed(event_log.events):
+        body = stored.body
+        if body.get("phase") != phase_id:
+            continue
+        event_type = body.get("event_type")
+        if event_type == "PhaseResolved":
+            return False
+        if event_type == "PhaseStarted":
+            return True
+    return False
+
+
+def _resume_phase(state: GameState, event_log: EventLog, ruleset: Any) -> tuple[Phase, bool]:
+    """Return ``(phase, already_started)`` for a rehydrated game state."""
+    if state.current_phase.kind is PhaseKind.TERMINAL:
+        return state.current_phase, True
+    phase_id = format_phase_id(state.current_phase)
+    if _phase_started_without_resolution(event_log, phase_id):
+        return state.current_phase, True
+    return next_phase(state.current_phase, ruleset), False
+
+
 async def _default_tick_runner(
     state: GameState,
     event_log: EventLog,
@@ -613,6 +662,8 @@ async def drive_game_loop(
     *,
     persistence: GamePersistence | None = None,
     tick_runner: TickRunner | None = None,
+    resume: GameResume | None = None,
+    phase_snapshot: PhaseSnapshotHook | None = None,
 ) -> GameOutcome:
     """Run a full game start-to-finish with an injectable per-phase tick runner.
 
@@ -625,10 +676,10 @@ async def drive_game_loop(
     the same deterministic game loop but supplies a human-aware tick wrapper.
     """
     ruleset = _RULESETS[config.ruleset_id]
-    event_log = EventLog()
+    event_log = resume.event_log if resume is not None else EventLog()
     llm_calls: list[AdapterResult] = []
     recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls, persistence)
-    state = initial_state()
+    state = resume.state if resume is not None else initial_state()
     run_phase_tick = tick_runner or _default_tick_runner
 
     game_ctx_keys = ("game_id", "ruleset_id")
@@ -669,46 +720,54 @@ async def drive_game_loop(
         for stored in event_log.events[log_before:]:
             await _persist_stored_event(persistence, stored)
 
-    # GameCreated
-    state = await emit_and_persist(
-        {
-            "event_type": "GameCreated",
-            "phase": "SETUP",
-            "visibility": "SYSTEM",
-            "actor_player_id": None,
-            "payload": {
-                "ruleset_id": config.ruleset_id,
-                "game_id": config.game_id,
-                "game_seed": config.game_seed,
-                "player_count": ruleset.PLAYER_COUNT,
-            },
-        },
-        state,
-    )
+    async def snapshot_phase(game_state: GameState, phase_id: str) -> None:
+        if phase_snapshot is not None:
+            await phase_snapshot(game_state, event_log, phase_id)
 
-    seats = assign_roles(config.game_seed, ruleset)
-    state = await emit_and_persist(
-        {
-            "event_type": "RolesAssigned",
-            "phase": "SETUP",
-            "visibility": "SYSTEM",
-            "actor_player_id": None,
-            "payload": {
-                "assignments": [
-                    {
-                        "public_player_id": s.public_player_id,
-                        "seat_index": s.seat_index,
-                        "role": s.role.value,
-                        "faction": s.faction.value,
-                    }
-                    for s in seats
-                ],
+    if resume is None:
+        # GameCreated
+        state = await emit_and_persist(
+            {
+                "event_type": "GameCreated",
+                "phase": "SETUP",
+                "visibility": "SYSTEM",
+                "actor_player_id": None,
+                "payload": {
+                    "ruleset_id": config.ruleset_id,
+                    "game_id": config.game_id,
+                    "game_seed": config.game_seed,
+                    "player_count": ruleset.PLAYER_COUNT,
+                },
             },
-        },
-        state,
-    )
+            state,
+        )
 
-    current_phase = next_phase(state.current_phase, ruleset)
+        seats = assign_roles(config.game_seed, ruleset)
+        state = await emit_and_persist(
+            {
+                "event_type": "RolesAssigned",
+                "phase": "SETUP",
+                "visibility": "SYSTEM",
+                "actor_player_id": None,
+                "payload": {
+                    "assignments": [
+                        {
+                            "public_player_id": s.public_player_id,
+                            "seat_index": s.seat_index,
+                            "role": s.role.value,
+                            "faction": s.faction.value,
+                        }
+                        for s in seats
+                    ],
+                },
+            },
+            state,
+        )
+
+        current_phase = next_phase(state.current_phase, ruleset)
+        phase_started_from_resume = False
+    else:
+        current_phase, phase_started_from_resume = _resume_phase(state, event_log, ruleset)
 
     try:
         while True:
@@ -732,26 +791,30 @@ async def drive_game_loop(
             phase_id = format_phase_id(current_phase)
             structlog.contextvars.bind_contextvars(phase_id=phase_id)
             with time_phase(config.ruleset_id, current_phase.kind.value):
-                state = await emit_and_persist(
-                    {
-                        "event_type": "PhaseStarted",
-                        "phase": phase_id,
-                        "visibility": "SYSTEM",
-                        "actor_player_id": None,
-                        "payload": {
-                            "phase_kind": current_phase.kind.value,
-                            "day": current_phase.day,
-                            "round": current_phase.round,
+                if phase_started_from_resume:
+                    phase_started_from_resume = False
+                else:
+                    state = await emit_and_persist(
+                        {
+                            "event_type": "PhaseStarted",
+                            "phase": phase_id,
+                            "visibility": "SYSTEM",
+                            "actor_player_id": None,
+                            "payload": {
+                                "phase_kind": current_phase.kind.value,
+                                "day": current_phase.day,
+                                "round": current_phase.round,
+                            },
                         },
-                    },
-                    state,
-                )
-                _logger.info(
-                    EVENT_PHASE_STARTED,
-                    phase_kind=current_phase.kind.value,
-                    day=current_phase.day,
-                    round=current_phase.round,
-                )
+                        state,
+                    )
+                    _logger.info(
+                        EVENT_PHASE_STARTED,
+                        phase_kind=current_phase.kind.value,
+                        day=current_phase.day,
+                        round=current_phase.round,
+                    )
+                await snapshot_phase(state, phase_id)
 
                 eligible = _eligible_seats(state)
                 responses: dict[str, AgentResponse] = {}
@@ -770,6 +833,7 @@ async def drive_game_loop(
                     # directly to event_log without folding through emit_and_persist;
                     # mirror them to the DB now so the persisted chain stays complete.
                     await persist_pending_events(log_before)
+                    await snapshot_phase(state, phase_id)
 
                 for seat in eligible:
                     response = responses.get(seat.public_player_id)
@@ -801,6 +865,7 @@ async def drive_game_loop(
                     },
                     state,
                 )
+                await snapshot_phase(state, phase_id)
                 _logger.info(EVENT_PHASE_RESOLVED)
 
             win = check_win(state, ruleset)
@@ -880,6 +945,8 @@ __all__ = [
     "GameConfig",
     "GameOutcome",
     "GamePersistence",
+    "GameResume",
+    "PhaseSnapshotHook",
     "TickRunner",
     "drive_game_loop",
     "run_game",

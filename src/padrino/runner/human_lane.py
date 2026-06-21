@@ -31,8 +31,8 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Final
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
 
 import structlog
 from sqlalchemy import select
@@ -44,9 +44,10 @@ from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
-from padrino.db.models import Game, GameSeat
+from padrino.db.models import Game, GameSeat, HumanActionSubmission, HumanChatSubmission
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_action_submissions as human_actions_repo
+from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.economics.human_cost_governance import global_breaker_open
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
@@ -54,9 +55,10 @@ from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
-from padrino.runner.game_runner import GameConfig, GamePersistence, drive_game_loop
+from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, drive_game_loop
 from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
 from padrino.runner.human_chat_release import release_held_chat_for_phase
+from padrino.runner.human_durability import RehydratedHumanGame, rehydrate_active_human_games
 from padrino.runner.human_tick import Clock, HumanTickConfig, Sleep, run_human_tick
 from padrino.settings import Settings, get_settings
 
@@ -260,6 +262,147 @@ async def _run_human_tick_responses(
     return result.responses
 
 
+def _json_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.isoformat()
+
+
+async def _runtime_buffer_snapshot(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    phase: str,
+) -> dict[str, Any]:
+    action_rows = list(
+        (
+            await session.execute(
+                select(HumanActionSubmission)
+                .where(HumanActionSubmission.game_id == game_id)
+                .where(HumanActionSubmission.phase == phase)
+                .order_by(
+                    HumanActionSubmission.public_player_id,
+                    HumanActionSubmission.created_at.desc(),
+                    HumanActionSubmission.id.desc(),
+                )
+            )
+        ).scalars()
+    )
+    actions: dict[str, dict[str, object]] = {}
+    for row in action_rows:
+        if row.public_player_id in actions:
+            continue
+        actions[row.public_player_id] = {
+            "action_type": row.action_type,
+            "target": row.target,
+            "idempotency_key": row.idempotency_key,
+            "created_at": _json_timestamp(row.created_at),
+        }
+
+    chat_rows = list(
+        (
+            await session.execute(
+                select(HumanChatSubmission)
+                .where(HumanChatSubmission.game_id == game_id)
+                .where(HumanChatSubmission.phase == phase)
+                .where(HumanChatSubmission.status == "HELD")
+                .order_by(
+                    HumanChatSubmission.public_player_id,
+                    HumanChatSubmission.created_at,
+                    HumanChatSubmission.id,
+                )
+            )
+        ).scalars()
+    )
+    chat_holds = [
+        {
+            "public_player_id": row.public_player_id,
+            "channel": row.channel,
+            "status": row.status,
+            "idempotency_key": row.idempotency_key,
+            "created_at": _json_timestamp(row.created_at),
+            "ready_for_release": row.cleaned_text is not None,
+        }
+        for row in chat_rows
+    ]
+    return {"actions": actions, "chat_holds": chat_holds}
+
+
+async def persist_human_runtime_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    phase: str,
+    deadline_at: datetime | None,
+    updated_at: datetime,
+    event_log: EventLog,
+) -> None:
+    """Persist the current human-lane runtime scaffold for one phase.
+
+    The snapshot contains only transport/runtime metadata. Raw or cleaned chat
+    text stays in the chat hold / sidecar tables and is not duplicated here.
+    """
+    async with session_factory() as session, session.begin():
+        buffer_snapshot = await _runtime_buffer_snapshot(session, game_id=game_id, phase=phase)
+        await runtime_repo.upsert(
+            session,
+            game_id=game_id,
+            phase=phase,
+            deadline_at=deadline_at,
+            buffer_snapshot=buffer_snapshot,
+            updated_at=updated_at,
+        )
+        if event_log.events:
+            game = await games_repo.get(session, game_id)
+            if game is not None and game.status != STATUS_COMPLETED:
+                game.current_phase = phase
+                game.event_hash_head = event_log.head_hash
+
+
+class _RuntimeSnapshotter:
+    """Phase hook that writes human runtime snapshots from the game loop."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        game_id: uuid.UUID,
+        phase_deadline_seconds: float,
+        resume: GameResume | None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._game_id = game_id
+        self._phase_deadline_seconds = phase_deadline_seconds
+        self._deadlines: dict[str, datetime] = {}
+        if resume is not None and resume.deadline_at is not None:
+            self._deadlines[resume.phase] = resume.deadline_at
+
+    async def __call__(self, _state: GameState, event_log: EventLog, phase: str) -> None:
+        updated_at = datetime.now(UTC)
+        deadline_at = self._deadlines.get(phase)
+        if deadline_at is None:
+            deadline_at = updated_at + timedelta(seconds=self._phase_deadline_seconds)
+            self._deadlines[phase] = deadline_at
+        await persist_human_runtime_snapshot(
+            self._session_factory,
+            game_id=self._game_id,
+            phase=phase,
+            deadline_at=deadline_at,
+            updated_at=updated_at,
+            event_log=event_log,
+        )
+
+
+def _game_resume_from_rehydrated(rehydrated: RehydratedHumanGame) -> GameResume:
+    return GameResume(
+        state=rehydrated.state,
+        event_log=rehydrated.event_log,
+        phase=rehydrated.phase,
+        deadline_at=rehydrated.deadline_at,
+        buffer_snapshot=rehydrated.buffer_snapshot,
+    )
+
+
 def _default_human_game_executor(settings: Settings) -> HumanGameExecutor:
     tick_config = HumanTickConfig(
         phase_deadline_seconds=settings.padrino_human_phase_deadline_seconds,
@@ -304,12 +447,20 @@ def _default_human_game_executor(settings: Settings) -> HumanGameExecutor:
                 release_chat=release_chat,
             )
 
+        snapshotter = _RuntimeSnapshotter(
+            persistence.session_factory,
+            game_id=persistence.game_id,
+            phase_deadline_seconds=settings.padrino_human_phase_deadline_seconds,
+            resume=persistence.resume,
+        )
         await drive_game_loop(
             config,
             adapter,
             False,
             persistence=persistence,
             tick_runner=tick_runner,
+            resume=persistence.resume,
+            phase_snapshot=snapshotter,
         )
 
     return execute
@@ -366,12 +517,12 @@ async def human_lane_admission(
 async def _claim_game(
     session_factory: async_sessionmaker[AsyncSession],
     game_id: uuid.UUID,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str] | None:
     """Atomically flip a claimable human-lane game to RUNNING.
 
-    Returns ``(game_seed, ruleset_id)`` on a successful claim, or ``None`` when
-    the game vanished, already completed, or is not a human-lane game (so a
-    concurrent worker / the benchmark lane never double-runs it).
+    Returns ``(game_seed, ruleset_id, prior_status)`` on a successful claim, or
+    ``None`` when the game vanished, already completed, or is not a human-lane
+    game (so a concurrent worker / the benchmark lane never double-runs it).
     """
     async with session_factory() as session, session.begin():
         game = await games_repo.get(session, game_id)
@@ -381,10 +532,11 @@ async def _claim_game(
             return None
         seed = game.game_seed
         ruleset_id = game.ruleset_id
+        prior_status = game.status
         if game.status != STATUS_RUNNING:
             game.status = STATUS_RUNNING
             await session.flush()
-    return seed, ruleset_id
+    return seed, ruleset_id, prior_status
 
 
 async def _run_one_human_game(
@@ -397,12 +549,19 @@ async def _run_one_human_game(
     game_executor: HumanGameExecutor,
     settings: Settings,
     build_production_adapter: bool,
+    resume: GameResume | None,
 ) -> None:
     async with semaphore:
         claimed = await _claim_game(session_factory, game_id)
         if claimed is None:
             return
-        game_seed, ruleset_id = claimed
+        game_seed, ruleset_id, prior_status = claimed
+        if prior_status == STATUS_RUNNING and resume is None:
+            _logger.warning(
+                "human_lane.running_game_missing_runtime_snapshot",
+                game_id=str(game_id),
+            )
+            return
 
         if adapter_factory is not None:
             adapter = adapter_factory()
@@ -424,6 +583,7 @@ async def _run_one_human_game(
             game_id=game_id,
             agent_builds={},
             league_id=None,
+            resume=resume,
         )
         structlog.contextvars.bind_contextvars(human_lane_game_id=str(game_id))
         try:
@@ -485,6 +645,10 @@ async def run_human_lane(
     executor = game_executor or _default_human_game_executor(cfg)
 
     tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+    rehydrated_by_game = {
+        item.game_id: _game_resume_from_rehydrated(item)
+        for item in await rehydrate_active_human_games(session_factory)
+    }
 
     try:
         while not stop_event.is_set():
@@ -506,6 +670,7 @@ async def run_human_lane(
 
                     return _done
 
+                resume = rehydrated_by_game.pop(game_id, None)
                 task = asyncio.create_task(
                     _run_one_human_game(
                         session_factory,
@@ -516,6 +681,7 @@ async def run_human_lane(
                         game_executor=executor,
                         settings=cfg,
                         build_production_adapter=use_default_executor,
+                        resume=resume,
                     ),
                     name=f"human-lane-game-{game_id}",
                 )

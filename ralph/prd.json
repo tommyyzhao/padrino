@@ -62,7 +62,7 @@
         "All backend gates pass."
       ],
       "notes": "Postgres-snapshot only; no Redis (hard rule 10).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-162",
