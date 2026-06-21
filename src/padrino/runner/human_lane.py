@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -36,18 +36,30 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.core.enums import SeatKind
+from padrino.core.agents.contract import AgentResponse
+from padrino.core.engine.actions import Action
+from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.state import GameState, Seat
+from padrino.core.enums import ActionType, SeatKind
+from padrino.core.observations import Observation, Ruleset
 from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import games as games_repo
+from padrino.db.repositories import human_action_submissions as human_actions_repo
 from padrino.economics.human_cost_governance import global_breaker_open
-from padrino.llm.adapter import LlmAdapter
-from padrino.llm.mock import NoopMockAdapter
-from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
+from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
+from padrino.gauntlets.tournament import project_agent_build
+from padrino.llm.adapter import AdapterResult, LlmAdapter
+from padrino.llm.adapter import AgentBuild as LlmAgentBuild
+from padrino.llm.human_adapter import HumanAdapter, PullAction
+from padrino.llm.multiplex import SeatMultiplexAdapter
+from padrino.runner.game_runner import GameConfig, GamePersistence, drive_game_loop
+from padrino.runner.human_tick import HumanTickConfig, run_human_tick
 from padrino.settings import Settings, get_settings
 
 _logger = structlog.get_logger("padrino.runner.human_lane")
 
 DEFAULT_POLL_INTERVAL_S: Final[float] = 1.0
+HUMAN_ACTION_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 STATUS_COMPLETED: Final[str] = "COMPLETED"
 STATUS_RUNNING: Final[str] = "RUNNING"
 
@@ -64,6 +76,7 @@ _CLAIMABLE_STATUSES: Final[frozenset[str]] = frozenset({"CREATED", "PENDING", ST
 
 # Type aliases for injectable seams (mirroring scheduler.py).
 AdapterFactory = Callable[[], LlmAdapter]
+AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
 
 
@@ -86,14 +99,192 @@ class HumanLaneAdmission:
         return max(0, self.capacity - self.in_flight)
 
 
-async def _default_human_game_executor(
-    config: GameConfig,
-    persistence: GamePersistence,
+class _InjectedExecutorAdapter:
+    """Adapter placeholder for tests that inject their own executor.
+
+    ``run_human_lane`` still passes an adapter argument to custom executors for
+    backward-compatible test seams. When the executor is injected and no adapter
+    factory is supplied, constructing a real production adapter would force
+    isolation tests to seed model rows they never use. This placeholder fails
+    loudly if a custom executor accidentally calls it.
+    """
+
+    async def complete(self, observation: Observation) -> AdapterResult:
+        raise RuntimeError(
+            "custom human-lane executor received a placeholder adapter; "
+            "pass adapter_factory if the executor calls complete()"
+        )
+
+
+def _action_from_submission(action_type: str, target: str | None) -> Action | None:
+    try:
+        parsed = ActionType(action_type)
+    except ValueError:
+        return None
+    return Action(type=parsed, target=target)
+
+
+def _db_backed_pull_action(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    public_player_id: str,
+) -> PullAction:
+    """Poll the authenticated POST action store for one human seat."""
+
+    async def pull(observation: Observation) -> Action | None:
+        async with session_factory() as session:
+            row = await human_actions_repo.latest_for_phase(
+                session,
+                game_id=game_id,
+                public_player_id=public_player_id,
+                phase=observation.phase,
+            )
+        if row is None:
+            return None
+        return _action_from_submission(row.action_type, row.target)
+
+    return pull
+
+
+def _is_human_controlled(seat: GameSeat) -> bool:
+    return seat.seat_kind == SeatKind.HUMAN.value
+
+
+def _agent_build_id_for_ai_seat(seat: GameSeat) -> uuid.UUID | None:
+    return seat.takeover_agent_build_id or seat.agent_build_id
+
+
+async def build_human_lane_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    settings: Settings,
+    ai_adapter_factory: AiAdapterFactory | None = None,
+) -> SeatMultiplexAdapter:
+    """Build the production per-seat adapter for a human-lane game.
+
+    HUMAN seats are backed by :class:`HumanAdapter` polling the authenticated
+    action submission store. AI / AI_TAKEOVER seats keep the curated
+    ``agent_build_id`` materialized at lobby launch and are projected into the
+    same heterogeneous LiteLLM adapter path used by model-vs-model games.
+    """
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(GameSeat)
+                    .where(GameSeat.game_id == game_id)
+                    .order_by(GameSeat.seat_index)
+                )
+            ).scalars()
+        )
+        if not rows:
+            raise ValueError(f"human-lane game {game_id} has no seats")
+
+        ai_assignments: dict[str, LlmAgentBuild] = {}
+        for seat in rows:
+            if _is_human_controlled(seat):
+                continue
+            build_id = _agent_build_id_for_ai_seat(seat)
+            if build_id is None:
+                raise ValueError(
+                    f"AI seat {seat.public_player_id!r} in human-lane game {game_id} "
+                    "has no agent_build_id"
+                )
+            ai_assignments[seat.public_player_id] = await project_agent_build(session, build_id)
+
+    ai_adapter: LlmAdapter | None = None
+    if ai_assignments:
+        ai_adapter = (
+            ai_adapter_factory(ai_assignments)
+            if ai_adapter_factory is not None
+            else build_heterogeneous_adapter(ai_assignments, settings=settings)
+        )
+
+    adapters: dict[str, LlmAdapter] = {}
+    for seat in rows:
+        if _is_human_controlled(seat):
+            adapters[seat.public_player_id] = HumanAdapter(
+                pull_action=_db_backed_pull_action(
+                    session_factory,
+                    game_id=game_id,
+                    public_player_id=seat.public_player_id,
+                ),
+                deadline_seconds=settings.padrino_human_phase_deadline_seconds,
+                poll_interval_seconds=HUMAN_ACTION_POLL_INTERVAL_SECONDS,
+            )
+        elif ai_adapter is not None:
+            adapters[seat.public_player_id] = ai_adapter
+
+    return SeatMultiplexAdapter(adapters)
+
+
+async def _run_human_tick_responses(
+    state: GameState,
+    event_log: EventLog,
+    eligible_seats: Sequence[Seat],
     adapter: LlmAdapter,
-) -> None:
-    # Human-lane games are always casual (ranked=False) — they never write the
-    # scientific Rating/RatingEvent tables (segregation, hard rule 8).
-    await run_game(config, adapter, False, persistence=persistence)
+    ruleset: Ruleset,
+    ranked: bool,
+    _timeout_s: float,
+    *,
+    config: HumanTickConfig,
+) -> dict[str, AgentResponse]:
+    result = await run_human_tick(
+        state,
+        event_log,
+        eligible_seats,
+        adapter,
+        ruleset,
+        config,
+        ranked=ranked,
+    )
+    return result.responses
+
+
+def _default_human_game_executor(settings: Settings) -> HumanGameExecutor:
+    tick_config = HumanTickConfig(
+        phase_deadline_seconds=settings.padrino_human_phase_deadline_seconds,
+        release_delay_seconds=settings.padrino_human_release_delay_seconds,
+    )
+
+    async def execute(
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+    ) -> None:
+        # Human-lane games are always casual (ranked=False) — they never write the
+        # scientific Rating/RatingEvent tables (segregation, hard rule 8).
+        async def tick_runner(
+            state: GameState,
+            event_log: EventLog,
+            eligible_seats: Sequence[Seat],
+            tick_adapter: LlmAdapter,
+            ruleset: Ruleset,
+            ranked: bool,
+            timeout_s: float,
+        ) -> dict[str, AgentResponse]:
+            return await _run_human_tick_responses(
+                state,
+                event_log,
+                eligible_seats,
+                tick_adapter,
+                ruleset,
+                ranked,
+                timeout_s,
+                config=tick_config,
+            )
+
+        await drive_game_loop(
+            config,
+            adapter,
+            False,
+            persistence=persistence,
+            tick_runner=tick_runner,
+        )
+
+    return execute
 
 
 async def _is_human_lane_game(session: AsyncSession, game_id: uuid.UUID) -> bool:
@@ -173,8 +364,11 @@ async def _run_one_human_game(
     *,
     game_id: uuid.UUID,
     semaphore: asyncio.Semaphore,
-    adapter_factory: AdapterFactory,
+    adapter_factory: AdapterFactory | None,
+    ai_adapter_factory: AiAdapterFactory | None,
     game_executor: HumanGameExecutor,
+    settings: Settings,
+    build_production_adapter: bool,
 ) -> None:
     async with semaphore:
         claimed = await _claim_game(session_factory, game_id)
@@ -182,7 +376,17 @@ async def _run_one_human_game(
             return
         game_seed, ruleset_id = claimed
 
-        adapter = adapter_factory()
+        if adapter_factory is not None:
+            adapter = adapter_factory()
+        elif build_production_adapter:
+            adapter = await build_human_lane_adapter(
+                session_factory,
+                game_id=game_id,
+                settings=settings,
+                ai_adapter_factory=ai_adapter_factory,
+            )
+        else:
+            adapter = _InjectedExecutorAdapter()
         config = GameConfig(game_id=str(game_id), game_seed=game_seed, ruleset_id=ruleset_id)
         # Human seats carry no agent_build_id, so ``agent_builds`` is empty: the
         # rating write path fails closed (segregation) and no scientific row is
@@ -222,6 +426,7 @@ async def run_human_lane(
     concurrency: int,
     stop_event: asyncio.Event,
     adapter_factory: AdapterFactory | None = None,
+    ai_adapter_factory: AiAdapterFactory | None = None,
     game_executor: HumanGameExecutor | None = None,
     semaphore: asyncio.Semaphore | None = None,
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
@@ -247,9 +452,9 @@ async def run_human_lane(
         raise ValueError("poll_interval_s must be > 0")
 
     sem = semaphore or asyncio.Semaphore(concurrency)
-    make_adapter = adapter_factory or NoopMockAdapter
-    executor = game_executor or _default_human_game_executor
     cfg = settings or get_settings()
+    use_default_executor = game_executor is None
+    executor = game_executor or _default_human_game_executor(cfg)
 
     tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
 
@@ -278,8 +483,11 @@ async def run_human_lane(
                         session_factory,
                         game_id=game_id,
                         semaphore=sem,
-                        adapter_factory=make_adapter,
+                        adapter_factory=adapter_factory,
+                        ai_adapter_factory=ai_adapter_factory,
                         game_executor=executor,
+                        settings=cfg,
+                        build_production_adapter=use_default_executor,
                     ),
                     name=f"human-lane-game-{game_id}",
                 )
@@ -301,8 +509,10 @@ async def run_human_lane(
 __all__ = [
     "DEFAULT_POLL_INTERVAL_S",
     "AdapterFactory",
+    "AiAdapterFactory",
     "HumanGameExecutor",
     "HumanLaneAdmission",
+    "build_human_lane_adapter",
     "human_lane_admission",
     "list_human_lane_games",
     "run_human_lane",

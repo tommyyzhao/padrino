@@ -16,7 +16,7 @@
         "uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv run pytest -m \"not integration\" all pass."
       ],
       "notes": "Root-cause fix, not a bandaid: the executor seam (HumanGameExecutor/adapter_factory) already exists; supply the human tick + adapter through it rather than special-casing.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-159",
