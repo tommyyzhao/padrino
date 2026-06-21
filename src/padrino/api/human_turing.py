@@ -34,9 +34,8 @@ from padrino.api.human_seat_auth import resolve_human_game_seat
 from padrino.core.enums import SeatKind
 from padrino.core.turing import score_guess
 from padrino.db.models import GameSeat
-from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_turing_guesses as guesses_repo
-from padrino.runner.human_durability import replay_state_from_rows
+from padrino.runner.human_state_cache import resolve_current_human_state
 
 GAME_NOT_FOUND_DETAIL = "game_not_found"
 WRONG_SEAT_DETAIL = "wrong_seat"
@@ -100,11 +99,11 @@ async def submit_guess(
             idempotent_replay=True,
         )
 
-    rows = await events_repo.list_events(session, game_id)
-    if not rows:
+    resolved = await resolve_current_human_state(session, game_id)
+    if resolved is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GAME_NOT_FOUND_DETAIL)
 
-    state, _event_log = replay_state_from_rows(rows)
+    state = resolved.state
     if state.terminal_result is None:
         # The imitation-game guess is a post-game step; a live game has no reveal.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=NOT_TERMINAL_DETAIL)

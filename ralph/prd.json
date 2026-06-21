@@ -90,7 +90,7 @@
         "All backend gates pass."
       ],
       "notes": "Balance integrity vs the US-168 performance win; the goal is no regression in tamper detection and a single state-resolution path.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-195",

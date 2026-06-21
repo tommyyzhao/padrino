@@ -129,6 +129,47 @@ def test_caller_mutation_after_append_does_not_affect_chain() -> None:
     assert stored.event_hash == compute_event_hash(GENESIS_HASH, _body(1))
 
 
+def _stored_chain(count: int) -> list[StoredEvent]:
+    log = EventLog()
+    for i in range(count):
+        log.append(_body(i))
+    return list(log.events)
+
+
+def test_from_stored_round_trips_a_valid_chain() -> None:
+    original = _stored_chain(4)
+    rebuilt = EventLog.from_stored(original)
+    assert list(rebuilt.events) == original
+    assert rebuilt.head_hash == original[-1].event_hash
+
+
+def test_from_stored_detects_a_tampered_prefix_body() -> None:
+    chain = _stored_chain(4)
+    # Tamper a pre-head body but leave its stored event_hash intact, simulating a
+    # cache whose head still matches the DB head row. The recompute must catch it.
+    tampered = StoredEvent(
+        sequence=chain[1].sequence,
+        prev_event_hash=chain[1].prev_event_hash,
+        event_hash=chain[1].event_hash,
+        body={**chain[1].body, "payload": {"phase_kind": "DAY_DISCUSSION", "day": 1, "round": 999}},
+    )
+    chain[1] = tampered
+    with pytest.raises(ValueError, match="does not match its event_hash"):
+        EventLog.from_stored(chain)
+
+
+def test_from_stored_rejects_a_broken_chain_pointer() -> None:
+    chain = _stored_chain(3)
+    chain[2] = StoredEvent(
+        sequence=chain[2].sequence,
+        prev_event_hash=GENESIS_HASH,
+        event_hash=chain[2].event_hash,
+        body=chain[2].body,
+    )
+    with pytest.raises(ValueError, match="does not chain from previous hash"):
+        EventLog.from_stored(chain)
+
+
 def test_no_module_imports_db_or_clock() -> None:
     import ast
     from pathlib import Path
