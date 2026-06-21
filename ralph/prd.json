@@ -290,7 +290,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: oauth.py:46-50/341-355/316/321, settings.py:170-187, tests/api/test_oauth_signin.py:699-730. Optionally make it auth_time-aware (do not reject on auth_time being old; bound strictly on iat). Use the impure clock seam (_NOW), never datetime.utcnow() in core. Document it as defense-in-depth supplementing exp, not an OIDC requirement.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-208",

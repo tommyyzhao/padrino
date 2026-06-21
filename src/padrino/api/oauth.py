@@ -14,8 +14,8 @@ provider tokens are persisted beyond completing the exchange — only the stable
 ``id_token`` signature, audience, issuer, nonce, authorized party
 (``azp == client_id`` when ``aud`` is multi-valued or ``azp`` present, US-201),
 and a bounded lifetime (``exp``/``iat`` essential; a token with no ``exp`` is
-rejected fail-closed; an ``iat`` older than a small max-age ceiling is rejected
-via the injected clock seam, US-201).
+rejected fail-closed; an ``iat`` older than the configured max-age ceiling is
+rejected via the injected clock seam, US-201/US-207).
 
 Tests stub the network entirely via the ``resolve_user_info`` indirection or the
 lower-level token/JWKS seams, so no live provider is contacted.
@@ -43,12 +43,6 @@ from padrino.settings import Settings
 _STATE_VERSION: Final[int] = 1
 # Small clock-skew tolerance for id_token exp/iat validation (US-193).
 _CLAIMS_LEEWAY_SECONDS: Final[int] = 60
-# Maximum accepted age of an id_token measured from its ``iat`` (US-201, low #12).
-# A signature-valid token whose ``iat`` is older than this ceiling (plus the
-# skew leeway) is rejected so acceptance lifetime is not bounded solely by the
-# provider-controlled ``exp``. OIDC sign-in id_tokens are minted at the moment of
-# the interactive flow, so a small ceiling is appropriate.
-_MAX_TOKEN_AGE_SECONDS: Final[int] = 300
 
 # Impure clock seam for the id_token max-age check (US-201). The api lane is
 # outside the pure-core firewall, so a real wall-clock read is allowed here; the
@@ -85,6 +79,7 @@ class OAuthConfig:
     jwks_url: str
     scope: str
     state_signing_key: str
+    max_token_age_seconds: int | None
 
 
 @dataclass(frozen=True)
@@ -154,6 +149,7 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         jwks_url=settings.padrino_oauth_jwks_url,
         scope=settings.padrino_oauth_scope,
         state_signing_key=state_signing_key,
+        max_token_age_seconds=settings.padrino_oauth_max_token_age_seconds,
     )
 
 
@@ -318,7 +314,7 @@ def _user_info_from_id_token(
         raise OAuthError("OAuth provider id_token validation failed") from exc
     payload = dict(claims)
     _validate_authorized_party(payload, client_id=config.client_id)
-    _validate_token_age(payload)
+    _validate_token_age(payload, max_age_seconds=config.max_token_age_seconds)
     return _user_info_from_payload(payload)
 
 
@@ -338,20 +334,24 @@ def _validate_authorized_party(payload: dict[str, Any], *, client_id: str) -> No
         raise OAuthError("OAuth provider id_token azp mismatch")
 
 
-def _validate_token_age(payload: dict[str, Any]) -> None:
-    """Reject an id_token whose ``iat`` is older than the max-age ceiling (US-201).
+def _validate_token_age(payload: dict[str, Any], *, max_age_seconds: int | None) -> None:
+    """Reject an id_token whose ``iat`` is older than the configured ceiling.
 
     ``iat`` is already marked essential and authlib rejects future-dating, but it
     imposes no upper bound on token age — acceptance lifetime is otherwise capped
-    only by the provider-controlled ``exp``. Enforce a small max-age using the
-    injected clock seam so a stale-but-unexpired token (e.g. far-future ``exp``)
-    is rejected.
+    only by the provider-controlled ``exp``. Enforce the configured max-age using
+    the injected clock seam so a stale-but-unexpired token (e.g. far-future
+    ``exp``) is rejected. Operators can set ``None`` to disable this additional
+    defense when provider timing is unusual; ``exp`` and ``iat`` validation still
+    runs through Authlib before this helper is called.
     """
     iat = payload.get("iat")
     if not isinstance(iat, (int, float)) or isinstance(iat, bool):
         raise OAuthError("OAuth provider id_token iat missing")
+    if max_age_seconds is None:
+        return
     age = _NOW() - float(iat)
-    if age > _MAX_TOKEN_AGE_SECONDS + _CLAIMS_LEEWAY_SECONDS:
+    if age > max_age_seconds + _CLAIMS_LEEWAY_SECONDS:
         raise OAuthError("OAuth provider id_token is too old")
 
 

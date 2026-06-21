@@ -38,7 +38,7 @@ from padrino.api.oauth import (
 from padrino.api.routes.human import OAUTH_STATE_COOKIE, OAUTH_VERIFIER_COOKIE
 from padrino.db.models import OAuthConsumedFlow, OAuthIdentity, Principal
 from padrino.db.repositories import human_principals as principals_repo
-from padrino.settings import get_settings
+from padrino.settings import Settings, get_settings
 
 _OAUTH_ENV = {
     "PADRINO_OAUTH_PROVIDER": "google",
@@ -166,6 +166,25 @@ def _stub_valid_token(nonce: str, *, subject: str = "subject-token") -> None:
 
     set_exchange_token(_exchange)
     set_fetch_jwks(_fetch)
+
+
+def _oauth_settings_with_max_token_age(max_token_age_seconds: int | None) -> Settings:
+    return Settings(
+        _env_file=None,
+        padrino_oauth_provider="google",
+        padrino_oauth_client_id="client-id-123",
+        padrino_oauth_client_secret="super-secret",
+        padrino_oauth_authorize_url="https://provider.example/authorize",
+        padrino_oauth_token_url="https://provider.example/token",
+        padrino_oauth_userinfo_url="https://provider.example/userinfo",
+        padrino_oauth_redirect_url="https://app.example/human/oauth/google/callback",
+        padrino_oauth_issuer="https://provider.example",
+        padrino_oauth_jwks_url="https://provider.example/jwks.json",
+        padrino_oauth_state_signing_key="dedicated-server-state-key",
+        padrino_oauth_max_token_age_seconds=max_token_age_seconds,
+        padrino_human_session_cookie_secure=False,
+        cerebras_api_key="test-cerebras-key",
+    )
 
 
 @pytest.mark.asyncio
@@ -700,7 +719,7 @@ async def test_callback_accepts_multi_audience_with_matching_azp(
 async def test_callback_rejects_stale_but_unexpired_id_token(
     client: AsyncClient,
 ) -> None:
-    """A stale-iat token with a far-future exp is rejected by the max-age ceiling (US-201)."""
+    """A stale-iat token with a far-future exp is rejected by the max-age ceiling."""
     state, verifier, nonce = await _callback_cookies(client)
 
     issued_at = int(time())
@@ -728,6 +747,122 @@ async def test_callback_rejects_stale_but_unexpired_id_token(
     )
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_accepts_id_token_within_default_max_age(
+    client: AsyncClient,
+) -> None:
+    """The default ceiling allows a legitimately slow OAuth round trip (US-207)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    issued_at = int(time())
+    slow_but_valid_iat = issued_at - 800
+    far_future_exp = issued_at + 10**6
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {
+            "id_token": _signed_id_token(
+                nonce=nonce,
+                iat=slow_but_valid_iat,
+                exp=far_future_exp,
+            )
+        }
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+    set_clock(lambda: float(issued_at))
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_callback_honors_configured_token_age_ceiling(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Operators can tighten the defense-in-depth max-age ceiling (US-207)."""
+    app = create_app(session_factory=session_factory, auth_required=True)
+    app.state.auth_settings = _oauth_settings_with_max_token_age(120)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        state, verifier, nonce = await _callback_cookies(ac)
+
+        issued_at = int(time())
+        too_old_for_override_iat = issued_at - 300
+        far_future_exp = issued_at + 10**6
+
+        async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+            return {
+                "id_token": _signed_id_token(
+                    nonce=nonce,
+                    iat=too_old_for_override_iat,
+                    exp=far_future_exp,
+                )
+            }
+
+        async def _fetch(config: object) -> dict[str, object]:
+            return _jwks()
+
+        set_exchange_token(_exchange)
+        set_fetch_jwks(_fetch)
+        set_clock(lambda: float(issued_at))
+
+        resp = await ac.get(
+            "/human/oauth/google/callback",
+            params={"code": "auth-code", "state": state},
+            cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+        )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_can_disable_extra_token_age_ceiling(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """None disables only the extra iat max-age check; exp still bounds the token."""
+    app = create_app(session_factory=session_factory, auth_required=True)
+    app.state.auth_settings = _oauth_settings_with_max_token_age(None)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        state, verifier, nonce = await _callback_cookies(ac)
+
+        issued_at = int(time())
+        old_but_unexpired_iat = issued_at - 4000
+        far_future_exp = issued_at + 10**6
+
+        async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+            return {
+                "id_token": _signed_id_token(
+                    nonce=nonce,
+                    iat=old_but_unexpired_iat,
+                    exp=far_future_exp,
+                )
+            }
+
+        async def _fetch(config: object) -> dict[str, object]:
+            return _jwks()
+
+        set_exchange_token(_exchange)
+        set_fetch_jwks(_fetch)
+        set_clock(lambda: float(issued_at))
+
+        resp = await ac.get(
+            "/human/oauth/google/callback",
+            params={"code": "auth-code", "state": state},
+            cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+        )
+
+    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
