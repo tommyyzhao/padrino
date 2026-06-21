@@ -395,3 +395,61 @@ async def test_action_channel_has_dedicated_rate_limit(
         rows = (await session.execute(select(HumanActionSubmission))).scalars().all()
     assert len(rows) == 1
     assert rows[0].idempotency_key == "k1"
+
+
+@pytest.mark.asyncio
+async def test_illegal_action_does_not_burn_rate_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # US-191 / FINDING 3: a seat that submitted several now-illegal actions can
+    # STILL submit its one valid action in the same phase — legality is checked
+    # before the rate-limit slot is consumed, so rejected tries never 429-lock
+    # the seat out of its legal move.
+    store = InMemoryRateLimitStore()
+    app = create_app(
+        session_factory=session_factory,
+        auth_required=True,
+        rate_limiter=RateLimiter(store=store),
+    )
+    app.state.auth_settings = Settings(
+        padrino_rate_limit_human_per_minute=10_000,
+        # Budget of exactly one accepted action this window: if any illegal try
+        # consumed the slot, the valid vote below would be 429-locked.
+        padrino_rate_limit_human_action_per_minute=1,
+        padrino_rate_limit_human_action_per_game_phase_per_minute=1,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        token = await _consenting_guest(ac)
+        principal_id = await _principal_id_for_token(session_factory)
+        async with session_factory() as session, session.begin():
+            game_id = await _seed_human_game(session, principal_id=principal_id)
+
+        # Several now-illegal submissions (self-vote is never a legal target).
+        for i in range(3):
+            illegal = await ac.post(
+                f"/human/games/{game_id}/actions",
+                json={
+                    "action": {"type": "VOTE", "target": _HUMAN_SEAT},
+                    "idempotency_key": f"bad-{i}",
+                },
+                cookies={HUMAN_SESSION_COOKIE: token},
+            )
+            assert illegal.status_code == 409
+            assert illegal.json()["detail"] == "illegal_action"
+
+        # The one legal vote still goes through: not 429-locked by the rejects.
+        valid = await ac.post(
+            f"/human/games/{game_id}/actions",
+            json={"action": {"type": "VOTE", "target": "P04"}, "idempotency_key": "good"},
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert valid.status_code == 200
+        assert valid.json()["accepted"] is True
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(HumanActionSubmission))).scalars().all()
+    # Only the legal action was ever recorded.
+    assert len(rows) == 1
+    assert rows[0].idempotency_key == "good"
+    assert rows[0].target == "P04"

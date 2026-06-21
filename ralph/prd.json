@@ -46,7 +46,7 @@
         "All backend gates pass."
       ],
       "notes": "Also covers the FINDING that record_heartbeat ran before the 404/terminal checks.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-192",
