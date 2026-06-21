@@ -46,6 +46,7 @@ from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
 from padrino.db.models import Game, GameSeat, HumanActionSubmission, HumanChatSubmission
+from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_action_submissions as human_actions_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
@@ -57,7 +58,7 @@ from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
-from padrino.runner.disconnect_takeover import take_over_seat
+from padrino.runner.disconnect_takeover import apply_takeover, build_takeover_event
 from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, drive_game_loop
 from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
 from padrino.runner.human_chat_release import release_held_chat_for_phase
@@ -88,7 +89,7 @@ _CLAIMABLE_STATUSES: Final[frozenset[str]] = frozenset({"CREATED", "PENDING", ST
 AdapterFactory = Callable[[], LlmAdapter]
 AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
-HumanChatRelease = Callable[[str, float, EventLog], Awaitable[None]]
+HumanChatRelease = Callable[[str, float, EventLog, Sequence[StoredEvent]], Awaitable[None]]
 BeforeTakeoverRevalidate = Callable[[], Awaitable[None]]
 
 
@@ -118,6 +119,10 @@ class AppliedTakeover:
     seat_id: str
     replacement_agent_build_id: uuid.UUID
     event: StoredEvent
+
+
+class TakeoverApplyRecoveryError(RuntimeError):
+    """Raised when a committed takeover cannot be mirrored into memory."""
 
 
 class _InjectedExecutorAdapter:
@@ -261,7 +266,15 @@ async def _expired_human_seat_for_update(
     seat = (await session.execute(stmt)).scalar_one_or_none()
     if seat is None or seat.seat_kind != SeatKind.HUMAN.value:
         return None
-    row = await presence_repo.get(session, game_id=game_id, public_player_id=seat_id)
+    # US-200: lock the presence row FOR UPDATE so a reconnect heartbeat that
+    # commits inside this revalidation transaction's read->commit window is
+    # serialized against the takeover. Without the lock, under READ COMMITTED a
+    # racing heartbeat is invisible to a plain SELECT and the worker wrongly
+    # takes over a LIVE human seat (docstring guarantee at the takeover loop).
+    # seats_past_grace is re-evaluated below AFTER the lock is held.
+    row = await presence_repo.get(
+        session, game_id=game_id, public_player_id=seat_id, for_update=True
+    )
     presence = _presence_from_row(
         public_player_id=seat_id,
         row=row,
@@ -321,6 +334,130 @@ async def _takeover_replacement_adapter(
         session_factory=session_factory,
         game_id=game_id,
     )
+
+
+async def _persist_stored_event_row(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    stored: StoredEvent,
+) -> None:
+    """Append one in-memory event envelope to ``game_events`` in ``session``.
+
+    Used to co-commit a SeatTakenOver / chat content_ref event row with its
+    paired DB mutation so the persisted hash chain never lags that state across
+    a crash (hard rule 4). The outer loop's ``persist_pending_events`` is
+    idempotent against an already-committed sequence, so this row is not
+    re-inserted later.
+    """
+    body = stored.body
+    await events_repo.append_event(
+        session,
+        game_id=game_id,
+        sequence=stored.sequence,
+        event_type=str(body["event_type"]),
+        phase=str(body["phase"]),
+        visibility=str(body["visibility"]),
+        actor_player_id=body.get("actor_player_id"),
+        payload=dict(body.get("payload", {})),
+        prev_event_hash=stored.prev_event_hash,
+        event_hash=stored.event_hash,
+    )
+
+
+def _seat_has_in_memory_takeover(event_log: EventLog, seat_id: str) -> bool:
+    """Return whether ``event_log`` already holds a SeatTakenOver for ``seat_id``.
+
+    The takeover recheck (US-197 AC2) guards against appending a SECOND
+    ``SeatTakenOver`` for a seat the in-memory log already took over. The DB-only
+    recheck (``_expired_human_seat_for_update``) cannot catch the case where a
+    prior commit FAILED mid-takeover: the DB seat may still read HUMAN/expired
+    while the in-memory mux already routes the seat to the AI adapter (the swap
+    is not reverted on commit failure — AC1). Scanning the in-memory log makes
+    the retry idempotent regardless of the DB seat row.
+    """
+    return any(
+        event.body.get("event_type") == "SeatTakenOver"
+        and event.body.get("payload", {}).get("public_player_id") == seat_id
+        for event in event_log.events
+    )
+
+
+def _resync_committed_takeover(
+    *,
+    mux: SeatMultiplexAdapter,
+    event_log: EventLog,
+    event: StoredEvent,
+    seat_id: str,
+    replacement_adapter: LlmAdapter,
+) -> StoredEvent:
+    """Mirror an already-committed takeover row into the in-memory structures."""
+    events = event_log.events
+    if event.sequence < len(events):
+        existing = events[event.sequence]
+        if (
+            existing.prev_event_hash == event.prev_event_hash
+            and existing.event_hash == event.event_hash
+            and existing.body == event.body
+        ):
+            mux.force_swap_seat(seat_id, replacement_adapter)
+            return existing
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} collides with in-memory "
+            f"event at sequence {event.sequence}"
+        )
+    if event.sequence != len(events):
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} is not contiguous with "
+            f"in-memory log length {len(events)}"
+        )
+    if event.prev_event_hash != event_log.head_hash:
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} does not chain from the in-memory log head"
+        )
+
+    mux.force_swap_seat(seat_id, replacement_adapter)
+    appended = event_log.append(event.body)
+    if appended.event_hash != event.event_hash:
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} re-sealed to a different hash"
+        )
+    return appended
+
+
+def _apply_committed_takeover(
+    *,
+    mux: SeatMultiplexAdapter,
+    event_log: EventLog,
+    event: StoredEvent,
+    seat_id: str,
+    replacement_adapter: LlmAdapter,
+) -> StoredEvent:
+    """Apply a DB-committed takeover, recovering memory on post-commit failure."""
+    try:
+        result = apply_takeover(
+            mux=mux,
+            event_log=event_log,
+            event=event,
+            seat_id=seat_id,
+            replacement_adapter=replacement_adapter,
+        )
+    except Exception as exc:
+        synced = _resync_committed_takeover(
+            mux=mux,
+            event_log=event_log,
+            event=event,
+            seat_id=seat_id,
+            replacement_adapter=replacement_adapter,
+        )
+        _logger.warning(
+            "human_lane.takeover.apply_failed_resynced",
+            game_event_sequence=event.sequence,
+            seat_id=seat_id,
+            error=str(exc),
+        )
+        return synced
+    return result.event
 
 
 async def _take_over_expired_human_seats(
@@ -393,6 +530,12 @@ async def _take_over_expired_human_seats(
             ai_adapter_factory=ai_adapter_factory,
         )
 
+        # In-memory recheck (US-197 AC2): if a prior takeover commit FAILED but
+        # left the in-memory swap/log in place, the DB seat may still read
+        # HUMAN/expired. Skip rather than append a SECOND SeatTakenOver.
+        if _seat_has_in_memory_takeover(event_log, seat_id):
+            continue
+
         async with session_factory() as session, session.begin():
             seat = await _expired_human_seat_for_update(
                 session,
@@ -403,25 +546,44 @@ async def _take_over_expired_human_seats(
             )
             if seat is None:
                 continue
-            result = take_over_seat(
-                mux=mux,
+            # US-197 AC1: build the SeatTakenOver envelope WITHOUT touching the
+            # long-lived in-memory mux / event_log, persist the paired row + seat
+            # mutation, and let this block's session.begin() commit. The
+            # in-memory swap + log append happen ONLY AFTER the commit succeeds
+            # (below), so a flush/commit failure here rolls back the DB and never
+            # advances the in-memory log/mux past what is durable in game_events.
+            event = build_takeover_event(
                 event_log=event_log,
                 state=state,
                 seat_id=seat_id,
-                replacement_adapter=replacement,
                 replacement_agent_build_ref=str(build_id),
             )
-            phase = str(result.event.body["phase"])
+            phase = str(event.body["phase"])
             seat.seat_kind = SeatKind.AI_TAKEOVER.value
             seat.taken_over_at_phase = phase
             seat.takeover_agent_build_id = build_id
-            applied.append(
-                AppliedTakeover(
-                    seat_id=seat_id,
-                    replacement_agent_build_id=build_id,
-                    event=result.event,
-                )
+            # Persist the paired SeatTakenOver event row in the SAME transaction
+            # as the seat mutation (hard rule 4): a crash can never leave an
+            # AI_TAKEOVER seat without its provenance event in game_events.
+            await _persist_stored_event_row(session, game_id=game_id, stored=event)
+
+        # The DB write committed; only now apply the irreversible in-memory swap
+        # + log append (US-197 AC1). If the commit above raised, control never
+        # reaches here and the in-memory state is untouched.
+        synced_event = _apply_committed_takeover(
+            mux=mux,
+            event_log=event_log,
+            event=event,
+            seat_id=seat_id,
+            replacement_adapter=replacement,
+        )
+        applied.append(
+            AppliedTakeover(
+                seat_id=seat_id,
+                replacement_agent_build_id=build_id,
+                event=synced_event,
             )
+        )
 
     return applied
 
@@ -510,6 +672,7 @@ async def _run_human_tick_responses(
     sleep: Sleep = asyncio.sleep,
     release_chat: HumanChatRelease | None = None,
 ) -> dict[str, AgentResponse]:
+    log_before = len(event_log.events)
     result = await run_human_tick(
         state,
         event_log,
@@ -522,7 +685,19 @@ async def _run_human_tick_responses(
         sleep=sleep,
     )
     if release_chat is not None:
-        await release_chat(format_phase_id(state.current_phase), result.settled_at, event_log)
+        # run_human_tick appends failure events (ActionTimedOut / OutputInvalid)
+        # straight to the in-memory event_log, persisted nowhere yet. Hand them to
+        # release_chat so it co-commits those LOWER sequences in the SAME
+        # transaction as the content_ref chat row it appends above them — closing
+        # the crash window where game_events would hold {N-1, N+1} with N only in
+        # memory until the post-tick persist_pending_events ran (US-196).
+        pending_lower_events = event_log.events[log_before:]
+        await release_chat(
+            format_phase_id(state.current_phase),
+            result.settled_at,
+            event_log,
+            pending_lower_events,
+        )
     return result.responses
 
 
@@ -687,7 +862,12 @@ def _default_human_game_executor(
     ) -> None:
         # Human-lane games are always casual (ranked=False) — they never write the
         # scientific Rating/RatingEvent tables (segregation, hard rule 8).
-        async def release_chat(phase: str, _settled_at: float, release_log: EventLog) -> None:
+        async def release_chat(
+            phase: str,
+            _settled_at: float,
+            release_log: EventLog,
+            pending_lower_events: Sequence[StoredEvent],
+        ) -> None:
             async with persistence.session_factory() as session, session.begin():
                 await release_held_chat_for_phase(
                     session,
@@ -695,6 +875,7 @@ def _default_human_game_executor(
                     phase=phase,
                     released_at=datetime.now(UTC),
                     event_log=release_log,
+                    pending_lower_events=pending_lower_events,
                 )
 
         async def tick_runner(

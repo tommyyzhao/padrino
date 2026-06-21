@@ -15,14 +15,13 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.human_seat_auth import WRONG_SEAT_DETAIL, resolve_human_game_seat
 from padrino.core.reveal import EndgameReveal, RevealModel, SeatRevealInput, project_endgame_reveal
 from padrino.db.models import AgentBuild, Game, GameSeat, ModelConfig, ModelProvider
-from padrino.db.repositories import events as events_repo
-from padrino.runner.human_durability import replay_state_from_rows
+from padrino.runner.human_state_cache import resolve_current_human_state
 
 GAME_NOT_FOUND_DETAIL = "game_not_found"
 NOT_TERMINAL_DETAIL = "game_not_terminal"
-WRONG_SEAT_DETAIL = "wrong_seat"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,23 +30,6 @@ class TerminalRevealState:
 
     is_terminal: bool
     winner: str | None
-
-
-async def resolve_participant_seat(
-    session: AsyncSession,
-    *,
-    game_id: uuid.UUID,
-    principal_id: uuid.UUID,
-) -> GameSeat:
-    """Return the seat occupied by ``principal_id`` in ``game_id``, or 403."""
-    stmt = select(GameSeat).where(
-        GameSeat.game_id == game_id,
-        GameSeat.occupant_principal_id == principal_id,
-    )
-    seat = (await session.execute(stmt)).scalar_one_or_none()
-    if seat is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=WRONG_SEAT_DETAIL)
-    return seat
 
 
 def winner_from_terminal_result(terminal_result: dict[str, object] | None) -> str | None:
@@ -66,7 +48,10 @@ async def resolve_terminal_reveal_state(
 
     Normal runner-finalized games carry ``Game.terminal_result``. Private human
     tests and restart edge cases can have a terminal event log before a row-level
-    terminal payload is materialized, so replay the verified chain as a fallback.
+    terminal payload is materialized, so resolve the current state as a fallback.
+    The fallback reuses the cache-backed :func:`resolve_current_human_state` (the
+    single human-lane state-resolution path) instead of replaying the full log
+    just to learn whether the game is terminal.
     """
     if game.terminal_result is not None:
         return TerminalRevealState(
@@ -74,14 +59,10 @@ async def resolve_terminal_reveal_state(
             winner=winner_from_terminal_result(game.terminal_result),
         )
 
-    rows = await events_repo.list_events(session, game.id)
-    if not rows:
+    resolved = await resolve_current_human_state(session, game.id)
+    if resolved is None or resolved.state.terminal_result is None:
         return TerminalRevealState(is_terminal=False, winner=None)
-
-    state, _event_log = replay_state_from_rows(rows)
-    if state.terminal_result is None:
-        return TerminalRevealState(is_terminal=False, winner=None)
-    return TerminalRevealState(is_terminal=True, winner=str(state.terminal_result))
+    return TerminalRevealState(is_terminal=True, winner=str(resolved.state.terminal_result))
 
 
 async def _resolve_seat_models(
@@ -166,7 +147,13 @@ async def build_participant_reveal(
     if game is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GAME_NOT_FOUND_DETAIL)
 
-    await resolve_participant_seat(session, game_id=game_id, principal_id=principal_id)
+    await resolve_human_game_seat(
+        session,
+        game_id=game_id,
+        principal_id=principal_id,
+        wrong_seat_detail=WRONG_SEAT_DETAIL,
+        restrict_to_human_lane=True,
+    )
 
     terminal = await resolve_terminal_reveal_state(session, game)
     if not terminal.is_terminal:
@@ -182,7 +169,6 @@ __all__ = [
     "TerminalRevealState",
     "build_endgame_reveal",
     "build_participant_reveal",
-    "resolve_participant_seat",
     "resolve_terminal_reveal_state",
     "winner_from_terminal_result",
 ]

@@ -25,6 +25,8 @@ from padrino.db.models import (
     AgentBuild,
     Game,
     GameSeat,
+    HumanCostAdmission,
+    HumanInferenceReservation,
     League,
     LlmCall,
     Lobby,
@@ -40,11 +42,14 @@ from padrino.economics.human_cost_governance import (
     ACTION_LAUNCH,
     HumanAdmitDecision,
     admit_human,
+    bind_admission_slots,
     global_breaker_open,
     global_human_lane_spend_usd,
     human_eligible_pool,
     lobby_breaker_open,
     price_turn_usd,
+    release_admission_for_lobby,
+    release_admission_for_member,
 )
 from padrino.settings import Settings
 
@@ -60,6 +65,7 @@ def _settings(
     inference_per_day: float = 5.0,
     lobby_cap: float = 2.0,
     global_breaker: float = 50.0,
+    inference_reserve: float = 0.5,
 ) -> Settings:
     return Settings(
         padrino_human_max_games_per_user_per_day=games_per_day,
@@ -67,6 +73,7 @@ def _settings(
         padrino_human_max_inference_usd_per_user_per_day=inference_per_day,
         padrino_human_lobby_cost_cap_usd=lobby_cap,
         padrino_human_global_lobby_cost_breaker_usd=global_breaker,
+        padrino_human_admission_inference_reserve_usd=inference_reserve,
     )
 
 
@@ -245,7 +252,8 @@ async def test_admit_all_clear(session_factory: async_sessionmaker[AsyncSession]
         decision = await admit_human(
             session, _settings(), principal_id=pid, action=ACTION_CREATE, now=_NOW
         )
-    assert decision == HumanAdmitDecision(allowed=True, reason="admitted")
+    assert decision.allowed is True
+    assert decision.reason == "admitted"
 
 
 @pytest.mark.parametrize(
@@ -617,3 +625,248 @@ async def test_human_eligible_pool_curated_active_builds(
     async with session_factory() as session:
         pool = await human_eligible_pool(session, "mini7_v1")
     assert pool == active_ids
+
+
+# ---------------------------------------------------------------------------
+# US-190: atomic inference-$ cap + breaker, releasable admission slots
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inference_cap_is_atomic_under_concurrent_admits(tmp_path: Path) -> None:
+    """N simultaneous admits cannot overshoot the per-user inference-$ ceiling.
+
+    Budget 1.0 / reserve 0.5 admits exactly two reservation slots; the rest must
+    be denied ``daily_inference_cap_reached`` even when every request reads the
+    same (zero) prior spend (the old SELECT-sum TOCTOU let them all pass).
+    """
+    from padrino.db.base import Base, create_engine, create_session_factory
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'infer-cap.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = create_session_factory(engine)
+
+    try:
+        async with session_factory() as session, session.begin():
+            pid = await _principal(session)
+
+        settings = _settings(
+            games_per_day=100, inference_per_day=1.0, inference_reserve=0.5, global_breaker=1000.0
+        )
+        ready = asyncio.Event()
+
+        async def attempt() -> HumanAdmitDecision:
+            await ready.wait()
+            async with session_factory() as session, session.begin():
+                return await admit_human(
+                    session, settings, principal_id=pid, action=ACTION_CREATE, now=_NOW
+                )
+
+        tasks = [asyncio.create_task(attempt()) for _ in range(10)]
+        ready.set()
+        decisions = await asyncio.gather(*tasks)
+    finally:
+        await engine.dispose()
+
+    allowed = [d for d in decisions if d.allowed]
+    denied = [d for d in decisions if not d.allowed]
+    assert len(allowed) == 2
+    assert {d.reason for d in denied} == {"daily_inference_cap_reached"}
+
+
+@pytest.mark.asyncio
+async def test_global_breaker_is_atomic_under_concurrent_admits(tmp_path: Path) -> None:
+    """N simultaneous admits cannot overshoot the GLOBAL $ breaker ceiling."""
+    from padrino.db.base import Base, create_engine, create_session_factory
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'breaker.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = create_session_factory(engine)
+
+    try:
+        # Distinct principals so the per-user cap never trips — only the global
+        # breaker bounds the concurrent admits.
+        async with session_factory() as session, session.begin():
+            pids = [await _principal(session) for _ in range(10)]
+
+        settings = _settings(
+            games_per_day=100,
+            inference_per_day=1000.0,
+            global_breaker=1.0,
+            inference_reserve=0.5,
+        )
+        ready = asyncio.Event()
+
+        async def attempt(pid: uuid.UUID) -> HumanAdmitDecision:
+            await ready.wait()
+            async with session_factory() as session, session.begin():
+                return await admit_human(
+                    session, settings, principal_id=pid, action=ACTION_CREATE, now=_NOW
+                )
+
+        tasks = [asyncio.create_task(attempt(pid)) for pid in pids]
+        ready.set()
+        decisions = await asyncio.gather(*tasks)
+    finally:
+        await engine.dispose()
+
+    allowed = [d for d in decisions if d.allowed]
+    denied = [d for d in decisions if not d.allowed]
+    assert len(allowed) == 2  # floor(1.0 / 0.5) global slots
+    assert {d.reason for d in denied} == {"breaker_open"}
+
+
+@pytest.mark.asyncio
+async def test_inference_denial_rolls_back_global_reservation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A per-user inference denial does not leak the global reservation it claimed.
+
+    The global slot is claimed first; a per-user cap denial must roll it back so
+    a later admission for a different principal is not blocked by a phantom hold.
+    """
+    async with session_factory() as session, session.begin():
+        capped = await _principal(session)
+        gid = await _game(session, created_at=_TODAY_START + timedelta(hours=1))
+        await _human_seat(session, game_id=gid, principal_id=capped)
+        # capped principal is already at its per-user inference cap.
+        await _call(session, game_id=gid, cost=1.0, created_at=_TODAY_START + timedelta(hours=2))
+
+    s = _settings(inference_per_day=1.0, global_breaker=1000.0, inference_reserve=0.5)
+    async with session_factory() as session, session.begin():
+        denied = await admit_human(session, s, principal_id=capped, action=ACTION_CREATE, now=_NOW)
+        assert denied.reason == "daily_inference_cap_reached"
+
+    # No reservation rows survived the rolled-back denial.
+    async with session_factory() as session:
+        rows = (await session.execute(select(HumanInferenceReservation))).scalars().all()
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_count_cap_denial_rolls_back_inference_reservations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A games/day count denial leaves zero held inference reservations."""
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        for i in range(2):
+            gid = await _game(session, created_at=_TODAY_START + timedelta(hours=1))
+            await _human_seat(session, game_id=gid, principal_id=pid, seat_index=i)
+
+    s = _settings(games_per_day=2, inference_per_day=1000.0, global_breaker=1000.0)
+    async with session_factory() as session, session.begin():
+        denied = await admit_human(session, s, principal_id=pid, action=ACTION_CREATE, now=_NOW)
+        assert denied.reason == "daily_game_cap_reached"
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(HumanInferenceReservation))).scalars().all()
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_aborted_create_releases_slot_for_reuse(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An admitted-but-abandoned create does not permanently consume a day slot.
+
+    With a games/day cap of 1: admit a create, bind it to a lobby, then release
+    (abandon) it. A subsequent admit for the same principal/day must succeed —
+    the cap counts actual games, not attempts.
+    """
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        league_id = await _league(session)
+        lobby = Lobby(
+            ruleset_id="mini7_v1",
+            identity_mode="ANONYMOUS",
+            invite_token=str(uuid.uuid4()),
+            lobby_seed="s",
+            host_principal_id=pid,
+            league_id=league_id,
+        )
+        session.add(lobby)
+        await session.flush()
+        lobby_id = lobby.id
+
+    s = _settings(games_per_day=1, inference_per_day=1000.0, global_breaker=1000.0)
+
+    async with session_factory() as session, session.begin():
+        first = await admit_human(session, s, principal_id=pid, action=ACTION_CREATE, now=_NOW)
+        assert first.allowed
+        await bind_admission_slots(session, first, lobby_id=lobby_id)
+
+    # At the cap, a second admit is denied while the first slot is still live.
+    async with session_factory() as session, session.begin():
+        blocked = await admit_human(session, s, principal_id=pid, action=ACTION_CREATE, now=_NOW)
+        assert blocked.reason == "daily_game_cap_reached"
+
+    # Abandon the lobby -> release its slots.
+    async with session_factory() as session, session.begin():
+        await release_admission_for_lobby(session, lobby_id=lobby_id, released_at=_NOW)
+
+    # The freed slot is reclaimable.
+    async with session_factory() as session, session.begin():
+        reused = await admit_human(session, s, principal_id=pid, action=ACTION_CREATE, now=_NOW)
+        assert reused.allowed is True
+
+    # Exactly one LIVE count slot at any time (released one + the new one).
+    async with session_factory() as session:
+        live = (
+            (
+                await session.execute(
+                    select(HumanCostAdmission).where(HumanCostAdmission.released_at.is_(None))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(live) == 1
+
+
+@pytest.mark.asyncio
+async def test_aborted_join_releases_slot_for_reuse(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A kicked/departed member's join slot is released and reclaimable."""
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        league_id = await _league(session)
+        lobby = Lobby(
+            ruleset_id="mini7_v1",
+            identity_mode="ANONYMOUS",
+            invite_token=str(uuid.uuid4()),
+            lobby_seed="s",
+            host_principal_id=pid,
+            league_id=league_id,
+        )
+        session.add(lobby)
+        await session.flush()
+        # joined yesterday so it is NOT counted as a legacy join slot today; it
+        # only serves as a valid bind target for the slot.
+        member = LobbyMember(
+            lobby_id=lobby.id,
+            principal_id=pid,
+            is_host=False,
+            joined_at=_YESTERDAY + timedelta(hours=1),
+        )
+        session.add(member)
+        await session.flush()
+        lobby_id = lobby.id
+        member_id = member.id
+
+    s = _settings(joins_per_day=1, inference_per_day=1000.0, global_breaker=1000.0)
+
+    async with session_factory() as session, session.begin():
+        first = await admit_human(session, s, principal_id=pid, action=ACTION_JOIN, now=_NOW)
+        assert first.allowed
+        await bind_admission_slots(session, first, lobby_id=lobby_id, lobby_member_id=member_id)
+
+    async with session_factory() as session, session.begin():
+        await release_admission_for_member(session, lobby_member_id=member_id, released_at=_NOW)
+
+    async with session_factory() as session, session.begin():
+        reused = await admit_human(session, s, principal_id=pid, action=ACTION_JOIN, now=_NOW)
+        assert reused.allowed is True

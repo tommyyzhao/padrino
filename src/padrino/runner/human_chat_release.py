@@ -10,13 +10,15 @@ phase-level schedule as AI chat emitted by the game loop.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.human_chat import human_chat_content_ref
+from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_chat as sidecar_repo
 from padrino.db.repositories import human_chat_submissions as holds_repo
 
@@ -81,6 +83,28 @@ def _message_event_body(
     }
 
 
+async def _persist_event_row(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    stored: StoredEvent,
+) -> None:
+    """Append one already-sealed event row to ``game_events`` within ``session``."""
+    body = stored.body
+    await events_repo.append_event(
+        session,
+        game_id=game_id,
+        sequence=stored.sequence,
+        event_type=str(body["event_type"]),
+        phase=str(body["phase"]),
+        visibility=str(body["visibility"]),
+        actor_player_id=body.get("actor_player_id"),
+        payload=dict(body.get("payload", {})),
+        prev_event_hash=stored.prev_event_hash,
+        event_hash=stored.event_hash,
+    )
+
+
 async def release_held_chat_for_phase(
     session: AsyncSession,
     *,
@@ -88,6 +112,7 @@ async def release_held_chat_for_phase(
     phase: str,
     released_at: datetime,
     event_log: EventLog,
+    pending_lower_events: Sequence[StoredEvent] = (),
 ) -> tuple[ReleasedHeldChat, ...]:
     """Release every approved held human chat row for ``phase``.
 
@@ -97,16 +122,39 @@ async def release_held_chat_for_phase(
     sequence order.
     Rows already released or blocked are ignored, making the helper idempotent
     for retries after a partial runner restart.
+
+    ``pending_lower_events`` are not-yet-persisted in-memory event_log entries
+    (typically ``ActionTimedOut`` / ``OutputInvalid`` failure rows appended
+    earlier in the SAME tick) whose sequences sit BELOW the content_ref chat row
+    this helper appends. They are co-committed in this single transaction BEFORE
+    the chat row so a crash can never leave ``game_events`` holding ``{N-1,
+    N+1}`` with ``N`` only in memory — which would re-seal non-contiguously on
+    rehydrate and raise ``ReplayHashMismatchError`` (US-196). Each is skipped if
+    its sequence is already persisted, keeping the outer loop's
+    ``persist_pending_events`` idempotent.
     """
     released: list[ReleasedHeldChat] = []
     held = await holds_repo.list_releasable_for_phase(session, game_id=game_id, phase=phase)
+    if not held:
+        return ()
+    pending_by_sequence = {stored.sequence: stored for stored in pending_lower_events}
+    if pending_by_sequence:
+        already = await events_repo.persisted_sequences_from(
+            session,
+            game_id,
+            from_sequence=min(pending_by_sequence),
+        )
+        for sequence in sorted(pending_by_sequence):
+            if sequence in already:
+                continue
+            await _persist_event_row(session, game_id=game_id, stored=pending_by_sequence[sequence])
     for submission in held:
         cleaned_text = submission.cleaned_text
         if cleaned_text is None:
             continue
         sequence = len(event_log.events)
         content_ref = human_chat_content_ref(submission.raw_text)
-        event_log.append(
+        stored = event_log.append(
             _message_event_body(
                 sequence=sequence,
                 phase=phase,
@@ -115,6 +163,13 @@ async def release_held_chat_for_phase(
                 content_ref=content_ref,
             )
         )
+        # Co-commit the content_ref event row with the sidecar row + hold flip in
+        # this single transaction (hard rule 4): a crash can never leave a sidecar
+        # row at sequence N without its game_events row, which would otherwise let
+        # the next release re-derive sequence N and collide on
+        # uq_human_chat_message_sequence. The outer loop's persist_pending_events
+        # is idempotent against an already-committed sequence.
+        await _persist_event_row(session, game_id=game_id, stored=stored)
         await sidecar_repo.append_human_chat(
             session,
             game_id=game_id,

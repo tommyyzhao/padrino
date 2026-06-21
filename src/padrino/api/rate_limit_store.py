@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.db.models import RateLimitBucket
@@ -56,6 +56,23 @@ class RateLimitStore(Protocol):
         limit_per_minute: int,
         window_seconds: float = 60.0,
     ) -> RateLimitDecision: ...
+
+    async def peek_request(
+        self,
+        key_hash: str,
+        *,
+        now: float,
+        limit_per_minute: int,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        """Return whether one more request WOULD be admitted, without recording.
+
+        This is the read-only half of a peek-then-commit sequence: a caller
+        enforcing several buckets at once peeks every bucket first and only
+        :meth:`record_request`-s them all once every peek admits, so a later
+        bucket's rejection never burns an earlier bucket's increment.
+        """
+        ...
 
 
 def _window_start(now: float, window_seconds: float) -> int:
@@ -91,6 +108,21 @@ class InMemoryRateLimitStore:
             retry = max(1.0, (window_start + window_seconds) - now)
             return RateLimitDecision(allowed=False, retry_after_seconds=retry)
         self._counts[(key_hash, window_start)] = current + 1
+        return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
+
+    async def peek_request(
+        self,
+        key_hash: str,
+        *,
+        now: float,
+        limit_per_minute: int,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        window_start = _window_start(now, window_seconds)
+        current = self._counts.get((key_hash, window_start), 0)
+        if current >= limit_per_minute:
+            retry = max(1.0, (window_start + window_seconds) - now)
+            return RateLimitDecision(allowed=False, retry_after_seconds=retry)
         return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
 
     def reset(self) -> None:
@@ -135,6 +167,27 @@ class DatabaseRateLimitStore:
                 window_start=window_start,
             )
         if new_count > limit_per_minute:
+            retry = max(1.0, (window_start + window_seconds) - now)
+            return RateLimitDecision(allowed=False, retry_after_seconds=retry)
+        return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
+
+    async def peek_request(
+        self,
+        key_hash: str,
+        *,
+        now: float,
+        limit_per_minute: int,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        window_start = _window_start(now, window_seconds)
+        async with self.session_factory() as session:
+            current = await session.scalar(
+                select(RateLimitBucket.count).where(
+                    RateLimitBucket.key_hash == key_hash,
+                    RateLimitBucket.window_start == window_start,
+                )
+            )
+        if current is not None and current >= limit_per_minute:
             retry = max(1.0, (window_start + window_seconds) - now)
             return RateLimitDecision(allowed=False, retry_after_seconds=retry)
         return RateLimitDecision(allowed=True, retry_after_seconds=0.0)

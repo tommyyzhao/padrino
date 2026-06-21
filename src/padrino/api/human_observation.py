@@ -50,7 +50,6 @@ from padrino.core.observation_privacy import (
 from padrino.core.observations import build_observation, format_phase_id
 from padrino.core.rulesets import get_ruleset
 from padrino.db.models import Game
-from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_chat_observation import (
     hydrate_observation_human_chat,
@@ -161,7 +160,9 @@ async def build_seat_observation_snapshot(
         assert_no_identity_markers(observation_frame)
 
     phase = format_phase_id(state.current_phase)
-    runtime = await runtime_repo.get(session, game_id)
+    # Reuse the runtime row already read while resolving the cached state instead
+    # of issuing a second identical read for the transport-only deadline.
+    runtime = resolved.runtime
     deadline_at = _as_aware(runtime.deadline_at) if runtime is not None else None
 
     return SeatObservationSnapshot(

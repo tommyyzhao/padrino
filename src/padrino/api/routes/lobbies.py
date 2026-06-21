@@ -50,7 +50,13 @@ from padrino.economics.human_cost_governance import (
     ACTION_CREATE,
     ACTION_JOIN,
     ACTION_LAUNCH,
+    HumanAdmitDecision,
     admit_human,
+    bind_admission_slots,
+    release_admission_for_lobby,
+    release_admission_for_member,
+    release_inference_reservations_for_lobby,
+    rollback_admission_decision,
 )
 
 router = APIRouter()
@@ -80,13 +86,14 @@ async def _enforce_admission(
     *,
     principal_id: uuid.UUID,
     action: str,
-) -> None:
+) -> HumanAdmitDecision:
     """Gate a human create/join/launch admission against per-user caps + breaker.
 
     The principal is the OAuth account (else the hashed guest token) already
     resolved by :func:`padrino.api.human_auth.require_human` — admission is keyed
     on that principal. On a denied decision this raises a 429 whose ``detail`` is
-    the structured admission reason; an admitted decision returns silently.
+    the structured admission reason; an admitted decision returns the decision so
+    the caller can bind its claimed slots to the resulting lobby/member (US-190).
     """
     from padrino.settings import get_settings
 
@@ -94,6 +101,7 @@ async def _enforce_admission(
     decision = await admit_human(session, settings, principal_id=principal_id, action=action)
     if not decision.allowed:
         raise HTTPException(status_code=_ADMISSION_DENIED_STATUS, detail=decision.reason)
+    return decision
 
 
 class LobbyCreate(BaseModel):
@@ -145,7 +153,9 @@ async def create_lobby(
     inference-$ cap, and the global cost breaker gate lobby creation (US-151). A
     denied decision is a 429 before any row is written.
     """
-    await _enforce_admission(request, session, principal_id=ctx.principal_id, action=ACTION_CREATE)
+    admission = await _enforce_admission(
+        request, session, principal_id=ctx.principal_id, action=ACTION_CREATE
+    )
     ruleset = get_ruleset(body.ruleset_id)
     player_count: int = ruleset.PLAYER_COUNT
     ai_seat_count = player_count - 1
@@ -185,6 +195,11 @@ async def create_lobby(
         principal_id=ctx.principal_id,
         is_host=True,
         now=now,
+    )
+    # Tie the admission slots to the lobby + host member so an abandoned lobby
+    # (idle auto-cancel) releases them — the day caps count games, not attempts.
+    await bind_admission_slots(
+        session, admission, lobby_id=lobby.id, lobby_member_id=host_member.id
     )
 
     await lobbies_repo.add_seat(
@@ -286,7 +301,7 @@ async def join_lobby(
         session, lobby_id=lobby.id, principal_id=ctx.principal_id
     )
     if existing is None:
-        await _enforce_admission(
+        admission = await _enforce_admission(
             request, session, principal_id=ctx.principal_id, action=ACTION_JOIN
         )
         if lobby.status != LobbyStatus.OPEN.value:
@@ -298,6 +313,7 @@ async def join_lobby(
             is_host=False,
             now=now,
         )
+        await bind_admission_slots(session, admission, lobby_id=lobby.id, lobby_member_id=member.id)
         await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
     else:
         await lobbies_repo.touch_member_presence(session, member_id=existing.id, now=now)
@@ -410,19 +426,76 @@ async def launch(
     Admission is enforced FIRST (US-151): the host principal's per-user/day game
     cap, inference-$ cap, and the global cost breaker gate the launch. A denied
     decision is a 429 before any game row is materialized.
+
+    Slot lifecycle (US-198): an already-LAUNCHED lobby short-circuits BEFORE
+    admission (mirroring join's existing-member guard) so an idempotent re-launch
+    claims — and leaks — nothing. On a launch that materializes a NEW game the
+    freshly claimed slots are bound to the lobby/host member and the lobby's
+    inference reservations are RELEASED (charged ``LlmCall`` spend now drives the
+    inference-$ cap, so a held reservation and the charged accounting never
+    double-count the same dollars). The lobby's prior create-time slots are
+    released first so a created+launched single game consumes exactly ONE
+    game-bucket count slot (no create+launch double-count). A failed launch rolls
+    the freshly claimed slots back.
     """
-    await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
-    await _enforce_admission(request, session, principal_id=ctx.principal_id, action=ACTION_LAUNCH)
+    lobby = await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    # Idempotent short-circuit BEFORE admission: an already-launched lobby returns
+    # its existing game and claims no slots (a re-launch must not leak budget).
+    if lobby.status == LobbyStatus.LAUNCHED.value and lobby.game_id is not None:
+        return LaunchResponse(
+            lobby_id=lobby_id,
+            game_id=lobby.game_id,
+            status=LobbyStatus.LAUNCHED.value,
+            created=False,
+        )
+
+    now = datetime.now(UTC)
+    # Release the lobby's create-time slots BEFORE launch admission so the host's
+    # own create slot does not block their launch (the create+launch double-count
+    # bug): a single created+launched game must consume exactly ONE game-bucket
+    # count slot. The materialized game then counts via _principal_games_today, so
+    # the per-day cap is preserved. On a failed launch this only frees an attempt
+    # slot, which is the intended "caps count games, not attempts" semantics.
+    await release_admission_for_lobby(session, lobby_id=lobby_id, released_at=now)
+
+    admission = await _enforce_admission(
+        request, session, principal_id=ctx.principal_id, action=ACTION_LAUNCH
+    )
     try:
         result = await launch_lobby(session, lobby_id=lobby_id)
-    except LobbyNotLaunchableError as exc:
+    except (LobbyNotLaunchableError, AutoFillPoolError) as exc:
+        # Roll the freshly claimed (unbound) slots back so a failed launch leaks
+        # neither a count slot nor a held inference reservation.
+        await rollback_admission_decision(session, admission)
+        await session.commit()
+        if isinstance(exc, AutoFillPoolError):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="autofill_pool_exhausted"
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc) or "lobby_not_launchable"
         ) from exc
-    except AutoFillPoolError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="autofill_pool_exhausted"
-        ) from exc
+
+    if result.created:
+        # Bind this launch's count slot to the lobby/host member, then release its
+        # inference reservations: charged LlmCall spend now governs the
+        # inference-$ cap, so a held reservation and the charged accounting never
+        # double-count the same dollars.
+        host_member = await lobbies_repo.get_member(
+            session, lobby_id=lobby_id, principal_id=ctx.principal_id
+        )
+        await bind_admission_slots(
+            session,
+            admission,
+            lobby_id=lobby_id,
+            lobby_member_id=host_member.id if host_member else None,
+        )
+        await release_inference_reservations_for_lobby(session, lobby_id=lobby_id, released_at=now)
+    else:
+        # A concurrent caller launched between our guard and now: this call
+        # created nothing, so release the slots it claimed.
+        await rollback_admission_decision(session, admission)
+
     await session.commit()
     return LaunchResponse(
         lobby_id=lobby_id,
@@ -447,6 +520,8 @@ async def kick_member(
     if target.is_host:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cannot_kick_host")
     now = datetime.now(UTC)
+    # Release the kicked member's join slot so it does not count against their cap.
+    await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
     await lobbies_repo.remove_member(session, member_id=member_id)
     await lobbies_repo.touch_lobby(session, lobby_id=lobby_id, now=now)
     summary = await _summary(session, lobby_id=lobby_id)
@@ -541,12 +616,16 @@ async def _reconcile_lifecycle(session: AsyncSession, lobby: Lobby) -> None:
         await lobbies_repo.set_lobby_status(
             session, lobby_id=lobby.id, status=LobbyStatus.CLOSED.value, now=now
         )
+        # An abandoned (never-launched) lobby releases its admission slots so the
+        # per-day caps count actual games, not abandoned attempts (US-190).
+        await release_admission_for_lobby(session, lobby_id=lobby.id, released_at=now)
         return
     for member_id in stale_member_ids(members, now=now, stale_seconds=_stale_seconds()):
         # The host is never silently evicted (abandonment is handled above by
         # the auto-cancel path); only non-host stale members are dropped.
         member = await lobbies_repo.get_member_by_id(session, member_id)
         if member is not None and not member.is_host:
+            await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
             await lobbies_repo.remove_member(session, member_id=member_id)
 
 

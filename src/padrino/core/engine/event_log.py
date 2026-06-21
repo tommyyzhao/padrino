@@ -50,12 +50,16 @@ class EventLog:
 
     @classmethod
     def from_stored(cls, stored_events: Sequence[StoredEvent]) -> EventLog:
-        """Build a log from already-verified stored envelopes.
+        """Build a log from stored envelopes, re-verifying the hash chain.
 
-        This preserves the supplied envelopes without re-hashing their bodies.
-        Callers that load a trusted cached prefix can then append and verify only
-        a new suffix. Contiguity and hash-chain pointers are still checked so a
-        malformed cache cannot produce an impossible in-memory log.
+        Each body is re-sealed (``event_hash`` recomputed via
+        :func:`compute_event_hash`) and checked against the stored hash, so a
+        tampered prefix body is detected here rather than silently trusted — the
+        same full-re-seal guarantee the verified replay path provides. Contiguity
+        and ``prev_event_hash`` pointers are also checked. A caller loading a
+        cached prefix can then append and verify only a new suffix. Any mismatch
+        raises :class:`ValueError` so the caller can fall back to a full verified
+        replay.
         """
         log = cls()
         previous_hash = GENESIS_HASH
@@ -69,6 +73,11 @@ class EventLog:
             if stored.prev_event_hash != previous_hash:
                 raise ValueError(
                     f"stored event {stored.sequence} does not chain from previous hash"
+                )
+            recomputed = compute_event_hash(previous_hash, stored.body)
+            if recomputed != stored.event_hash:
+                raise ValueError(
+                    f"stored event {stored.sequence} body does not match its event_hash"
                 )
             copied.append(stored)
             previous_hash = stored.event_hash

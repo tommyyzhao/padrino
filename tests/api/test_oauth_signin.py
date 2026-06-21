@@ -11,8 +11,10 @@ when no provider is configured, and provider secrets/tokens are never persisted.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from time import time
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -25,17 +27,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.api.oauth import (
+    OAuthError,
     OAuthUserInfo,
+    reset_clock,
     reset_oauth_io,
     reset_resolve_user_info,
+    set_clock,
     set_exchange_token,
     set_fetch_jwks,
     set_resolve_user_info,
 )
 from padrino.api.routes.human import OAUTH_STATE_COOKIE, OAUTH_VERIFIER_COOKIE
-from padrino.db.models import OAuthIdentity, Principal
+from padrino.db.models import OAuthConsumedFlow, OAuthIdentity, Principal
 from padrino.db.repositories import human_principals as principals_repo
-from padrino.settings import get_settings
+from padrino.settings import Settings, get_settings
 
 _OAUTH_ENV = {
     "PADRINO_OAUTH_PROVIDER": "google",
@@ -47,6 +52,7 @@ _OAUTH_ENV = {
     "PADRINO_OAUTH_REDIRECT_URL": "https://app.example/human/oauth/google/callback",
     "PADRINO_OAUTH_ISSUER": "https://provider.example",
     "PADRINO_OAUTH_JWKS_URL": "https://provider.example/jwks.json",
+    "PADRINO_OAUTH_STATE_SIGNING_KEY": "dedicated-server-state-key",
     "PADRINO_HUMAN_SESSION_COOKIE_SECURE": "false",
     "CEREBRAS_API_KEY": "test-cerebras-key",
 }
@@ -68,6 +74,7 @@ def _restore_resolver() -> Iterator[None]:
     yield
     reset_resolve_user_info()
     reset_oauth_io()
+    reset_clock()
 
 
 @pytest_asyncio.fixture
@@ -116,18 +123,25 @@ def _signed_id_token(
     *,
     subject: str = "subject-token",
     nonce: str,
-    aud: str = "client-id-123",
+    aud: str | list[str] = "client-id-123",
     iss: str = "https://provider.example",
+    exp: int | None = None,
+    include_exp: bool = True,
+    azp: str | None = None,
+    iat: int | None = None,
 ) -> str:
-    claims = {
+    claims: dict[str, Any] = {
         "iss": iss,
         "sub": subject,
         "aud": aud,
         "nonce": nonce,
         "name": "Token Alice",
-        "exp": int(time()) + 3600,
-        "iat": int(time()),
+        "iat": iat if iat is not None else int(time()),
     }
+    if azp is not None:
+        claims["azp"] = azp
+    if include_exp:
+        claims["exp"] = exp if exp is not None else int(time()) + 3600
     token = jwt.encode({"alg": "RS256", "kid": "test-key"}, claims, _OIDC_KEY)
     assert isinstance(token, bytes)
     return token.decode("ascii")
@@ -154,6 +168,25 @@ def _stub_valid_token(nonce: str, *, subject: str = "subject-token") -> None:
 
     set_exchange_token(_exchange)
     set_fetch_jwks(_fetch)
+
+
+def _oauth_settings_with_max_token_age(max_token_age_seconds: int | None) -> Settings:
+    return Settings(
+        _env_file=None,
+        padrino_oauth_provider="google",
+        padrino_oauth_client_id="client-id-123",
+        padrino_oauth_client_secret="super-secret",
+        padrino_oauth_authorize_url="https://provider.example/authorize",
+        padrino_oauth_token_url="https://provider.example/token",
+        padrino_oauth_userinfo_url="https://provider.example/userinfo",
+        padrino_oauth_redirect_url="https://app.example/human/oauth/google/callback",
+        padrino_oauth_issuer="https://provider.example",
+        padrino_oauth_jwks_url="https://provider.example/jwks.json",
+        padrino_oauth_state_signing_key="dedicated-server-state-key",
+        padrino_oauth_max_token_age_seconds=max_token_age_seconds,
+        padrino_human_session_cookie_secure=False,
+        cerebras_api_key="test-cerebras-key",
+    )
 
 
 @pytest.mark.asyncio
@@ -372,7 +405,7 @@ async def test_callback_rejects_id_token_claim_mismatch(
     client: AsyncClient, override: str, value: str
 ) -> None:
     state, verifier, nonce = await _callback_cookies(client)
-    claims = {"nonce": nonce}
+    claims: dict[str, Any] = {"nonce": nonce}
     claims[override] = value
 
     async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
@@ -391,6 +424,557 @@ async def test_callback_rejects_id_token_claim_mismatch(
     )
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_id_token_without_exp(client: AsyncClient) -> None:
+    """An id_token with no bounded lifetime is rejected fail-closed (US-193)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": _signed_id_token(nonce=nonce, include_exp=False)}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_expired_id_token(client: AsyncClient) -> None:
+    """An expired (past exp) id_token is rejected (US-193)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": _signed_id_token(nonce=nonce, exp=int(time()) - 3600)}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_state_signing_key_is_not_derivable_from_client_secret() -> None:
+    """The state key must not be reconstructable from the client secret (US-201).
+
+    The earlier fallback derived the key as
+    ``base64url(HMAC(client_secret, domain-string))`` — fully reproducible by an
+    attacker holding only the client secret. Assert the resolved key is NOT that
+    derivation (and not the client secret), i.e. it is a genuinely independent
+    server secret.
+    """
+    import base64
+    import hashlib
+    import hmac
+
+    from padrino.api.oauth import resolve_oauth_config
+
+    settings = get_settings()
+    config = resolve_oauth_config(settings, "google")
+    assert config is not None
+    assert config.state_signing_key
+    assert config.state_signing_key != config.client_secret
+    derived = (
+        base64.urlsafe_b64encode(
+            hmac.new(
+                config.client_secret.encode("utf-8"),
+                b"padrino.oauth.state-signing-key.v1",
+                hashlib.sha256,
+            ).digest()
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    assert config.state_signing_key != derived
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_replayed_state_and_code(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Replaying the same (state cookie, code) yields one session + a rejection (US-202).
+
+    The first callback succeeds and mints exactly one account session; a second
+    callback with the IDENTICAL state cookie and code is rejected fail-closed
+    (``oauth_state_replayed``) by the server-side single-use store, independent of
+    whether the provider would have re-redeemed the code.
+    """
+    state, verifier, nonce = await _callback_cookies(client)
+    _stub_valid_token(nonce, subject="subject-replay")
+    cookies = {OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier}
+    params = {"code": "auth-code", "state": state}
+
+    first = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert first.status_code == 200
+    # The first login persisted a session cookie on the client jar; clear it so
+    # the replayed request carries the IDENTICAL session-binding context as the
+    # original (an attacker replaying the exact same request), isolating the
+    # single-use store as the thing that rejects the replay.
+    client.cookies.clear()
+
+    second = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert second.status_code == 400
+    assert second.json()["detail"] == "oauth_state_replayed"
+
+    async with session_factory() as session:
+        principals = (await session.execute(select(Principal))).scalars().all()
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    # Exactly one successful session/account, and exactly one consumed-flow row.
+    assert len(principals) == 1
+    assert len(identities) == 1
+    assert len(flows) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_exchange_consumes_flow_durably(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A failed provider exchange still consumes the flow token durably (US-208)."""
+    state, verifier, _ = await _callback_cookies(client)
+    cookies = {OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier}
+    params = {"code": "auth-code", "state": state}
+
+    async def _fail_exchange(
+        config: object, *, code: str, code_verifier: str, nonce: str
+    ) -> OAuthUserInfo:
+        raise OAuthError("provider rejected code")
+
+    set_resolve_user_info(_fail_exchange)
+    first = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert first.status_code == 400
+    assert first.json()["detail"] == "oauth_exchange_failed"
+
+    # If the consumed-flow claim rolled back with the failed exchange, this
+    # second request would mint an account. It must instead be rejected before
+    # the provider exchange path runs again.
+    _stub_subject("subject-after-failure")
+    second = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert second.status_code == 400
+    assert second.json()["detail"] == "oauth_state_replayed"
+
+    async with session_factory() as session:
+        principals = (await session.execute(select(Principal))).scalars().all()
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    assert len(principals) == 0
+    assert len(identities) == 0
+    assert len(flows) == 1
+
+
+@pytest.mark.asyncio
+async def test_callback_does_not_prune_consumed_flows_on_every_attempt(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hot callback path claims the flow without sweeping on every request."""
+    from padrino.api.routes import human as human_routes
+    from padrino.db.repositories import oauth_consumed_flows as flows_repo
+
+    state, verifier, nonce = await _callback_cookies(client)
+    _stub_valid_token(nonce, subject="subject-no-hot-prune")
+
+    monkeypatch.setattr(human_routes, "_oauth_flow_prune_due", lambda _flow_token: False)
+
+    async def _raise_if_pruned(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("oauth callback pruned consumed flows on an unsampled request")
+
+    monkeypatch.setattr(flows_repo, "prune_expired", _raise_if_pruned)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_callback_opportunistic_prune_bounds_consumed_flow_table(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sampled callback sweeps expired rows while stale rows are otherwise inert."""
+    from padrino.api.routes import human as human_routes
+
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                OAuthConsumedFlow(
+                    flow="expired-flow-1",
+                    consumed_at=now - timedelta(seconds=3600),
+                ),
+                OAuthConsumedFlow(
+                    flow="expired-flow-2",
+                    consumed_at=now - timedelta(seconds=1800),
+                ),
+                OAuthConsumedFlow(flow="fresh-flow", consumed_at=now),
+            ]
+        )
+        await session.commit()
+
+    state, verifier, nonce = await _callback_cookies(client)
+    _stub_valid_token(nonce, subject="subject-pruned")
+    monkeypatch.setattr(human_routes, "_oauth_flow_prune_due", lambda _flow_token: True)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+    async with session_factory() as session:
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    flow_names = {flow.flow for flow in flows}
+    assert "fresh-flow" in flow_names
+    assert "expired-flow-1" not in flow_names
+    assert "expired-flow-2" not in flow_names
+    assert len(flow_names) == 2
+
+
+@pytest.mark.asyncio
+async def test_distinct_flows_each_consume_independently(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Two distinct start->callback flows both succeed (single-use is per-flow).
+
+    A fresh ``/start`` mints a new per-flow token, so a second legitimate sign-in
+    is never blocked by the single-use store (only an exact replay of the same
+    flow is rejected).
+    """
+
+    async def _login(subject: str) -> int:
+        state, verifier, nonce = await _callback_cookies(client)
+        _stub_valid_token(nonce, subject=subject)
+        resp = await client.get(
+            "/human/oauth/google/callback",
+            params={"code": "auth-code", "state": state},
+            cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+        )
+        return resp.status_code
+
+    assert await _login("subject-flow") == 200
+    assert await _login("subject-flow") == 200
+
+    async with session_factory() as session:
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    # Same account (repeat sign-in) but two distinct flows were consumed.
+    assert len(flows) == 2
+
+
+@pytest.mark.asyncio
+async def test_try_consume_flow_is_single_use(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The repo claim is atomic: the first call wins, every later call loses."""
+    from datetime import UTC, datetime, timedelta
+
+    from padrino.db.repositories import oauth_consumed_flows as flows_repo
+
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        assert await flows_repo.try_consume_flow(session, flow="flow-1", consumed_at=now) is True
+        assert await flows_repo.try_consume_flow(session, flow="flow-1", consumed_at=now) is False
+        # A distinct flow is still claimable.
+        assert await flows_repo.try_consume_flow(session, flow="flow-2", consumed_at=now) is True
+        await session.commit()
+
+    async with session_factory() as session:
+        # A replay across a fresh session/transaction is still rejected.
+        assert await flows_repo.try_consume_flow(session, flow="flow-1", consumed_at=now) is False
+        # Pruning past the TTL removes stale rows but is order-insensitive here.
+        removed = await flows_repo.prune_expired(session, older_than=now + timedelta(seconds=1))
+        assert removed == 2
+        await session.commit()
+
+
+def test_explicit_state_signing_key_used_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit server signing key is used verbatim for the state HMAC (US-201)."""
+    from padrino.api.oauth import resolve_oauth_config
+
+    monkeypatch.setenv("PADRINO_OAUTH_STATE_SIGNING_KEY", "dedicated-server-key")
+    get_settings.cache_clear()
+    try:
+        config = resolve_oauth_config(get_settings(), "google")
+        assert config is not None
+        assert config.state_signing_key == "dedicated-server-key"
+        assert config.state_signing_key != config.client_secret
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_unset_state_signing_key_yields_no_oauth_config(
+    monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    """An unset/blank state-signing key is fail-closed: no usable config (US-201)."""
+    from padrino.api.oauth import resolve_oauth_config
+
+    if value is None:
+        monkeypatch.delenv("PADRINO_OAUTH_STATE_SIGNING_KEY", raising=False)
+    else:
+        monkeypatch.setenv("PADRINO_OAUTH_STATE_SIGNING_KEY", value)
+    get_settings.cache_clear()
+    try:
+        assert resolve_oauth_config(get_settings(), "google") is None
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_routes_503_without_state_signing_key(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no dedicated state key the OAuth routes 503 (fail-closed, US-201)."""
+    monkeypatch.delenv("PADRINO_OAUTH_STATE_SIGNING_KEY", raising=False)
+    get_settings.cache_clear()
+    try:
+        app = create_app(session_factory=session_factory, auth_required=True)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+            start = await ac.get("/human/oauth/google/start")
+            assert start.status_code == 503
+            cb = await ac.get("/human/oauth/google/callback", params={"code": "c", "state": "s"})
+            assert cb.status_code == 503
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_multi_audience_with_foreign_azp(
+    client: AsyncClient,
+) -> None:
+    """A token minted for another RP (aud=[us, other], azp=other) is rejected (US-201)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {
+            "id_token": _signed_id_token(
+                nonce=nonce,
+                aud=["client-id-123", "other-rp"],
+                azp="other-rp",
+            )
+        }
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_accepts_multi_audience_with_matching_azp(
+    client: AsyncClient,
+) -> None:
+    """A multi-aud token whose azp is THIS client is accepted (US-201)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {
+            "id_token": _signed_id_token(
+                nonce=nonce,
+                aud=["client-id-123", "other-rp"],
+                azp="client-id-123",
+            )
+        }
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_stale_but_unexpired_id_token(
+    client: AsyncClient,
+) -> None:
+    """A stale-iat token with a far-future exp is rejected by the max-age ceiling."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    issued_at = int(time())
+    # iat is well beyond the max-age ceiling, but exp is far in the future so
+    # authlib's exp check alone would accept it.
+    stale_iat = issued_at - 4000
+    far_future_exp = issued_at + 10**6
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": _signed_id_token(nonce=nonce, iat=stale_iat, exp=far_future_exp)}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+    # Pin the clock just after issuance for the authlib exp/iat checks, then the
+    # max-age check measures the (large) gap to the stale iat.
+    set_clock(lambda: float(issued_at))
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_accepts_id_token_within_default_max_age(
+    client: AsyncClient,
+) -> None:
+    """The default ceiling allows a legitimately slow OAuth round trip (US-207)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    issued_at = int(time())
+    slow_but_valid_iat = issued_at - 800
+    far_future_exp = issued_at + 10**6
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {
+            "id_token": _signed_id_token(
+                nonce=nonce,
+                iat=slow_but_valid_iat,
+                exp=far_future_exp,
+            )
+        }
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+    set_clock(lambda: float(issued_at))
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_callback_honors_configured_token_age_ceiling(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Operators can tighten the defense-in-depth max-age ceiling (US-207)."""
+    app = create_app(session_factory=session_factory, auth_required=True)
+    app.state.auth_settings = _oauth_settings_with_max_token_age(120)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        state, verifier, nonce = await _callback_cookies(ac)
+
+        issued_at = int(time())
+        too_old_for_override_iat = issued_at - 300
+        far_future_exp = issued_at + 10**6
+
+        async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+            return {
+                "id_token": _signed_id_token(
+                    nonce=nonce,
+                    iat=too_old_for_override_iat,
+                    exp=far_future_exp,
+                )
+            }
+
+        async def _fetch(config: object) -> dict[str, object]:
+            return _jwks()
+
+        set_exchange_token(_exchange)
+        set_fetch_jwks(_fetch)
+        set_clock(lambda: float(issued_at))
+
+        resp = await ac.get(
+            "/human/oauth/google/callback",
+            params={"code": "auth-code", "state": state},
+            cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+        )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_can_disable_extra_token_age_ceiling(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """None disables only the extra iat max-age check; exp still bounds the token."""
+    app = create_app(session_factory=session_factory, auth_required=True)
+    app.state.auth_settings = _oauth_settings_with_max_token_age(None)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        state, verifier, nonce = await _callback_cookies(ac)
+
+        issued_at = int(time())
+        old_but_unexpired_iat = issued_at - 4000
+        far_future_exp = issued_at + 10**6
+
+        async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+            return {
+                "id_token": _signed_id_token(
+                    nonce=nonce,
+                    iat=old_but_unexpired_iat,
+                    exp=far_future_exp,
+                )
+            }
+
+        async def _fetch(config: object) -> dict[str, object]:
+            return _jwks()
+
+        set_exchange_token(_exchange)
+        set_fetch_jwks(_fetch)
+        set_clock(lambda: float(issued_at))
+
+        resp = await ac.get(
+            "/human/oauth/google/callback",
+            params={"code": "auth-code", "state": state},
+            cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+        )
+
+    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio

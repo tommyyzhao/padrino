@@ -88,6 +88,21 @@ def test_default_xiaomi_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _fresh().xiaomi_base_url == "https://token-plan-sgp.xiaomimimo.com/v1"
 
 
+def test_default_oauth_max_token_age(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PADRINO_OAUTH_MAX_TOKEN_AGE_SECONDS", raising=False)
+    assert _fresh().padrino_oauth_max_token_age_seconds == 900
+
+
+def test_env_override_oauth_max_token_age(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PADRINO_OAUTH_MAX_TOKEN_AGE_SECONDS", "1200")
+    assert _fresh().padrino_oauth_max_token_age_seconds == 1200
+
+
+def test_env_none_disables_oauth_max_token_age(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PADRINO_OAUTH_MAX_TOKEN_AGE_SECONDS", "none")
+    assert _fresh().padrino_oauth_max_token_age_seconds is None
+
+
 def test_env_override_xiaomi_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XIAOMI_BASE_URL", "https://xiaomi.example.test/v1")
     assert _fresh().xiaomi_base_url == "https://xiaomi.example.test/v1"

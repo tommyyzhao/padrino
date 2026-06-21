@@ -70,6 +70,18 @@ class SeatMultiplexAdapter:
         self._adapters[seat] = adapter
         return previous
 
+    def force_swap_seat(self, seat: str, adapter: LlmAdapter) -> LlmAdapter | None:
+        """Rebind ``seat`` even if normal swap validation failed post-commit.
+
+        This is reserved for crash-consistency recovery after a takeover row has
+        already committed to ``game_events``. The DB row is now authoritative, so
+        the worker must make the in-memory dispatch table match it before any
+        later tick can build another event.
+        """
+        previous = self._adapters.get(seat)
+        self._adapters[seat] = adapter
+        return previous
+
     async def complete(self, observation: Observation) -> AdapterResult:
         seat = observation.you.player_id
         try:

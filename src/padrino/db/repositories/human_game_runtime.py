@@ -16,12 +16,22 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.db.models import HumanGameRuntime
+
+
+class _Unset(Enum):
+    """Sentinel distinguishing "caller omitted state_cache" from "set it to None"."""
+
+    UNSET = 0
+
+
+_UNSET = _Unset.UNSET
 
 
 async def upsert(
@@ -32,9 +42,15 @@ async def upsert(
     deadline_at: datetime | None,
     buffer_snapshot: dict[str, Any],
     updated_at: datetime,
-    state_cache: dict[str, Any] | None = None,
+    state_cache: dict[str, Any] | None | _Unset = _UNSET,
 ) -> HumanGameRuntime:
-    """Insert or update the one runtime row for ``game_id`` and return it."""
+    """Insert or update the one runtime row for ``game_id`` and return it.
+
+    ``state_cache`` is a tri-state: omitting it preserves any existing cache (an
+    insert defaults to ``None``); passing a dict replaces it; passing ``None``
+    explicitly clears it. This prevents a partial-update caller that does not
+    manage the US-168 cache from silently wiping it.
+    """
     row = await session.get(HumanGameRuntime, game_id)
     if row is None:
         row = HumanGameRuntime(
@@ -42,7 +58,7 @@ async def upsert(
             phase=phase,
             deadline_at=deadline_at,
             buffer_snapshot=buffer_snapshot,
-            state_cache=state_cache,
+            state_cache=None if isinstance(state_cache, _Unset) else state_cache,
             updated_at=updated_at,
         )
         session.add(row)
@@ -50,7 +66,8 @@ async def upsert(
         row.phase = phase
         row.deadline_at = deadline_at
         row.buffer_snapshot = buffer_snapshot
-        row.state_cache = state_cache
+        if not isinstance(state_cache, _Unset):
+            row.state_cache = state_cache
         row.updated_at = updated_at
     await session.flush()
     return row

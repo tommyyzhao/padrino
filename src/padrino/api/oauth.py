@@ -2,13 +2,20 @@
 
 ONE provider (e.g. Google) via Authlib's :class:`AsyncOAuth2Client`. The
 authorization-code flow is protected with a signed, session-bound CSRF
-``state`` plus PKCE (``code_challenge_method=S256``). The provider client
-id/secret, endpoints, issuer, and JWKS URL come from
-:class:`padrino.settings.Settings` and are optional/None so the engine boots and
-the test suite runs without them; the client secret is never logged. No provider
-tokens are persisted beyond completing the exchange — only the stable
+``state`` plus PKCE (``code_challenge_method=S256``); the state HMAC uses a
+dedicated server signing key (US-193) that is REQUIRED when OAuth is enabled and
+independent of the provider client secret — when it is unset the OAuth config is
+incomplete and the routes 503 (fail-closed; no key derivation from the client
+secret, US-201). The provider client id/secret, endpoints, issuer, and JWKS URL
+come from :class:`padrino.settings.Settings` and are optional/None so the engine
+boots and the test suite runs without them; the client secret is never logged. No
+provider tokens are persisted beyond completing the exchange — only the stable
 ``(provider, subject)`` identity is stored after validating the provider
-``id_token`` signature, audience, issuer, and nonce.
+``id_token`` signature, audience, issuer, nonce, authorized party
+(``azp == client_id`` when ``aud`` is multi-valued or ``azp`` present, US-201),
+and a bounded lifetime (``exp``/``iat`` essential; a token with no ``exp`` is
+rejected fail-closed; an ``iat`` older than the configured max-age ceiling is
+rejected via the injected clock seam, US-201/US-207).
 
 Tests stub the network entirely via the ``resolve_user_info`` indirection or the
 lower-level token/JWKS seams, so no live provider is contacted.
@@ -20,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final
@@ -33,6 +41,27 @@ from authlib.jose.errors import JoseError
 from padrino.settings import Settings
 
 _STATE_VERSION: Final[int] = 1
+# Small clock-skew tolerance for id_token exp/iat validation (US-193).
+_CLAIMS_LEEWAY_SECONDS: Final[int] = 60
+
+# Impure clock seam for the id_token max-age check (US-201). The api lane is
+# outside the pure-core firewall, so a real wall-clock read is allowed here; the
+# seam exists so tests can pin the clock without touching ``datetime.utcnow`` in
+# core. Defaults to ``time.time``.
+NowFn = Callable[[], float]
+_NOW: NowFn = time.time
+
+
+def set_clock(now_fn: NowFn) -> None:
+    """Override the wall-clock used for id_token max-age checks (test seam)."""
+    global _NOW
+    _NOW = now_fn
+
+
+def reset_clock() -> None:
+    """Restore the live wall-clock for id_token max-age checks."""
+    global _NOW
+    _NOW = time.time
 
 
 @dataclass(frozen=True)
@@ -49,6 +78,8 @@ class OAuthConfig:
     issuer: str
     jwks_url: str
     scope: str
+    state_signing_key: str
+    max_token_age_seconds: int | None
 
 
 @dataclass(frozen=True)
@@ -80,6 +111,7 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         return None
     if provider != settings.padrino_oauth_provider:
         return None
+    state_signing_key = _resolve_state_signing_key(settings)
     required = (
         settings.padrino_oauth_client_id,
         settings.padrino_oauth_client_secret,
@@ -89,6 +121,10 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         settings.padrino_oauth_redirect_url,
         settings.padrino_oauth_issuer,
         settings.padrino_oauth_jwks_url,
+        # Fail-closed: a missing/blank dedicated state-signing key yields no
+        # usable OAuth config (so the routes 503) rather than silently deriving
+        # a forgeable key from the client secret (US-201).
+        state_signing_key,
     )
     if any(value is None for value in required):
         return None
@@ -100,6 +136,7 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
     assert settings.padrino_oauth_redirect_url is not None
     assert settings.padrino_oauth_issuer is not None
     assert settings.padrino_oauth_jwks_url is not None
+    assert state_signing_key is not None
     return OAuthConfig(
         provider=settings.padrino_oauth_provider,
         client_id=settings.padrino_oauth_client_id,
@@ -111,7 +148,27 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         issuer=settings.padrino_oauth_issuer,
         jwks_url=settings.padrino_oauth_jwks_url,
         scope=settings.padrino_oauth_scope,
+        state_signing_key=state_signing_key,
+        max_token_age_seconds=settings.padrino_oauth_max_token_age_seconds,
     )
+
+
+def _resolve_state_signing_key(settings: Settings) -> str | None:
+    """Return the dedicated OAuth state-signing key, or None if unset (US-201).
+
+    The state HMAC MUST use a dedicated server signing key that is independent of
+    the provider client secret: a leaked client secret must not let an attacker
+    recompute the state-signing key and mint validly-signed CSRF/session-binding
+    state tokens. The earlier fallback that DERIVED the key from the client
+    secret (HMAC over a hardcoded, open-source domain string) was fully
+    reconstructable from the client secret alone, so it is removed. When the
+    dedicated key is unset/blank this returns ``None`` and the OAuth config is
+    treated as incomplete (the routes 503) — fail-closed, never derived.
+    """
+    explicit = settings.padrino_oauth_state_signing_key
+    if explicit is not None and explicit.strip():
+        return explicit
+    return None
 
 
 def build_authorization_request(
@@ -164,6 +221,25 @@ def validate_authorization_state(
     if not hmac.compare_digest(stored_binding, session_binding):
         raise OAuthError("OAuth state session mismatch")
     return nonce
+
+
+def state_flow_token(config: OAuthConfig, state: str) -> str:
+    """Return the per-flow unique token embedded in a signed OAuth ``state``.
+
+    The ``flow`` claim is a fresh random token minted per authorization request
+    in :func:`_encode_state`; it is the natural key for a server-side single-use
+    ledger so a replayed ``(state, code)`` pair fails closed (US-202). The state
+    signature is re-verified here (via :func:`_decode_state`) so a forged/tampered
+    state cannot inject an attacker-chosen flow key.
+    """
+    try:
+        payload = _decode_state(config, state)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OAuthError("OAuth state is invalid") from exc
+    flow = payload.get("flow")
+    if not isinstance(flow, str) or not flow:
+        raise OAuthError("OAuth state flow token missing")
+    return flow
 
 
 async def _default_resolve_user_info(
@@ -224,12 +300,59 @@ def _user_info_from_id_token(
                 "aud": {"essential": True, "value": config.client_id},
                 "sub": {"essential": True},
                 "nonce": {"essential": True, "value": nonce},
+                # A signature-valid token with no bounded lifetime must be
+                # REJECTED fail-closed (US-193): mark ``exp`` essential so a
+                # missing ``exp`` fails validation rather than being treated as a
+                # permanent, non-expiring login assertion. ``iat`` is also
+                # required so an issued-at can be sanity-checked.
+                "exp": {"essential": True},
+                "iat": {"essential": True},
             },
         )
-        claims.validate()
+        claims.validate(leeway=_CLAIMS_LEEWAY_SECONDS)
     except (JoseError, TypeError, ValueError) as exc:
         raise OAuthError("OAuth provider id_token validation failed") from exc
-    return _user_info_from_payload(dict(claims))
+    payload = dict(claims)
+    _validate_authorized_party(payload, client_id=config.client_id)
+    _validate_token_age(payload, max_age_seconds=config.max_token_age_seconds)
+    return _user_info_from_payload(payload)
+
+
+def _validate_authorized_party(payload: dict[str, Any], *, client_id: str) -> None:
+    """Enforce ``azp == client_id`` when ``aud`` is multi-valued or ``azp`` set.
+
+    OIDC requires the ``azp`` (authorized party) claim to identify this relying
+    party when the ``aud`` claim is multi-valued or ``azp`` is present. Authlib's
+    ``validate_aud`` accepts a token whose ``aud`` merely CONTAINS ``client_id``,
+    so a token minted for another RP (``aud=[client_id, other-rp]``,
+    ``azp=other-rp``) would otherwise validate. Reject such tokens (US-201).
+    """
+    aud = payload.get("aud")
+    azp = payload.get("azp")
+    aud_is_multi = isinstance(aud, (list, tuple)) and len(aud) > 1
+    if (aud_is_multi or azp is not None) and azp != client_id:
+        raise OAuthError("OAuth provider id_token azp mismatch")
+
+
+def _validate_token_age(payload: dict[str, Any], *, max_age_seconds: int | None) -> None:
+    """Reject an id_token whose ``iat`` is older than the configured ceiling.
+
+    ``iat`` is already marked essential and authlib rejects future-dating, but it
+    imposes no upper bound on token age — acceptance lifetime is otherwise capped
+    only by the provider-controlled ``exp``. Enforce the configured max-age using
+    the injected clock seam so a stale-but-unexpired token (e.g. far-future
+    ``exp``) is rejected. Operators can set ``None`` to disable this additional
+    defense when provider timing is unusual; ``exp`` and ``iat`` validation still
+    runs through Authlib before this helper is called.
+    """
+    iat = payload.get("iat")
+    if not isinstance(iat, (int, float)) or isinstance(iat, bool):
+        raise OAuthError("OAuth provider id_token iat missing")
+    if max_age_seconds is None:
+        return
+    age = _NOW() - float(iat)
+    if age > max_age_seconds + _CLAIMS_LEEWAY_SECONDS:
+        raise OAuthError("OAuth provider id_token is too old")
 
 
 def _user_info_from_payload(payload: dict[str, Any]) -> OAuthUserInfo:
@@ -329,7 +452,7 @@ def _decode_state(config: OAuthConfig, state: str) -> dict[str, Any]:
 
 def _state_signature(config: OAuthConfig, body: str) -> str:
     digest = hmac.new(
-        config.client_secret.encode("utf-8"),
+        config.state_signing_key.encode("utf-8"),
         body.encode("ascii"),
         hashlib.sha256,
     ).digest()
@@ -353,11 +476,14 @@ __all__ = [
     "build_authorization_request",
     "exchange_code",
     "oauth_session_binding",
+    "reset_clock",
     "reset_oauth_io",
     "reset_resolve_user_info",
     "resolve_oauth_config",
+    "set_clock",
     "set_exchange_token",
     "set_fetch_jwks",
     "set_resolve_user_info",
+    "state_flow_token",
     "validate_authorization_state",
 ]

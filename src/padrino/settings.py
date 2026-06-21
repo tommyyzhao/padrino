@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 from typing import TYPE_CHECKING
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 if TYPE_CHECKING:
@@ -179,6 +180,22 @@ class Settings(BaseSettings):
     padrino_oauth_issuer: str | None = None
     padrino_oauth_jwks_url: str | None = None
     padrino_oauth_scope: str = "openid email profile"
+    # Dedicated server signing key for the CSRF/session-binding OAuth ``state``
+    # HMAC (US-193). Keeping this distinct from the provider client secret means
+    # a leaked client secret does not also forge state tokens. When unset/blank,
+    # OAuth is treated as unconfigured and the routes fail closed (503).
+    padrino_oauth_state_signing_key: str | None = None
+    # Defense-in-depth id_token max-age ceiling measured from ``iat``. ``exp``
+    # remains essential either way; set None to disable this additional ceiling
+    # for providers with unusual but still signature-valid issuance timing.
+    padrino_oauth_max_token_age_seconds: int | None = 900
+
+    @field_validator("padrino_oauth_max_token_age_seconds", mode="before")
+    @classmethod
+    def _parse_optional_oauth_max_token_age(cls, value: object) -> object:
+        if isinstance(value, str) and value.strip().lower() in {"none", "null"}:
+            return None
+        return value
 
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any
     # scraper that can reach the process; flipping the flag requires the same
@@ -254,6 +271,13 @@ class Settings(BaseSettings):
     padrino_human_max_inference_usd_per_user_per_day: float = 5.0
     padrino_human_lobby_cost_cap_usd: float = 2.0
     padrino_human_global_lobby_cost_breaker_usd: float = 50.0
+    # US-190: the inference-$ cap and the global breaker are enforced atomically
+    # by reserving discrete budget slots at admission (not a TOCTOU SELECT-sum).
+    # This is the estimated USD a single admitted action may accrue; the daily
+    # cap / breaker is divided into floor(budget / reserve) reservation slots, so
+    # concurrent admissions cannot overshoot the ceiling. A smaller value gives a
+    # finer-grained (less conservative) cap; it must stay > 0.
+    padrino_human_admission_inference_reserve_usd: float = 0.5
     # Fallback token-price table (USD per 1K tokens) used when a LiteLLM response
     # carries no ``response_cost`` (None). Keyed by LiteLLM model string; the
     # ``default`` key is the catch-all when a model is not listed.

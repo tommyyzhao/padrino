@@ -214,7 +214,8 @@
       <strong>{accuracy.correct}</strong>
       of
       <strong>{accuracy.total}</strong>
-      seats ({Math.round(Number(accuracy.accuracy) * 100)}% accuracy).
+      seats (accuracy
+      <span data-testid="reveal-accuracy-value">{accuracy.accuracy}</span>).
     </div>
   {/if}
 

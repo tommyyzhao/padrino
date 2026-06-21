@@ -245,6 +245,65 @@ test.describe('endgame reveal + guess (US-156/US-163)', () => {
       [SEAT_TAKEOVER]: 'AI'
     });
   });
+
+  // US-195: the backend now renders accuracy as a fraction STRING ('2/3'), not
+  // a decimal. The dashboard must render that server string verbatim — a
+  // parseFloat('2/3') would yield NaN. This test pins the existing-guess path
+  // with a fraction-string fixture and asserts the value is shown as-is.
+  test('fraction-string accuracy renders verbatim (no parseFloat NaN)', async ({ page }) => {
+    const FRACTION_RESULT = {
+      guesser_public_id: SEAT_ME,
+      total: 3,
+      correct: 2,
+      accuracy: '2/3',
+      idempotent_replay: false
+    };
+
+    // Viewer has already guessed: GET turing-guess returns the scored result
+    // immediately, so the reveal + accuracy are disclosed on load.
+    await page.route(`**/human/games/${GAME_ID}/turing-guess`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(FRACTION_RESULT)
+      });
+    });
+
+    let firstObs = true;
+    await page.route(`**/human/games/${GAME_ID}/observation/stream*`, async (route) => {
+      if (firstObs) {
+        firstObs = false;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: observationSseBody()
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    await page.route(`**/human/games/${GAME_ID}/reveal`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(REVEAL_BODY)
+      });
+    });
+
+    await page.goto(`/play/${GAME_ID}/reveal`);
+    await expect(page.getByTestId('reveal-title')).toBeVisible();
+
+    // The accuracy is disclosed (already-guessed path) and the fraction string
+    // is rendered exactly as the server emitted it — not NaN, not a decimal.
+    const accuracyValue = page.getByTestId('reveal-accuracy-value');
+    await expect(accuracyValue).toBeVisible({ timeout: 15_000 });
+    await expect(accuracyValue).toHaveText('2/3');
+    await expect(accuracyValue).not.toContainText('NaN');
+  });
 });
 
 test.describe('profile / stats page (US-156)', () => {
@@ -299,5 +358,57 @@ test.describe('profile / stats page (US-156)', () => {
     expect(html).not.toContain('elo');
     expect(html).not.toContain('rating');
     expect(html).not.toContain('leaderboard');
+  });
+
+  // US-203: the core renders some accuracy ratios as an exact 'num/den'
+  // fraction string (core/turing/scoring.py _accuracy_string). Number('2/3')
+  // is NaN, so the old pct() rendered an em-dash. pct() must now parse the
+  // ratio and show a percentage, not an em-dash.
+  test('fraction-string detection_accuracy renders a percentage (no em-dash)', async ({
+    page
+  }) => {
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          principal_id: 'cccccccc-0000-0000-0000-000000000000',
+          kind: 'account',
+          display_name: 'Bob'
+        })
+      });
+    });
+
+    await page.route('**/human/stats*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ruleset_id: 'mini7_v1',
+          principal_id: 'cccccccc-0000-0000-0000-000000000000',
+          games: 3,
+          wins: 1,
+          draws: 0,
+          losses: 2,
+          role_win_rates: [],
+          survival_rate: 0.5,
+          voting_accuracy: { total_votes: 3, accurate_votes: 2, rate: 0.6667 },
+          // The core fraction-string format that Number() turns into NaN.
+          detection_accuracy: '2/3'
+        })
+      });
+    });
+
+    await page.goto('/profile');
+    await expect(page.getByTestId('profile-stats')).toBeVisible({ timeout: 15_000 });
+
+    const detection = page.getByTestId('profile-detection-accuracy');
+    await expect(detection).toBeVisible();
+    // 2/3 -> 67%, NOT an em-dash and NOT a literal NaN.
+    await expect(detection).toContainText('67');
+    await expect(detection).not.toContainText('—');
+    await expect(detection).not.toContainText('NaN');
   });
 });

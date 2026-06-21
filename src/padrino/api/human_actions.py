@@ -14,7 +14,10 @@ This impure shell:
 * enforces the chat firewall — ONLY the structured ``Action`` is accepted here;
   chat is a separate channel (US-135). The action drives state, nothing else.
 * dedupes retries with an idempotency key so a network retry never double-votes.
-* enforces action-channel rate limits distinct from the shared session bucket.
+* enforces action-channel rate limits distinct from the shared session bucket —
+  but ONLY after legality passes (US-191), so a now-illegal action (e.g. a vote
+  on a target eliminated between observe and submit) never burns the seat's
+  rate budget and 429-locks it out of its one legal move for the phase.
 
 All validation reads the pure core (``legal_actions_for``); no mechanics live
 here. The store is :class:`padrino.db.models.HumanActionSubmission`.
@@ -89,13 +92,9 @@ async def submit_action(
         principal_id=principal_id,
         wrong_seat_detail=WRONG_SEAT_DETAIL,
     )
-    await presence_repo.record_heartbeat(
-        session,
-        game_id=game_id,
-        public_player_id=seat_row.public_player_id,
-        seen_at=now,
-    )
 
+    # Cheap existence / terminal checks run BEFORE the presence heartbeat: do not
+    # heartbeat (nor consume any budget) for an unknown or already-finished game.
     resolved = await resolve_current_human_state(session, game_id)
     if resolved is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GAME_NOT_FOUND_DETAIL)
@@ -109,6 +108,13 @@ async def submit_action(
     if core_seat is None:
         # The seat exists in the DB but not in the replayed state — treat as wrong seat.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=WRONG_SEAT_DETAIL)
+
+    await presence_repo.record_heartbeat(
+        session,
+        game_id=game_id,
+        public_player_id=seat_row.public_player_id,
+        seen_at=now,
+    )
 
     phase = format_phase_id(state.current_phase)
     existing = await submissions_repo.get_by_idempotency_key(
@@ -127,16 +133,11 @@ async def submit_action(
             idempotent_replay=True,
         )
 
-    await _enforce_action_rate_limits(
-        rate_limit if rate_limit is not None else _DEFAULT_ACTION_RATE_LIMIT_STORE,
-        principal_id=principal_id,
-        game_id=game_id,
-        phase=phase,
-        now=now,
-        per_principal_limit=per_principal_limit,
-        per_game_phase_limit=per_game_phase_limit,
-    )
-
+    # Validate legality BEFORE consuming a rate-limit slot (US-191 / FINDING 3).
+    # An illegal / out-of-phase action — including the normal live-game race where
+    # a vote target was eliminated between observe and submit — returns 409 WITHOUT
+    # burning the seat's per-principal / per-game-phase budget, so a seat is never
+    # 429-locked out of its ONE legal move for the phase by prior rejected tries.
     legal = legal_actions_for(state, core_seat)
 
     if action.type not in legal.allowed_action_types:
@@ -150,6 +151,17 @@ async def submit_action(
     elif action.target is not None:
         # NOOP / ABSTAIN must not carry a target.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ILLEGAL_ACTION_DETAIL)
+
+    # The action is legal: only now consume a rate-limit slot.
+    await _enforce_action_rate_limits(
+        rate_limit if rate_limit is not None else _DEFAULT_ACTION_RATE_LIMIT_STORE,
+        principal_id=principal_id,
+        game_id=game_id,
+        phase=phase,
+        now=now,
+        per_principal_limit=per_principal_limit,
+        per_game_phase_limit=per_game_phase_limit,
+    )
 
     record = await submissions_repo.record(
         session,
@@ -185,10 +197,22 @@ async def _enforce_action_rate_limits(
     game_phase_key = _hash_key(
         f"human-action:game-phase-principal:{game_id}:{phase}:{principal_id}"
     )
-    for key_hash, limit in (
+    buckets = (
         (principal_key, per_principal_limit),
         (game_phase_key, per_game_phase_limit),
-    ):
+    )
+    # Peek-then-commit: verify every bucket would admit the request BEFORE
+    # incrementing any. A later bucket's rejection must not burn an earlier
+    # bucket's per-minute budget across the seat's other games/phases.
+    for key_hash, limit in buckets:
+        decision = await rate_limit.peek_request(key_hash, now=epoch, limit_per_minute=limit)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=RATE_LIMITED_DETAIL,
+                headers={"Retry-After": str(int(decision.retry_after_seconds))},
+            )
+    for key_hash, limit in buckets:
         decision = await rate_limit.record_request(key_hash, now=epoch, limit_per_minute=limit)
         if not decision.allowed:
             raise HTTPException(

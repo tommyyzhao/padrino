@@ -249,10 +249,22 @@ async def _enforce_chat_rate_limits(
     epoch = now.timestamp()
     principal_key = _hash_key(f"human-chat:user:{principal_id}")
     game_phase_key = _hash_key(f"human-chat:game-phase-principal:{game_id}:{phase}:{principal_id}")
-    for key_hash, limit in (
+    buckets = (
         (principal_key, per_principal_limit),
         (game_phase_key, per_game_phase_limit),
-    ):
+    )
+    # Peek-then-commit: verify every bucket would admit the request BEFORE
+    # incrementing any. A later bucket's rejection must not burn an earlier
+    # bucket's per-minute budget across the seat's other games/phases.
+    for key_hash, limit in buckets:
+        decision = await rate_limit.peek_request(key_hash, now=epoch, limit_per_minute=limit)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=RATE_LIMITED_DETAIL,
+                headers={"Retry-After": str(int(decision.retry_after_seconds))},
+            )
+    for key_hash, limit in buckets:
         decision = await rate_limit.record_request(key_hash, now=epoch, limit_per_minute=limit)
         if not decision.allowed:
             raise HTTPException(

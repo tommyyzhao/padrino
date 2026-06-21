@@ -15,6 +15,7 @@ human session via :func:`padrino.api.human_auth.require_human`.
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -26,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.auth import _get_auth_settings, _get_rate_limiter
-from padrino.api.deps import get_session
+from padrino.api.deps import get_session, get_session_factory
 from padrino.api.human_actions import submit_action
 from padrino.api.human_auth import (
     HUMAN_SESSION_COOKIE,
@@ -54,12 +55,14 @@ from padrino.api.oauth import (
     exchange_code,
     oauth_session_binding,
     resolve_oauth_config,
+    state_flow_token,
     validate_authorization_state,
 )
 from padrino.api.reveal import build_participant_reveal
 from padrino.core.engine.actions import Action
 from padrino.core.reveal import EndgameReveal
 from padrino.db.repositories import human_principals as principals_repo
+from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
 
 router = APIRouter()
@@ -67,6 +70,7 @@ router = APIRouter()
 OAUTH_STATE_COOKIE = "padrino_oauth_state"
 OAUTH_VERIFIER_COOKIE = "padrino_oauth_verifier"
 _OAUTH_FLOW_TTL_SECONDS = 600
+_OAUTH_FLOW_PRUNE_SAMPLE_MODULUS = 16
 
 
 class GuestSummary(BaseModel):
@@ -582,6 +586,24 @@ async def oauth_callback(
             status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch"
         ) from exc
 
+    # Single-use guard (US-202/US-208): durably claim this flow's unique token
+    # BEFORE exchanging the code so a replayed (state cookie, code) pair fails
+    # closed even if the provider exchange or later account/session work fails.
+    now = datetime.now(UTC)
+    try:
+        flow_token = state_flow_token(config, state)
+    except OAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch"
+        ) from exc
+    claimed = await _try_consume_oauth_flow_durably(
+        request,
+        flow_token=flow_token,
+        consumed_at=now,
+    )
+    if not claimed:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_replayed")
+
     try:
         user_info = await exchange_code(
             config,
@@ -594,7 +616,6 @@ async def oauth_callback(
             status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_exchange_failed"
         ) from exc
 
-    now = datetime.now(UTC)
     guest_id = await _in_flight_guest_id(session, request)
     account = await oauth_repo.find_or_create_account(
         session,
@@ -632,6 +653,41 @@ async def oauth_callback(
         kind=account.kind,
         display_name=account.display_name,
     )
+
+
+async def _try_consume_oauth_flow_durably(
+    request: Request,
+    *,
+    flow_token: str,
+    consumed_at: datetime,
+) -> bool:
+    """Claim an OAuth flow in its own transaction before provider exchange."""
+    session_factory = get_session_factory(request)
+    async with session_factory() as flow_session:
+        if _oauth_flow_prune_due(flow_token):
+            await oauth_flows_repo.prune_expired(
+                flow_session,
+                older_than=consumed_at - timedelta(seconds=_OAUTH_FLOW_TTL_SECONDS),
+            )
+        claimed = await oauth_flows_repo.try_consume_flow(
+            flow_session,
+            flow=flow_token,
+            consumed_at=consumed_at,
+        )
+        await flow_session.commit()
+    return claimed
+
+
+def _oauth_flow_prune_due(flow_token: str) -> bool:
+    """Return True for a stable 1/N sample of OAuth callbacks.
+
+    Expired consumed-flow rows are inert because every new authorization start
+    mints a fresh random flow token. Deferring most sweeps is therefore
+    functionally safe while avoiding a predicate DELETE on every callback.
+    """
+    digest = hashlib.sha256(flow_token.encode("utf-8")).digest()
+    bucket = int.from_bytes(digest[:8], byteorder="big") % _OAUTH_FLOW_PRUNE_SAMPLE_MODULUS
+    return bucket == 0
 
 
 async def _in_flight_guest_id(session: AsyncSession, request: Request) -> uuid.UUID | None:

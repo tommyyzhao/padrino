@@ -21,6 +21,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -105,6 +106,19 @@ class AgentBuild(Base):
 
 class League(Base):
     __tablename__ = "leagues"
+    __table_args__ = (
+        # The dormant humans-included league is one-per-ruleset; a partial unique
+        # index scoped to kind=HUMANS_INCLUDED prevents a concurrent get_or_create
+        # from materializing duplicate dormant leagues without constraining the
+        # scientific leagues (which legitimately repeat per ruleset).
+        Index(
+            "uq_league_humans_included_ruleset",
+            "ruleset_id",
+            unique=True,
+            sqlite_where=text("kind = 'HUMANS_INCLUDED'"),
+            postgresql_where=text("kind = 'HUMANS_INCLUDED'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String, nullable=False)
@@ -285,7 +299,15 @@ class LlmCall(Base):
 
 
 class HumanCostAdmission(Base):
-    """Finite per-principal/day admission slot claimed before human-lane writes."""
+    """Finite per-principal/day admission slot claimed before human-lane writes.
+
+    A slot is claimed atomically at create/join/launch admission (US-165). Since
+    US-190 a slot is tied to the resulting lobby / lobby member it admitted: when
+    that lobby is abandoned (idle auto-cancel) or the member leaves/is kicked the
+    slot is RELEASED (``released_at`` set) so the per-day caps count actual
+    games/joins, not abandoned attempts. A released slot's ``slot_index`` is free
+    to be re-claimed by a later admission for the same principal/day/bucket.
+    """
 
     __tablename__ = "human_cost_admissions"
     __table_args__ = (
@@ -309,6 +331,57 @@ class HumanCostAdmission(Base):
     admitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    #: The lobby this admission produced (NULL for a launch slot, or before bind).
+    lobby_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobbies.id", ondelete="SET NULL"), nullable=True
+    )
+    #: The lobby member this admission produced (a join/create slot).
+    lobby_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobby_members.id", ondelete="SET NULL"), nullable=True
+    )
+    #: When non-NULL the slot is released (abandoned/cancelled) and reclaimable.
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class HumanInferenceReservation(Base):
+    """Atomic inference-$ reservation slot (US-190).
+
+    The per-user/day inference-$ cap and the global cost breaker were previously
+    plain SELECT-sum reads compared to a threshold (TOCTOU): concurrent admissions
+    all read sub-threshold spend and all passed, overshooting the $ ceiling. This
+    table models the remaining $ budget as a finite number of discrete reservation
+    slots; each admission claims one slot atomically (unique constraint), so N
+    concurrent admits can never exceed the slot count and therefore never overshoot
+    the budget. ``scope_key`` is the principal hex for the per-user cap or the
+    literal ``"GLOBAL"`` for the breaker (no FK, so the global scope needs no
+    sentinel principal row and stays portable across SQLite + Postgres).
+    """
+
+    __tablename__ = "human_inference_reservations"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_key",
+            "reservation_day",
+            "slot_index",
+            name="uq_human_inference_reservation_slot",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    #: Principal hex (per-user) or the literal "GLOBAL" (breaker).
+    scope_key: Mapped[str] = mapped_column(String, nullable=False)
+    reservation_day: Mapped[date] = mapped_column(Date, nullable=False)
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    lobby_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobbies.id", ondelete="SET NULL"), nullable=True
+    )
+    lobby_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobby_members.id", ondelete="SET NULL"), nullable=True
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Rating(Base):
@@ -760,6 +833,32 @@ class OAuthIdentity(Base):
     )
 
 
+class OAuthConsumedFlow(Base):
+    """A spent OAuth authorization flow, for single-use replay resistance (US-202).
+
+    OAuth ``state``/``nonce`` are stateless signed tokens with no server-side
+    single-use ledger, so within the short flow-cookie TTL the same
+    ``(state cookie, code)`` pair could be replayed and the only block on a second
+    session was the upstream provider invalidating the authorization code on first
+    redemption (a provider-dependent defense). This row records the per-flow unique
+    token (the ``flow`` claim embedded in the signed state) the moment the callback
+    begins the code exchange. The callback inserts-or-rejects atomically
+    (``INSERT ... ON CONFLICT DO NOTHING``) BEFORE the exchange, so a replayed flow
+    fails closed independent of provider behavior.
+
+    This is short-lived auth metadata (not game state, so the hash-chain rules do
+    not apply): rows older than the flow TTL are inert and may be swept.
+    """
+
+    __tablename__ = "oauth_consumed_flows"
+    __table_args__ = (Index("ix_oauth_consumed_flows_consumed_at", "consumed_at"),)
+
+    flow: Mapped[str] = mapped_column(String, primary_key=True)
+    consumed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class HumanConsent(Base):
     """An append-only record of a human accepting a legal document (US-130).
 
@@ -1159,6 +1258,7 @@ __all__ = [
     "MaterializedGameAnalytics",
     "ModelConfig",
     "ModelProvider",
+    "OAuthConsumedFlow",
     "OAuthIdentity",
     "Principal",
     "PromptVersion",

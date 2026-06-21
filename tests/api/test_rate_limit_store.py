@@ -88,6 +88,52 @@ async def test_in_memory_store_evicts_stale_buckets() -> None:
     assert ("bbb", int(now - (now % 60))) not in store._counts
 
 
+# --- peek_request: non-incrementing check ------------------------------------
+
+
+async def test_in_memory_peek_does_not_increment() -> None:
+    store = InMemoryRateLimitStore()
+    key_hash = "p" * 64
+    now = 1_000_000.0
+    # Peeking many times never burns the budget; a single record can still run.
+    for _ in range(5):
+        peeked = await store.peek_request(key_hash, now=now, limit_per_minute=1)
+        assert peeked.allowed
+    recorded = await store.record_request(key_hash, now=now, limit_per_minute=1)
+    assert recorded.allowed
+    # The single allowance is now spent; both peek and record report full.
+    assert not (await store.peek_request(key_hash, now=now, limit_per_minute=1)).allowed
+    assert not (await store.record_request(key_hash, now=now, limit_per_minute=1)).allowed
+
+
+async def test_in_memory_peek_reports_full_with_retry_after() -> None:
+    store = InMemoryRateLimitStore()
+    key_hash = "q" * 64
+    now = 1_000_000.0
+    await store.record_request(key_hash, now=now, limit_per_minute=1)
+    peeked = await store.peek_request(key_hash, now=now, limit_per_minute=1)
+    assert not peeked.allowed
+    assert peeked.retry_after_seconds > 0
+
+
+async def test_database_peek_does_not_increment(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = DatabaseRateLimitStore(session_factory=session_factory)
+    key_hash = "facefeed" * 8
+    now = 1_000_000.0
+    for _ in range(5):
+        peeked = await store.peek_request(key_hash, now=now, limit_per_minute=1)
+        assert peeked.allowed
+    # No bucket row exists yet — peek never wrote.
+    async with session_factory() as session:
+        rows = list((await session.execute(select(RateLimitBucket))).scalars())
+    assert rows == []
+    recorded = await store.record_request(key_hash, now=now, limit_per_minute=1)
+    assert recorded.allowed
+    assert not (await store.peek_request(key_hash, now=now, limit_per_minute=1)).allowed
+
+
 # --- Database store: cross-session contention --------------------------------
 
 

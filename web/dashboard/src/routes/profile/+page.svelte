@@ -19,9 +19,21 @@
   let signedIn = $state(false);
 
   function pct(value: string | number): string {
-    const n = typeof value === 'number' ? value : Number(value);
-    if (Number.isNaN(n)) return '—';
-    return `${Math.round(n * 100)}%`;
+    if (typeof value === 'number') {
+      return Number.isNaN(value) ? '—' : `${Math.round(value * 100)}%`;
+    }
+    // The core emits some accuracy ratios as an exact 'num/den' fraction
+    // string (core/turing/scoring.py _accuracy_string), which Number() turns
+    // into NaN. Parse the ratio so '2/3' renders a percentage, not an em-dash.
+    const fraction = /^(-?\d+)\/(\d+)$/.exec(value.trim());
+    if (fraction) {
+      const den = Number(fraction[2]);
+      if (den !== 0) return `${Math.round((Number(fraction[1]) / den) * 100)}%`;
+    }
+    const n = Number(value);
+    if (!Number.isNaN(n)) return `${Math.round(n * 100)}%`;
+    // Fall back to rendering the core string verbatim rather than an em-dash.
+    return value.trim() === '' ? '—' : value;
   }
 
   async function load(): Promise<void> {
