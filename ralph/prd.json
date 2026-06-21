@@ -31,7 +31,7 @@
         "All backend gates pass."
       ],
       "notes": "Sized to the Moderate $500-$2k/mo platform-absorbed envelope; the inference-$ cap is the one most worth making atomic.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-191",

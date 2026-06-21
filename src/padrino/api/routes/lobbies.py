@@ -50,7 +50,11 @@ from padrino.economics.human_cost_governance import (
     ACTION_CREATE,
     ACTION_JOIN,
     ACTION_LAUNCH,
+    HumanAdmitDecision,
     admit_human,
+    bind_admission_slots,
+    release_admission_for_lobby,
+    release_admission_for_member,
 )
 
 router = APIRouter()
@@ -80,13 +84,14 @@ async def _enforce_admission(
     *,
     principal_id: uuid.UUID,
     action: str,
-) -> None:
+) -> HumanAdmitDecision:
     """Gate a human create/join/launch admission against per-user caps + breaker.
 
     The principal is the OAuth account (else the hashed guest token) already
     resolved by :func:`padrino.api.human_auth.require_human` — admission is keyed
     on that principal. On a denied decision this raises a 429 whose ``detail`` is
-    the structured admission reason; an admitted decision returns silently.
+    the structured admission reason; an admitted decision returns the decision so
+    the caller can bind its claimed slots to the resulting lobby/member (US-190).
     """
     from padrino.settings import get_settings
 
@@ -94,6 +99,7 @@ async def _enforce_admission(
     decision = await admit_human(session, settings, principal_id=principal_id, action=action)
     if not decision.allowed:
         raise HTTPException(status_code=_ADMISSION_DENIED_STATUS, detail=decision.reason)
+    return decision
 
 
 class LobbyCreate(BaseModel):
@@ -145,7 +151,9 @@ async def create_lobby(
     inference-$ cap, and the global cost breaker gate lobby creation (US-151). A
     denied decision is a 429 before any row is written.
     """
-    await _enforce_admission(request, session, principal_id=ctx.principal_id, action=ACTION_CREATE)
+    admission = await _enforce_admission(
+        request, session, principal_id=ctx.principal_id, action=ACTION_CREATE
+    )
     ruleset = get_ruleset(body.ruleset_id)
     player_count: int = ruleset.PLAYER_COUNT
     ai_seat_count = player_count - 1
@@ -185,6 +193,11 @@ async def create_lobby(
         principal_id=ctx.principal_id,
         is_host=True,
         now=now,
+    )
+    # Tie the admission slots to the lobby + host member so an abandoned lobby
+    # (idle auto-cancel) releases them — the day caps count games, not attempts.
+    await bind_admission_slots(
+        session, admission, lobby_id=lobby.id, lobby_member_id=host_member.id
     )
 
     await lobbies_repo.add_seat(
@@ -286,7 +299,7 @@ async def join_lobby(
         session, lobby_id=lobby.id, principal_id=ctx.principal_id
     )
     if existing is None:
-        await _enforce_admission(
+        admission = await _enforce_admission(
             request, session, principal_id=ctx.principal_id, action=ACTION_JOIN
         )
         if lobby.status != LobbyStatus.OPEN.value:
@@ -298,6 +311,7 @@ async def join_lobby(
             is_host=False,
             now=now,
         )
+        await bind_admission_slots(session, admission, lobby_id=lobby.id, lobby_member_id=member.id)
         await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
     else:
         await lobbies_repo.touch_member_presence(session, member_id=existing.id, now=now)
@@ -447,6 +461,8 @@ async def kick_member(
     if target.is_host:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cannot_kick_host")
     now = datetime.now(UTC)
+    # Release the kicked member's join slot so it does not count against their cap.
+    await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
     await lobbies_repo.remove_member(session, member_id=member_id)
     await lobbies_repo.touch_lobby(session, lobby_id=lobby_id, now=now)
     summary = await _summary(session, lobby_id=lobby_id)
@@ -541,12 +557,16 @@ async def _reconcile_lifecycle(session: AsyncSession, lobby: Lobby) -> None:
         await lobbies_repo.set_lobby_status(
             session, lobby_id=lobby.id, status=LobbyStatus.CLOSED.value, now=now
         )
+        # An abandoned (never-launched) lobby releases its admission slots so the
+        # per-day caps count actual games, not abandoned attempts (US-190).
+        await release_admission_for_lobby(session, lobby_id=lobby.id, released_at=now)
         return
     for member_id in stale_member_ids(members, now=now, stale_seconds=_stale_seconds()):
         # The host is never silently evicted (abandonment is handled above by
         # the auto-cancel path); only non-host stale members are dropped.
         member = await lobbies_repo.get_member_by_id(session, member_id)
         if member is not None and not member.is_host:
+            await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
             await lobbies_repo.remove_member(session, member_id=member_id)
 
 

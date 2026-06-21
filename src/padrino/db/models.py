@@ -285,7 +285,15 @@ class LlmCall(Base):
 
 
 class HumanCostAdmission(Base):
-    """Finite per-principal/day admission slot claimed before human-lane writes."""
+    """Finite per-principal/day admission slot claimed before human-lane writes.
+
+    A slot is claimed atomically at create/join/launch admission (US-165). Since
+    US-190 a slot is tied to the resulting lobby / lobby member it admitted: when
+    that lobby is abandoned (idle auto-cancel) or the member leaves/is kicked the
+    slot is RELEASED (``released_at`` set) so the per-day caps count actual
+    games/joins, not abandoned attempts. A released slot's ``slot_index`` is free
+    to be re-claimed by a later admission for the same principal/day/bucket.
+    """
 
     __tablename__ = "human_cost_admissions"
     __table_args__ = (
@@ -309,6 +317,57 @@ class HumanCostAdmission(Base):
     admitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    #: The lobby this admission produced (NULL for a launch slot, or before bind).
+    lobby_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobbies.id", ondelete="SET NULL"), nullable=True
+    )
+    #: The lobby member this admission produced (a join/create slot).
+    lobby_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobby_members.id", ondelete="SET NULL"), nullable=True
+    )
+    #: When non-NULL the slot is released (abandoned/cancelled) and reclaimable.
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class HumanInferenceReservation(Base):
+    """Atomic inference-$ reservation slot (US-190).
+
+    The per-user/day inference-$ cap and the global cost breaker were previously
+    plain SELECT-sum reads compared to a threshold (TOCTOU): concurrent admissions
+    all read sub-threshold spend and all passed, overshooting the $ ceiling. This
+    table models the remaining $ budget as a finite number of discrete reservation
+    slots; each admission claims one slot atomically (unique constraint), so N
+    concurrent admits can never exceed the slot count and therefore never overshoot
+    the budget. ``scope_key`` is the principal hex for the per-user cap or the
+    literal ``"GLOBAL"`` for the breaker (no FK, so the global scope needs no
+    sentinel principal row and stays portable across SQLite + Postgres).
+    """
+
+    __tablename__ = "human_inference_reservations"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_key",
+            "reservation_day",
+            "slot_index",
+            name="uq_human_inference_reservation_slot",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    #: Principal hex (per-user) or the literal "GLOBAL" (breaker).
+    scope_key: Mapped[str] = mapped_column(String, nullable=False)
+    reservation_day: Mapped[date] = mapped_column(Date, nullable=False)
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    lobby_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobbies.id", ondelete="SET NULL"), nullable=True
+    )
+    lobby_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobby_members.id", ondelete="SET NULL"), nullable=True
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Rating(Base):

@@ -254,6 +254,13 @@ class Settings(BaseSettings):
     padrino_human_max_inference_usd_per_user_per_day: float = 5.0
     padrino_human_lobby_cost_cap_usd: float = 2.0
     padrino_human_global_lobby_cost_breaker_usd: float = 50.0
+    # US-190: the inference-$ cap and the global breaker are enforced atomically
+    # by reserving discrete budget slots at admission (not a TOCTOU SELECT-sum).
+    # This is the estimated USD a single admitted action may accrue; the daily
+    # cap / breaker is divided into floor(budget / reserve) reservation slots, so
+    # concurrent admissions cannot overshoot the ceiling. A smaller value gives a
+    # finer-grained (less conservative) cap; it must stay > 0.
+    padrino_human_admission_inference_reserve_usd: float = 0.5
     # Fallback token-price table (USD per 1K tokens) used when a LiteLLM response
     # carries no ``response_cost`` (None). Keyed by LiteLLM model string; the
     # ``default`` key is the catch-all when a model is not listed.
