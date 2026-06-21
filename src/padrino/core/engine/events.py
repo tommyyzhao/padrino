@@ -148,6 +148,8 @@ class NightResolvedPayload(_FrozenModel):
     eliminated: str | None
     protected: str | None
     mafia_kill_target: str | None
+    cleaned_deaths: tuple[str, ...] = ()
+    clean_spent_actor_ids: tuple[str, ...] = ()
 
 
 class DetectiveResultDeliveredPayload(_FrozenModel):
@@ -157,9 +159,9 @@ class DetectiveResultDeliveredPayload(_FrozenModel):
 
 class PlayerEliminatedPayload(_FrozenModel):
     public_player_id: str
-    role: Role
-    faction: Faction
     cause: str
+    role: Role | None = None
+    faction: Faction | None = None
 
 
 class PhaseResolvedPayload(_FrozenModel):

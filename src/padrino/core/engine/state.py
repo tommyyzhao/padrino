@@ -7,11 +7,13 @@ in-place edits.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from padrino.core.enums import Faction, PhaseKind, Role, SeatKind
+
+JANITOR_CLEAN_SHOT_CAP: Final[int] = 1
 
 
 class QueuedInspection(BaseModel):
@@ -40,6 +42,9 @@ class Seat(BaseModel):
     # to None so replaying a pre-Wave-9 event log reproduces identical state and
     # mechanics are entirely unaffected.
     seat_kind: SeatKind | None = None
+    # US-177: None means the role's default shot cap has not been materialized
+    # yet, preserving legacy seat payloads and hand-built Janitor states.
+    janitor_clean_shots_remaining: int | None = None
 
 
 class Phase(BaseModel):
@@ -93,3 +98,12 @@ class GameState(BaseModel):
             if seat.alive:
                 counts[seat.faction] = counts.get(seat.faction, 0) + 1
         return counts
+
+
+def janitor_clean_shots_remaining(seat: Seat) -> int:
+    """Return the deterministic remaining successful cleans for a Janitor seat."""
+    if seat.role is not Role.JANITOR:
+        return 0
+    if seat.janitor_clean_shots_remaining is None:
+        return JANITOR_CLEAN_SHOT_CAP
+    return max(seat.janitor_clean_shots_remaining, 0)

@@ -333,6 +333,27 @@ def test_every_event_class_has_a_round_trip_sample() -> None:
     assert sampled == set(EVENT_TYPES)
 
 
+def test_cleaned_player_eliminated_payload_may_omit_role_and_faction() -> None:
+    event = EventAdapter.validate_python(
+        {
+            "event_type": "PlayerEliminated",
+            "sequence": 99,
+            "phase": "NIGHT_1_ACTIONS",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {
+                "public_player_id": "P05",
+                "cause": "night_kill",
+            },
+        }
+    )
+
+    assert isinstance(event, PlayerEliminated)
+    assert event.payload.public_player_id == "P05"
+    assert event.payload.role is None
+    assert event.payload.faction is None
+
+
 def test_events_are_frozen() -> None:
     event = _all_events()[0]
     with pytest.raises(ValidationError):

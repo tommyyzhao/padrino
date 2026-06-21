@@ -42,8 +42,14 @@ from padrino.core.engine.events import (
     VoteSubmitted,
     WatchSubmitted,
 )
-from padrino.core.engine.state import GameState, Phase, QueuedInspection, Seat
-from padrino.core.enums import PhaseKind
+from padrino.core.engine.state import (
+    GameState,
+    Phase,
+    QueuedInspection,
+    Seat,
+    janitor_clean_shots_remaining,
+)
+from padrino.core.enums import PhaseKind, Role
 
 # Event classes that are recorded in the log but do not mutate mechanical
 # state. Chat events are part of this set per the chat-vs-action firewall.
@@ -87,6 +93,24 @@ def _update_seat(state: GameState, public_player_id: str, updates: dict[str, obj
         for s in state.seats
     )
     return state.model_copy(update={"seats": new_seats})
+
+
+def _spend_janitor_clean_shots(state: GameState, actor_ids: tuple[str, ...]) -> GameState:
+    if not actor_ids:
+        return state
+    spent = set(actor_ids)
+    changed = False
+    seats: list[Seat] = []
+    for seat in state.seats:
+        if seat.public_player_id in spent and seat.role is Role.JANITOR:
+            remaining = max(janitor_clean_shots_remaining(seat) - 1, 0)
+            seats.append(seat.model_copy(update={"janitor_clean_shots_remaining": remaining}))
+            changed = True
+        else:
+            seats.append(seat)
+    if not changed:
+        return state
+    return state.model_copy(update={"seats": tuple(seats)})
 
 
 def apply_event(state: GameState, event: Event) -> GameState:
@@ -135,6 +159,8 @@ def apply_event(state: GameState, event: Event) -> GameState:
         return _update_seat(
             state, event.actor_player_id, {"last_protected_target": event.payload.target}
         )
+    if isinstance(event, NightResolved):
+        return _spend_janitor_clean_shots(state, event.payload.clean_spent_actor_ids)
     if isinstance(event, GameTerminated):
         return state.model_copy(
             update={

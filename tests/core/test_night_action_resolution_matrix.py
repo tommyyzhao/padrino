@@ -276,8 +276,21 @@ def test_protection_feedback_is_structured_and_deterministic() -> None:
 
 
 def test_track_and_watch_feedback_use_public_player_ids_only() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.TRACKER, Faction.TOWN),
+                _seat("P04", 3, Role.WATCHER, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
     result = resolve_night_actions(
-        _state(),
+        state,
         (
             _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
             _intent("P03", NightActionKind.TRACK, "P01"),
@@ -298,6 +311,88 @@ def test_track_and_watch_feedback_use_public_player_ids_only() -> None:
 
 
 def test_cleaned_death_suppresses_death_reveal_only() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.JANITOR, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.CLEAN, "P05"),
+        ),
+    )
+
+    assert result.eliminated == "P05"
+    assert result.cleaned_deaths == ("P05",)
+    assert result.clean_spent_actor_ids == ("P02",)
+    assert [(r.public_player_id, r.role, r.faction, r.cleaned) for r in result.death_reveals] == [
+        ("P05", None, None, True)
+    ]
+
+
+def test_janitor_clean_is_one_successful_shot() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.JANITOR, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+
+    protected = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.CLEAN, "P05"),
+            _intent("P04", NightActionKind.PROTECT, "P05"),
+        ),
+    )
+    assert protected.eliminated is None
+    assert protected.cleaned_deaths == ()
+    assert protected.clean_spent_actor_ids == ()
+
+    spent_state = state.model_copy(
+        update={
+            "seats": (
+                state.seats[0],
+                state.seats[1].model_copy(update={"janitor_clean_shots_remaining": 0}),
+                *state.seats[2:],
+            )
+        }
+    )
+    after_spent = resolve_night_actions(
+        spent_state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.CLEAN, "P05"),
+        ),
+    )
+
+    assert after_spent.eliminated == "P05"
+    assert after_spent.cleaned_deaths == ()
+    assert after_spent.clean_spent_actor_ids == ()
+    assert [
+        (r.public_player_id, r.role, r.faction, r.cleaned) for r in after_spent.death_reveals
+    ] == [("P05", Role.VILLAGER, Faction.TOWN, False)]
+
+
+def test_non_janitor_clean_intent_is_ignored() -> None:
     result = resolve_night_actions(
         _state(),
         (
@@ -308,9 +403,10 @@ def test_cleaned_death_suppresses_death_reveal_only() -> None:
     )
 
     assert result.eliminated == "P05"
-    assert result.cleaned_deaths == ("P05",)
+    assert result.cleaned_deaths == ()
+    assert result.clean_spent_actor_ids == ()
     assert [(r.public_player_id, r.role, r.faction, r.cleaned) for r in result.death_reveals] == [
-        ("P05", None, None, True)
+        ("P05", Role.VILLAGER, Faction.TOWN, False)
     ]
 
 

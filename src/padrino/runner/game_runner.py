@@ -700,34 +700,48 @@ def _resolve_night_events(
 ) -> list[dict[str, Any]]:
     submissions = {sid: r.action for sid, r in responses.items()}
     night = resolve_night(state, submissions)
+    night_payload: dict[str, Any] = {
+        "eliminated": night.eliminated,
+        "protected": night.protected,
+        "mafia_kill_target": night.mafia_kill_target,
+    }
+    if night.cleaned_deaths:
+        night_payload["cleaned_deaths"] = night.cleaned_deaths
+        night_payload["clean_spent_actor_ids"] = night.clean_spent_actor_ids
     events: list[dict[str, Any]] = [
         {
             "event_type": "NightResolved",
             "phase": phase_id,
             "visibility": "SYSTEM",
             "actor_player_id": None,
-            "payload": {
-                "eliminated": night.eliminated,
-                "protected": night.protected,
-                "mafia_kill_target": night.mafia_kill_target,
-            },
+            "payload": night_payload,
         }
     ]
     if night.eliminated is not None:
-        target_seat = state.seat_by_public_id(night.eliminated)
-        if target_seat is not None:
+        death_reveal = next(
+            (
+                reveal
+                for reveal in night.death_reveals
+                if reveal.public_player_id == night.eliminated
+            ),
+            None,
+        )
+        if death_reveal is not None:
+            payload: dict[str, Any] = {
+                "public_player_id": death_reveal.public_player_id,
+                "cause": CAUSE_NIGHT_KILL,
+            }
+            if death_reveal.role is not None:
+                payload["role"] = death_reveal.role.value
+            if death_reveal.faction is not None:
+                payload["faction"] = death_reveal.faction.value
             events.append(
                 {
                     "event_type": "PlayerEliminated",
                     "phase": phase_id,
                     "visibility": "PUBLIC",
                     "actor_player_id": None,
-                    "payload": {
-                        "public_player_id": night.eliminated,
-                        "role": target_seat.role.value,
-                        "faction": target_seat.faction.value,
-                        "cause": CAUSE_NIGHT_KILL,
-                    },
+                    "payload": payload,
                 }
             )
     if night.detective_finding is not None:

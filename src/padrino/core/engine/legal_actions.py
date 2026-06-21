@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from padrino.core.engine.state import GameState, Seat
+from padrino.core.engine.state import GameState, Seat, janitor_clean_shots_remaining
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role
 
 
@@ -122,6 +122,8 @@ def legal_actions_for(state: GameState, seat: Seat) -> LegalActions:
                 legal_targets=targets,
             )
         if seat.role in _FUTURE_NIGHT_ROLE_ACTIONS:
+            if seat.role is Role.JANITOR and janitor_clean_shots_remaining(seat) <= 0:
+                return _NOOP_ONLY
             return LegalActions(
                 allowed_action_types=[_FUTURE_NIGHT_ROLE_ACTIONS[seat.role]],
                 legal_targets=_living_others(state, seat),

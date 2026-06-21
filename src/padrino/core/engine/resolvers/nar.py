@@ -24,7 +24,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from padrino.core.engine.actions import Action
-from padrino.core.engine.state import GameState, Seat
+from padrino.core.engine.state import GameState, Seat, janitor_clean_shots_remaining
 from padrino.core.enums import ActionType, Faction, Role
 
 FINDING_MAFIA: Literal["MAFIA"] = "MAFIA"
@@ -313,6 +313,7 @@ class MatrixNightResolution(BaseModel):
     feedback: tuple[NightFeedback, ...] = ()
     death_reveals: tuple[DeathReveal, ...] = ()
     cleaned_deaths: tuple[str, ...] = ()
+    clean_spent_actor_ids: tuple[str, ...] = ()
     protect_outcomes: dict[str, ProtectOutcome] = Field(default_factory=dict)
     investigation_outcomes: dict[str, InvestigationOutcome] = Field(default_factory=dict)
 
@@ -382,12 +383,19 @@ def _valid_target_for_kind(
         return actor.role is Role.MAFIA_ROLEBLOCKER and target_id != actor.public_player_id
     if kind is NightActionKind.REDIRECT:
         return _alive_seat(state, redirect_target_id) is not None
-    return kind in {
-        NightActionKind.FRAME,
-        NightActionKind.TRACK,
-        NightActionKind.WATCH,
-        NightActionKind.CLEAN,
-    }
+    if kind is NightActionKind.FRAME:
+        return actor.role is Role.FRAMER and target_id != actor.public_player_id
+    if kind is NightActionKind.TRACK:
+        return actor.role is Role.TRACKER and target_id != actor.public_player_id
+    if kind is NightActionKind.WATCH:
+        return actor.role is Role.WATCHER and target_id != actor.public_player_id
+    if kind is NightActionKind.CLEAN:
+        return (
+            actor.role is Role.JANITOR
+            and target_id != actor.public_player_id
+            and janitor_clean_shots_remaining(actor) > 0
+        )
+    return False
 
 
 def _valid_intents(
@@ -661,17 +669,20 @@ def _resolve_visit_graph_feedback(
 
 
 def _resolve_cleaned_deaths(
+    state: GameState,
     intents: Sequence[NightActionIntent],
     eliminated: str | None,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if eliminated is None:
-        return ()
-    cleaned = {
-        intent.target
+        return (), ()
+    cleaner_ids = {
+        intent.actor
         for intent in _tier_intents(intents, NightActionKind.CLEAN)
         if intent.target == eliminated
     }
-    return tuple(pid for pid in (eliminated,) if pid in cleaned)
+    if not cleaner_ids:
+        return (), ()
+    return (eliminated,), _sort_ids(state, cleaner_ids)
 
 
 def _death_reveals(
@@ -738,7 +749,9 @@ def resolve_night_actions(
     feedback.extend(investigation_feedback)
     feedback.extend(_resolve_visit_graph_feedback(state, active_intents, visits))
 
-    cleaned_deaths = _resolve_cleaned_deaths(active_intents, eliminated)
+    cleaned_deaths, clean_spent_actor_ids = _resolve_cleaned_deaths(
+        state, active_intents, eliminated
+    )
     death_reveals = _death_reveals(state, eliminated, cleaned_deaths)
 
     return MatrixNightResolution(
@@ -753,6 +766,7 @@ def resolve_night_actions(
         feedback=tuple(feedback),
         death_reveals=death_reveals,
         cleaned_deaths=cleaned_deaths,
+        clean_spent_actor_ids=clean_spent_actor_ids,
         protect_outcomes=protect_outcomes,
         investigation_outcomes=investigation_outcomes,
     )

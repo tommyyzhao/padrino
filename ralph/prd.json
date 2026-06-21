@@ -147,7 +147,7 @@
         "All backend gates pass."
       ],
       "notes": "Gemini: 'Janitor State Leaks' when a cleaned death ends the game. Codex: limit shots, be careful with observation redaction. Real modules: core/spectator_projection.py (mid-game) and core/reveal.py (endgame).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-178",
