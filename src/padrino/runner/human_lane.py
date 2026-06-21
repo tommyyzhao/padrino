@@ -58,7 +58,7 @@ from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
-from padrino.runner.disconnect_takeover import take_over_seat
+from padrino.runner.disconnect_takeover import apply_takeover, build_takeover_event
 from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, drive_game_loop
 from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
 from padrino.runner.human_chat_release import release_held_chat_for_phase
@@ -353,6 +353,24 @@ async def _persist_stored_event_row(
     )
 
 
+def _seat_has_in_memory_takeover(event_log: EventLog, seat_id: str) -> bool:
+    """Return whether ``event_log`` already holds a SeatTakenOver for ``seat_id``.
+
+    The takeover recheck (US-197 AC2) guards against appending a SECOND
+    ``SeatTakenOver`` for a seat the in-memory log already took over. The DB-only
+    recheck (``_expired_human_seat_for_update``) cannot catch the case where a
+    prior commit FAILED mid-takeover: the DB seat may still read HUMAN/expired
+    while the in-memory mux already routes the seat to the AI adapter (the swap
+    is not reverted on commit failure — AC1). Scanning the in-memory log makes
+    the retry idempotent regardless of the DB seat row.
+    """
+    return any(
+        event.body.get("event_type") == "SeatTakenOver"
+        and event.body.get("payload", {}).get("public_player_id") == seat_id
+        for event in event_log.events
+    )
+
+
 async def _take_over_expired_human_seats(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -423,6 +441,12 @@ async def _take_over_expired_human_seats(
             ai_adapter_factory=ai_adapter_factory,
         )
 
+        # In-memory recheck (US-197 AC2): if a prior takeover commit FAILED but
+        # left the in-memory swap/log in place, the DB seat may still read
+        # HUMAN/expired. Skip rather than append a SECOND SeatTakenOver.
+        if _seat_has_in_memory_takeover(event_log, seat_id):
+            continue
+
         async with session_factory() as session, session.begin():
             seat = await _expired_human_seat_for_update(
                 session,
@@ -433,29 +457,44 @@ async def _take_over_expired_human_seats(
             )
             if seat is None:
                 continue
-            result = take_over_seat(
-                mux=mux,
+            # US-197 AC1: build the SeatTakenOver envelope WITHOUT touching the
+            # long-lived in-memory mux / event_log, persist the paired row + seat
+            # mutation, and let this block's session.begin() commit. The
+            # in-memory swap + log append happen ONLY AFTER the commit succeeds
+            # (below), so a flush/commit failure here rolls back the DB and never
+            # advances the in-memory log/mux past what is durable in game_events.
+            event = build_takeover_event(
                 event_log=event_log,
                 state=state,
                 seat_id=seat_id,
-                replacement_adapter=replacement,
                 replacement_agent_build_ref=str(build_id),
             )
-            phase = str(result.event.body["phase"])
+            phase = str(event.body["phase"])
             seat.seat_kind = SeatKind.AI_TAKEOVER.value
             seat.taken_over_at_phase = phase
             seat.takeover_agent_build_id = build_id
             # Persist the paired SeatTakenOver event row in the SAME transaction
             # as the seat mutation (hard rule 4): a crash can never leave an
             # AI_TAKEOVER seat without its provenance event in game_events.
-            await _persist_stored_event_row(session, game_id=game_id, stored=result.event)
-            applied.append(
-                AppliedTakeover(
-                    seat_id=seat_id,
-                    replacement_agent_build_id=build_id,
-                    event=result.event,
-                )
+            await _persist_stored_event_row(session, game_id=game_id, stored=event)
+
+        # The DB write committed; only now apply the irreversible in-memory swap
+        # + log append (US-197 AC1). If the commit above raised, control never
+        # reaches here and the in-memory state is untouched.
+        result = apply_takeover(
+            mux=mux,
+            event_log=event_log,
+            event=event,
+            seat_id=seat_id,
+            replacement_adapter=replacement,
+        )
+        applied.append(
+            AppliedTakeover(
+                seat_id=seat_id,
+                replacement_agent_build_id=build_id,
+                event=result.event,
             )
+        )
 
     return applied
 

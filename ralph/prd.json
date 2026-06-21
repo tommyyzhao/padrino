@@ -136,7 +136,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: disconnect_takeover.py:75-92, human_lane.py:426-451/256-274, multiplex.py:69-71, event_log.py:87-99, events.py:35-47/106, game_runner.py:260-270. Existing tests (test_human_lane_takeover_wiring.py:440/497) only cover the commit-SUCCESS idempotency path and the crash-AFTER-commit path; the commit-FAILURE-mid-takeover window is unguarded. Cleanest: split take_over_seat into pure-envelope-build vs in-memory-commit; build+persist+commit, then apply to mux/event_log.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-198",
@@ -202,7 +202,10 @@
       "id": "US-202",
       "title": "OAuth single-use state store (replay-resistant callback)",
       "priority": 202,
-      "dependencies": ["US-199", "US-201"],
+      "dependencies": [
+        "US-199",
+        "US-201"
+      ],
       "description": "ROUND-2 REVIEW FINDING #11 (LOW, PLAUSIBLE). OAuth state and nonce are stateless signed tokens with no server-side single-use ledger: validate_authorization_state (oauth.py:169-193) only verifies the HMAC signature, version, nonce presence, and session_binding; it never records or checks a consumed-state set. The callback (routes/human.py:567-629) does compare_digest + validate_authorization_state + exchange_code with no DB/cache write marking the state/nonce/code as used. Within the 600s flow-cookie TTL, the same (state cookie, code) pair can be replayed; the only block on a second exchange minting a second session is the upstream provider invalidating the authorization code on first redemption (a provider-dependent defense). Add a server-side single-use block so replay fails closed independent of provider behavior.",
       "acceptanceCriteria": [
         "A server-side single-use store keyed on the per-flow unique token (already generated in _encode_state, oauth.py:341) records consumed flows; the callback atomically inserts-or-rejects (INSERT ... ON CONFLICT DO NOTHING) BEFORE exchange_code, rejecting a replayed flow with a clear fail-closed error (e.g. oauth_state_replayed).",

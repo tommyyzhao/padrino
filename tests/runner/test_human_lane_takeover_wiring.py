@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -43,6 +44,7 @@ from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
+from padrino.llm.human_adapter import HumanAdapter
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.llm.multiplex import SeatMultiplexAdapter
 from padrino.runner.human_durability import replay_state_from_rows
@@ -572,3 +574,108 @@ async def test_takeover_event_row_is_co_committed_with_seat_mutation(
     decoded = [EventAdapter.validate_python(e.body) for e in rehydrated_log.events]
     provenance = compute_seat_provenance(decoded)
     assert provenance[_HUMAN_SEAT] == PROVENANCE_HUMAN_THEN_AI
+
+
+async def test_takeover_commit_failure_leaves_in_memory_uncorrupted(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """US-197: a mid-takeover commit failure must not corrupt in-memory state.
+
+    Force the takeover transaction to raise (patched ``_persist_stored_event_row``,
+    standing in for any flush/commit failure inside ``session.begin()``) and
+    assert (a) the in-memory mux still routes the seat to the HUMAN adapter and
+    the event_log has NO orphaned SeatTakenOver, and (b) a subsequent tick does
+    not append a second SeatTakenOver nor re-persist a rolled-back sequence.
+    """
+    async with session_factory() as session, session.begin():
+        principal_id = await _seed_principal(session)
+        ai_build_id = await _seed_agent_build(session, label="failwin-ai")
+        await _seed_agent_build(session, label="failwin-takeover")
+        game_id = await _seed_game(
+            session,
+            principal_id=principal_id,
+            ai_build_id=ai_build_id,
+            status="RUNNING",
+        )
+        await _persist_vote_phase(session, game_id)
+        await presence_repo.mark_disconnected(
+            session,
+            game_id=game_id,
+            public_player_id=_HUMAN_SEAT,
+            disconnected_at=_NOW - timedelta(seconds=180),
+        )
+
+    rows = await _event_rows(session_factory, game_id)
+    state, event_log = replay_state_from_rows(rows)
+    sequences_before = [e.sequence for e in event_log.events]
+    adapter = await build_human_lane_adapter(
+        session_factory,
+        game_id=game_id,
+        settings=_settings(),
+        ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+    )
+    assert isinstance(adapter, SeatMultiplexAdapter)
+    assert isinstance(adapter._adapters[_HUMAN_SEAT], HumanAdapter)
+
+    boom = RuntimeError("simulated takeover transaction failure")
+
+    async def _raise(*_args: Any, **_kwargs: Any) -> None:
+        raise boom
+
+    monkeypatch.setattr(human_lane, "_persist_stored_event_row", _raise)
+
+    with pytest.raises(RuntimeError):
+        await _take_over_expired_human_seats(
+            session_factory,
+            game_id=game_id,
+            mux=adapter,
+            event_log=event_log,
+            state=state,
+            settings=_settings(),
+            ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+            now=_NOW,
+        )
+
+    # (a) The in-memory swap NEVER advanced past the durable DB state: the seat
+    # still routes to the HUMAN adapter and the log holds no orphaned event.
+    assert isinstance(adapter._adapters[_HUMAN_SEAT], HumanAdapter)
+    assert [e.body["event_type"] for e in event_log.events].count("SeatTakenOver") == 0
+    assert [e.sequence for e in event_log.events] == sequences_before
+
+    # The DB rolled back: no SeatTakenOver row, seat is still HUMAN/expired.
+    persisted = await _event_rows(session_factory, game_id)
+    assert [r for r in persisted if r.event_type == "SeatTakenOver"] == []
+    async with session_factory() as session:
+        seat = (
+            await session.execute(
+                select(GameSeat).where(
+                    GameSeat.game_id == game_id,
+                    GameSeat.public_player_id == _HUMAN_SEAT,
+                )
+            )
+        ).scalar_one()
+    assert seat.seat_kind == SeatKind.HUMAN.value
+
+    # (b) A subsequent tick (commit now succeeds) takes over EXACTLY once: one
+    # SeatTakenOver in-memory, one persisted row, one contiguous new sequence.
+    monkeypatch.undo()
+    applied = await _take_over_expired_human_seats(
+        session_factory,
+        game_id=game_id,
+        mux=adapter,
+        event_log=event_log,
+        state=state,
+        settings=_settings(),
+        ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+        now=_NOW,
+    )
+    assert [result.seat_id for result in applied] == [_HUMAN_SEAT]
+    assert not isinstance(adapter._adapters[_HUMAN_SEAT], HumanAdapter)
+    assert [e.body["event_type"] for e in event_log.events].count("SeatTakenOver") == 1
+    assert [e.sequence for e in event_log.events] == [*sequences_before, sequences_before[-1] + 1]
+
+    persisted_after = await _event_rows(session_factory, game_id)
+    takeover_rows = [r for r in persisted_after if r.event_type == "SeatTakenOver"]
+    assert len(takeover_rows) == 1
+    assert takeover_rows[0].sequence == sequences_before[-1] + 1
