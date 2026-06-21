@@ -25,6 +25,10 @@ class Ruleset(Protocol):
     PLAYER_COUNT: int
     ROLE_COUNTS: dict[Role, int]
     ROLE_FACTIONS: dict[Role, Faction]
+    ALT_WIN_CONDITIONS: tuple[str, ...]
+    SOLO_FACTIONS: tuple[str, ...]
+    FACTION_MUTATION_ALLOWED: bool
+    KINGMAKING_OBJECTIVE: bool
     DISCUSSION_ROUNDS_PER_DAY: int
     MAX_DAYS: int
     PUBLIC_MESSAGE_MAX_CHARS: int

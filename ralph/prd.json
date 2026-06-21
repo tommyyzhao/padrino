@@ -35,7 +35,7 @@
         "All backend gates pass."
       ],
       "notes": "Review (both Codex + Gemini): the canonical ladder must stay 'narrow, boring, heavily tested.' Unknown context => unrated, never canonical. There is no US-146-labeled suite; the concrete in-tree gates are tests/ratings/test_segregation.py and tests/test_invariants_human_mp.py.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-173",

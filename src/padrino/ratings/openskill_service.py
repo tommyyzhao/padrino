@@ -25,6 +25,7 @@ from openskill.models import PlackettLuce
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction
+from padrino.core.rulesets.canonicality import canonical_team_ranks_for_outcome
 from padrino.db.models import Game, RatingContext, RatingEvent
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.db.repositories import ratings as ratings_repo
@@ -52,11 +53,8 @@ class GameResult:
 
 def _ranks_for(winner: Literal["TOWN", "MAFIA", "DRAW"]) -> tuple[int, int]:
     """Return ``(town_rank, mafia_rank)`` — lower is better."""
-    if winner == "TOWN":
-        return (1, 2)
-    if winner == "MAFIA":
-        return (2, 1)
-    return (1, 1)
+    ranks = canonical_team_ranks_for_outcome(winner)
+    return (ranks["TOWN"], ranks["MAFIA"])
 
 
 async def _apply_scope_update(

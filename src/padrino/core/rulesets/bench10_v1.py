@@ -45,6 +45,10 @@ ROLE_FACTIONS: Final[dict[Role, Faction]] = {
     Role.DOCTOR: Faction.TOWN,
     Role.VILLAGER: Faction.TOWN,
 }
+ALT_WIN_CONDITIONS: Final[tuple[str, ...]] = ()
+SOLO_FACTIONS: Final[tuple[str, ...]] = ()
+FACTION_MUTATION_ALLOWED: Final[bool] = False
+KINGMAKING_OBJECTIVE: Final[bool] = False
 
 
 def role_family_for(role: Role) -> RoleFamily:

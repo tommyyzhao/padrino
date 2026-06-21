@@ -69,6 +69,7 @@ from padrino.core.observation_privacy import (
 )
 from padrino.core.observations import Observation, Ruleset
 from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets.canonicality import assert_ruleset_canonical_pure
 from padrino.core.spectator_projection import project_events_for_spectator
 from padrino.db.models import (
     Game,
@@ -1159,3 +1160,8 @@ async def test_assert_no_identity_markers_catches_model_and_human_markers() -> N
     for key in sorted(IDENTITY_MARKER_KEYS):
         with pytest.raises(AnonymityViolation):
             assert_no_identity_markers({"meta": {key: "x"}})
+
+
+async def test_human_invariant_gate_includes_canonical_ruleset_purity() -> None:
+    """The aggregate invariant gate also protects the canonical ladder."""
+    assert_ruleset_canonical_pure(mini7_v1)
