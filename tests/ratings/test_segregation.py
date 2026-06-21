@@ -26,13 +26,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import Faction, LeagueKind, Role
+from padrino.core.enums import Faction, LeagueKind, RatingContextKind, Role
 from padrino.core.rulesets import bench10_v1, mini7_v1
 from padrino.db.models import (
     HumanRating,
     HumanRatingEvent,
     League,
     Rating,
+    RatingContext,
     RatingEvent,
 )
 from padrino.db.repositories import (
@@ -54,6 +55,7 @@ from padrino.db.repositories import (
     providers as providers_repo,
 )
 from padrino.llm.mock import DeterministicMockAdapter
+from padrino.ratings.openskill_service import GameResult, update_ratings_for_game
 from padrino.runner.game_runner import (
     GameConfig,
     GamePersistence,
@@ -289,5 +291,91 @@ async def test_human_seat_fails_closed_even_if_ranked_true(
     )
     assert outcome.final_state.terminal_result == "TOWN"
 
+    counts = await _count_all_rating_rows(session_factory)
+    assert counts == (0, 0, 0, 0)
+
+
+async def test_non_canonical_context_writes_zero_scientific_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A non-canonical context is scored outside the sacred Rating tables."""
+    experimental_ruleset = "experimental_placement_v1"
+    async with session_factory() as session, session.begin():
+        provider = await providers_repo.create(
+            session, name="cerebras", auth_secret_ref="CEREBRAS_API_KEY"
+        )
+        mc = await model_configs_repo.create(
+            session,
+            provider_id=provider.id,
+            model_name="glm-4.7",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        builds: dict[str, uuid.UUID] = {}
+        for seat_index in range(7):
+            pv = await prompt_versions_repo.create(
+                session,
+                ruleset_id=experimental_ruleset,
+                version=f"v{seat_index}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"noncanonical-{seat_index}",
+            )
+            ab = await agent_builds_repo.create(
+                session,
+                display_name=f"build-{seat_index}",
+                model_config_id=mc.id,
+                prompt_version_id=pv.id,
+                adapter_version="2026.05",
+                inference_params={"temperature": 0.7},
+                active=True,
+            )
+            builds[f"P{seat_index + 1:02d}"] = ab.id
+        league = await leagues_repo.create(
+            session,
+            name="experimental",
+            ruleset_id=experimental_ruleset,
+            ranked=True,
+        )
+        game = await games_repo.create(
+            session,
+            ruleset_id=experimental_ruleset,
+            game_seed="experimental-seed",
+            status="COMPLETED",
+        )
+        session.add(
+            RatingContext(
+                kind=RatingContextKind.PLACEMENT.value,
+                ruleset_id=experimental_ruleset,
+                is_canonical=False,
+                display_label="Experimental placement",
+            )
+        )
+
+    seat_factions = {
+        "P01": Faction.MAFIA,
+        "P02": Faction.MAFIA,
+        "P03": Faction.TOWN,
+        "P04": Faction.TOWN,
+        "P05": Faction.TOWN,
+        "P06": Faction.TOWN,
+        "P07": Faction.TOWN,
+    }
+    async with session_factory() as session, session.begin():
+        events = await update_ratings_for_game(
+            session,
+            league_id=league.id,
+            game_result=GameResult(
+                game_id=game.id,
+                winner="TOWN",
+                seat_factions=seat_factions,
+            ),
+            agent_builds_by_seat=builds,
+        )
+
+    assert events == []
     counts = await _count_all_rating_rows(session_factory)
     assert counts == (0, 0, 0, 0)

@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from typing import Final
 
-from padrino.core.enums import Faction, Role, RoleFamily
+from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
 
 RULESET_ID: Final[str] = "mini7_v1"
+RATING_CONTEXT_KIND: Final[RatingContextKind] = RatingContextKind.CANONICAL_TEAM
+IS_CANONICAL: Final[bool] = True
+RATING_CONTEXT_DISPLAY_LABEL: Final[str] = "Mini 7 canonical team"
 PLAYER_COUNT: Final[int] = 7
 
 ROLE_COUNTS: Final[dict[Role, int]] = {

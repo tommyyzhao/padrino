@@ -25,7 +25,8 @@ from openskill.models import PlackettLuce
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction
-from padrino.db.models import RatingEvent
+from padrino.db.models import Game, RatingContext, RatingEvent
+from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.db.repositories import ratings as ratings_repo
 
 INITIAL_MU: Final[float] = 25.0
@@ -63,6 +64,9 @@ async def _apply_scope_update(
     *,
     league_id: uuid.UUID,
     game_id: uuid.UUID,
+    ruleset_id: str,
+    rating_context_id: uuid.UUID,
+    game_seed: str,
     scope_type: str,
     town_scope_value: str,
     mafia_scope_value: str,
@@ -84,6 +88,8 @@ async def _apply_scope_update(
             initial_mu=INITIAL_MU,
             initial_sigma=INITIAL_SIGMA,
             initial_conservative_score=_conservative(INITIAL_MU, INITIAL_SIGMA),
+            ruleset_id=ruleset_id,
+            rating_context_id=rating_context_id,
         )
         town_rows.append(row)
 
@@ -98,6 +104,8 @@ async def _apply_scope_update(
             initial_mu=INITIAL_MU,
             initial_sigma=INITIAL_SIGMA,
             initial_conservative_score=_conservative(INITIAL_MU, INITIAL_SIGMA),
+            ruleset_id=ruleset_id,
+            rating_context_id=rating_context_id,
         )
         mafia_rows.append(row)
 
@@ -119,6 +127,10 @@ async def _apply_scope_update(
                 new_sigma=new.sigma,
                 league_id=league_id,
                 game_id=game_id,
+                ruleset_id=ruleset_id,
+                rating_context_id=rating_context_id,
+                game_seed=game_seed,
+                team_outcome=winner,
                 scope_type=scope_type,
                 scope_value=town_scope_value,
                 public_player_id=sid,
@@ -134,6 +146,10 @@ async def _apply_scope_update(
                 new_sigma=new.sigma,
                 league_id=league_id,
                 game_id=game_id,
+                ruleset_id=ruleset_id,
+                rating_context_id=rating_context_id,
+                game_seed=game_seed,
+                team_outcome=winner,
                 scope_type=scope_type,
                 scope_value=mafia_scope_value,
                 public_player_id=sid,
@@ -151,6 +167,10 @@ async def _persist_one(
     new_sigma: float,
     league_id: uuid.UUID,
     game_id: uuid.UUID,
+    ruleset_id: str,
+    rating_context_id: uuid.UUID,
+    game_seed: str,
+    team_outcome: str,
     scope_type: str,
     scope_value: str,
     public_player_id: str | None = None,
@@ -179,6 +199,10 @@ async def _persist_one(
         league_id=league_id,
         game_id=game_id,
         agent_build_id=updated.agent_build_id,
+        ruleset_id=ruleset_id,
+        rating_context_id=rating_context_id,
+        game_seed=game_seed,
+        team_outcome=team_outcome,
         scope_type=scope_type,
         scope_value=scope_value,
         before_mu=before_mu,
@@ -187,6 +211,25 @@ async def _persist_one(
         after_sigma=new_sigma,
         public_player_id=public_player_id,
     )
+
+
+async def _resolve_canonical_metadata(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    game_id: uuid.UUID,
+) -> tuple[Game, RatingContext] | None:
+    game = await session.get(Game, game_id)
+    if game is None:
+        return None
+    context = await rating_contexts_repo.resolve_canonical_team_context(
+        session,
+        league_id=league_id,
+        ruleset_id=game.ruleset_id,
+    )
+    if context is None:
+        return None
+    return game, context
 
 
 async def update_ratings_for_game(
@@ -211,6 +254,15 @@ async def update_ratings_for_game(
     Returns the freshly-appended :class:`RatingEvent` audit rows in scope
     order (GLOBAL then FACTION) and seat order within each scope.
     """
+    metadata = await _resolve_canonical_metadata(
+        session,
+        league_id=league_id,
+        game_id=game_result.game_id,
+    )
+    if metadata is None:
+        return []
+    game, context = metadata
+
     seats_sorted = sorted(game_result.seat_factions)
     town_seats: list[tuple[str, uuid.UUID]] = []
     mafia_seats: list[tuple[str, uuid.UUID]] = []
@@ -230,6 +282,9 @@ async def update_ratings_for_game(
             session,
             league_id=league_id,
             game_id=game_result.game_id,
+            ruleset_id=game.ruleset_id,
+            rating_context_id=context.id,
+            game_seed=game.game_seed,
             scope_type=SCOPE_GLOBAL,
             town_scope_value=SCOPE_VALUE_GLOBAL,
             mafia_scope_value=SCOPE_VALUE_GLOBAL,
@@ -245,6 +300,9 @@ async def update_ratings_for_game(
             session,
             league_id=league_id,
             game_id=game_result.game_id,
+            ruleset_id=game.ruleset_id,
+            rating_context_id=context.id,
+            game_seed=game.game_seed,
             scope_type=SCOPE_FACTION,
             town_scope_value=Faction.TOWN.value,
             mafia_scope_value=Faction.MAFIA.value,

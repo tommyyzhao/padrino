@@ -5,11 +5,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.core.enums import Faction
-from padrino.db.models import AgentBuild, Game, League, Rating, RatingEvent
+from padrino.core.enums import Faction, RatingContextKind
+from padrino.db.models import AgentBuild, Game, League, Rating, RatingContext, RatingEvent
 from padrino.db.repositories import (
     agent_builds,
     games,
@@ -18,6 +18,7 @@ from padrino.db.repositories import (
     prompt_versions,
     providers,
 )
+from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.ratings.openskill_service import (
     INITIAL_MU,
     INITIAL_SIGMA,
@@ -161,6 +162,69 @@ async def test_town_win_winner_mu_up_loser_mu_down(
         else:
             assert r.mu < INITIAL_MU
         assert r.sigma < INITIAL_SIGMA
+
+
+async def test_canonical_rating_writes_carry_context_and_outcome_metadata(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league, builds, game = await _seed(session_factory, hash_prefix="ctx-meta")
+    seat_factions, abs_by_seat = _seven_seat_layout(builds)
+
+    async with session_factory() as session:
+        context = await rating_contexts_repo.get_by_ruleset_kind(
+            session,
+            ruleset_id="mini7_v1",
+            kind=RatingContextKind.CANONICAL_TEAM,
+        )
+    assert context is not None
+    assert context.is_canonical is True
+
+    async with session_factory() as session, session.begin():
+        await update_ratings_for_game(
+            session,
+            league_id=league.id,
+            game_result=GameResult(game_id=game.id, winner="TOWN", seat_factions=seat_factions),
+            agent_builds_by_seat=abs_by_seat,
+        )
+
+    async with session_factory() as session:
+        ratings = (await session.execute(select(Rating))).scalars().all()
+        events = (await session.execute(select(RatingEvent))).scalars().all()
+
+    assert ratings
+    assert events
+    assert {row.ruleset_id for row in ratings} == {"mini7_v1"}
+    assert {row.rating_context_id for row in ratings} == {context.id}
+    assert {event.ruleset_id for event in events} == {"mini7_v1"}
+    assert {event.rating_context_id for event in events} == {context.id}
+    assert {event.game_seed for event in events} == {game.game_seed}
+    assert {event.team_outcome for event in events} == {"TOWN"}
+    assert {event.agent_build_id for event in events} == {build.id for build in builds}
+
+
+async def test_missing_rating_context_fails_closed_without_canonical_write(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league, builds, game = await _seed(session_factory, hash_prefix="ctx-missing")
+    seat_factions, abs_by_seat = _seven_seat_layout(builds)
+
+    async with session_factory() as session, session.begin():
+        await session.execute(delete(RatingContext))
+
+    async with session_factory() as session, session.begin():
+        events = await update_ratings_for_game(
+            session,
+            league_id=league.id,
+            game_result=GameResult(game_id=game.id, winner="TOWN", seat_factions=seat_factions),
+            agent_builds_by_seat=abs_by_seat,
+        )
+
+    assert events == []
+    async with session_factory() as session:
+        rating_count = (await session.execute(select(Rating))).scalars().all()
+        event_count = (await session.execute(select(RatingEvent))).scalars().all()
+    assert rating_count == []
+    assert event_count == []
 
 
 async def test_mafia_win_winner_mu_up_loser_mu_down(

@@ -32,9 +32,14 @@ from padrino.db.models import (
     LlmCall,
     ModelConfig,
     ModelProvider,
+    PlacementRating,
+    PlacementRatingEvent,
     PromptVersion,
     Rating,
+    RatingContext,
     RatingEvent,
+    SoloRateRating,
+    SoloRateRatingEvent,
 )
 from padrino.db.repositories import (
     agent_builds,
@@ -166,8 +171,13 @@ def test_uuid_primary_keys_use_portable_sa_uuid() -> None:
         GameSeat,
         GameEvent,
         LlmCall,
+        RatingContext,
         Rating,
         RatingEvent,
+        PlacementRating,
+        PlacementRatingEvent,
+        SoloRateRating,
+        SoloRateRatingEvent,
         ApiKey,
     )
     for model in uuid_owners:

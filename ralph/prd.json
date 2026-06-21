@@ -20,7 +20,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Generalizes the planned three rating contexts (scientific / humans-included / human-personal) into N contexts keyed by (ruleset_id, kind). REUSES, not reimplements, the in-tree segregation pattern (League.kind + _should_apply_ratings + the human_rating sibling tables). Contexts are keyed on (ruleset_id, kind) with no per-setup key.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-172",

@@ -2,11 +2,12 @@
 
 Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``agent_builds``, ``leagues``, ``gauntlets``, ``gauntlet_roster_slots``,
-``games``, ``game_seats``, ``game_events``, ``llm_calls``, ``ratings``,
-``rating_events``, the dormant human-lane siblings ``human_rating`` /
-``human_rating_event`` (Wave 9, US-125), and the browser-human identity layer
-``principals`` / ``human_sessions`` (Wave 9, US-127), plus human-lane cost
-admission slots.
+``games``, ``game_seats``, ``game_events``, ``llm_calls``,
+``rating_contexts``, ``ratings``, ``rating_events``, the dormant human-lane
+siblings ``human_rating`` / ``human_rating_event`` (Wave 9, US-125), the
+non-canonical context sibling rating tables, and the browser-human identity
+layer ``principals`` / ``human_sessions`` (Wave 9, US-127), plus human-lane
+cost admission slots.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -384,6 +386,33 @@ class HumanInferenceReservation(Base):
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class RatingContext(Base):
+    """First-class scoring context keyed only by ``(ruleset_id, kind)``.
+
+    A CANONICAL_TEAM context is metadata for the existing scientific
+    ``ratings`` / ``rating_events`` path. PLACEMENT and SOLO_RATE are separate
+    contexts whose writes live in sibling tables.
+    """
+
+    __tablename__ = "rating_contexts"
+    __table_args__ = (
+        UniqueConstraint("ruleset_id", "kind", name="uq_rating_context_ruleset_kind"),
+        CheckConstraint(
+            "kind IN ('CANONICAL_TEAM', 'PLACEMENT', 'SOLO_RATE')",
+            name="ck_rating_context_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    is_canonical: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    display_label: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class Rating(Base):
     __tablename__ = "ratings"
     __table_args__ = (
@@ -398,6 +427,12 @@ class Rating(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    # Additive context marker (US-171). The scientific reach path remains
+    # ``league_id`` + League.kind; this nullable FK is never a bypass.
+    ruleset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    rating_context_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("rating_contexts.id"), nullable=True
+    )
     agent_build_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("agent_builds.id"), nullable=False
     )
@@ -481,6 +516,12 @@ class RatingEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
     game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    ruleset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    rating_context_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("rating_contexts.id"), nullable=True
+    )
+    game_seed: Mapped[str | None] = mapped_column(String, nullable=True)
+    team_outcome: Mapped[str | None] = mapped_column(String, nullable=True)
     agent_build_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("agent_builds.id"), nullable=False
     )
@@ -491,6 +532,147 @@ class RatingEvent(Base):
     before_sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     after_mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     after_sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class PlacementRating(Base):
+    """OpenSkill rating rows for non-canonical placement contexts."""
+
+    __tablename__ = "placement_ratings"
+    __table_args__ = (
+        UniqueConstraint(
+            "rating_context_id",
+            "agent_build_id",
+            "scope_type",
+            "scope_value",
+            name="uq_placement_rating_scope",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    rating_context_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("rating_contexts.id"), nullable=False
+    )
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_value: Mapped[str] = mapped_column(String, nullable=False)
+    mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    conservative_score: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    games: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_game_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class PlacementRatingEvent(Base):
+    """Audit rows for placement-context OpenSkill updates."""
+
+    __tablename__ = "placement_rating_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "game_id",
+            "agent_build_id",
+            "scope_type",
+            "scope_value",
+            "public_player_id",
+            name="uq_placement_rating_event_scope",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    rating_context_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("rating_contexts.id"), nullable=False
+    )
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    game_seed: Mapped[str] = mapped_column(String, nullable=False)
+    team_outcome: Mapped[str] = mapped_column(String, nullable=False)
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=False
+    )
+    public_player_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_value: Mapped[str] = mapped_column(String, nullable=False)
+    before_mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    before_sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    after_mu: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    after_sigma: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class SoloRateRating(Base):
+    """Per-role success-rate rows for SOLO_RATE contexts."""
+
+    __tablename__ = "solo_rate_ratings"
+    __table_args__ = (
+        UniqueConstraint(
+            "rating_context_id",
+            "agent_build_id",
+            "scope_type",
+            "scope_value",
+            name="uq_solo_rate_rating_scope",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    rating_context_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("rating_contexts.id"), nullable=False
+    )
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_value: Mapped[str] = mapped_column(String, nullable=False)
+    successes: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    posterior_alpha: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    posterior_beta: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    mean_success_rate: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class SoloRateRatingEvent(Base):
+    """Audit rows for SOLO_RATE success/attempt updates."""
+
+    __tablename__ = "solo_rate_rating_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "game_id",
+            "agent_build_id",
+            "scope_type",
+            "scope_value",
+            "public_player_id",
+            name="uq_solo_rate_rating_event_scope",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    rating_context_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("rating_contexts.id"), nullable=False
+    )
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    game_seed: Mapped[str] = mapped_column(String, nullable=False)
+    outcome_label: Mapped[str] = mapped_column(String, nullable=False)
+    agent_build_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("agent_builds.id"), nullable=False
+    )
+    public_player_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_value: Mapped[str] = mapped_column(String, nullable=False)
+    succeeded: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    before_successes: Mapped[int] = mapped_column(Integer, nullable=False)
+    before_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    after_successes: Mapped[int] = mapped_column(Integer, nullable=False)
+    after_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -1260,11 +1442,16 @@ __all__ = [
     "ModelProvider",
     "OAuthConsumedFlow",
     "OAuthIdentity",
+    "PlacementRating",
+    "PlacementRatingEvent",
     "Principal",
     "PromptVersion",
     "RateLimitBucket",
     "Rating",
+    "RatingContext",
     "RatingEvent",
     "ScheduledGauntlet",
     "SchedulerHeartbeat",
+    "SoloRateRating",
+    "SoloRateRatingEvent",
 ]

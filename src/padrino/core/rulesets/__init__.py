@@ -12,13 +12,16 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from padrino.core.enums import Faction, Role, RoleFamily
+from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
 
 
 class Ruleset(Protocol):
     """Full structural contract for a ruleset module (e.g. ``mini7_v1``)."""
 
     RULESET_ID: str
+    RATING_CONTEXT_KIND: RatingContextKind
+    IS_CANONICAL: bool
+    RATING_CONTEXT_DISPLAY_LABEL: str
     PLAYER_COUNT: int
     ROLE_COUNTS: dict[Role, int]
     ROLE_FACTIONS: dict[Role, Faction]

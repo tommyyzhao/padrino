@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from typing import Final
 
-from padrino.core.enums import Faction, Role, RoleFamily
+from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
 
 RULESET_ID: Final[str] = "bench10_v1"
+RATING_CONTEXT_KIND: Final[RatingContextKind] = RatingContextKind.CANONICAL_TEAM
+IS_CANONICAL: Final[bool] = True
+RATING_CONTEXT_DISPLAY_LABEL: Final[str] = "Bench 10 canonical team"
 PLAYER_COUNT: Final[int] = 10
 
 ROLE_COUNTS: Final[dict[Role, int]] = {

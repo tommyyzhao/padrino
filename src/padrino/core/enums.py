@@ -68,6 +68,19 @@ class LeagueKind(StrEnum):
     HUMANS_INCLUDED = "HUMANS_INCLUDED"
 
 
+class RatingContextKind(StrEnum):
+    """Scoring lane discriminator for a ruleset.
+
+    ``CANONICAL_TEAM`` is the sacred two-faction OpenSkill ladder reached only
+    through a SCIENTIFIC league. ``PLACEMENT`` and ``SOLO_RATE`` are sibling
+    contexts that never write to ``ratings`` / ``rating_events``.
+    """
+
+    CANONICAL_TEAM = "CANONICAL_TEAM"
+    PLACEMENT = "PLACEMENT"
+    SOLO_RATE = "SOLO_RATE"
+
+
 class IdentityMode(StrEnum):
     """Per-game disclosure mode for human-vs-AI / model identity (Wave 9).
 
