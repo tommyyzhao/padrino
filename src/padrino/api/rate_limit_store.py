@@ -19,6 +19,7 @@ and ships two implementations:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -30,10 +31,24 @@ from padrino.db.models import RateLimitBucket
 
 @dataclass(frozen=True)
 class RateLimitDecision:
-    """The outcome of one :meth:`RateLimitStore.record_request` call."""
+    """The outcome of one rate-limit commit or preflight call."""
 
     allowed: bool
     retry_after_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitBucketSpec:
+    """One fixed-window bucket touched by a multi-bucket rate-limit decision."""
+
+    key_hash: str
+    limit_per_minute: int
+
+
+class _RateLimitBatchRejected(Exception):
+    def __init__(self, decision: RateLimitDecision) -> None:
+        super().__init__()
+        self.decision = decision
 
 
 @runtime_checkable
@@ -57,6 +72,21 @@ class RateLimitStore(Protocol):
         window_seconds: float = 60.0,
     ) -> RateLimitDecision: ...
 
+    async def record_requests(
+        self,
+        buckets: Sequence[RateLimitBucketSpec],
+        *,
+        now: float,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        """Atomically record one request against every bucket.
+
+        If any bucket is full, no bucket is incremented. This is the
+        authoritative commit half for callers that enforce several ceilings on
+        a single user-visible action.
+        """
+        ...
+
     async def peek_request(
         self,
         key_hash: str,
@@ -77,6 +107,10 @@ class RateLimitStore(Protocol):
 
 def _window_start(now: float, window_seconds: float) -> int:
     return int(now - (now % window_seconds))
+
+
+def _retry_after(now: float, *, window_start: int, window_seconds: float) -> float:
+    return max(1.0, (window_start + window_seconds) - now)
 
 
 @dataclass
@@ -105,9 +139,31 @@ class InMemoryRateLimitStore:
                 del self._counts[bucket_key]
         current = self._counts.get((key_hash, window_start), 0)
         if current >= limit_per_minute:
-            retry = max(1.0, (window_start + window_seconds) - now)
+            retry = _retry_after(now, window_start=window_start, window_seconds=window_seconds)
             return RateLimitDecision(allowed=False, retry_after_seconds=retry)
         self._counts[(key_hash, window_start)] = current + 1
+        return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
+
+    async def record_requests(
+        self,
+        buckets: Sequence[RateLimitBucketSpec],
+        *,
+        now: float,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        window_start = _window_start(now, window_seconds)
+        cutoff = window_start - int(window_seconds)
+        for bucket_key in list(self._counts):
+            if bucket_key[1] < cutoff:
+                del self._counts[bucket_key]
+        for bucket in buckets:
+            current = self._counts.get((bucket.key_hash, window_start), 0)
+            if current >= bucket.limit_per_minute:
+                retry = _retry_after(now, window_start=window_start, window_seconds=window_seconds)
+                return RateLimitDecision(allowed=False, retry_after_seconds=retry)
+        for bucket in buckets:
+            key = (bucket.key_hash, window_start)
+            self._counts[key] = self._counts.get(key, 0) + 1
         return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
 
     async def peek_request(
@@ -121,7 +177,7 @@ class InMemoryRateLimitStore:
         window_start = _window_start(now, window_seconds)
         current = self._counts.get((key_hash, window_start), 0)
         if current >= limit_per_minute:
-            retry = max(1.0, (window_start + window_seconds) - now)
+            retry = _retry_after(now, window_start=window_start, window_seconds=window_seconds)
             return RateLimitDecision(allowed=False, retry_after_seconds=retry)
         return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
 
@@ -167,8 +223,41 @@ class DatabaseRateLimitStore:
                 window_start=window_start,
             )
         if new_count > limit_per_minute:
-            retry = max(1.0, (window_start + window_seconds) - now)
+            retry = _retry_after(now, window_start=window_start, window_seconds=window_seconds)
             return RateLimitDecision(allowed=False, retry_after_seconds=retry)
+        return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
+
+    async def record_requests(
+        self,
+        buckets: Sequence[RateLimitBucketSpec],
+        *,
+        now: float,
+        window_seconds: float = 60.0,
+    ) -> RateLimitDecision:
+        window_start = _window_start(now, window_seconds)
+        cutoff = window_start - int(window_seconds)
+        try:
+            async with self.session_factory() as session, session.begin():
+                await session.execute(
+                    delete(RateLimitBucket).where(RateLimitBucket.window_start < cutoff)
+                )
+                for bucket in buckets:
+                    new_count = await _upsert_count(
+                        session,
+                        key_hash=bucket.key_hash,
+                        window_start=window_start,
+                    )
+                    if new_count > bucket.limit_per_minute:
+                        retry = _retry_after(
+                            now,
+                            window_start=window_start,
+                            window_seconds=window_seconds,
+                        )
+                        raise _RateLimitBatchRejected(
+                            RateLimitDecision(allowed=False, retry_after_seconds=retry)
+                        )
+        except _RateLimitBatchRejected as exc:
+            return exc.decision
         return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
 
     async def peek_request(
@@ -188,7 +277,7 @@ class DatabaseRateLimitStore:
                 )
             )
         if current is not None and current >= limit_per_minute:
-            retry = max(1.0, (window_start + window_seconds) - now)
+            retry = _retry_after(now, window_start=window_start, window_seconds=window_seconds)
             return RateLimitDecision(allowed=False, retry_after_seconds=retry)
         return RateLimitDecision(allowed=True, retry_after_seconds=0.0)
 
@@ -241,6 +330,7 @@ async def _upsert_count(
 __all__ = [
     "DatabaseRateLimitStore",
     "InMemoryRateLimitStore",
+    "RateLimitBucketSpec",
     "RateLimitDecision",
     "RateLimitStore",
 ]
