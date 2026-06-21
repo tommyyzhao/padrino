@@ -48,7 +48,7 @@ from padrino.api.auth import SCOPE_SPECTATOR, RateLimiter, generate_raw_key
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
-from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, Faction, Role, SeatKind
 from padrino.core.human_chat import human_chat_content_ref
@@ -468,7 +468,12 @@ async def test_human_game_full_spine_smoke(
     )
     release_base = datetime(2026, 6, 20, tzinfo=UTC)
 
-    async def release_chat(phase: str, settled_at: float, release_log: EventLog) -> None:
+    async def release_chat(
+        phase: str,
+        settled_at: float,
+        release_log: EventLog,
+        pending_lower_events: Sequence[StoredEvent],
+    ) -> None:
         async with session_factory() as session, session.begin():
             await release_held_chat_for_phase(
                 session,
@@ -476,6 +481,7 @@ async def test_human_game_full_spine_smoke(
                 phase=phase,
                 released_at=release_base + timedelta(seconds=settled_at),
                 event_log=release_log,
+                pending_lower_events=pending_lower_events,
             )
 
     async def tick_runner(

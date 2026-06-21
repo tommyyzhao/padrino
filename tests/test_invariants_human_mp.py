@@ -52,7 +52,7 @@ from padrino.api.auth import SCOPE_SPECTATOR, RateLimiter, generate_raw_key
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
-from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Seat
@@ -725,7 +725,12 @@ async def test_wiring_human_and_ai_messages_release_at_same_buffered_instant(
     release_base = datetime(2026, 6, 20, 12, tzinfo=UTC)
     human_release_instants: list[float] = []
 
-    async def release_chat(phase: str, settled_at: float, release_log: EventLog) -> None:
+    async def release_chat(
+        phase: str,
+        settled_at: float,
+        release_log: EventLog,
+        pending_lower_events: Sequence[StoredEvent],
+    ) -> None:
         human_release_instants.append(settled_at)
         async with session_factory() as session, session.begin():
             await release_held_chat_for_phase(
@@ -734,6 +739,7 @@ async def test_wiring_human_and_ai_messages_release_at_same_buffered_instant(
                 phase=phase,
                 released_at=release_base + timedelta(seconds=settled_at),
                 event_log=release_log,
+                pending_lower_events=pending_lower_events,
             )
 
     await human_lane_module._run_human_tick_responses(

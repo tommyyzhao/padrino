@@ -89,7 +89,7 @@ _CLAIMABLE_STATUSES: Final[frozenset[str]] = frozenset({"CREATED", "PENDING", ST
 AdapterFactory = Callable[[], LlmAdapter]
 AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
-HumanChatRelease = Callable[[str, float, EventLog], Awaitable[None]]
+HumanChatRelease = Callable[[str, float, EventLog, Sequence[StoredEvent]], Awaitable[None]]
 BeforeTakeoverRevalidate = Callable[[], Awaitable[None]]
 
 
@@ -544,6 +544,7 @@ async def _run_human_tick_responses(
     sleep: Sleep = asyncio.sleep,
     release_chat: HumanChatRelease | None = None,
 ) -> dict[str, AgentResponse]:
+    log_before = len(event_log.events)
     result = await run_human_tick(
         state,
         event_log,
@@ -556,7 +557,19 @@ async def _run_human_tick_responses(
         sleep=sleep,
     )
     if release_chat is not None:
-        await release_chat(format_phase_id(state.current_phase), result.settled_at, event_log)
+        # run_human_tick appends failure events (ActionTimedOut / OutputInvalid)
+        # straight to the in-memory event_log, persisted nowhere yet. Hand them to
+        # release_chat so it co-commits those LOWER sequences in the SAME
+        # transaction as the content_ref chat row it appends above them — closing
+        # the crash window where game_events would hold {N-1, N+1} with N only in
+        # memory until the post-tick persist_pending_events ran (US-196).
+        pending_lower_events = event_log.events[log_before:]
+        await release_chat(
+            format_phase_id(state.current_phase),
+            result.settled_at,
+            event_log,
+            pending_lower_events,
+        )
     return result.responses
 
 
@@ -721,7 +734,12 @@ def _default_human_game_executor(
     ) -> None:
         # Human-lane games are always casual (ranked=False) — they never write the
         # scientific Rating/RatingEvent tables (segregation, hard rule 8).
-        async def release_chat(phase: str, _settled_at: float, release_log: EventLog) -> None:
+        async def release_chat(
+            phase: str,
+            _settled_at: float,
+            release_log: EventLog,
+            pending_lower_events: Sequence[StoredEvent],
+        ) -> None:
             async with persistence.session_factory() as session, session.begin():
                 await release_held_chat_for_phase(
                     session,
@@ -729,6 +747,7 @@ def _default_human_game_executor(
                     phase=phase,
                     released_at=datetime.now(UTC),
                     event_log=release_log,
+                    pending_lower_events=pending_lower_events,
                 )
 
         async def tick_runner(

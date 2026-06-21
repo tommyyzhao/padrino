@@ -121,7 +121,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Evidence: human_chat_release.py:108-151/119-124, human_lane.py:558-559/725, game_runner.py:867/250-258, tick.py:111,146-153, replay.py:55-66, event_log.py:89-91. The existing test (test_human_chat_release.py:154-235) only exercises the chat event as sequence 0 from an already-persisted log; it never covers the in-memory-failure-event-at-N-below-a-committed-N+1 gap. Keep replay deterministic.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-197",

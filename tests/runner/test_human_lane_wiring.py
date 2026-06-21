@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -25,7 +25,7 @@ from padrino.api.auth import RateLimiter
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
-from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import ActionType, Faction, Role, SeatKind
@@ -581,7 +581,12 @@ async def test_human_lane_releases_posted_chat_on_the_symmetric_tick_schedule(
     release_base = datetime(2026, 6, 20, tzinfo=UTC)
     tick_releases: list[float] = []
 
-    async def release_chat(phase: str, settled_at: float, release_log: EventLog) -> None:
+    async def release_chat(
+        phase: str,
+        settled_at: float,
+        release_log: EventLog,
+        pending_lower_events: Sequence[StoredEvent],
+    ) -> None:
         tick_releases.append(settled_at)
         async with session_factory() as session, session.begin():
             await release_held_chat_for_phase(
@@ -590,6 +595,7 @@ async def test_human_lane_releases_posted_chat_on_the_symmetric_tick_schedule(
                 phase=phase,
                 released_at=release_base + timedelta(seconds=settled_at),
                 event_log=release_log,
+                pending_lower_events=pending_lower_events,
             )
 
     responses = await _run_human_tick_responses(
