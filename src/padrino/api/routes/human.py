@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.auth import _get_auth_settings, _get_rate_limiter
-from padrino.api.deps import get_session
+from padrino.api.deps import get_session, get_session_factory
 from padrino.api.human_actions import submit_action
 from padrino.api.human_auth import (
     HUMAN_SESSION_COOKIE,
@@ -584,10 +584,9 @@ async def oauth_callback(
             status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch"
         ) from exc
 
-    # Single-use guard (US-202): atomically claim this flow's unique token BEFORE
-    # exchanging the code so a replayed (state cookie, code) pair fails closed,
-    # independent of whether the provider has invalidated the code yet. A losing
-    # insert (the flow was already consumed) rejects the callback.
+    # Single-use guard (US-202/US-208): durably claim this flow's unique token
+    # BEFORE exchanging the code so a replayed (state cookie, code) pair fails
+    # closed even if the provider exchange or later account/session work fails.
     now = datetime.now(UTC)
     try:
         flow_token = state_flow_token(config, state)
@@ -595,10 +594,11 @@ async def oauth_callback(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch"
         ) from exc
-    await oauth_flows_repo.prune_expired(
-        session, older_than=now - timedelta(seconds=_OAUTH_FLOW_TTL_SECONDS)
+    claimed = await _try_consume_oauth_flow_durably(
+        request,
+        flow_token=flow_token,
+        consumed_at=now,
     )
-    claimed = await oauth_flows_repo.try_consume_flow(session, flow=flow_token, consumed_at=now)
     if not claimed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_replayed")
 
@@ -651,6 +651,28 @@ async def oauth_callback(
         kind=account.kind,
         display_name=account.display_name,
     )
+
+
+async def _try_consume_oauth_flow_durably(
+    request: Request,
+    *,
+    flow_token: str,
+    consumed_at: datetime,
+) -> bool:
+    """Claim an OAuth flow in its own transaction before provider exchange."""
+    session_factory = get_session_factory(request)
+    async with session_factory() as flow_session:
+        await oauth_flows_repo.prune_expired(
+            flow_session,
+            older_than=consumed_at - timedelta(seconds=_OAUTH_FLOW_TTL_SECONDS),
+        )
+        claimed = await oauth_flows_repo.try_consume_flow(
+            flow_session,
+            flow=flow_token,
+            consumed_at=consumed_at,
+        )
+        await flow_session.commit()
+    return claimed
 
 
 async def _in_flight_guest_id(session: AsyncSession, request: Request) -> uuid.UUID | None:

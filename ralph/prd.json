@@ -305,7 +305,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: oauth_consumed_flows.py:64-66, deps.py:22-30, human.py:587-590/601/605-629, models.py:845-847. If a durable autonomous commit is deemed too heavy, the acceptable alternative is to NARROW the docstrings to 'holds for successfully-completed flows; the atomic insert blocks concurrent in-flight replays' -- but durable consume is preferred since it is what the security claim promises.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-209",

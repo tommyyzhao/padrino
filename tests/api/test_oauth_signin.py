@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.api.oauth import (
+    OAuthError,
     OAuthUserInfo,
     reset_clock,
     reset_oauth_io,
@@ -539,6 +540,42 @@ async def test_callback_rejects_replayed_state_and_code(
     # Exactly one successful session/account, and exactly one consumed-flow row.
     assert len(principals) == 1
     assert len(identities) == 1
+    assert len(flows) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_exchange_consumes_flow_durably(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A failed provider exchange still consumes the flow token durably (US-208)."""
+    state, verifier, _ = await _callback_cookies(client)
+    cookies = {OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier}
+    params = {"code": "auth-code", "state": state}
+
+    async def _fail_exchange(
+        config: object, *, code: str, code_verifier: str, nonce: str
+    ) -> OAuthUserInfo:
+        raise OAuthError("provider rejected code")
+
+    set_resolve_user_info(_fail_exchange)
+    first = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert first.status_code == 400
+    assert first.json()["detail"] == "oauth_exchange_failed"
+
+    # If the consumed-flow claim rolled back with the failed exchange, this
+    # second request would mint an account. It must instead be rejected before
+    # the provider exchange path runs again.
+    _stub_subject("subject-after-failure")
+    second = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert second.status_code == 400
+    assert second.json()["detail"] == "oauth_state_replayed"
+
+    async with session_factory() as session:
+        principals = (await session.execute(select(Principal))).scalars().all()
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    assert len(principals) == 0
+    assert len(identities) == 0
     assert len(flows) == 1
 
 
