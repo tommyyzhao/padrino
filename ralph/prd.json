@@ -75,7 +75,7 @@
         "All backend gates pass."
       ],
       "notes": "Real provider creds remain a deploy-time step; validate logic against a stubbed signed token.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-194",
