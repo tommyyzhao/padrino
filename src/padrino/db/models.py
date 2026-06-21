@@ -671,6 +671,19 @@ class HumanChatMessage(Base):
     )
 
 
+class HumanChatSequenceCounter(Base):
+    """Atomic per-game allocator for human-chat sidecar sequence reservations."""
+
+    __tablename__ = "human_chat_sequence_counters"
+
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="CASCADE"), primary_key=True
+    )
+    next_sequence: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+
+
 class Principal(Base):
     """A browser-human identity, completely separate from API-key auth (US-127).
 
@@ -1123,6 +1136,7 @@ __all__ = [
     "GauntletRosterSlot",
     "HumanActionSubmission",
     "HumanChatMessage",
+    "HumanChatSequenceCounter",
     "HumanChatSubmission",
     "HumanConsent",
     "HumanCostAdmission",

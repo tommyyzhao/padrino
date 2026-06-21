@@ -136,7 +136,7 @@
         "All backend gates pass."
       ],
       "notes": "Keep the (game_id, sequence) uniqueness; just make allocation safe.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-167",

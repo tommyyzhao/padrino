@@ -12,7 +12,9 @@ Asserts the core GDPR-vs-replay invariant:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -20,9 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.event_log import EventLog
 from padrino.core.human_chat import human_chat_content_ref
+from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.models import Game, GameEvent, HumanChatMessage
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_chat as human_chat_repo
+from padrino.db.repositories import human_chat_submissions as human_chat_holds_repo
 from padrino.export.bundle import EventEnvelope, verify_chain
 
 _RAW_HUMAN_TEXT = "Hi I am Alice Smith, call me at 555-0100, I think P03 is mafia"
@@ -200,6 +204,59 @@ async def test_raw_text_never_in_game_events_table(
         )
         for row in event_rows:
             assert _RAW_HUMAN_TEXT not in str(row.payload)
+
+
+async def test_concurrent_sidecar_sequence_allocation_persists_every_message(
+    tmp_path: Path,
+) -> None:
+    """Concurrent sidecar writers reserve distinct per-game sequences."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'human-chat-sequences.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = create_session_factory(engine)
+
+    try:
+        async with session_factory() as session, session.begin():
+            game = Game(
+                gauntlet_id=None,
+                ruleset_id="mini7_v1",
+                game_seed="sidecar-race",
+                status="RUNNING",
+            )
+            session.add(game)
+            await session.flush()
+            game_id = game.id
+
+        ready = asyncio.Event()
+
+        async def write_message(index: int) -> int:
+            await ready.wait()
+            async with session_factory() as session, session.begin():
+                sequence = await human_chat_holds_repo.next_sidecar_sequence(
+                    session, game_id=game_id
+                )
+                await human_chat_repo.append_human_chat(
+                    session,
+                    game_id=game_id,
+                    sequence=sequence,
+                    public_player_id=f"P{index + 1:02d}",
+                    raw_text=f"message {index}",
+                    cleaned_text=f"message {index}",
+                )
+                return sequence
+
+        tasks = [asyncio.create_task(write_message(index)) for index in range(8)]
+        ready.set()
+        sequences = await asyncio.gather(*tasks)
+
+        async with session_factory() as session:
+            rows = await human_chat_repo.list_for_game(session, game_id)
+    finally:
+        await engine.dispose()
+
+    assert sorted(sequences) == list(range(8))
+    assert [row.sequence for row in rows] == list(range(8))
+    assert len(rows) == 8
 
 
 def test_content_ref_is_deterministic_sha256() -> None:

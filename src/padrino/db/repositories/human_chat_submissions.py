@@ -17,10 +17,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.db.models import HumanChatSubmission
+from padrino.db.models import HumanChatMessage, HumanChatSequenceCounter, HumanChatSubmission
 
 STATUS_HELD = "HELD"
 STATUS_RELEASED = "RELEASED"
@@ -77,20 +77,77 @@ async def record_held(
 
 
 async def next_sidecar_sequence(session: AsyncSession, *, game_id: uuid.UUID) -> int:
-    """Return the next per-game sidecar sequence for a released human message.
+    """Reserve and return the next per-game sidecar sequence.
 
     The released raw text is paired to the :class:`padrino.db.models.HumanChatMessage`
-    sidecar (keyed by ``(game_id, sequence)``). Until the human-aware tick
-    (US-138/140) chains the message into a real ``game_events`` sequence, the
-    hold allocates a monotonic per-game ordinal from existing sidecar rows so the
-    sidecar unique constraint never collides on a single game.
+    sidecar (keyed by ``(game_id, sequence)``). A tiny per-game counter row
+    reserves the next ordinal via ``INSERT ... ON CONFLICT DO UPDATE`` so
+    concurrent writers receive distinct values instead of racing on
+    read-max-then-+1.
     """
-    stmt = select(HumanChatSubmission.sidecar_sequence).where(
-        HumanChatSubmission.game_id == game_id,
-        HumanChatSubmission.sidecar_sequence.is_not(None),
+    first_unreserved = await _first_unreserved_sidecar_sequence(session, game_id=game_id)
+    return await _claim_sidecar_sequence(
+        session, game_id=game_id, first_unreserved=first_unreserved
     )
-    existing = [seq for seq in (await session.execute(stmt)).scalars() if seq is not None]
+
+
+async def _first_unreserved_sidecar_sequence(session: AsyncSession, *, game_id: uuid.UUID) -> int:
+    """Return one greater than the highest sequence already persisted for a game."""
+    sidecar_max = await session.scalar(
+        select(func.max(HumanChatMessage.sequence)).where(HumanChatMessage.game_id == game_id)
+    )
+    hold_max = await session.scalar(
+        select(func.max(HumanChatSubmission.sidecar_sequence)).where(
+            HumanChatSubmission.game_id == game_id,
+            HumanChatSubmission.sidecar_sequence.is_not(None),
+        )
+    )
+    existing = [seq for seq in (sidecar_max, hold_max) if seq is not None]
     return (max(existing) + 1) if existing else 0
+
+
+async def _claim_sidecar_sequence(
+    session: AsyncSession, *, game_id: uuid.UUID, first_unreserved: int
+) -> int:
+    """Atomically increment the per-game counter and return the reserved value."""
+    bind = session.get_bind()
+    dialect_name = bind.dialect.name
+    next_sequence_expr = case(
+        (
+            HumanChatSequenceCounter.next_sequence < first_unreserved,
+            first_unreserved + 1,
+        ),
+        else_=HumanChatSequenceCounter.next_sequence + 1,
+    )
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = (
+            pg_insert(HumanChatSequenceCounter)
+            .values(game_id=game_id, next_sequence=first_unreserved + 1)
+            .on_conflict_do_update(
+                index_elements=["game_id"],
+                set_={"next_sequence": next_sequence_expr},
+            )
+            .returning(HumanChatSequenceCounter.next_sequence)
+        )
+    elif dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        stmt = (
+            sqlite_insert(HumanChatSequenceCounter)
+            .values(game_id=game_id, next_sequence=first_unreserved + 1)
+            .on_conflict_do_update(
+                index_elements=["game_id"],
+                set_={"next_sequence": next_sequence_expr},
+            )
+            .returning(HumanChatSequenceCounter.next_sequence)
+        )
+    else:
+        raise RuntimeError(f"unsupported dialect for sidecar sequence allocation: {dialect_name!r}")
+
+    next_sequence = (await session.execute(stmt)).scalar_one()
+    return int(next_sequence) - 1
 
 
 async def mark_ready_for_release(
