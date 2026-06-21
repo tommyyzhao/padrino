@@ -1,201 +1,112 @@
 {
   "project": "Padrino",
-  "branchName": "ralph/padrino-v9",
-  "description": "Wave 9 post-review FIX wave. Closes the blocking integration gaps and security/correctness findings from /code-review on the ralph/padrino-v9 branch. The Wave 9 modules (US-121..157) exist and are unit-tested but several core human-play seams were never wired into the production run path, and the anonymity-by-timing invariant is violable in the real path. These stories WIRE the existing machinery, harden the new human-facing surfaces, and strengthen the invariant CI gate so the gaps cannot regress. Runs on the existing ralph/padrino-v9 branch (continues the wave); after this completes and re-passes /code-review, the whole branch merges to main. Run with ralph/ralph-codex.sh (Codex / gpt-5.5).",
+  "branchName": "ralph/padrino-v9-fixes-2",
+  "description": "v9-fixes-2 (DRAFT) - second hardening wave for the human-multiplayer layer now merged to main (Wave 9 + v9-fixes, US-121..170). Addresses the NON-BLOCKING residual findings from the post-merge /code-review re-run (crash-consistency atomicity, cost-cap atomicity, rate-limit ordering, presence race, OAuth exp, state-cache verification + adoption, and cleanup). None of these blocked the merge; this wave makes the human lane production-robust. Recommended to run BEFORE the Wave 10 role-expansion (prd-v10-roles.json) so the human-MP foundation is hardened before it is extended - though they are independent. DRAFT: not activated, not run. Story ids continue monotonically (US-189..195) after the v10 draft's allocation.",
   "userStories": [
     {
-      "id": "US-158",
-      "title": "Wire the human-play tick + HumanAdapter into the production executor",
-      "priority": 158,
+      "id": "US-189",
+      "title": "Atomic event persistence for takeover + chat-release (event-log-wins on crash)",
+      "priority": 189,
       "dependencies": [],
-      "description": "BLOCKER. src/padrino/runner/human_lane.py `_default_human_game_executor` runs the BENCHMARK runner `run_game(config, adapter, False)` with `NoopMockAdapter`; the human-play machinery `run_human_tick` (US-138) and `HumanAdapter` (US-137) have ZERO callers under src/. A launched human game therefore never consumes human-submitted actions through the intended seam and applies no symmetric release delay. Wire the real loop: the human lane must drive turns via `run_human_tick`, human seats served by a `HumanAdapter` bound to the action store, AI seats served by their normal curated adapter.",
+      "description": "FINDING 1 (most significant). _take_over_expired_human_seats commits the GameSeat change (seat_kind=AI_TAKEOVER, takeover fields) in its own transaction, but the paired SeatTakenOver event is only appended to the in-memory event_log and persisted to game_events later by drive_game_loop's persist_pending_events (after the release-delay sleep). Likewise release_held_chat_for_phase commits the sidecar row + marks the hold RELEASED in its own txn while the content_ref chat event is persisted to game_events only later. A process crash in that window leaves the DB AHEAD of the hash chain: a seat is AI_TAKEOVER (or a sidecar row exists at sequence N) with no corresponding game_events row, so on rehydrate the event-log replay reconstructs a DIFFERENT state (takeover provenance lost; or the next chat release re-derives sequence N and collides on uq_human_chat_message_sequence, wedging chat). This soft-violates hard rule 4 (event log is the source of truth).",
       "acceptanceCriteria": [
-        "src/padrino/runner/human_lane.py drives human-lane games via run_human_tick (not run_game); human seats are served by HumanAdapter constructed from settings (deadline from padrino_human_phase_deadline_seconds) and reading the human action store; AI auto-fill seats keep their curated adapter.",
-        "An integration-style test launches a mixed human+AI game and shows a human action submitted via the POST action channel is actually consumed by the running game through HumanAdapter (no stub substitution).",
-        "A guard test asserts run_human_tick AND HumanAdapter each have at least one production (src/) caller, and that no human-lane game is executed via run_game/NoopMockAdapter; this test must fail if the executor regresses to the benchmark runner.",
-        "uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv run pytest -m \"not integration\" all pass."
+        "The takeover seat mutation (seat_kind/takeover fields) and its SeatTakenOver game_events row are persisted in a SINGLE transaction (so the seat row is never committed without its event row).",
+        "A released human chat message's sidecar row + hold status flip and its content_ref game_events row are persisted in a SINGLE transaction (sidecar sequence and event sequence cannot diverge across a crash).",
+        "A test proves the invariant: for any committed takeover/chat-release DB mutation there is a matching game_events row at the expected sequence; simulate an interrupted run (apply the seat/sidecar mutation, then rehydrate from game_events) and assert reconstructed state is consistent (no AI_TAKEOVER seat missing its SeatTakenOver; no orphaned sidecar row; chat release resumes without a uq collision).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
-      "notes": "Root-cause fix, not a bandaid: the executor seam (HumanGameExecutor/adapter_factory) already exists; supply the human tick + adapter through it rather than special-casing.",
-      "passes": true
+      "notes": "Cleanest fix: append+persist the event in the same session/txn as the DB mutation (or persist_pending_events before returning control across the await/sleep). Keep replay deterministic.",
+      "passes": false
     },
     {
-      "id": "US-159",
-      "title": "Apply symmetric release delay to human chat in the live path (close the timing leak)",
-      "priority": 159,
-      "dependencies": ["US-158"],
-      "description": "BLOCKER (anonymity invariant). src/padrino/api/human_chat.py releases human chat synchronously at POST time (released_at=now), while AI public messages emit at tick resolution. The fixed symmetric release delay built for US-138 is never applied, so an observer can distinguish human vs AI by message timing before the endgame reveal. Route human public/private messages through the SAME release buffer/schedule as AI messages.",
-      "acceptanceCriteria": [
-        "Human public/private messages are held and released on the same fixed release schedule as AI messages (the US-138 buffer), not at the instant of the POST.",
-        "A regression test asserts release-timing symmetry: a human message and an AI message submitted in the same phase surface to observers at the same buffered release point, with no per-source timing signal.",
-        "The behaviour holds on the wired production path from US-158 (not only in a unit harness).",
-        "All backend gates pass."
-      ],
-      "notes": "This is the exact channel US-138 was meant to close; verify against the real runner path, not a stub.",
-      "passes": true
-    },
-    {
-      "id": "US-160",
-      "title": "Human chat enters the hash chain via content_ref so AI seats observe it",
-      "priority": 160,
-      "dependencies": ["US-158"],
-      "description": "BLOCKER (functional). Human chat is written only to the sidecar; no core event carrying content_ref is appended, so AI observations (built from the event log) never include human messages and mixed human+AI discussion is broken. The content_ref seam (core/human_chat.human_chat_content_ref, the optional content_ref on PublicMessageSubmitted/PrivateMessageSubmitted) has no producer. Append the core event carrying ONLY the content_ref (sidecar keeps the raw text), preserving the out-of-band invariant and deterministic replay.",
-      "acceptanceCriteria": [
-        "When a human message is released, a core PublicMessageSubmitted/PrivateMessageSubmitted event is appended carrying content_ref (hash) and NO raw text; the raw text remains only in the sidecar.",
-        "In a mixed game, an AI seat's observation includes the human's released public message (display surfaces resolve the text from the sidecar by ref; the chained event carries only the ref).",
-        "Deterministic replay is unchanged: chat events stay recorded-only and replay does not depend on chat text; hash-chain canonicalization is preserved (existing replay/round-trip tests still pass).",
-        "The out-of-band invariant test confirms no raw human text is ever placed in a hash-chained event.",
-        "All backend gates pass."
-      ],
-      "notes": "Keep GDPR-erasure safe: redacting the sidecar must leave the chain valid.",
-      "passes": true
-    },
-    {
-      "id": "US-161",
-      "title": "Persist durable runtime snapshots in the tick loop + rehydrate on worker startup",
-      "priority": 161,
-      "dependencies": ["US-158"],
-      "description": "BLOCKER (durability). runtime_repo.upsert (the HumanGameRuntime snapshot writer) has no production caller and rehydrate_active_human_games reads a stale/missing row, so a worker restart loses live games. Persist the snapshot each tick and rehydrate active human games on worker start.",
-      "acceptanceCriteria": [
-        "The human tick loop upserts the HumanGameRuntime snapshot (phase, deadline_at, buffer) consistent with the event log on each tick / phase transition.",
-        "The human worker lane calls rehydrate_active_human_games on startup and resumes in-flight games at the correct phase/deadline without losing or duplicating a turn.",
-        "A restart-mid-phase regression test: write snapshot -> simulate process restart -> rehydrate -> the game resumes at the right phase with buffered submissions intact.",
-        "All backend gates pass."
-      ],
-      "notes": "Postgres-snapshot only; no Redis (hard rule 10).",
-      "passes": true
-    },
-    {
-      "id": "US-162",
-      "title": "Wire disconnect-grace + silent AI takeover into the worker lane",
-      "priority": 162,
-      "dependencies": ["US-158", "US-161"],
-      "description": "BLOCKER (US-150 unwired). take_over_seat / seats_past_grace have no production caller and no presence/heartbeats are recorded, so disconnect -> AI takeover never fires. Record seat presence, evaluate the grace window in the tick loop, and persist the takeover.",
-      "acceptanceCriteria": [
-        "The worker lane records per-seat presence/heartbeats and, after the grace window, calls take_over_seat; the SeatTakenOver event is persisted in order with the tick loop and seat_kind flips to AI_TAKEOVER (occupant_principal_id retained for reveal provenance).",
-        "A reconnect within grace cancels the pending takeover; a reconnect racing an in-flight takeover neither double-applies nor loses the turn (regression test for the race).",
-        "Endgame reveal reports HUMAN_THEN_AI provenance for a taken-over seat.",
-        "All backend gates pass."
-      ],
-      "notes": "ELO penalty hooks stay dormant (v1 casual).",
-      "passes": true
-    },
-    {
-      "id": "US-163",
-      "title": "Participant-reachable endgame reveal for private human games",
-      "priority": 163,
-      "dependencies": ["US-158"],
-      "description": "BLOCKER (decision-11 unreachable). The only reveal route, /public/games/{id}/reveal, is gated on is_broadcastable && broadcast_state==RECENT; private/anonymous human games are never broadcastable, so participants can never get the endgame disclosure (who was human, roles, exact models). Add a participant-gated reveal route for terminal human games, reusing the single reveal projection.",
-      "acceptanceCriteria": [
-        "A route (e.g. GET /human/games/{game_id}/reveal) returns project_endgame_reveal for a TERMINAL human game to an authenticated participant (a seat occupant of that game); it returns 403 for non-participants and 404/409 before the game is terminal.",
-        "It reuses the single core/reveal.project_endgame_reveal schema (no second reveal projection).",
-        "The frontend reveal page (US-156) consumes this route for human/lobby games; an e2e test covers a private ANONYMOUS game completing and a participant reaching its reveal.",
-        "No reveal is served before terminal; anonymity holds pre-terminal. All backend + frontend gates (pnpm lint/check/test:e2e) pass."
-      ],
-      "notes": "This is the payoff of the imitation game; without it the spot-the-AI loop has no truth to reveal.",
-      "passes": true
-    },
-    {
-      "id": "US-164",
-      "title": "Harden OAuth identity assertion + session-bound state + expiry on upgrade",
-      "priority": 164,
+      "id": "US-190",
+      "title": "Atomic inference-$ cap + breaker; release admission slots on abort",
+      "priority": 190,
       "dependencies": [],
-      "description": "SECURITY. src/padrino/api/oauth.py trusts the userinfo sub/id with no id_token signature/aud/iss/nonce validation; the OAuth state cookie is SameSite=Lax and not bound to the in-flight guest session (login-CSRF / guest-absorption); _in_flight_guest_id upgrades expired (non-revoked) guest sessions, disagreeing with get_human_context.",
+      "description": "FINDING 2. US-165 made the per-user/day COUNT caps race-safe via the slot table + unique constraint, but the per-user daily inference-$ cap and the global cost breaker are still plain SELECT-sum reads compared to a threshold (TOCTOU): concurrent admissions all read sub-threshold spend and all pass, overshooting the $ budget. Separately, _claim_admission_slot inserts a slot per create/join/launch that is NEVER released, so an admitted-but-aborted/abandoned action permanently consumes a day-cap slot (the cap counts ATTEMPTS not games -> self-DoS, and a probe of the create endpoint can burn a victim's day budget since it is keyed only on principal_id).",
       "acceptanceCriteria": [
-        "When the provider returns an id_token, its signature, aud (== configured client_id), iss, and a nonce bound to the start request are validated before the identity is trusted; a tampered/missing/mismatched token rejects the sign-in.",
-        "The OAuth state/verifier is bound to the specific in-flight guest session; a callback whose state does not match the originating session is rejected.",
-        "_in_flight_guest_id rejects expired sessions (consistent with get_human_context); an expired guest session is never upgraded or merged.",
-        "Regression tests cover each path (tampered/missing id_token, mismatched/replayed state, expired guest). All backend gates pass."
+        "The daily inference-$ cap and the global breaker are enforced atomically (reservation/lock or a slot-style accounting) so concurrent admissions cannot overshoot the $ ceiling; a concurrency test asserts the cap holds under N simultaneous admits.",
+        "Admission slots are tied to the resulting Game/LobbyMember (or released/expired on a failed/abandoned action) so the day caps count actual games/joins, not attempts; a test asserts an aborted create/join does not permanently consume a slot.",
+        "The breaker stays throttle-not-kill (never boots an active game).",
+        "All backend gates pass."
       ],
-      "notes": "Real provider credentials remain a deploy-time step; validate the LOGIC against a stubbed signed token/JWKS, no live provider needed in tests.",
-      "passes": true
+      "notes": "Sized to the Moderate $500-$2k/mo platform-absorbed envelope; the inference-$ cap is the one most worth making atomic.",
+      "passes": false
     },
     {
-      "id": "US-165",
-      "title": "Atomic cost-governance admission + correct day-boundary + AI_TAKEOVER spend",
-      "priority": 165,
+      "id": "US-191",
+      "title": "Validate action legality BEFORE consuming the rate-limit budget",
+      "priority": 191,
       "dependencies": [],
-      "description": "COST GOVERNANCE. src/padrino/economics/human_cost_governance.py admit_human is read-then-write with no lock, so concurrent create/join/launch requests all admit past the per-user/day caps and the breaker. Daily inference-$ is keyed to Game.created_at, so a game spanning UTC midnight escapes the daily cap. global_human_lane_spend_usd filters seat_kind=='HUMAN' only, excluding AI_TAKEOVER, undercounting spend.",
+      "description": "FINDING 3. In submit_action the order is idempotency -> _enforce_action_rate_limits (consumes a per-principal AND per-game-phase token) -> legal_actions_for validation. So an action that is rejected as illegal/out-of-phase (e.g. voting a target eliminated between observe and submit - a normal live-game race) still burns the seat's rate budget; repeated legitimate-but-now-illegal submissions can 429-lock the seat out of its ONE legal move for the phase.",
       "acceptanceCriteria": [
-        "Admission is atomic under concurrency (SELECT ... FOR UPDATE / reservation row / DB constraint) so N concurrent admissions cannot exceed the per-user/day caps or bypass the breaker; a concurrency regression test proves it.",
-        "Daily inference-$ is attributed to the spend/charge time, not Game.created_at, so a game spanning the day boundary is counted in the correct day.",
-        "global_human_lane_spend_usd counts the full human-lane seat set {HUMAN, AI_TAKEOVER} (consistent with human_lane/durability definitions).",
+        "Legality (allowed_action_types + target legality + terminal/phase) is validated BEFORE a rate-limit slot is consumed (or the slot is refunded on a validation rejection); a malformed/illegal action returns 409 without consuming the budget.",
+        "A test asserts a seat that submitted several now-illegal actions can still submit its valid action in the same phase (not 429-locked).",
+        "Order the cheap existence/terminal (404/409) checks and the presence heartbeat sensibly (do not heartbeat for an unknown/terminal game).",
         "All backend gates pass."
       ],
-      "notes": "Sized to the Moderate $500-$2k/mo envelope; the breaker must remain throttle-not-kill (never boots an active game).",
-      "passes": true
+      "notes": "Also covers the FINDING that record_heartbeat ran before the 404/terminal checks.",
+      "passes": false
     },
     {
-      "id": "US-166",
-      "title": "Race-free human-chat sidecar sequence allocation",
-      "priority": 166,
+      "id": "US-192",
+      "title": "Race-safe presence heartbeat (atomic upsert)",
+      "priority": 192,
       "dependencies": [],
-      "description": "CORRECTNESS. src/padrino/db/repositories/human_chat_submissions.py next_sidecar_sequence is read-max-then-+1 with no lock; two concurrent human chats in the same game compute the same ordinal and collide on uq_human_chat_message_sequence (HTTP 500 / dropped message). Concurrent chat is the normal multiplayer case.",
+      "description": "FINDING 4. db/repositories/human_seat_presence.py record_heartbeat / mark_disconnected do read-then-insert with no DB-level upsert; concurrent heartbeats for the same (game_id, public_player_id) both see no row, both INSERT, and the second violates uq_human_seat_presence -> IntegrityError surfacing as a 500 on the presence/observation/action path. The chat-sequence allocator was given ON CONFLICT DO UPDATE for exactly this; presence was left racy.",
       "acceptanceCriteria": [
-        "Sidecar sequence allocation is concurrency-safe (atomic per-game counter, or insert-with-retry on the unique violation) so concurrent submissions in the same game/phase all persist with distinct sequences.",
-        "A regression test simulating concurrent chat submissions asserts no IntegrityError surfaces to the client and no message is dropped.",
+        "record_heartbeat / mark_disconnected use an atomic upsert (INSERT ... ON CONFLICT (game_id, public_player_id) DO UPDATE) so concurrent heartbeats never raise IntegrityError.",
+        "A concurrency test fires simultaneous heartbeats for one seat and asserts no error + a single coherent presence row.",
         "All backend gates pass."
       ],
-      "notes": "Keep the (game_id, sequence) uniqueness; just make allocation safe.",
-      "passes": true
+      "notes": "Keep portable across SQLite + Postgres (sqlalchemy dialect-aware upsert or insert-with-on-conflict helper).",
+      "passes": false
     },
     {
-      "id": "US-167",
-      "title": "Chat rate limiting fails closed + per-principal fairness",
-      "priority": 167,
+      "id": "US-193",
+      "title": "OAuth id_token exp/iat hardening + dedicated state-signing key",
+      "priority": 193,
       "dependencies": [],
-      "description": "SECURITY/FAIRNESS. src/padrino/api/human_chat.py skips rate limiting entirely when the injected store is None (fail-open), and the per-game/phase ceiling is shared across all seats so one principal can exhaust the phase budget and 429 everyone else.",
+      "description": "FINDING 5. api/oauth.py claims_options marks iss/aud/sub/nonce essential but omits exp/iat, so claims.validate() only checks exp when present - a signature-valid id_token with no exp claim is accepted as a permanent, non-expiring login assertion. Separately, the CSRF/session-binding state HMAC is keyed on client_secret, coupling state integrity to the OAuth client secret (widens blast radius of a secret leak).",
       "acceptanceCriteria": [
-        "A missing/None rate-limit store fails CLOSED (deny, or a safe in-process default limiter) rather than silently allowing unlimited chat.",
-        "The per-game/phase budget is enforced with per-principal fairness so one seat flooding cannot block another seat's legitimate message in the same phase (regression test with two principals).",
+        "id_token validation marks exp essential (and validates iat with a small leeway) so a token without a bounded lifetime is REJECTED fail-closed; a test asserts an exp-less / expired token is rejected.",
+        "The state/session-binding HMAC uses a dedicated server signing key (e.g. a settings secret) rather than client_secret.",
+        "Existing OAuth tests (stubbed signed token/JWKS) still pass; add a regression test for the exp-less case.",
         "All backend gates pass."
       ],
-      "notes": "Security controls fail closed (mirrors the anonymity-guard convention).",
-      "passes": true
+      "notes": "Real provider creds remain a deploy-time step; validate logic against a stubbed signed token.",
+      "passes": false
     },
     {
-      "id": "US-168",
-      "title": "Avoid full-log replay on every human request + rate-limit the action channel",
-      "priority": 168,
-      "dependencies": ["US-158", "US-161"],
-      "description": "PERFORMANCE. Each action POST, chat POST, and observation poll runs events_repo.list_events + replay_state_from_rows, re-sealing and re-folding the ENTIRE event log (O(events)). For the minutes-to-hours games this lane targets, latency grows with game length and eats the phase-deadline window. The action channel also has no dedicated rate limiter (only the shared session bucket).",
-      "acceptanceCriteria": [
-        "Action POST, chat POST, and observation poll resolve current game state without re-folding the entire event log on every request (use the durable snapshot/cached head from US-161 plus bounded incremental reads).",
-        "The action POST channel has its own rate limiter distinct from the shared per-session read bucket.",
-        "A test asserts per-request state resolution does not grow O(events) for a long game (bounded number of new-event reads per request).",
-        "All backend gates pass."
-      ],
-      "notes": "Correctness must not regress: the snapshot must stay consistent with the event log (US-161).",
-      "passes": true
-    },
-    {
-      "id": "US-169",
-      "title": "Strengthen the anonymity/segregation CI gate to catch production-wiring gaps",
-      "priority": 169,
-      "dependencies": ["US-158", "US-159", "US-160", "US-163"],
-      "description": "TEST HARDENING. The US-146 invariant gate passed while the production loop was unwired because it exercised projection/stubs, not the real run path. Extend the CI-enforced gate to assert real wiring so these gaps cannot silently regress.",
-      "acceptanceCriteria": [
-        "The invariant test suite (run by default in pytest -m \"not integration\") asserts: (a) human and AI message release timing is symmetric on the wired path; (b) a released human chat message is observable by an AI seat via the event log; (c) a terminal private game's reveal is reachable by a participant; (d) the human-lane executor uses run_human_tick + HumanAdapter and no human game runs through run_game/NoopMockAdapter.",
-        "Each assertion fails if the corresponding wiring regresses (verify by a quick local mutation check noted in progress.txt).",
-        "All backend gates pass."
-      ],
-      "notes": "Closes the systemic 'green via stubs' hole that let US-131/137/138/150 ship unwired.",
-      "passes": true
-    },
-    {
-      "id": "US-170",
-      "title": "Latent-bug + duplication cleanup from the review",
-      "priority": 170,
+      "id": "US-194",
+      "title": "State-cache: preserve full tamper-detection + complete cache adoption",
+      "priority": 194,
       "dependencies": [],
-      "description": "CLEANUP. Lower-severity review findings: get_or_create_humans_included ignores the ruleset_id argument (returns the first humans-included league for every ruleset, cross-wiring rulesets); the seat-authorization helper _resolve_seat is copy-pasted across the 4 human routes (a future authz hardening could miss one); HumanGameRuntime.buffer_snapshot is NOT NULL with no server_default; turing _accuracy_string derives its string from a binary float.",
+      "description": "FINDING 6 (+7 partial). US-168's resolve_current_human_state / EventLog.from_stored trust the cached prefix bodies (from_stored does not recompute event_hash from each body; only the cached head is cross-checked against the DB head row and the suffix is re-sealed), so a tampered pre-head game_events body is not detected on the read path the way the old replay_state_from_rows (full re-seal) was. Defense-in-depth (needs DB write access), but the human request paths lost an integrity check. Also: human_turing.py still uses the pre-cache full replay (incomplete adoption), and human_game_runtime.upsert defaults state_cache=None and unconditionally overwrites it (a future partial-update caller silently wipes the cache).",
       "acceptanceCriteria": [
-        "get_or_create_humans_included filters by ruleset_id so each ruleset gets its own dormant humans-included league (regression test for two rulesets).",
-        "The human seat-authorization check (_resolve_seat) lives in one shared helper consumed by all human routes (action/chat/observation/turing).",
-        "HumanGameRuntime.buffer_snapshot has a server_default (or is documented ORM-only with a test asserting inserts supply it); add a migration if a server_default is introduced (linear, after the current head).",
-        "turing accuracy disclosure is derived without a binary-float repr artifact (exact ratio/decimal string).",
+        "The cache read path does not weaken tamper detection vs the old replay: either re-verify the cached prefix's chain (recompute event_hash) on load, or detect a mismatch and fall back to full verified replay; a test tampers a pre-head body and asserts it is detected (not silently served).",
+        "human_turing.py uses the shared resolve_current_human_state cache path (consistent with action/chat/observation), not a separate full replay.",
+        "human_game_runtime.upsert preserves an existing state_cache when the caller does not supply one (no accidental wipe); a test covers a cache-omitting update.",
         "All backend gates pass."
       ],
-      "notes": "Prefer wrapping the existing public.moderation guard adapter over duplicating it, but only if it does not risk behaviour drift; otherwise leave the two adapters and note it.",
-      "passes": true
+      "notes": "Balance integrity vs the US-168 performance win; the goal is no regression in tamper detection and a single state-resolution path.",
+      "passes": false
+    },
+    {
+      "id": "US-195",
+      "title": "Cleanup: dedup reveal seat-auth, dup-league constraint, hot-path + compat tidy",
+      "priority": 195,
+      "dependencies": [],
+      "description": "FINDINGS 7-8 + minors. api/reveal.py defines a private resolve_participant_seat identical to the shared api/human_seat_auth.resolve_human_game_seat added in the same wave (the reveal route - an identity-disclosure surface - was missed by the US-170 consolidation, so its seat-auth can drift). get_or_create_humans_included now scopes by ruleset_id but the leagues table has no unique (kind, ruleset_id) constraint, so concurrent calls can create duplicate dormant leagues. Minor: build_seat_observation_snapshot reads the human_game_runtime row twice; the reveal non-terminal fallback replays the full event log to return 409; resolve_human_game_seat binds on occupant_principal_id with no seat_kind filter; _accuracy_string now renders '2/3' not '0.666...' (confirm the dashboard renders it as a string, not parseFloat).",
+      "acceptanceCriteria": [
+        "The reveal route uses the shared human_seat_auth.resolve_human_game_seat (single seat-auth source); the shared helper optionally restricts to human-lane seat kinds so the binding cannot be widened by an upstream invariant break.",
+        "A unique constraint on leagues (kind, ruleset_id) [scoped to HUMANS_INCLUDED] prevents duplicate dormant leagues; migration linear off the current head; get_or_create handles the conflict idempotently.",
+        "Observation reads the runtime row once (reuse the cache-resolution result for the deadline); the reveal non-terminal path avoids a full-log replay just to return 409.",
+        "Confirm/adjust the frontend reveal so accuracy is rendered as the server string (no parseFloat that would NaN on '2/3'); add a test.",
+        "All backend + frontend gates pass (pnpm lint/check/test:e2e if the dashboard is touched)."
+      ],
+      "notes": "Pure cleanup/robustness; no behavior change beyond removing drift and a duplicate-league race.",
+      "passes": false
     }
   ]
 }
