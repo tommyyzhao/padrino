@@ -213,7 +213,13 @@ async def _enforce_action_rate_limits(
                 headers={"Retry-After": str(int(decision.retry_after_seconds))},
             )
     for key_hash, limit in buckets:
-        await rate_limit.record_request(key_hash, now=epoch, limit_per_minute=limit)
+        decision = await rate_limit.record_request(key_hash, now=epoch, limit_per_minute=limit)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=RATE_LIMITED_DETAIL,
+                headers={"Retry-After": str(int(decision.retry_after_seconds))},
+            )
 
 
 def _hash_key(raw: str) -> str:

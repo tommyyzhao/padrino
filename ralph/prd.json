@@ -245,7 +245,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Evidence: rate_limit_store.py:150-238/174-193, human_actions.py:200-216, human_chat.py:249-268, app.py:82-87. The robust fix is an atomic multi-bucket check-and-increment (one transaction that increments all buckets and rolls back / returns the limiting decision if any exceeds) -- but at minimum the record loop must re-check the decision (do NOT discard it). Keep the peek loop for the budget-burn fix.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-205",
