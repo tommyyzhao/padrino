@@ -1,23 +1,25 @@
 {
   "project": "Padrino",
   "branchName": "ralph/padrino-v10",
-  "description": "Wave 10 - Role Expansion & Multi-Context Scoring (DRAFT). Extends the scientific Mafia benchmark with deterministic scum-skill roles (deception/info-denial), a formal Night Action Resolution (NAR) tier system, and a multi-context rating architecture in which EVERY mode is SCORED but canonical 2-faction ELO ranking PURITY is firewalled and CI-enforced. Sequenced AFTER the still-unexecuted Wave 9 + v9-fixes (US-121..170) land; this wave is about the core benchmark engine, largely orthogonal to the human-multiplayer layer. Incorporates a 4-model review (Claude synthesis + mafiascum research agents + Codex gpt-5.5 + Antigravity Gemini-3.1-Pro). Guiding refinement from review: 'scored' must NOT mean 'same leaderboard' - each mode rates into its own context; canonical ladders stay narrow, boring, heavily tested. DRAFT: not activated, not run.",
+  "description": "Wave 10 - Role Expansion & Multi-Context Scoring (DRAFT). Extends the scientific Mafia benchmark with deterministic scum-skill roles (deception/info-denial), a formal Night Action Resolution (NAR) tier system, and a multi-context rating architecture in which EVERY mode is SCORED but canonical 2-faction ELO ranking PURITY is firewalled and CI-enforced. GROUNDING (HEAD c209858, Alembic head 0046): Wave 9 + v9-fixes + v9-fixes-2 (US-121..209) are MERGED; this wave builds on the merged tree, not on unexecuted work. The single new migration is 0047 (linear after 0046). The existing segregation firewall is REUSED, not reimplemented: League.kind in {SCIENTIFIC, HUMANS_INCLUDED}, the fail-closed _should_apply_ratings chokepoint in runner/game_runner.py, the sibling human_rating tables, and Rating/RatingEvent keyed on league_id + scope_type/scope_value; the anonymity/segregation CI gate (tests/test_invariants_human_mp.py + tests/ratings/test_segregation.py) is IN-TREE and reused. The presentation surfaces ALREADY EXIST: the SvelteKit spectator frontend (web/dashboard) and src/padrino/ratings/public_leaderboard.py. This wave is about the core benchmark engine and multi-context scoring, with firewalled canonical purity, largely orthogonal to the human-multiplayer layer. Incorporates a 4-model review (Claude synthesis + mafiascum research agents + Codex gpt-5.5 + Antigravity Gemini-3.1-Pro). Guiding refinement from review: 'scored' must NOT mean 'same leaderboard' - each mode rates into its own context; canonical ladders stay narrow, boring, heavily tested. Now 21 stories including 2 prerequisite substrate stories (US-214 structured-action vocabulary, US-215 faction/win-condition generalization) and the US-187 -> US-187/US-187b Tracker+Watcher / Ninja split. DRAFT: not activated, not run.",
   "userStories": [
     {
       "id": "US-171",
-      "title": "RatingContext abstraction + per-context rating tables (fail-closed)",
+      "title": "RatingContext abstraction + per-context rating tables (composes with League.kind firewall, fail-closed)",
       "priority": 171,
       "dependencies": [],
-      "description": "Introduce a first-class RatingContext so every ruleset/mode maps to exactly one rating context, and ratings are written per-context. This is the substrate for 'every mode scored, canonical pure'. Context kinds: CANONICAL_TEAM (2-faction OpenSkill team rating), PLACEMENT (OpenSkill multi-team placement), SOLO_RATE (per-role success-rate metric). Canonical purity is preserved by strict separation of write paths, mirroring the existing scientific-vs-humans-included segregation.",
+      "description": "Introduce a first-class RatingContext so every ruleset/mode maps to exactly one rating context, and ratings are written per-context. This is the substrate for 'every mode scored, canonical pure'. Context kinds: CANONICAL_TEAM (2-faction OpenSkill team rating), PLACEMENT (OpenSkill multi-team placement), SOLO_RATE (per-role success-rate metric). Crucially RatingContext COMPOSES WITH the existing League.kind firewall rather than introducing a parallel firewall: a CANONICAL_TEAM context binds ONLY a SCIENTIFIC league and the sacred Rating/RatingEvent rows are reached exactly as today (League.kind + the fail-closed _should_apply_ratings chokepoint in runner/game_runner.py); the new PLACEMENT/SOLO_RATE contexts live on NEW sibling tables (the same pattern as the existing human_rating sibling) and NEVER write to Rating/RatingEvent. Contexts are keyed on (ruleset_id, kind) only.",
       "acceptanceCriteria": [
-        "New RatingContext concept: a rating_contexts table (id, kind in {CANONICAL_TEAM, PLACEMENT, SOLO_RATE}, ruleset_id, setup_id, is_canonical bool, display_label) and a rating_context_id FK on every rating write path (Rating/RatingEvent and the new sibling tables). One migration after the current head, linear.",
+        "New RatingContext concept: a rating_contexts table (id, kind in {CANONICAL_TEAM, PLACEMENT, SOLO_RATE}, ruleset_id, is_canonical bool, display_label) keyed on (ruleset_id, kind) ONLY. It does NOT add a competing rating_context_id FK that bypasses League.kind; the sacred Rating/RatingEvent reach path stays League.kind + _should_apply_ratings exactly as in-tree.",
+        "CANONICAL_TEAM maps onto the existing SCIENTIFIC league: a canonical context may ONLY bind a SCIENTIFIC league, and the canonical backfill is a no-op marker (it stamps the existing rows, it does not create a new write path). PLACEMENT/SOLO_RATE contexts live on NEW sibling tables (mirroring the human_rating sibling pattern) and never write a row to Rating/RatingEvent.",
         "Rulesets declare a canonical flag and a rating-context kind; get_ruleset exposes them. A ruleset with kind != CANONICAL_TEAM (or is_canonical=false) can NEVER resolve to a canonical context.",
-        "FAIL CLOSED: a game with a missing/unknown/None rating context is treated as UNRATED (written nowhere) - it NEVER defaults into a canonical ladder.",
-        "Canonical team rating writes carry: ruleset_id, setup_id, rating_context_id, every participant's model/build id, the game seed, and the final 2-team outcome.",
-        "Backfill existing mini7_v1/bench10_v1 ratings into their canonical contexts without changing any existing scientific ELO value (a test asserts byte-stable canonical ratings pre/post migration).",
+        "FAIL CLOSED: a game with a missing/unknown/None rating context is treated as UNRATED (written nowhere) - it NEVER defaults into a canonical ladder; this reuses the existing fail-closed _should_apply_ratings posture.",
+        "Canonical team rating writes carry: ruleset_id, rating_context_id (CANONICAL_TEAM marker on the SCIENTIFIC league), every participant's model/build id, the game seed, and the final 2-team outcome - with no change to the actual Rating/RatingEvent reach path.",
+        "Migration pinned as 0047 (linear after current head 0046). The backfill is strictly ADDITIVE: NO re-rating / no PlackettLuce re-run. BOTH existing scopes per ruleset (GLOBAL/global and FACTION/TOWN + FACTION/MAFIA) for mini7_v1 and bench10_v1 are stamped with the same CANONICAL_TEAM marker on the SCIENTIFIC league; a test asserts (mu, sigma, conservative_score) are byte-identical for every pre-existing row and row counts are unchanged.",
+        "Extend tests/ratings/test_segregation.py to re-assert the existing zero-canonical-write proofs post-migration (a non-canonical context writes zero rows to Rating/RatingEvent).",
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
-      "notes": "Generalizes the planned three rating contexts (scientific / humans-included / human-personal) into N contexts keyed by mode. Reuse the segregation pattern from US-125/US-146.",
+      "notes": "Generalizes the planned three rating contexts (scientific / humans-included / human-personal) into N contexts keyed by (ruleset_id, kind). REUSES, not reimplements, the in-tree segregation pattern (League.kind + _should_apply_ratings + the human_rating sibling tables). Contexts are keyed on (ruleset_id, kind) with no per-setup key.",
       "passes": false
     },
     {
@@ -27,27 +29,27 @@
       "dependencies": ["US-171"],
       "description": "Make canonical ELO purity a CI-enforced invariant, the way anonymity/segregation are. A ruleset may be CANONICAL only if its win-state space is exactly two mutually-exclusive, collectively-exhaustive TEAM outcomes (Town win XOR Mafia win, plus a defined draw handled per US-173) with no faction mutation, no solo/third faction, no alt-win condition, and no kingmaking objective.",
       "acceptanceCriteria": [
-        "A canonicality validator programmatically introspects every ruleset marked canonical and ASSERTS its terminal win-states reduce to exactly two MECE team outcomes (+ the defined draw); any solo faction, conversion/mutation, or alt-win condition fails the assertion.",
-        "CI gate test (extends the US-146 invariant suite) forbids ALL of: (a) any non-canonical-context game writing to canonical Rating/RatingEvent; (b) any rating event whose context is missing/None updating a canonical ladder; (c) any canonical ruleset that fails the two-MECE-outcomes introspection; (d) any canonical rating event missing ruleset_id/setup_id/rating_context_id/model+build ids/seed/team-outcome; (e) any canonical observation leaking model/provider/build identity; (f) any core role using wall-clock/unseeded-random/DB/network/chat-derived mechanics.",
+        "A canonicality validator programmatically introspects every ruleset marked canonical and ASSERTS its win-state space is exactly {TOWN win, MAFIA win} as the only two RANKED outcomes, PLUS an optional DRAW that is a TIE between those two teams (equal OpenSkill rank), NOT a third winning party; the validator asserts no terminal winner outside {TOWN, MAFIA} and that DRAW maps to a tie. Any solo faction, conversion/mutation, or alt-win condition fails the assertion.",
+        "CI gate test (in tests/ratings/test_segregation.py and tests/test_invariants_human_mp.py) forbids ALL of: (a) any non-canonical-context game writing to canonical Rating/RatingEvent; (b) any rating event whose context is missing/None updating a canonical ladder; (c) any canonical ruleset that fails the two-MECE-outcomes introspection; (d) any canonical rating event missing ruleset_id/rating_context_id/model+build ids/seed/team-outcome; (e) any canonical observation leaking model/provider/build identity; (f) any core role using wall-clock/unseeded-random/DB/network/chat-derived mechanics.",
         "The gate runs in the default pytest -m 'not integration' suite and fails if any rule is violated.",
         "All backend gates pass."
       ],
-      "notes": "Review (both Codex + Gemini): the canonical ladder must stay 'narrow, boring, heavily tested.' Unknown context => unrated, never canonical.",
+      "notes": "Review (both Codex + Gemini): the canonical ladder must stay 'narrow, boring, heavily tested.' Unknown context => unrated, never canonical. There is no US-146-labeled suite; the concrete in-tree gates are tests/ratings/test_segregation.py and tests/test_invariants_human_mp.py.",
       "passes": false
     },
     {
       "id": "US-173",
-      "title": "Deterministic endgame + MAX_DAYS tie-breaker + per-faction (Town/Scum) diagnostics",
+      "title": "Deterministic endgame + MAX_DAYS draw (build on existing) + per-faction (Town/Scum) diagnostics",
       "priority": 173,
       "dependencies": ["US-171"],
-      "description": "Both reviewers flagged the day-cap as a rating hazard (draw compresses ELO; survive-to-win breeds a stall meta; mafia-wins-on-clock breeds random lynching). Define one clean, deterministic terminal-resolution policy used identically across ALL canonical ladders, and track per-faction + per-role diagnostics so a blended ELO doesn't hide faction asymmetry.",
+      "description": "MAX_DAYS already resolves to a DRAW in the merged tree (check_win returns WinResult(winner='DRAW', reason='MAX_DAYS_REACHED') when day > MAX_DAYS, and openskill _ranks_for handles DRAW as a tie). BUILD ON this rather than redefining it. Both reviewers flagged the day-cap as a rating hazard (draw compresses ELO; survive-to-win breeds a stall meta; mafia-wins-on-clock breeds random lynching). Preserve the existing deterministic terminal policy unchanged, make draw handling unconditional, pin that a model cannot farm score by forcing draws, and track per-faction + per-role diagnostics so a blended ELO doesn't hide faction asymmetry.",
       "acceptanceCriteria": [
-        "A single documented deterministic terminal policy: normal parity/elimination win conditions, plus an explicit, mathematically clean MAX_DAYS outcome (town-win / mafia-win / draw) that is identical across every canonical ruleset and recorded in terminal_result.",
-        "If draws are possible, OpenSkill draw handling is applied consistently; a test asserts the day-cap outcome is deterministic and replay-stable.",
-        "Per-faction rating diagnostics: store Town-ELO and Scum-ELO (and per-role sample counts) separately even if a blended number is displayed; a model with N games shows its town/mafia/per-role sample breakdown.",
+        "The existing deterministic terminal policy is PRESERVED: parity/elimination win conditions plus the in-tree MAX_DAYS -> DRAW outcome recorded in terminal_result. A test asserts the mini7_v1/bench10_v1 day-cap outcomes are byte-unchanged (same terminal_result and event_hash chain) before/after this story.",
+        "OpenSkill draw handling is applied UNCONDITIONALLY and consistently (drop any 'if draws are possible' conditional - draws ARE possible today); a test asserts the day-cap outcome is deterministic and replay-stable, AND asserts a model cannot raise its conservative_score purely by forcing draws (sigma-shrink from added games is acceptable; mu-gain from a draw is not).",
+        "Per-faction rating diagnostics (genuinely new work): store Town-ELO and Scum-ELO and per-role sample counts separately even if a blended number is displayed; only GLOBAL + FACTION TOWN/MAFIA scopes exist today, so this adds the per-role sample-count breakdown. A model with N games shows its town/mafia/per-role sample breakdown.",
         "All backend gates pass."
       ],
-      "notes": "Gemini: need a 'mathematically clean tie-breaker' to avoid degenerate metas. Codex: track town/mafia win rates + per-role sample counts as diagnostics, not just one blended ELO.",
+      "notes": "Gemini: need a 'mathematically clean tie-breaker' to avoid degenerate metas - already in-tree as DRAW(MAX_DAYS). Codex: track town/mafia win rates + per-role sample counts as diagnostics, not just one blended ELO.",
       "passes": false
     },
     {
@@ -55,10 +57,11 @@
       "title": "Night Action Resolution (NAR) tier system + resolution matrix",
       "priority": 174,
       "dependencies": [],
-      "description": "THE KEYSTONE. Replace ad-hoc night resolution with a formal, deterministic NAR tier system and an explicit resolution MATRIX (rows = action types; columns = blocked / protected / killed / redirected / watched-tracked / cleaned). Every current and future role's night interaction is defined by this matrix. Both reviewers: a flat prose order will rot; this must be a tested matrix with all edge cases pinned.",
+      "description": "THE KEYSTONE. Replace ad-hoc night resolution with a formal, deterministic NAR tier system and an explicit resolution MATRIX (rows = action types; columns = blocked / protected / killed / redirected / watched-tracked / cleaned). Every current and future role's night interaction is defined by this matrix. The existing resolvers (core/engine/resolvers/: mafia_kill.py, doctor_protect.py, detective.py, night.py, day_vote.py) must be EXPRESSED AS matrix entries, not left as a parallel resolution path. Both reviewers: a flat prose order will rot; this must be a tested matrix with all edge cases pinned.",
       "acceptanceCriteria": [
         "A documented tier order is implemented deterministically: (1) roleblocks, (2) redirects, (3) kills/protects/visits applied + visit-recording, (4) investigations/track/watch read resolved state, (5) death-reveal (with clean/forge handling). Pure-core, seed-driven, no wall-clock.",
         "Explicit predeclared resolutions, each with a test: roleblock-vs-roleblock = BOTH blocks apply (no mutual-cancel special case); factional-kill ownership when the designated killer is roleblocked (define whether the kill fails or another scum carries it); whether a blocked action counts as a 'visit' for Tracker/Watcher; whether an investigation on a target that dies the same night still returns a result; structured deterministic FEEDBACK messages for blocked/protected/investigated outcomes (never inferred from chat).",
+        "The existing mafia_kill/doctor_protect/detective resolvers (core/engine/resolvers/) are EXPRESSED AS matrix entries with NO parallel resolution path; a regression test replays a corpus of existing mini7_v1/bench10_v1 games and asserts identical event_hash chains AND identical terminal_result before/after the NAR refactor (no floats in core events).",
         "A resolution-matrix data structure (or table) is the single source of truth; adding a role means adding matrix entries, not editing scattered conditionals.",
         "Property test: replay-determinism holds across all role/action interaction combinations (Hypothesis stateful where practical).",
         "All backend gates pass."
@@ -67,30 +70,64 @@
       "passes": false
     },
     {
+      "id": "US-214",
+      "title": "Structured-action vocabulary keystone: new night ActionTypes + legal-actions + coercion + feedback",
+      "priority": 174.5,
+      "dependencies": ["US-174"],
+      "description": "ActionType today is only NOOP/ABSTAIN/VOTE/MAFIA_KILL/PROTECT/INVESTIGATE (core/enums.py). Add ROLEBLOCK/FRAME/TRACK/WATCH/CLEAN; emit them per role/phase from legal_actions (core/engine/legal_actions.py + core/observations.py) as the SINGLE source of truth; extend coercion (core/agents/coercion.py) so unknown/illegal types fall back deterministically; add a deterministic structured feedback channel in core/observations.py for roleblocked/tracked/watched results keyed by public_player_id only (never chat-derived). Pure-core, identity-blind. This BLOCKS every active-role story.",
+      "acceptanceCriteria": [
+        "The 5 new ActionType members (ROLEBLOCK, FRAME, TRACK, WATCH, CLEAN) are added to core/enums.py.",
+        "legal_actions emits each new action per the role/phase that may use it, as the SINGLE source of truth (core/engine/legal_actions.py + core/observations.py).",
+        "Coercion maps unknown/illegal/empty actions to a deterministic fallback (ties to US-181), reusing the existing coerce_to_safe_action posture.",
+        "A deterministic structured feedback channel delivers block/track/watch results via observation fields keyed by public_player_id only (never chat).",
+        "Existing mini7_v1/bench10_v1 legal-action spaces are byte-unchanged: a test asserts no new action leaks into the 2 canonical setups.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Keystone prerequisite the review flagged: every active-role story silently assumed these actions exist.",
+      "passes": false
+    },
+    {
+      "id": "US-215",
+      "title": "Faction / win-condition substrate generalization (N-faction / solo / alt-win), 2-faction byte-stable",
+      "priority": 181.5,
+      "dependencies": ["US-173"],
+      "description": "Faction enum is strictly {TOWN, MAFIA} (core/enums.py) and check_win is hardcoded 2-faction parity (alive_mafia >= alive_town) in core/engine/win_conditions.py. Generalize the faction + win-condition model to support a 3rd/solo faction (e.g. SK last-alive) and alt-win conditions, WITHOUT changing the canonical 2-faction path. Prerequisite for US-182/183/185.",
+      "acceptanceCriteria": [
+        "Faction/win-condition model generalized to N-faction / solo / alt-win (the 2-faction parity becomes one case of the general rule).",
+        "The existing 2-faction parity AND the DRAW(MAX_DAYS) outcome are byte-identical: a test replays a corpus of mini7_v1 and bench10_v1 games and asserts identical terminal_result AND identical event_hash chains pre/post.",
+        "Pure-core (no wall-clock/unseeded-random).",
+        "All backend gates pass."
+      ],
+      "notes": "Substrate prerequisite; US-183 (SK) and US-185 (Jester) are unbuildable on the strict 2-faction substrate.",
+      "passes": false
+    },
+    {
       "id": "US-175",
       "title": "Godfather (reads innocent to investigation) - first scum-skill role",
       "priority": 175,
       "dependencies": ["US-174"],
-      "description": "The cleanest, lowest-variance scum deception role and the recommended FIRST addition. At investigation resolution, the Godfather returns Town/Innocent instead of true alignment. Deterministic single conditional; 2-faction-clean (Mafia-aligned). Tests information corruption / trust-calibration.",
+      "description": "The cleanest, lowest-variance scum deception role and the recommended FIRST addition. At investigation resolution, the Godfather returns Town/Innocent instead of true alignment. Deterministic single conditional; 2-faction-clean (Mafia-aligned). Tests information corruption / trust-calibration. PASSIVE investigation-falsify: it needs only the NAR matrix (US-174), not the new active-action vocabulary.",
       "acceptanceCriteria": [
         "INVESTIGATE on the Godfather deterministically returns Innocent/Town; identity-blindness preserved (the result is falsified, not leaked). Resolved at the NAR investigation tier.",
         "Variance guard: a test/diagnostic asserts the Detective still discriminates (the role corrupts a result, it must not make the Detective pure noise); document the measured effect on town inference.",
         "Belongs only in 10p+ canonical setups (not mini7_v1).",
+        "All role feedback (here, the falsified alignment) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
         "All backend gates pass."
       ],
-      "notes": "Codex: add Godfather FIRST; measure whether Detective still discriminates skill.",
+      "notes": "Codex: add Godfather FIRST; measure whether Detective still discriminates skill. PASSIVE falsify - deliberately does NOT depend on US-214.",
       "passes": false
     },
     {
       "id": "US-176",
       "title": "Mafia Roleblocker (action denial) on the NAR engine",
       "priority": 176,
-      "dependencies": ["US-174"],
-      "description": "Scum action-denial / tempo role. Blocks a target's active night action (passives immune). Uses the NAR tier-1 resolution. High skill (denying the town's power roles) but the biggest resolution-complexity contributor, so it lands only after the NAR matrix (US-174) and in a dedicated 10p+ setup.",
+      "dependencies": ["US-174", "US-214"],
+      "description": "Scum action-denial / tempo role. Blocks a target's active night action (passives immune). Uses the NAR tier-1 resolution. High skill (denying the town's power roles) but the biggest resolution-complexity contributor, so it lands only after the NAR matrix (US-174) and the structured-action vocabulary (US-214) and in a dedicated 10p+ setup.",
       "acceptanceCriteria": [
         "ROLEBLOCK nullifies the target's active action per the NAR matrix; passives (e.g. Bulletproof/Mason) are immune; the roleblock-vs-roleblock and blocked-factional-killer cases follow US-174's predeclared rules with tests.",
         "Deterministic structured feedback to the blocked actor; no chat-derived inference.",
         "Introduced only in a dedicated 10p+ setup, not mini7_v1.",
+        "All role feedback (block results) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
         "All backend gates pass."
       ],
       "notes": "Codex: 'useful but dangerous... add Roleblocker in a dedicated setup.'",
@@ -100,45 +137,49 @@
       "id": "US-177",
       "title": "Janitor (suppress public role-reveal on death; leak-safe at game end)",
       "priority": 177,
-      "dependencies": ["US-174"],
+      "dependencies": ["US-174", "US-214"],
       "description": "Post-mortem information denial: on a successful kill the Janitor 'cleans' the death so the public death-reveal omits role/alignment. The true role is preserved internally for replay and the endgame reveal context. Must handle the win-condition-halt leak hazard the review raised.",
       "acceptanceCriteria": [
-        "On a cleaned death, the public death event omits role/alignment; the internal event state preserves the true role for deterministic replay and for the terminal endgame reveal.",
-        "LEAK GUARD: if a cleaned death triggers a terminal win condition (e.g. last mafia dies), the mid-game halt must NOT expose the cleaned role; the role is disclosed only via the terminal endgame-reveal projection (test this exact scenario).",
+        "On a cleaned death the public death event omits role/faction (stripped), verified against the real spectator projection (core/spectator_projection.py) in BOTH anonymous and transparent modes; the true role survives only in internal event state and is disclosed only via the terminal endgame-reveal projection (core/reveal.py).",
+        "LEAK GUARD: a test drives the last-mafia-cleaned-death win and asserts zero role/faction leak in any mid-game observation or spectator projection; the cleaned role is disclosed only via the terminal endgame-reveal projection (test this exact scenario).",
         "X-shot capped (e.g. 1-shot) to bound variance; resolved at the NAR death-reveal tier.",
+        "All role feedback and reveals are delivered via structured deterministic observation/projection fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
         "All backend gates pass."
       ],
-      "notes": "Gemini: 'Janitor State Leaks' when a cleaned death ends the game. Codex: limit shots, be careful with observation redaction.",
+      "notes": "Gemini: 'Janitor State Leaks' when a cleaned death ends the game. Codex: limit shots, be careful with observation redaction. Real modules: core/spectator_projection.py (mid-game) and core/reveal.py (endgame).",
       "passes": false
     },
     {
       "id": "US-178",
       "title": "Framer (frame a town target as guilty) - variance-gated",
       "priority": 178,
-      "dependencies": ["US-174", "US-175"],
+      "dependencies": ["US-174", "US-175", "US-214"],
       "description": "The richest opponent-modeling scum role (predict the Detective's target) but the highest variance ('Framer = variance bomb' - N1 luck can lose town through no reasoning fault). Implement deterministically, but GATE its inclusion in any canonical ladder behind a measured variance budget.",
       "acceptanceCriteria": [
         "FRAME marks a target; at the NAR investigation tier an investigation of a framed target deterministically returns Guilty/Mafia; framing resolves correctly when the Framer is itself roleblocked (per US-174).",
+        "Framer x Godfather precedence is pinned at the NAR investigation tier: a frame WINS -> Guilty (the frame is an active mark and overrides Godfather's passive self-innocent property); a test covers investigate(framed Godfather) returning Guilty, and the precedence is mirrored as a US-174 matrix entry.",
         "X-shot/limited; identity-blind preserved.",
-        "VARIANCE GATE: the role is enabled in a canonical ruleset ONLY if a measured-variance check (e.g. games-to-converge / outcome-variance attributable to frame RNG vs skill) stays within an explicit budget documented in progress.txt; otherwise it ships disabled / experimental-only.",
+        "VARIANCE GATE (pinned numerically): the role is enabled in a canonical ruleset ONLY IF, over >= 200 mirror-paired games (US-180), the share of outcome variance attributable to frame-target RNG (vs the measured skill delta) is <= 15%; the test computes this and disables Framer from canonical if exceeded; otherwise it ships disabled / experimental-only.",
+        "All role feedback (falsified alignment of a framed target) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
         "All backend gates pass."
       ],
-      "notes": "Both reviewers: Framer adds the most noise. Add Godfather + Roleblocker + Janitor first; admit Framer to canonical only if variance remains acceptable.",
+      "notes": "Both reviewers: Framer adds the most noise. Add Godfather + Roleblocker + Janitor first; admit Framer to canonical only if measured variance stays within the pinned <=15% budget.",
       "passes": false
     },
     {
       "id": "US-179",
-      "title": "Canonical 'deception-hardened' 2-faction ruleset (10p+), vanilla-majority",
+      "title": "Canonical 'deception-hardened' 2-faction ruleset (13p), vanilla-majority",
       "priority": 179,
-      "dependencies": ["US-172", "US-175", "US-176", "US-177"],
-      "description": "Assemble the vetted scum-skill roles into a NEW canonical 2-faction ruleset at 11-13 players that benchmarks deception/info-denial/counter-deduction, while keeping power roles a minority so games stay skill-decided not power-decided.",
+      "dependencies": ["US-172", "US-175", "US-176", "US-177", "US-178"],
+      "description": "Assemble the vetted scum-skill roles into a NEW canonical 2-faction ruleset at 13 players that benchmarks deception/info-denial/counter-deduction, while keeping power roles a minority so games stay skill-decided not power-decided. The US-178 dependency is a build-order edge: the conditional-Framer include can only be wired once the variance-gated Framer exists.",
       "acceptanceCriteria": [
-        "A new ruleset (e.g. deception13_v1) registered via get_ruleset: ~25-30% scum, VANILLA-MAJORITY, one town info (Detective) + one town protection (Doctor) + Godfather + Mafia Roleblocker + Janitor; Framer included only if US-178's variance gate passed.",
+        "A new ruleset deception13_v1 with an EXACT roster of 13 players: 4 Mafia (1 Godfather, 1 Roleblocker, 1 Janitor[1-shot], 1 Goon) ~31% scum; 9 Town (1 Detective, 1 Doctor, 7 Villagers). ROLE_COUNTS are stated explicitly. Vanilla-majority on the town side. Framer included only if US-178's variance gate passed.",
+        "Registered via get_ruleset: the resolver in core/rulesets/__init__.py is extended so the new ruleset_id 'deception13_v1' resolves (currently it only resolves mini7_v1 and bench10_v1).",
         "It declares a CANONICAL_TEAM rating context and PASSES the US-172 canonicality introspection (exactly two MECE team outcomes).",
         "Power-role count stays a minority of seats; a balance note in progress.txt documents the town:scum ratio and power-role density vs the variance budget.",
         "All backend gates pass."
       ],
-      "notes": "Both reviewers: do NOT put the quartet in mini7; role-heavy scored ladders want 10p+. Keep canonical ladders narrow and well-tested.",
+      "notes": "Both reviewers: do NOT put the quartet in mini7; role-heavy scored ladders want 10p+. Keep canonical ladders narrow and well-tested. US-178 is a build-order dependency (conditional-Framer include).",
       "passes": false
     },
     {
@@ -146,56 +187,59 @@
       "title": "Paired/mirror games ('duplicate bridge') + balanced assignment + min-sample gates",
       "priority": 180,
       "dependencies": ["US-171", "US-173"],
-      "description": "Isolate logical skill from board RNG by exploiting Padrino's determinism: run the SAME seed twice with the model<->faction (and seat) assignment swapped, and aggregate the paired outcome into the canonical rating so 'got mafia more often' or N1-luck cancels out. Also enforce balanced role/seat assignment and minimum-sample gates before a model is ranked.",
+      "description": "Isolate logical skill from board RNG by exploiting Padrino's determinism. Role layout is derived deterministically from sha256(b'roles'+game_seed) (core/engine/role_assignment.py), so re-running the SAME seed yields the IDENTICAL layout. The mirror therefore SHARES one game_seed (board RNG/role layout byte-identical) but SWAPS the agent_build->seat roster mapping, so 'got mafia more often' or N1-luck cancels out. Also enforce balanced role/seat assignment and minimum-sample gates before a model is ranked.",
       "acceptanceCriteria": [
-        "A paired-game scheduler produces mirror pairs from one seed (model A as Town / model B as Mafia, then swapped) deterministically; canonical rating updates consume the paired result so board-RNG/assignment is controlled for.",
-        "Role/seat assignment across a model's rated games is balanced (or paired) so per-(faction,role) sample counts are tracked; a model is shown as PROVISIONAL until per-context and per-faction minimum-sample gates are met.",
-        "Tests assert the mirror pairing is deterministic and that an unbalanced/under-sampled model is flagged provisional rather than ranked.",
+        "A paired-game scheduler (integrated in runner/scheduler.py) produces mirror pairs that SHARE one game_seed but SWAP the agent_build->seat mapping; a test asserts both legs have IDENTICAL assign_roles output (board RNG/role layout byte-identical) but transposed model placement.",
+        "PlackettLuce updates are order-dependent, so the mirror pair is rated as ONE atomic, order-INDEPENDENT update: apply both legs in canonical (seed, swap-flag) order in a single rating transaction, or net both outcomes into one placement before a single rate call; a test asserts the paired result is identical regardless of leg order.",
+        "The two legs are persisted as distinct game rows sharing a pair_id; canonical rating updates consume the paired result so board-RNG/assignment is controlled for.",
+        "Role/seat assignment across a model's rated games is balanced (or paired) so per-(faction,role) sample counts are tracked; a model is shown as PROVISIONAL until per-context and per-faction minimum-sample gates are met; a test asserts an unbalanced/under-sampled model is flagged provisional rather than ranked.",
         "All backend gates pass."
       ],
-      "notes": "Gemini's 'Duplicate Bridge Solution' (CRITICAL) + Codex's seat/role-confounding warning. This is a high-leverage rating-quality win unique to a deterministic engine.",
+      "notes": "Gemini's 'Duplicate Bridge Solution' (CRITICAL) + Codex's seat/role-confounding warning. This is a high-leverage rating-quality win unique to a deterministic engine. Same-seed-shared-layout + swapped-roster is the only correct mirror given role_assignment is seeded by sha256(b'roles'+game_seed).",
       "passes": false
     },
     {
       "id": "US-181",
-      "title": "Deterministic, consistently-scored invalid-action handling",
+      "title": "Deterministic, consistently-scored invalid-action handling (consolidation)",
       "priority": 181,
       "dependencies": ["US-174"],
-      "description": "More roles => bigger structured-action space => more malformed/illegal action submissions. Define one deterministic fallback applied identically across all roles and ladders, counted in diagnostics so invalid-action rate is visible and never silently distorts ratings.",
+      "description": "More roles => bigger structured-action space => more malformed/illegal action submissions. This is CONSOLIDATION, not net-new: ActionType.NOOP/ABSTAIN already exist and resolvers already coerce illegal actions (core/agents/coercion.py: coerce_to_safe_action returns ABSTAIN in DAY_VOTE and NOOP everywhere else). Consolidate into ONE documented deterministic fallback applied identically across all roles and ladders, counted in diagnostics so invalid-action rate is visible and never silently distorts ratings.",
       "acceptanceCriteria": [
-        "A malformed/illegal/empty structured action resolves to a single deterministic fallback (e.g. NOOP / forced-abstain) identical across roles; never randomized; never chat-derived.",
+        "Consolidate the existing coercion into ONE documented deterministic fallback identical across roles/ladders (a malformed/illegal/empty structured action resolves to NOOP / forced-abstain per phase); never randomized; never chat-derived; a test asserts the existing coercion already satisfies replay-stability.",
         "Invalid-action rate per model is recorded as a diagnostic and surfaced; a test asserts the fallback is deterministic and replay-stable.",
         "All backend gates pass."
       ],
-      "notes": "Codex: 'invalid action handling must be deterministic and scored consistently.'",
+      "notes": "Codex: 'invalid action handling must be deterministic and scored consistently.' Reframed as consolidation of the in-tree coerce_to_safe_action chokepoint.",
       "passes": false
     },
     {
       "id": "US-182",
       "title": "PLACEMENT rating context (multi-team / solo-faction), firewalled from canonical",
       "priority": 182,
-      "dependencies": ["US-171", "US-172"],
-      "description": "Scored context for modes with >2 outcome groups (e.g. Town vs Mafia vs Serial Killer). Use OpenSkill placement (winner ranked 1st, the rest tie) within that exact context only. Never writes to any canonical ladder.",
+      "dependencies": ["US-171", "US-172", "US-215"],
+      "description": "Scored context for modes with >2 outcome groups (e.g. Town vs Mafia vs Serial Killer). Use OpenSkill placement (winner ranked 1st, the rest tie) within that exact context only. Never writes to any canonical ladder. Depends on the US-215 faction/win-condition substrate generalization for the >2-group terminal model.",
       "acceptanceCriteria": [
         "A PLACEMENT rating context computes OpenSkill placement ratings from multi-team terminal results; it is its own context (per ruleset) and is CI-asserted non-canonical.",
         "The US-172 gate confirms placement-context games write zero rows to canonical Rating/RatingEvent.",
         "All backend gates pass."
       ],
-      "notes": "Both reviewers: OpenSkill natively handles multi-team placement; correct math for 3-faction/SK, but a SEPARATE context.",
+      "notes": "Both reviewers: OpenSkill natively handles multi-team placement; correct math for 3-faction/SK, but a SEPARATE context. Requires US-215's generalized N-faction terminal model.",
       "passes": false
     },
     {
       "id": "US-183",
       "title": "Serial Killer (solo faction) on a placement-scored ruleset",
       "priority": 183,
-      "dependencies": ["US-182", "US-174"],
-      "description": "Implement the solo-killer faction (wins as last alive) ONLY inside a placement-scored, non-canonical ruleset. Tests solo survival + frame management + tempo. Never enters a canonical 2-faction ladder.",
+      "dependencies": ["US-182", "US-174", "US-214", "US-215"],
+      "description": "Implement the solo-killer faction (wins as last alive) ONLY inside a placement-scored, non-canonical ruleset. Tests solo survival + frame management + tempo. Never enters a canonical 2-faction ladder. Requires the US-215 substrate (the strict 2-faction parity in core/engine/win_conditions.py cannot express an SK-solo win).",
       "acceptanceCriteria": [
         "A 3-faction ruleset (Town vs Mafia vs SK) with deterministic SK night kill resolved via the NAR matrix; terminal results map to a placement outcome.",
+        "check_win's 2-faction parity (alive_mafia >= alive_town in core/engine/win_conditions.py) MUST NOT be reused for this 3-faction ruleset (it ignores SK and would mis-fire a MAFIA win or never resolve an SK-solo win); the placement ruleset declares its own deterministic terminal policy (SK wins when last-alive -> OpenSkill placement). A test asserts a board where mafia==town but SK alive does NOT resolve a MAFIA win.",
+        "The new ruleset_id is registered via get_ruleset (extend the resolver in core/rulesets/__init__.py).",
         "It declares a PLACEMENT context and FAILS the canonical introspection (proving the gate works); CI confirms zero canonical writes.",
         "All backend gates pass."
       ],
-      "notes": "Gemini: native multi-team placement is the right model; keep larger setups to dampen its swing.",
+      "notes": "Gemini: native multi-team placement is the right model; keep larger setups to dampen its swing. Built on the US-215 generalized win-condition substrate.",
       "passes": false
     },
     {
@@ -214,60 +258,80 @@
     },
     {
       "id": "US-185",
-      "title": "Jester (+ Executioner/Survivor) on SOLO_RATE-scored modes",
+      "title": "Jester (+ Executioner/Survivor follow-up) on SOLO_RATE-scored modes",
       "priority": 185,
-      "dependencies": ["US-184", "US-174"],
-      "description": "Implement the alt-win roles whose entire value is a novel solo intelligence (Jester = anti-persuasion / reverse psychology), scored ONLY via the SOLO_RATE context (e.g. Jester lynch-bait success rate). Their alt-win conditions exist ONLY inside their own rulesets/contexts and never leak into team ELO.",
+      "dependencies": ["US-184", "US-174", "US-214", "US-215"],
+      "description": "Implement the alt-win roles whose entire value is a novel solo intelligence (Jester = anti-persuasion / reverse psychology), scored ONLY via the SOLO_RATE context (e.g. Jester lynch-bait success rate). Their alt-win conditions exist ONLY inside their own rulesets/contexts and never leak into team ELO. Requires the US-215 substrate for alt-win conditions.",
       "acceptanceCriteria": [
-        "Jester (win if day-voted out) implemented deterministically; its outcome records a SOLO_RATE success/attempt, never a team-ELO result; optionally Executioner (target lynched) and Survivor (survive to end) on the same context.",
+        "Jester (win if day-voted out) implemented deterministically (REQUIRED); its outcome records a SOLO_RATE success/attempt, never a team-ELO result. Executioner (target lynched) and Survivor (survive to end) on the same context are deferred to a follow-up story.",
+        "The new ruleset_id is registered via get_ruleset (extend the resolver in core/rulesets/__init__.py).",
         "A test asserts a Jester/alt-win game produces zero canonical and zero placement-team rating writes (only a SOLO_RATE event).",
+        "All role feedback / alt-win signalling is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
         "All backend gates pass."
       ],
-      "notes": "Directly answers the product question: Jester IS benchmark-worthy - as a standalone lynch-bait success rate, never inside Town-vs-Mafia ELO.",
+      "notes": "Directly answers the product question: Jester IS benchmark-worthy - as a standalone lynch-bait success rate, never inside Town-vs-Mafia ELO. Executioner/Survivor moved to a follow-up story. Built on the US-215 alt-win substrate.",
       "passes": false
     },
     {
       "id": "US-186",
-      "title": "Multi-context presentation: separate cards, hard walls, no co-sorting",
+      "title": "Multi-context presentation: separate cards, hard walls, no co-sorting (frontend EXISTS)",
       "priority": 186,
       "dependencies": ["US-179", "US-182", "US-184"],
-      "description": "Surface every context's scores ('every mode scored') WITHOUT implying false comparability. Each model shows multiple context cards (canonical ELO per ruleset, placement ratings, solo success rates); they are never merged or sorted into one ranking; provisional/min-sample states are explicit.",
+      "description": "Surface every context's scores ('every mode scored') WITHOUT implying false comparability. Each model shows multiple context cards (canonical ELO per ruleset, placement ratings, solo success rates); they are never merged or sorted into one ranking; provisional/min-sample states are explicit. The presentation surfaces ALREADY EXIST: the SvelteKit spectator frontend (web/dashboard) and src/padrino/ratings/public_leaderboard.py - this story extends them, it does not introduce a frontend.",
       "acceptanceCriteria": [
-        "The leaderboard/API exposes per-context, per-ruleset cards (e.g. 'bench10_v1 canonical: 31.2 +/-2.1', 'sk_10p placement: 24.8 +/-4.9', 'jester_8p lynch-bait: 42% CI 35-49'); canonical and non-canonical are never co-sorted in one list.",
-        "Hard separation in the surface (distinct sections/labels) marks canonical 'ranked' vs experimental contexts; provisional (under-sampled) models are labeled, not ranked.",
-        "If the spectator frontend is in scope, it renders the separated cards; otherwise the public API contract enforces the separation. All relevant gates (backend, and pnpm lint/check/test:e2e if frontend touched) pass.",
-        "All backend gates pass."
+        "The public API contract (src/padrino/ratings/public_leaderboard.py + the API) computes per-context, per-ruleset cards (e.g. 'bench10_v1 canonical: 31.2 +/-2.1', 'sk_10p placement: 24.8 +/-4.9', 'jester_8p lynch-bait: 42% CI 35-49') with HARD CANONICAL vs non-canonical section separation and no cross-context co-sort; provisional/min-sample flags are explicit.",
+        "The API response shape is pinned: a separate canonical-cards array vs an experimental-cards array, NEVER merged into one list; canonical 'ranked' vs experimental contexts are distinctly labelled; provisional (under-sampled) models are labeled, not ranked.",
+        "The existing SvelteKit spectator dashboard (web/dashboard) renders the separated cards and runs pnpm lint / check / test:e2e.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration') and the frontend pnpm lint/check/test:e2e gates pass."
       ],
-      "notes": "Both reviewers: 'same model may have multiple cards, not one merged number'; 'never sort all of these together'; presentation must scream 'separate context.'",
+      "notes": "CORRECTED: the frontend EXISTS (web/dashboard, first-class since Wave 7) and ratings/public_leaderboard.py exists. Both reviewers: 'same model may have multiple cards, not one merged number'; 'never sort all of these together'; presentation must scream 'separate context.'",
       "passes": false
     },
     {
       "id": "US-187",
-      "title": "Tracker / Watcher (visit-graph inference) + Ninja (scum visit suppression)",
+      "title": "Tracker / Watcher (visit-graph inference)",
       "priority": 187,
-      "dependencies": ["US-174"],
-      "description": "Canonical-compatible town investigative roles that infer alignment from the night visit graph rather than handed-down labels - a distinct intelligence dimension. Tracker (whom target visited) and Watcher (who visited target), with Ninja as the scum counter (factional kill leaves no visit). All resolved via the NAR visit-recording tier.",
+      "dependencies": ["US-174", "US-214"],
+      "description": "Canonical-compatible town investigative roles that infer alignment from the night visit graph rather than handed-down labels - a distinct intelligence dimension. Tracker (whom target visited) and Watcher (who visited target). Both resolved via the NAR visit-recording tier (read at the NAR investigation/visit tier).",
       "acceptanceCriteria": [
-        "Tracker and Watcher return deterministic visit lists per the NAR matrix; the blocked-action-as-visit rule (US-174) is honored; Ninja suppresses the killer's visit deterministically.",
-        "2-faction-clean; usable in 10p+ canonical setups; tests cover the block/ninja/visit interactions.",
+        "Tracker and Watcher return deterministic visit lists per the NAR matrix (visit-recording read at the NAR tier); the blocked-action-as-visit rule (US-174) is honored.",
+        "Per-role AC: Tracker reports whom the target visited; Watcher reports who visited the target; both with deterministic visit lists and tests covering the block-as-visit interaction.",
+        "2-faction-clean; usable in 10p+ canonical setups; tests cover the block/visit interactions.",
+        "All role feedback (visit lists) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
         "All backend gates pass."
       ],
-      "notes": "DEFER until NAR is solid; Ninja only matters once Tracker/Watcher exist (bundle them).",
+      "notes": "DEFER until NAR is solid. Tracker/Watcher (visit-graph inference) split out from Ninja (now US-187b).",
+      "passes": false
+    },
+    {
+      "id": "US-187b",
+      "title": "Ninja (scum factional-killer visit suppression)",
+      "priority": 187.5,
+      "dependencies": ["US-174", "US-214", "US-187"],
+      "description": "The scum counter to the visit-graph inference roles: the Ninja suppresses the factional killer's visit deterministically so Tracker/Watcher record no visit for that kill. Only matters once Tracker/Watcher (US-187) exist. Resolved via the NAR visit-recording tier.",
+      "acceptanceCriteria": [
+        "Ninja suppresses the factional-killer visit deterministically per the NAR matrix: a Tracker/Watcher observing a ninja-suppressed kill records no visit; tests cover the ninja/visit interaction (including the block-as-visit interplay from US-174).",
+        "2-faction-clean; usable in 10p+ canonical setups.",
+        "All role feedback (suppressed/observed visit lists) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
+        "All backend gates pass."
+      ],
+      "notes": "Ninja only matters once Tracker/Watcher exist; split from US-187 so the visit-recording read tier ships and is tested before the suppression counter.",
       "passes": false
     },
     {
       "id": "US-188",
       "title": "Engine-stress utility roles: Mayor, Commuter, Mason",
       "priority": 188,
-      "dependencies": ["US-174"],
+      "dependencies": ["US-174", "US-214"],
       "description": "Lower-priority deterministic, 2-faction-clean roles that also exercise specific engine paths: Mayor (weighted vote -> tests tally/threshold logic), Commuter (untargetable at night -> tests invalid/no-op target bounce), Mason (confirmed-town pair -> coordination; channel firewalled, modeled as a shared fact not chat).",
       "acceptanceCriteria": [
-        "Mayor: deterministic public vote weight in the tally; a test covers threshold/hammer math with a weighted vote.",
+        "Mayor: deterministic public vote weight in the tally; a test covers threshold/hammer math with a weighted vote. Mayor (weighted vote) is NOT admitted to any CANONICAL_TEAM ruleset unless it passes the same measured-variance gate as US-178 (otherwise it is an engine-correctness role only).",
         "Commuter: untargetable resolution at the NAR tier; actions targeting a commuter resolve to the deterministic no-op/bounce (ties to US-181).",
         "Mason: confirmed-town shared fact (no chat-driven mechanic); 2-faction-clean; identity-blind preserved.",
+        "All role feedback (Mayor tally weight, Commuter bounce, Mason shared fact) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
         "All backend gates pass."
       ],
-      "notes": "Gemini: Mayor/Commuter are great engine-correctness tests. Mason is the cheapest coordination role; keep its channel firewalled.",
+      "notes": "Gemini: Mayor/Commuter are great engine-correctness tests. Mason is the cheapest coordination role; keep its channel firewalled. Mayor admitted to canonical only behind the US-178-style measured-variance gate.",
       "passes": false
     }
   ]
