@@ -1,0 +1,112 @@
+{
+  "project": "Padrino",
+  "branchName": "ralph/padrino-v9-fixes-2",
+  "description": "v9-fixes-2 (DRAFT) - second hardening wave for the human-multiplayer layer now merged to main (Wave 9 + v9-fixes, US-121..170). Addresses the NON-BLOCKING residual findings from the post-merge /code-review re-run (crash-consistency atomicity, cost-cap atomicity, rate-limit ordering, presence race, OAuth exp, state-cache verification + adoption, and cleanup). None of these blocked the merge; this wave makes the human lane production-robust. Recommended to run BEFORE the Wave 10 role-expansion (prd-v10-roles.json) so the human-MP foundation is hardened before it is extended - though they are independent. DRAFT: not activated, not run. Story ids continue monotonically (US-189..195) after the v10 draft's allocation.",
+  "userStories": [
+    {
+      "id": "US-189",
+      "title": "Atomic event persistence for takeover + chat-release (event-log-wins on crash)",
+      "priority": 189,
+      "dependencies": [],
+      "description": "FINDING 1 (most significant). _take_over_expired_human_seats commits the GameSeat change (seat_kind=AI_TAKEOVER, takeover fields) in its own transaction, but the paired SeatTakenOver event is only appended to the in-memory event_log and persisted to game_events later by drive_game_loop's persist_pending_events (after the release-delay sleep). Likewise release_held_chat_for_phase commits the sidecar row + marks the hold RELEASED in its own txn while the content_ref chat event is persisted to game_events only later. A process crash in that window leaves the DB AHEAD of the hash chain: a seat is AI_TAKEOVER (or a sidecar row exists at sequence N) with no corresponding game_events row, so on rehydrate the event-log replay reconstructs a DIFFERENT state (takeover provenance lost; or the next chat release re-derives sequence N and collides on uq_human_chat_message_sequence, wedging chat). This soft-violates hard rule 4 (event log is the source of truth).",
+      "acceptanceCriteria": [
+        "The takeover seat mutation (seat_kind/takeover fields) and its SeatTakenOver game_events row are persisted in a SINGLE transaction (so the seat row is never committed without its event row).",
+        "A released human chat message's sidecar row + hold status flip and its content_ref game_events row are persisted in a SINGLE transaction (sidecar sequence and event sequence cannot diverge across a crash).",
+        "A test proves the invariant: for any committed takeover/chat-release DB mutation there is a matching game_events row at the expected sequence; simulate an interrupted run (apply the seat/sidecar mutation, then rehydrate from game_events) and assert reconstructed state is consistent (no AI_TAKEOVER seat missing its SeatTakenOver; no orphaned sidecar row; chat release resumes without a uq collision).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Cleanest fix: append+persist the event in the same session/txn as the DB mutation (or persist_pending_events before returning control across the await/sleep). Keep replay deterministic.",
+      "passes": false
+    },
+    {
+      "id": "US-190",
+      "title": "Atomic inference-$ cap + breaker; release admission slots on abort",
+      "priority": 190,
+      "dependencies": [],
+      "description": "FINDING 2. US-165 made the per-user/day COUNT caps race-safe via the slot table + unique constraint, but the per-user daily inference-$ cap and the global cost breaker are still plain SELECT-sum reads compared to a threshold (TOCTOU): concurrent admissions all read sub-threshold spend and all pass, overshooting the $ budget. Separately, _claim_admission_slot inserts a slot per create/join/launch that is NEVER released, so an admitted-but-aborted/abandoned action permanently consumes a day-cap slot (the cap counts ATTEMPTS not games -> self-DoS, and a probe of the create endpoint can burn a victim's day budget since it is keyed only on principal_id).",
+      "acceptanceCriteria": [
+        "The daily inference-$ cap and the global breaker are enforced atomically (reservation/lock or a slot-style accounting) so concurrent admissions cannot overshoot the $ ceiling; a concurrency test asserts the cap holds under N simultaneous admits.",
+        "Admission slots are tied to the resulting Game/LobbyMember (or released/expired on a failed/abandoned action) so the day caps count actual games/joins, not attempts; a test asserts an aborted create/join does not permanently consume a slot.",
+        "The breaker stays throttle-not-kill (never boots an active game).",
+        "All backend gates pass."
+      ],
+      "notes": "Sized to the Moderate $500-$2k/mo platform-absorbed envelope; the inference-$ cap is the one most worth making atomic.",
+      "passes": false
+    },
+    {
+      "id": "US-191",
+      "title": "Validate action legality BEFORE consuming the rate-limit budget",
+      "priority": 191,
+      "dependencies": [],
+      "description": "FINDING 3. In submit_action the order is idempotency -> _enforce_action_rate_limits (consumes a per-principal AND per-game-phase token) -> legal_actions_for validation. So an action that is rejected as illegal/out-of-phase (e.g. voting a target eliminated between observe and submit - a normal live-game race) still burns the seat's rate budget; repeated legitimate-but-now-illegal submissions can 429-lock the seat out of its ONE legal move for the phase.",
+      "acceptanceCriteria": [
+        "Legality (allowed_action_types + target legality + terminal/phase) is validated BEFORE a rate-limit slot is consumed (or the slot is refunded on a validation rejection); a malformed/illegal action returns 409 without consuming the budget.",
+        "A test asserts a seat that submitted several now-illegal actions can still submit its valid action in the same phase (not 429-locked).",
+        "Order the cheap existence/terminal (404/409) checks and the presence heartbeat sensibly (do not heartbeat for an unknown/terminal game).",
+        "All backend gates pass."
+      ],
+      "notes": "Also covers the FINDING that record_heartbeat ran before the 404/terminal checks.",
+      "passes": false
+    },
+    {
+      "id": "US-192",
+      "title": "Race-safe presence heartbeat (atomic upsert)",
+      "priority": 192,
+      "dependencies": [],
+      "description": "FINDING 4. db/repositories/human_seat_presence.py record_heartbeat / mark_disconnected do read-then-insert with no DB-level upsert; concurrent heartbeats for the same (game_id, public_player_id) both see no row, both INSERT, and the second violates uq_human_seat_presence -> IntegrityError surfacing as a 500 on the presence/observation/action path. The chat-sequence allocator was given ON CONFLICT DO UPDATE for exactly this; presence was left racy.",
+      "acceptanceCriteria": [
+        "record_heartbeat / mark_disconnected use an atomic upsert (INSERT ... ON CONFLICT (game_id, public_player_id) DO UPDATE) so concurrent heartbeats never raise IntegrityError.",
+        "A concurrency test fires simultaneous heartbeats for one seat and asserts no error + a single coherent presence row.",
+        "All backend gates pass."
+      ],
+      "notes": "Keep portable across SQLite + Postgres (sqlalchemy dialect-aware upsert or insert-with-on-conflict helper).",
+      "passes": false
+    },
+    {
+      "id": "US-193",
+      "title": "OAuth id_token exp/iat hardening + dedicated state-signing key",
+      "priority": 193,
+      "dependencies": [],
+      "description": "FINDING 5. api/oauth.py claims_options marks iss/aud/sub/nonce essential but omits exp/iat, so claims.validate() only checks exp when present - a signature-valid id_token with no exp claim is accepted as a permanent, non-expiring login assertion. Separately, the CSRF/session-binding state HMAC is keyed on client_secret, coupling state integrity to the OAuth client secret (widens blast radius of a secret leak).",
+      "acceptanceCriteria": [
+        "id_token validation marks exp essential (and validates iat with a small leeway) so a token without a bounded lifetime is REJECTED fail-closed; a test asserts an exp-less / expired token is rejected.",
+        "The state/session-binding HMAC uses a dedicated server signing key (e.g. a settings secret) rather than client_secret.",
+        "Existing OAuth tests (stubbed signed token/JWKS) still pass; add a regression test for the exp-less case.",
+        "All backend gates pass."
+      ],
+      "notes": "Real provider creds remain a deploy-time step; validate logic against a stubbed signed token.",
+      "passes": false
+    },
+    {
+      "id": "US-194",
+      "title": "State-cache: preserve full tamper-detection + complete cache adoption",
+      "priority": 194,
+      "dependencies": [],
+      "description": "FINDING 6 (+7 partial). US-168's resolve_current_human_state / EventLog.from_stored trust the cached prefix bodies (from_stored does not recompute event_hash from each body; only the cached head is cross-checked against the DB head row and the suffix is re-sealed), so a tampered pre-head game_events body is not detected on the read path the way the old replay_state_from_rows (full re-seal) was. Defense-in-depth (needs DB write access), but the human request paths lost an integrity check. Also: human_turing.py still uses the pre-cache full replay (incomplete adoption), and human_game_runtime.upsert defaults state_cache=None and unconditionally overwrites it (a future partial-update caller silently wipes the cache).",
+      "acceptanceCriteria": [
+        "The cache read path does not weaken tamper detection vs the old replay: either re-verify the cached prefix's chain (recompute event_hash) on load, or detect a mismatch and fall back to full verified replay; a test tampers a pre-head body and asserts it is detected (not silently served).",
+        "human_turing.py uses the shared resolve_current_human_state cache path (consistent with action/chat/observation), not a separate full replay.",
+        "human_game_runtime.upsert preserves an existing state_cache when the caller does not supply one (no accidental wipe); a test covers a cache-omitting update.",
+        "All backend gates pass."
+      ],
+      "notes": "Balance integrity vs the US-168 performance win; the goal is no regression in tamper detection and a single state-resolution path.",
+      "passes": false
+    },
+    {
+      "id": "US-195",
+      "title": "Cleanup: dedup reveal seat-auth, dup-league constraint, hot-path + compat tidy",
+      "priority": 195,
+      "dependencies": [],
+      "description": "FINDINGS 7-8 + minors. api/reveal.py defines a private resolve_participant_seat identical to the shared api/human_seat_auth.resolve_human_game_seat added in the same wave (the reveal route - an identity-disclosure surface - was missed by the US-170 consolidation, so its seat-auth can drift). get_or_create_humans_included now scopes by ruleset_id but the leagues table has no unique (kind, ruleset_id) constraint, so concurrent calls can create duplicate dormant leagues. Minor: build_seat_observation_snapshot reads the human_game_runtime row twice; the reveal non-terminal fallback replays the full event log to return 409; resolve_human_game_seat binds on occupant_principal_id with no seat_kind filter; _accuracy_string now renders '2/3' not '0.666...' (confirm the dashboard renders it as a string, not parseFloat).",
+      "acceptanceCriteria": [
+        "The reveal route uses the shared human_seat_auth.resolve_human_game_seat (single seat-auth source); the shared helper optionally restricts to human-lane seat kinds so the binding cannot be widened by an upstream invariant break.",
+        "A unique constraint on leagues (kind, ruleset_id) [scoped to HUMANS_INCLUDED] prevents duplicate dormant leagues; migration linear off the current head; get_or_create handles the conflict idempotently.",
+        "Observation reads the runtime row once (reuse the cache-resolution result for the deadline); the reveal non-terminal path avoids a full-log replay just to return 409.",
+        "Confirm/adjust the frontend reveal so accuracy is rendered as the server string (no parseFloat that would NaN on '2/3'); add a test.",
+        "All backend + frontend gates pass (pnpm lint/check/test:e2e if the dashboard is touched)."
+      ],
+      "notes": "Pure cleanup/robustness; no behavior change beyond removing drift and a duplicate-league race.",
+      "passes": false
+    }
+  ]
+}
