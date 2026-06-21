@@ -90,6 +90,95 @@ class Settings(BaseSettings):
     padrino_rate_limit_submitter_per_minute: int = 30
     padrino_rate_limit_spectator_per_minute: int = 1200
     padrino_rate_limit_anonymous_per_minute: int = 60
+    # Browser-human principal rate limit (US-127). Per-human-principal sliding
+    # window, completely separate from the API-key ceilings above. Reuses the
+    # same RateLimitStore, keyed by the session hash so it shares no bucket with
+    # any api_key.
+    padrino_rate_limit_human_per_minute: int = 120
+    # Human action POST channel (US-168). These ceilings are distinct from the
+    # shared per-session human read bucket and from chat buckets, so action spam
+    # cannot consume observation/chat capacity or bypass a channel-specific cap.
+    padrino_rate_limit_human_action_per_minute: int = 60
+    padrino_rate_limit_human_action_per_game_phase_per_minute: int = 30
+    # Block-before-release human chat moderation (US-140/US-167). Two message
+    # ceilings, both via RateLimitStore: a per-human-principal chat ceiling and a
+    # per-game/phase/principal ceiling so one seat cannot exhaust another seat's
+    # phase-local budget. The guard-model latency budget hides inside the buffer hold.
+    padrino_rate_limit_human_chat_per_minute: int = 30
+    padrino_rate_limit_human_chat_per_game_phase_per_minute: int = 120
+    padrino_human_chat_guard_timeout_seconds: float = 2.0
+
+    # Guest quickplay (US-128). How long a freshly-minted guest/account human
+    # session cookie stays valid, and whether the cookie carries the ``Secure``
+    # attribute. ``Secure`` defaults on (HTTPS-only) for production; tests and
+    # local plain-HTTP dev flip it off so the cookie survives an http:// client.
+    padrino_human_session_ttl_hours: int = 720
+    padrino_human_session_cookie_secure: bool = True
+
+    # Separate human-game worker lane (US-132). Minutes-to-hours human games run
+    # on an isolated worker lane with its OWN concurrency cap and admission
+    # accounting, so they never consume the benchmark scheduler's slots (which
+    # are sized for ~45s model turns at ``padrino_max_concurrent_games`` = 3).
+    # The two lanes are different processes (``padrino human-lane`` vs
+    # ``padrino scheduler``) with independent semaphores.
+    padrino_human_lane_max_concurrent: int = 5
+
+    # Human-aware tick (US-138). A human-friendly per-phase deadline the tick
+    # barrier waits on (slow humans and slow LLMs alike are coerced to a safe
+    # action past it), plus a FIXED release delay applied symmetrically to ALL
+    # public messages — human AND AI — so message timing cannot out a seat
+    # (decision 5, simplified: a fixed delay, no seeded jitter / multi-message
+    # windows in v1). Both are wall-clock values consumed only in the impure
+    # runner; the pure core never reads them.
+    padrino_human_phase_deadline_seconds: float = 120.0
+    padrino_human_release_delay_seconds: float = 3.0
+
+    # Disconnect grace + silent AI takeover (US-150). A dropped human seat gets
+    # this reconnect grace window; on expiry a curated AI silently takes the seat
+    # (SeatMultiplexAdapter swap + a SeatTakenOver event) so the game continues,
+    # invisibly in anonymous mode. A wall-clock value consumed only in the impure
+    # runner; the pure decision (WHEN to take over) reads it as plain data.
+    padrino_human_reconnect_grace_seconds: float = 90.0
+
+    # Invite links, roster, ready-up, presence (US-148). A lobby member is
+    # considered PRESENT only if it heartbeated within
+    # ``padrino_lobby_presence_stale_seconds``; a stale member is evicted on the
+    # next roster/state read. A lobby whose last activity (any member action or
+    # heartbeat) is older than ``padrino_lobby_idle_cancel_seconds`` (and any
+    # OPEN/LOCKED lobby the host has abandoned) auto-cancels to CLOSED. The
+    # member-scoped lobby state SSE channel polls every
+    # ``padrino_lobby_stream_poll_ms`` and closes after
+    # ``padrino_lobby_stream_idle_timeout_ms`` of no change (tests flip the idle
+    # timeout near-zero so the snapshot-then-close stream returns immediately).
+    padrino_lobby_presence_stale_seconds: float = 60.0
+    padrino_lobby_idle_cancel_seconds: float = 1800.0
+    padrino_lobby_stream_poll_ms: int = 1000
+    padrino_lobby_stream_heartbeat_ms: int = 15000
+    padrino_lobby_stream_idle_timeout_ms: int = 300000
+
+    # One-tap consent + 16+ age gate (US-130). The CURRENT version of each legal
+    # document a human must accept before sending any action or chat. A consent
+    # is "current" only when its stored ``document_version`` equals the value
+    # here, so bumping any of these re-prompts every human on their next action.
+    padrino_consent_tos_version: str = "2026-06-18"
+    padrino_consent_privacy_version: str = "2026-06-18"
+    padrino_consent_age_gate_version: str = "2026-06-18"
+
+    # Optional OAuth sign-in, ONE provider (US-129). All fields default to None
+    # so the engine boots and the test suite runs WITHOUT any provider
+    # credentials (the actual OAuth app is a deploy-time human step). When the
+    # client id/secret + endpoint urls are all present the ``/human/oauth/*``
+    # routes are live; otherwise they 503. The client secret is never logged.
+    padrino_oauth_provider: str | None = None
+    padrino_oauth_client_id: str | None = None
+    padrino_oauth_client_secret: str | None = None
+    padrino_oauth_authorize_url: str | None = None
+    padrino_oauth_token_url: str | None = None
+    padrino_oauth_userinfo_url: str | None = None
+    padrino_oauth_redirect_url: str | None = None
+    padrino_oauth_issuer: str | None = None
+    padrino_oauth_jwks_url: str | None = None
+    padrino_oauth_scope: str = "openid email profile"
 
     # Prometheus metrics (US-059). The default exposes ``GET /metrics`` to any
     # scraper that can reach the process; flipping the flag requires the same
@@ -153,6 +242,25 @@ class Settings(BaseSettings):
     padrino_max_games_per_day: int = 20
     padrino_max_concurrent_games: int = 3
 
+    # Human cost governance (US-151). Human play is platform-absorbed within a
+    # Moderate budget: per-user/day caps keyed on the human principal bound new
+    # lobbies/joins/launches, and a per-lobby cost cap + circuit breaker throttle
+    # NEW lobbies / new LLM turns on breach while LETTING ACTIVE GAMES FINISH
+    # (the "AI-only continuation boots humans" anti-pattern is rejected).
+    # Concrete numbers are conservative pending a PREP-v9 sign-off; override via
+    # the matching PADRINO_* env vars.
+    padrino_human_max_games_per_user_per_day: int = 10
+    padrino_human_max_joins_per_user_per_day: int = 30
+    padrino_human_max_inference_usd_per_user_per_day: float = 5.0
+    padrino_human_lobby_cost_cap_usd: float = 2.0
+    padrino_human_global_lobby_cost_breaker_usd: float = 50.0
+    # Fallback token-price table (USD per 1K tokens) used when a LiteLLM response
+    # carries no ``response_cost`` (None). Keyed by LiteLLM model string; the
+    # ``default`` key is the catch-all when a model is not listed.
+    padrino_human_fallback_token_price_per_1k: dict[str, tuple[float, float]] = {
+        "default": (0.0005, 0.0015),
+    }
+
     # Judge sampling enrichment (US-105). ``padrino_judge_sample_rate`` controls
     # the fraction of unevaluated completed games selected per batch run.
     # ``padrino_judge_max_games_per_run`` is a hard per-invocation ceiling that
@@ -171,6 +279,18 @@ class Settings(BaseSettings):
     # SSE connection cap (US-107). Maximum concurrent SSE broadcast streams
     # per client IP. Excess connections are rejected with 429.
     padrino_sse_max_connections_per_ip: int = 5
+
+    # Live-tail SSE (US-133). When ``?tail=true`` the live endpoint streams the
+    # committed prefix then keeps polling the still-growing event log for newly
+    # committed PUBLIC events, emitting keep-alive heartbeats while idle. Each
+    # poll opens its own short read transaction (no long-held DB session).
+    # ``poll_ms`` is the interval between append polls; ``heartbeat_ms`` is the
+    # maximum gap before a keep-alive comment is emitted; ``idle_timeout_ms``
+    # caps how long the tail waits with no new events on a still-LIVE game
+    # before closing (0 disables the timeout).
+    padrino_sse_live_tail_poll_ms: int = 1000
+    padrino_sse_live_tail_heartbeat_ms: int = 15000
+    padrino_sse_live_tail_idle_timeout_ms: int = 300000
 
     # Retention / archival (US-108). ``padrino_raw_payload_ttl_days`` controls
     # when heavy llm_call columns (request_json, raw_response) are scrubbed for

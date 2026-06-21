@@ -108,6 +108,177 @@ describe('PadrinoClient', () => {
   });
 });
 
+describe('PadrinoClient human-session play channels', () => {
+  it('sends cookie credentials only in human-session mode', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
+    const spectator = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
+    await spectator.publicLiveIndex();
+    expect((fetchImpl.mock.calls[0][1] as RequestInit).credentials).toBeUndefined();
+
+    const human = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+    await human.getHumanMe();
+    expect((fetchImpl.mock.calls[1][1] as RequestInit).credentials).toBe('include');
+    expect(human.hasHumanSession()).toBe(true);
+  });
+
+  it('setHumanSession toggles the credential mode', () => {
+    const client = new PadrinoClient({ baseUrl: 'http://api' });
+    expect(client.hasHumanSession()).toBe(false);
+    client.setHumanSession(true);
+    expect(client.hasHumanSession()).toBe(true);
+    client.setHumanSession(false);
+    expect(client.hasHumanSession()).toBe(false);
+  });
+
+  it('posts a structured action with an idempotency key', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        accepted: true,
+        public_player_id: 'p1',
+        phase: 'DAY_1',
+        action_type: 'VOTE',
+        target: 'p2',
+        idempotent_replay: false
+      })
+    );
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+    const result = await client.submitAction('g1', {
+      action: { type: 'VOTE', target: 'p2' },
+      idempotency_key: 'k1'
+    });
+    expect(result.action_type).toBe('VOTE');
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(new URL(url).pathname).toBe('/human/games/g1/actions');
+    const req = init as RequestInit;
+    expect(req.method).toBe('POST');
+    expect((req.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+    expect(JSON.parse(req.body as string)).toEqual({
+      action: { type: 'VOTE', target: 'p2' },
+      idempotency_key: 'k1'
+    });
+  });
+
+  it('posts a chat message into the buffered hold', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        accepted: true,
+        public_player_id: 'p1',
+        phase: 'DAY_1',
+        channel: 'PUBLIC',
+        status: 'HELD',
+        idempotent_replay: false
+      })
+    );
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+    await client.submitChat('g1', { channel: 'PUBLIC', text: 'hi', idempotency_key: 'k2' });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(new URL(url).pathname).toBe('/human/games/g1/chat');
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      channel: 'PUBLIC',
+      text: 'hi',
+      idempotency_key: 'k2'
+    });
+  });
+
+  it('submits and reads a spot-the-AI guess', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse({
+          guesser_public_id: 'p1',
+          total: 6,
+          correct: 4,
+          accuracy: '0.6667',
+          idempotent_replay: false
+        })
+      )
+    );
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+    await client.submitTuringGuess('g1', { p2: 'AI', p3: 'HUMAN' });
+    expect(new URL(fetchImpl.mock.calls[0][0]).pathname).toBe('/human/games/g1/turing-guess');
+    expect(JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      guess: { p2: 'AI', p3: 'HUMAN' }
+    });
+    await client.getTuringGuess('g1');
+    expect((fetchImpl.mock.calls[1][1] as RequestInit).method ?? 'GET').toBe('GET');
+  });
+
+  it('reads the counts-only composition and both reveal surfaces', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          game_id: 'g1',
+          ruleset_id: 'mini7_v1',
+          composition: { human_count: 1, ai_count: 6, total: 7 }
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ game_id: 'g1', ruleset_id: 'mini7_v1', winner: 'TOWN', seats: [] })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ game_id: 'g1', ruleset_id: 'mini7_v1', winner: 'TOWN', seats: [] })
+      );
+    const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
+    const composition = await client.publicGameComposition('g1');
+    expect(composition.composition).toEqual({ human_count: 1, ai_count: 6, total: 7 });
+    const reveal = await client.publicGameReveal('g1');
+    expect(reveal.winner).toBe('TOWN');
+    const humanReveal = await client.humanGameReveal('g1');
+    expect(humanReveal.winner).toBe('TOWN');
+    expect(new URL(fetchImpl.mock.calls[0][0]).pathname).toBe('/public/games/g1/composition');
+    expect(new URL(fetchImpl.mock.calls[1][0]).pathname).toBe('/public/games/g1/reveal');
+    expect(new URL(fetchImpl.mock.calls[2][0]).pathname).toBe('/human/games/g1/reveal');
+  });
+
+  it('drives the lobby create / join / ready / launch surface', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+    await client.createLobby({ ruleset_id: 'mini7_v1', identity_mode: 'ANONYMOUS' });
+    await client.joinLobby('tok');
+    await client.setLobbyReady('l1', true);
+    await client.launchLobby('l1');
+    const paths = fetchImpl.mock.calls.map((c) => new URL(c[0]).pathname);
+    expect(paths).toEqual(['/lobbies', '/lobbies/join/tok', '/lobbies/l1/ready', '/lobbies/l1/launch']);
+    expect(JSON.parse((fetchImpl.mock.calls[2][1] as RequestInit).body as string)).toEqual({
+      ready: true
+    });
+  });
+
+  it('mints a guest and gates human stats by ruleset', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+    await client.createGuest();
+    expect(new URL(fetchImpl.mock.calls[0][0]).pathname).toBe('/human/guest');
+    expect((fetchImpl.mock.calls[0][1] as RequestInit).method).toBe('POST');
+    await client.getHumanStats('mini7_v1');
+    const statsUrl = new URL(fetchImpl.mock.calls[1][0]);
+    expect(statsUrl.pathname).toBe('/human/stats');
+    expect(statsUrl.searchParams.get('ruleset_id')).toBe('mini7_v1');
+  });
+
+  it('throws PadrinoApiError with parsed detail on a failed mutation', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ detail: 'consent_required' }, { status: 412 }));
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+    await expect(
+      client.submitAction('g1', { action: { type: 'NOOP' }, idempotency_key: 'k' })
+    ).rejects.toMatchObject({ status: 412, detail: { detail: 'consent_required' } });
+  });
+
+  it('builds resume-aware live-tail and seat observation URLs', () => {
+    const client = new PadrinoClient({ baseUrl: 'http://api' });
+    const tailFresh = new URL(client.liveTailUrl('g1'));
+    expect(tailFresh.pathname).toBe('/public/games/g1/live');
+    expect(tailFresh.searchParams.get('tail')).toBe('true');
+    expect(tailFresh.searchParams.has('after')).toBe(false);
+    const tailResume = new URL(client.liveTailUrl('g1', 42));
+    expect(tailResume.searchParams.get('after')).toBe('42');
+    const obs = new URL(client.seatObservationUrl('g1'));
+    expect(obs.pathname).toBe('/human/games/g1/observation/stream');
+  });
+});
+
 describe('session storage', () => {
   it('round-trips via sessionStorage and removes on null', () => {
     // jsdom provides sessionStorage.

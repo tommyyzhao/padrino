@@ -1,216 +1,201 @@
 {
   "project": "Padrino",
-  "branchName": "ralph/padrino-v8",
-  "description": "Wave 8 \u2014 Production Launch Hardening. Closes every loop-buildable gap between the Wave 7 feature-complete state and a public production release, under the locked product shape: the PUBLIC surface is a spectator website (lobby, live watch, ladder, recap) served exclusively from /public/* endpoints; everything else (admin, ingest, gauntlets, leagues, scheduler, metrics) runs on a PRIVATE backend that is never exposed to the internet. Build order: P0 surface split (110-111) -> P1 trust + ops rails (112-116) -> P2 verification + flake burn-down (117-118) -> P3 deploy + perf (119-120). Human-gated launch steps (key rotation, domain/TLS/CDN/Postgres provisioning, cap/cadence sign-off, legal pages, one paid integration run) are NOT stories \u2014 see the launch checklist in the session plan; the loop must reach loop-complete without any new credential.",
+  "branchName": "ralph/padrino-v9",
+  "description": "Wave 9 post-review FIX wave. Closes the blocking integration gaps and security/correctness findings from /code-review on the ralph/padrino-v9 branch. The Wave 9 modules (US-121..157) exist and are unit-tested but several core human-play seams were never wired into the production run path, and the anonymity-by-timing invariant is violable in the real path. These stories WIRE the existing machinery, harden the new human-facing surfaces, and strengthen the invariant CI gate so the gaps cannot regress. Runs on the existing ralph/padrino-v9 branch (continues the wave); after this completes and re-passes /code-review, the whole branch merges to main. Run with ralph/ralph-codex.sh (Codex / gpt-5.5).",
   "userStories": [
     {
-      "id": "US-110",
-      "title": "Public-surface-only API mode",
-      "description": "As the operator, I need the API to run in a mode that serves ONLY the public spectator surface, so the internet-facing process physically cannot expose admin, ingest, or any private route \u2014 the architectural embodiment of 'website public, everything else private'.",
-      "acceptanceCriteria": [
-        "New setting `padrino_public_surface_only: bool = False`; when True, `create_app` mounts ONLY the public router and the health router \u2014 admin, admin_keys, ingest, games, leagues, gauntlets, and scheduled_gauntlets routers are not mounted at all (404, not 401/403).",
-        "`/metrics` is NOT served in public-surface-only mode (scraping happens against the internal instance).",
-        "`/healthz` and `/readyz` still work in public mode (the edge needs probes).",
-        "Test `tests/api/test_public_surface_only.py` asserts: with the flag on, every private route prefix 404s, `/public/live`, `/public/recent`, `/public/ladder`, `/public/games/{id}/live` and `/healthz` work; with the flag off (default) behavior is unchanged.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
+      "id": "US-158",
+      "title": "Wire the human-play tick + HumanAdapter into the production executor",
+      "priority": 158,
       "dependencies": [],
-      "priority": 110,
-      "passes": true,
-      "notes": "P0. Defense in depth: even a reverse-proxy misconfiguration cannot leak a private route, because the public process never registers them."
+      "description": "BLOCKER. src/padrino/runner/human_lane.py `_default_human_game_executor` runs the BENCHMARK runner `run_game(config, adapter, False)` with `NoopMockAdapter`; the human-play machinery `run_human_tick` (US-138) and `HumanAdapter` (US-137) have ZERO callers under src/. A launched human game therefore never consumes human-submitted actions through the intended seam and applies no symmetric release delay. Wire the real loop: the human lane must drive turns via `run_human_tick`, human seats served by a `HumanAdapter` bound to the action store, AI seats served by their normal curated adapter.",
+      "acceptanceCriteria": [
+        "src/padrino/runner/human_lane.py drives human-lane games via run_human_tick (not run_game); human seats are served by HumanAdapter constructed from settings (deadline from padrino_human_phase_deadline_seconds) and reading the human action store; AI auto-fill seats keep their curated adapter.",
+        "An integration-style test launches a mixed human+AI game and shows a human action submitted via the POST action channel is actually consumed by the running game through HumanAdapter (no stub substitution).",
+        "A guard test asserts run_human_tick AND HumanAdapter each have at least one production (src/) caller, and that no human-lane game is executed via run_game/NoopMockAdapter; this test must fail if the executor regresses to the benchmark runner.",
+        "uv run ruff check . && uv run ruff format --check . && uv run mypy src tests && uv run pytest -m \"not integration\" all pass."
+      ],
+      "notes": "Root-cause fix, not a bandaid: the executor seam (HumanGameExecutor/adapter_factory) already exists; supply the human tick + adapter through it rather than special-casing.",
+      "passes": true
     },
     {
-      "id": "US-111",
-      "title": "Spectator website consumes only /public endpoints",
-      "description": "As a public visitor, every page I can reach must work against the public-surface-only API, so the deployed website functions with zero access to private routes.",
+      "id": "US-159",
+      "title": "Apply symmetric release delay to human chat in the live path (close the timing leak)",
+      "priority": 159,
+      "dependencies": ["US-158"],
+      "description": "BLOCKER (anonymity invariant). src/padrino/api/human_chat.py releases human chat synchronously at POST time (released_at=now), while AI public messages emit at tick resolution. The fixed symmetric release delay built for US-138 is never applied, so an observer can distinguish human vs AI by message timing before the endgame reveal. Route human public/private messages through the SAME release buffer/schedule as AI messages.",
       "acceptanceCriteria": [
-        "Audit `web/dashboard/src/routes/**`: the home page currently calls `listGames` and `listGauntlets` (private `/games`, `/gauntlets`) for KPIs \u2014 replace home KPIs with public-surface data (e.g. live-now count from `/public/live`, recent count from `/public/recent` total_estimate, top-3 from `/public/ladder`); no public-reachable page may call a non-/public endpoint.",
-        "Private-only pages (e.g. internal games browser) are either removed from the public nav or clearly degrade when the private API is absent \u2014 no infinite spinners, no hard errors on the public site.",
-        "Playwright `web/dashboard/tests/e2e/home.spec.ts` updated to the new KPI set and passing against the smoke harness.",
-        "pnpm -C web/dashboard lint passes",
-        "pnpm -C web/dashboard check passes",
-        "pnpm -C web/dashboard test:e2e passes (Playwright)",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
+        "Human public/private messages are held and released on the same fixed release schedule as AI messages (the US-138 buffer), not at the instant of the POST.",
+        "A regression test asserts release-timing symmetry: a human message and an AI message submitted in the same phase surface to observers at the same buffered release point, with no per-source timing signal.",
+        "The behaviour holds on the wired production path from US-158 (not only in a unit harness).",
+        "All backend gates pass."
       ],
-      "dependencies": [
-        "US-110"
-      ],
-      "priority": 111,
-      "passes": true,
-      "notes": "Root cause of the pre-existing home.spec e2e failure: the home page depends on auth-gated private endpoints."
+      "notes": "This is the exact channel US-138 was meant to close; verify against the real runner path, not a stub.",
+      "passes": true
     },
     {
-      "id": "US-112",
-      "title": "Public surfaces exclude unverified ingested games",
-      "description": "As the platform, the public ladder/leaderboards must never include results from self-signed ingested bundles that were not centrally verified, so a submitter-scoped key can never pollute the public rankings.",
+      "id": "US-160",
+      "title": "Human chat enters the hash chain via content_ref so AI seats observe it",
+      "priority": 160,
+      "dependencies": ["US-158"],
+      "description": "BLOCKER (functional). Human chat is written only to the sidecar; no core event carrying content_ref is appended, so AI observations (built from the event log) never include human messages and mixed human+AI discussion is broken. The content_ref seam (core/human_chat.human_chat_content_ref, the optional content_ref on PublicMessageSubmitted/PrivateMessageSubmitted) has no producer. Append the core event carrying ONLY the content_ref (sidecar keeps the raw text), preserving the out-of-band invariant and deterministic replay.",
       "acceptanceCriteria": [
-        "Every public rating/analytics surface (public leaderboard, model rollup, ladder, recent index) excludes games originating from `IngestedGame` rows whose `verification_status` is not 'verified'; house-run (non-ingested) games are unaffected.",
-        "Test `tests/api/test_public_excludes_unverified.py` seeds one house game, one verified ingest, one unverified ingest, and asserts the unverified one is absent from each public surface while remaining visible on the private/admin surface.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
+        "When a human message is released, a core PublicMessageSubmitted/PrivateMessageSubmitted event is appended carrying content_ref (hash) and NO raw text; the raw text remains only in the sidecar.",
+        "In a mixed game, an AI seat's observation includes the human's released public message (display surfaces resolve the text from the sidecar by ref; the chained event carries only the ref).",
+        "Deterministic replay is unchanged: chat events stay recorded-only and replay does not depend on chat text; hash-chain canonicalization is preserved (existing replay/round-trip tests still pass).",
+        "The out-of-band invariant test confirms no raw human text is ever placed in a hash-chained event.",
+        "All backend gates pass."
       ],
+      "notes": "Keep GDPR-erasure safe: redacting the sidecar must leave the chain valid.",
+      "passes": true
+    },
+    {
+      "id": "US-161",
+      "title": "Persist durable runtime snapshots in the tick loop + rehydrate on worker startup",
+      "priority": 161,
+      "dependencies": ["US-158"],
+      "description": "BLOCKER (durability). runtime_repo.upsert (the HumanGameRuntime snapshot writer) has no production caller and rehydrate_active_human_games reads a stale/missing row, so a worker restart loses live games. Persist the snapshot each tick and rehydrate active human games on worker start.",
+      "acceptanceCriteria": [
+        "The human tick loop upserts the HumanGameRuntime snapshot (phase, deadline_at, buffer) consistent with the event log on each tick / phase transition.",
+        "The human worker lane calls rehydrate_active_human_games on startup and resumes in-flight games at the correct phase/deadline without losing or duplicating a turn.",
+        "A restart-mid-phase regression test: write snapshot -> simulate process restart -> rehydrate -> the game resumes at the right phase with buffered submissions intact.",
+        "All backend gates pass."
+      ],
+      "notes": "Postgres-snapshot only; no Redis (hard rule 10).",
+      "passes": true
+    },
+    {
+      "id": "US-162",
+      "title": "Wire disconnect-grace + silent AI takeover into the worker lane",
+      "priority": 162,
+      "dependencies": ["US-158", "US-161"],
+      "description": "BLOCKER (US-150 unwired). take_over_seat / seats_past_grace have no production caller and no presence/heartbeats are recorded, so disconnect -> AI takeover never fires. Record seat presence, evaluate the grace window in the tick loop, and persist the takeover.",
+      "acceptanceCriteria": [
+        "The worker lane records per-seat presence/heartbeats and, after the grace window, calls take_over_seat; the SeatTakenOver event is persisted in order with the tick loop and seat_kind flips to AI_TAKEOVER (occupant_principal_id retained for reveal provenance).",
+        "A reconnect within grace cancels the pending takeover; a reconnect racing an in-flight takeover neither double-applies nor loses the turn (regression test for the race).",
+        "Endgame reveal reports HUMAN_THEN_AI provenance for a taken-over seat.",
+        "All backend gates pass."
+      ],
+      "notes": "ELO penalty hooks stay dormant (v1 casual).",
+      "passes": true
+    },
+    {
+      "id": "US-163",
+      "title": "Participant-reachable endgame reveal for private human games",
+      "priority": 163,
+      "dependencies": ["US-158"],
+      "description": "BLOCKER (decision-11 unreachable). The only reveal route, /public/games/{id}/reveal, is gated on is_broadcastable && broadcast_state==RECENT; private/anonymous human games are never broadcastable, so participants can never get the endgame disclosure (who was human, roles, exact models). Add a participant-gated reveal route for terminal human games, reusing the single reveal projection.",
+      "acceptanceCriteria": [
+        "A route (e.g. GET /human/games/{game_id}/reveal) returns project_endgame_reveal for a TERMINAL human game to an authenticated participant (a seat occupant of that game); it returns 403 for non-participants and 404/409 before the game is terminal.",
+        "It reuses the single core/reveal.project_endgame_reveal schema (no second reveal projection).",
+        "The frontend reveal page (US-156) consumes this route for human/lobby games; an e2e test covers a private ANONYMOUS game completing and a participant reaching its reveal.",
+        "No reveal is served before terminal; anonymity holds pre-terminal. All backend + frontend gates (pnpm lint/check/test:e2e) pass."
+      ],
+      "notes": "This is the payoff of the imitation game; without it the spot-the-AI loop has no truth to reveal.",
+      "passes": true
+    },
+    {
+      "id": "US-164",
+      "title": "Harden OAuth identity assertion + session-bound state + expiry on upgrade",
+      "priority": 164,
       "dependencies": [],
-      "priority": 112,
-      "passes": true,
-      "notes": "Cheap insurance: ingest is private in this deployment, but the filter makes the trust property hold by construction."
+      "description": "SECURITY. src/padrino/api/oauth.py trusts the userinfo sub/id with no id_token signature/aud/iss/nonce validation; the OAuth state cookie is SameSite=Lax and not bound to the in-flight guest session (login-CSRF / guest-absorption); _in_flight_guest_id upgrades expired (non-revoked) guest sessions, disagreeing with get_human_context.",
+      "acceptanceCriteria": [
+        "When the provider returns an id_token, its signature, aud (== configured client_id), iss, and a nonce bound to the start request are validated before the identity is trusted; a tampered/missing/mismatched token rejects the sign-in.",
+        "The OAuth state/verifier is bound to the specific in-flight guest session; a callback whose state does not match the originating session is rejected.",
+        "_in_flight_guest_id rejects expired sessions (consistent with get_human_context); an expired guest session is never upgraded or merged.",
+        "Regression tests cover each path (tampered/missing id_token, mismatched/replayed state, expired guest). All backend gates pass."
+      ],
+      "notes": "Real provider credentials remain a deploy-time step; validate the LOGIC against a stubbed signed token/JWKS, no live provider needed in tests.",
+      "passes": true
     },
     {
-      "id": "US-113",
-      "title": "Operational alerting: webhook notifier + alert rules",
-      "description": "As the operator of an unattended money-spending system, I need to be notified when something important happens \u2014 spend cap reached, scheduler dead, moderation gate degraded \u2014 instead of discovering it on the provider bill.",
-      "acceptanceCriteria": [
-        "New `src/padrino/observability/alerts.py` with `AlertNotifier` (async, posts JSON to `padrino_alert_webhook_url: str | None = None`; no-op transport when unset; always emits a structured log).",
-        "Alerts fired from existing seams: `spend.cap.reached` (spend governor denial), `scheduler.heartbeat.stale` (checked in the tick against the heartbeats table), `moderation.guard.unavailable` (guard None or erroring while continuous matchmaking enabled), `admission.denied.streak` (N consecutive denials, configurable).",
-        "A Prometheus alert-rules file (`docs/deployment/alert-rules.yml`) covering the same conditions from the existing metrics, shipped with the deploy config.",
-        "Tests `tests/observability/test_alerts.py` use a stub transport (httpx MockTransport) \u2014 no network, no integration marker: each trigger fires exactly once per condition transition (no alert spam every tick).",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
+      "id": "US-165",
+      "title": "Atomic cost-governance admission + correct day-boundary + AI_TAKEOVER spend",
+      "priority": 165,
       "dependencies": [],
-      "priority": 113,
-      "passes": true,
-      "notes": "Webhook URL is set by the human at deploy time (Slack/Discord/etc.); the loop builds and tests the machinery."
+      "description": "COST GOVERNANCE. src/padrino/economics/human_cost_governance.py admit_human is read-then-write with no lock, so concurrent create/join/launch requests all admit past the per-user/day caps and the breaker. Daily inference-$ is keyed to Game.created_at, so a game spanning UTC midnight escapes the daily cap. global_human_lane_spend_usd filters seat_kind=='HUMAN' only, excluding AI_TAKEOVER, undercounting spend.",
+      "acceptanceCriteria": [
+        "Admission is atomic under concurrency (SELECT ... FOR UPDATE / reservation row / DB constraint) so N concurrent admissions cannot exceed the per-user/day caps or bypass the breaker; a concurrency regression test proves it.",
+        "Daily inference-$ is attributed to the spend/charge time, not Game.created_at, so a game spanning the day boundary is counted in the correct day.",
+        "global_human_lane_spend_usd counts the full human-lane seat set {HUMAN, AI_TAKEOVER} (consistent with human_lane/durability definitions).",
+        "All backend gates pass."
+      ],
+      "notes": "Sized to the Moderate $500-$2k/mo envelope; the breaker must remain throttle-not-kill (never boots an active game).",
+      "passes": true
     },
     {
-      "id": "US-114",
-      "title": "Scheduler claim hardening (SKIP LOCKED)",
-      "description": "As the operator, two scheduler replicas must never double-claim the same gauntlet, so accidental horizontal scaling (or a stuck-then-restarted instance) cannot corrupt runs.",
-      "acceptanceCriteria": [
-        "`claim_oldest_pending` (runner/scheduler claim path) uses `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL (`with_for_update(skip_locked=True)`); SQLite path unchanged (single-writer documented in the function docstring).",
-        "Postgres-marked test (`@pytest.mark.postgres`) asserts two concurrent claimers receive distinct rows (or one row + one None) \u2014 never the same row.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
+      "id": "US-166",
+      "title": "Race-free human-chat sidecar sequence allocation",
+      "priority": 166,
       "dependencies": [],
-      "priority": 114,
-      "passes": true,
-      "notes": "Matters exactly now that continuous matchmaking gives the scheduler a permanent workload."
+      "description": "CORRECTNESS. src/padrino/db/repositories/human_chat_submissions.py next_sidecar_sequence is read-max-then-+1 with no lock; two concurrent human chats in the same game compute the same ordinal and collide on uq_human_chat_message_sequence (HTTP 500 / dropped message). Concurrent chat is the normal multiplayer case.",
+      "acceptanceCriteria": [
+        "Sidecar sequence allocation is concurrency-safe (atomic per-game counter, or insert-with-retry on the unique violation) so concurrent submissions in the same game/phase all persist with distinct sequences.",
+        "A regression test simulating concurrent chat submissions asserts no IntegrityError surfaces to the client and no message is dropped.",
+        "All backend gates pass."
+      ],
+      "notes": "Keep the (game_id, sequence) uniqueness; just make allocation safe.",
+      "passes": true
     },
     {
-      "id": "US-115",
-      "title": "Honor PADRINO_LOG_LEVEL",
-      "description": "As the operator debugging production, the configured log level must actually take effect \u2014 cli.py currently hardcodes 'INFO'.",
-      "acceptanceCriteria": [
-        "`padrino serve`, `padrino scheduler`, and `padrino bootstrap` configure logging from `settings.padrino_log_level` (env `PADRINO_LOG_LEVEL`), not a hardcoded literal.",
-        "Unit test asserts the logging configuration call receives the settings value (e.g. DEBUG) for at least the serve and scheduler entrypoints.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
+      "id": "US-167",
+      "title": "Chat rate limiting fails closed + per-principal fairness",
+      "priority": 167,
       "dependencies": [],
-      "priority": 115,
-      "passes": true,
-      "notes": "Known bug: cli.py:47-ish hardcodes \"INFO\"."
+      "description": "SECURITY/FAIRNESS. src/padrino/api/human_chat.py skips rate limiting entirely when the injected store is None (fail-open), and the per-game/phase ceiling is shared across all seats so one principal can exhaust the phase budget and 429 everyone else.",
+      "acceptanceCriteria": [
+        "A missing/None rate-limit store fails CLOSED (deny, or a safe in-process default limiter) rather than silently allowing unlimited chat.",
+        "The per-game/phase budget is enforced with per-principal fairness so one seat flooding cannot block another seat's legitimate message in the same phase (regression test with two principals).",
+        "All backend gates pass."
+      ],
+      "notes": "Security controls fail closed (mirrors the anonymity-guard convention).",
+      "passes": true
     },
     {
-      "id": "US-116",
-      "title": "Retention executor job (guarded, dry-run default)",
-      "description": "As the operator, the retention planner from US-108 needs an actual executor wired into the scheduler so the compounding game bank stays bounded without manual intervention.",
+      "id": "US-168",
+      "title": "Avoid full-log replay on every human request + rate-limit the action channel",
+      "priority": 168,
+      "dependencies": ["US-158", "US-161"],
+      "description": "PERFORMANCE. Each action POST, chat POST, and observation poll runs events_repo.list_events + replay_state_from_rows, re-sealing and re-folding the ENTIRE event log (O(events)). For the minutes-to-hours games this lane targets, latency grows with game length and eats the phase-deadline window. The action channel also has no dedicated rate limiter (only the shared session bucket).",
       "acceptanceCriteria": [
-        "Scheduler tick gains a retention step gated by `padrino_enable_retention: bool = False` and `padrino_retention_dry_run: bool = True` (both must be explicitly flipped for destructive action).",
-        "Executor applies `plan_retention` output: deletes expired non-broadcastable games (cascade), scrubs heavy `llm_calls` payloads past TTL; emits structured logs with counts; dry-run logs the plan without touching rows.",
-        "Tests `tests/db/test_retention_executor.py`: dry-run mutates nothing; enabled run deletes/scrubs exactly the planned candidates and NEVER touches broadcastable games, ratings, or public replay data; idempotent on re-run.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
+        "Action POST, chat POST, and observation poll resolve current game state without re-folding the entire event log on every request (use the durable snapshot/cached head from US-161 plus bounded incremental reads).",
+        "The action POST channel has its own rate limiter distinct from the shared per-session read bucket.",
+        "A test asserts per-request state resolution does not grow O(events) for a long game (bounded number of new-event reads per request).",
+        "All backend gates pass."
       ],
+      "notes": "Correctness must not regress: the snapshot must stay consistent with the event log (US-161).",
+      "passes": true
+    },
+    {
+      "id": "US-169",
+      "title": "Strengthen the anonymity/segregation CI gate to catch production-wiring gaps",
+      "priority": 169,
+      "dependencies": ["US-158", "US-159", "US-160", "US-163"],
+      "description": "TEST HARDENING. The US-146 invariant gate passed while the production loop was unwired because it exercised projection/stubs, not the real run path. Extend the CI-enforced gate to assert real wiring so these gaps cannot silently regress.",
+      "acceptanceCriteria": [
+        "The invariant test suite (run by default in pytest -m \"not integration\") asserts: (a) human and AI message release timing is symmetric on the wired path; (b) a released human chat message is observable by an AI seat via the event log; (c) a terminal private game's reveal is reachable by a participant; (d) the human-lane executor uses run_human_tick + HumanAdapter and no human game runs through run_game/NoopMockAdapter.",
+        "Each assertion fails if the corresponding wiring regresses (verify by a quick local mutation check noted in progress.txt).",
+        "All backend gates pass."
+      ],
+      "notes": "Closes the systemic 'green via stubs' hole that let US-131/137/138/150 ship unwired.",
+      "passes": true
+    },
+    {
+      "id": "US-170",
+      "title": "Latent-bug + duplication cleanup from the review",
+      "priority": 170,
       "dependencies": [],
-      "priority": 116,
-      "passes": true,
-      "notes": "US-108 built the pure planner; this is the impure executor it was designed for."
-    },
-    {
-      "id": "US-117",
-      "title": "Broadcast pipeline end-to-end smoke test",
-      "description": "As the platform, one default-suite test must exercise the ENTIRE Wave 7 spine \u2014 matchmaking tick through SSE consumption \u2014 so a cross-boundary contract break (like the Wave 7 moderation event-type bug) can never again pass a green suite.",
+      "description": "CLEANUP. Lower-severity review findings: get_or_create_humans_included ignores the ruleset_id argument (returns the first humans-included league for every ruleset, cross-wiring rulesets); the seat-authorization helper _resolve_seat is copy-pasted across the 4 human routes (a future authz hardening could miss one); HumanGameRuntime.buffer_snapshot is NOT NULL with no server_default; turing _accuracy_string derives its string from a binary float.",
       "acceptanceCriteria": [
-        "New `tests/public/test_broadcast_pipeline_e2e.py` (mock LLM adapter, stub guard, zero cadence): run_continuous_matchmaking_tick \u2192 game COMPLETED \u2192 analytics aggregates written \u2192 moderation pass marks broadcastable \u2192 LIVE \u2192 consume the full SSE stream \u2192 every frame validates against the public_event_v1 golden contract \u2192 terminal frame is last \u2192 mark_recent \u2192 recap analytics served spoiler-free.",
-        "The test asserts at least one PublicMessageSubmitted frame's text was actually seen by the moderation gate (e.g. via a recording stub guard) \u2014 regression-guards the vacuous-gate class of bug.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
+        "get_or_create_humans_included filters by ruleset_id so each ruleset gets its own dormant humans-included league (regression test for two rulesets).",
+        "The human seat-authorization check (_resolve_seat) lives in one shared helper consumed by all human routes (action/chat/observation/turing).",
+        "HumanGameRuntime.buffer_snapshot has a server_default (or is documented ORM-only with a test asserting inserts supply it); add a migration if a server_default is introduced (linear, after the current head).",
+        "turing accuracy disclosure is derived without a binary-float repr artifact (exact ratio/decimal string).",
+        "All backend gates pass."
       ],
-      "dependencies": [],
-      "priority": 117,
-      "passes": true,
-      "notes": "Lesson from the Wave 7 review: per-story unit tests validated each side of an invented contract; only an end-to-end path catches lockstep-wrong seams."
-    },
-    {
-      "id": "US-118",
-      "title": "Flake burn-down: migrations, scheduler timing, dashboard e2e",
-      "description": "As the operator, the gates must be trustworthy: every known-flaky or environment-dependent test either becomes hermetic or is properly isolated, so a red CI means a real problem.",
-      "acceptanceCriteria": [
-        "`tests/db/test_migrations_all_dialects.py::test_postgres_full_cycle_upgrade_downgrade_upgrade` passes reliably in the full suite (isolate shared Postgres state per test, e.g. unique schema/database per run).",
-        "`tests/runner/test_scheduler.py::test_pending_gauntlet_runs_and_finalizes_to_completed` no longer depends on wall-clock timing under load (injected clock or generous deterministic synchronization).",
-        "Dashboard e2e `games.spec.ts` and `leaderboard.spec.ts` are hermetic against the smoke harness (deterministic seeded data, no dependence on machine state); `home.spec.ts` covered by US-111.",
-        "Full suite passes 3 consecutive runs locally (`uv run pytest -m \"not integration\"` \u00d73) \u2014 document the runs in progress.txt.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-111"
-      ],
-      "priority": 118,
-      "passes": true,
-      "notes": "Known offenders enumerated from the Wave 7 verification runs."
-    },
-    {
-      "id": "US-119",
-      "title": "Deploy topology: public edge vs private backend",
-      "description": "As the operator, the compose/deploy config must encode the public/private split: a public-api (surface-only) + static dashboard exposed to the edge, and api/scheduler/Postgres reachable only on an internal network.",
-      "acceptanceCriteria": [
-        "`docker-compose.yml` gains a `public-api` service running with `PADRINO_PUBLIC_SURFACE_ONLY=true` and a published port; the full `api` service and `postgres` lose published ports (internal network only); `scheduler` internal; `dashboard` built against the public-api URL.",
-        "Compose networks: `edge` (public-api, dashboard) and `internal` (postgres, api, scheduler, public-api) \u2014 postgres/api/scheduler are NOT on `edge`.",
-        "`docs/deployment/v2-public.md` runbook updated for the split topology, including the reverse-proxy/CDN expectations (TLS termination, caching immutable RECENT responses) and the env vars for spend cap, guard model, alert webhook \u2014 this story MAY edit that md as explicit deploy doc.",
-        "`tests/docker/test_compose_v2.py` extended (docker-marked, opt-in): compose graph parses, public-api has the flag and a published port, postgres/api/scheduler publish no ports.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [
-        "US-110",
-        "US-111"
-      ],
-      "priority": 119,
-      "passes": true,
-      "notes": "Human provisions the actual edge (domain/TLS/CDN); the loop ships config that makes the safe topology the default."
-    },
-    {
-      "id": "US-120",
-      "title": "Materialize per-game analytics at RECENT promotion",
-      "description": "As the platform serving a public recap page, per-game analytics for finished games should be computed once when the game becomes RECENT instead of re-deriving the full event log on every request.",
-      "acceptanceCriteria": [
-        "On `mark_recent` (or completion of broadcast), the deterministic per-game analytics + claim analysis are computed once and persisted (new table or JSON column keyed by game_id).",
-        "`GET /public/games/{id}/analytics` serves the stored result for RECENT games (immutable Cache-Control already in place); LIVE games keep the existing on-the-fly spoiler-safe path; behavior identical from the client's perspective (existing tests keep passing unchanged).",
-        "Backfill path: a stored-missing RECENT game falls back to on-the-fly compute and persists the result (self-healing for games promoted before this story).",
-        "Test `tests/api/test_game_analytics_materialized.py` asserts the stored row is created at promotion, served on GET, and the fallback persists.",
-        "uv run ruff check . passes",
-        "uv run ruff format --check . passes",
-        "uv run mypy src tests passes",
-        "uv run pytest -m \"not integration\" passes"
-      ],
-      "dependencies": [],
-      "priority": 120,
-      "passes": true,
-      "notes": "Review finding #14 (deliberately deferred from the --fix pass as architectural)."
+      "notes": "Prefer wrapping the existing public.moderation guard adapter over duplicating it, but only if it does not risk behaviour drift; otherwise leave the two adapters and note it.",
+      "passes": true
     }
   ]
 }

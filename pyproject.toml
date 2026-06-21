@@ -37,6 +37,7 @@ dependencies = [
     "pyyaml>=6.0",
     "prometheus-client>=0.20",
     "cryptography>=42.0",
+    "authlib>=1.7.2",
 ]
 
 [project.optional-dependencies]
@@ -69,7 +70,10 @@ build-backend = "hatchling.build"
 packages = ["src/padrino"]
 # Bundle canonical prompt markdown alongside the package so `importlib.resources`
 # can read them at runtime in installed wheels (US-052).
-artifacts = ["src/padrino/llm/prompts/**/*.md"]
+artifacts = [
+    "src/padrino/llm/prompts/**/*.md",
+    "src/padrino/assets/sprites/**/*.svg",
+]
 
 [tool.ruff]
 line-length = 100
@@ -116,7 +120,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["src/padrino/db/migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "openskill.*", "vcr.*", "testcontainers.*"]
+module = ["litellm.*", "openskill.*", "vcr.*", "testcontainers.*", "authlib.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

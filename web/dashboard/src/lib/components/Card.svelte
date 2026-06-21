@@ -4,11 +4,12 @@
   interface Props {
     class?: string;
     children?: import('svelte').Snippet;
+    [key: string]: unknown;
   }
 
-  let { class: className = '', children }: Props = $props();
+  let { class: className = '', children, ...rest }: Props = $props();
 </script>
 
-<div class={cn('rounded-lg border border-border bg-card p-4 shadow-sm', className)}>
+<div class={cn('rounded-lg border border-border bg-card p-4 shadow-sm', className)} {...rest}>
   {@render children?.()}
 </div>

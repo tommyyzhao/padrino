@@ -16,7 +16,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from padrino.core.enums import Faction, Role
+from padrino.core.enums import Faction, Role, SeatKind
 
 Visibility = Literal["PUBLIC", "PRIVATE", "SYSTEM"]
 
@@ -37,6 +37,10 @@ class SeatAssignment(_FrozenModel):
     seat_index: int
     role: Role
     faction: Faction
+    # Wave 9 (US-122): optional occupancy kind as pure provenance data. Defaults
+    # to None so an existing AI-only event log is byte-identical and replays to
+    # the same state; seat_kind never influences mechanics.
+    seat_kind: SeatKind | None = None
 
 
 class GameCreatedPayload(_FrozenModel):
@@ -59,11 +63,19 @@ class PhaseStartedPayload(_FrozenModel):
 class PublicMessageSubmittedPayload(_FrozenModel):
     text: str
     round_index: int | None = None
+    # US-123: a HUMAN seat's message carries ONLY this opaque content reference
+    # (sha256 of the raw text); the raw/cleaned text lives in the
+    # ``human_chat_messages`` sidecar so it can be GDPR-redacted without changing
+    # any event_hash. None for AI seats (whose text lives inline as before), so
+    # existing/AI events stay byte-identical.
+    content_ref: str | None = None
 
 
 class PrivateMessageSubmittedPayload(_FrozenModel):
     text: str
     channel_id: str
+    # US-123: see PublicMessageSubmittedPayload.content_ref.
+    content_ref: str | None = None
 
 
 class VoteSubmittedPayload(_FrozenModel):
@@ -133,6 +145,22 @@ class GameTerminatedPayload(_FrozenModel):
 
 class RoleClaimedPayload(_FrozenModel):
     claimed_role: str
+
+
+class SeatTakenOverPayload(_FrozenModel):
+    """A silent AI takeover of a human seat.
+
+    Provenance-only: folding this event preserves all mechanical state. The
+    payload carries no wall-clock or random value — ``day`` and ``phase`` come
+    from the engine's logical phase, and ``replacement_agent_build_ref`` is a
+    caller-supplied identifier for the AI that assumed the seat.
+    """
+
+    public_player_id: str
+    day: int
+    phase: str
+    reason: str
+    replacement_agent_build_ref: str
 
 
 # --------------------------------------------------------------------------- #
@@ -311,6 +339,15 @@ class RoleClaimed(_FrozenModel):
     payload: RoleClaimedPayload
 
 
+class SeatTakenOver(_FrozenModel):
+    event_type: Literal["SeatTakenOver"] = "SeatTakenOver"
+    sequence: int
+    phase: str
+    visibility: Literal["SYSTEM"] = "SYSTEM"
+    actor_player_id: str | None = None
+    payload: SeatTakenOverPayload
+
+
 # --------------------------------------------------------------------------- #
 # Discriminated union
 # --------------------------------------------------------------------------- #
@@ -334,7 +371,8 @@ Event = Annotated[
     | PlayerEliminated
     | PhaseResolved
     | GameTerminated
-    | RoleClaimed,
+    | RoleClaimed
+    | SeatTakenOver,
     Field(discriminator="event_type"),
 ]
 
@@ -360,6 +398,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "PhaseResolved",
     "GameTerminated",
     "RoleClaimed",
+    "SeatTakenOver",
 )
 
 
@@ -404,6 +443,8 @@ __all__ = [
     "RolesAssigned",
     "RolesAssignedPayload",
     "SeatAssignment",
+    "SeatTakenOver",
+    "SeatTakenOverPayload",
     "Visibility",
     "VoteSubmitted",
     "VoteSubmittedPayload",

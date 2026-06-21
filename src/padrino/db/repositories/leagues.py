@@ -7,7 +7,10 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.core.enums import LeagueKind
 from padrino.db.models import League
+
+HUMANS_INCLUDED_LEAGUE_NAME = "Humans-Included League"
 
 
 async def create(
@@ -16,11 +19,44 @@ async def create(
     name: str,
     ruleset_id: str,
     ranked: bool,
+    kind: LeagueKind = LeagueKind.SCIENTIFIC,
 ) -> League:
-    obj = League(name=name, ruleset_id=ruleset_id, ranked=ranked)
+    obj = League(name=name, ruleset_id=ruleset_id, ranked=ranked, kind=kind.value)
     session.add(obj)
     await session.flush()
     return obj
+
+
+async def get_or_create_humans_included(
+    session: AsyncSession,
+    *,
+    ruleset_id: str,
+) -> League:
+    """Return the dormant casual humans-included league for one ruleset.
+
+    The humans-included league is ``ranked=False`` and discriminated by
+    ``kind=HUMANS_INCLUDED`` so scientific vs human leagues are queryable. Human
+    games reference it; it is the home of the dormant ``human_rating`` schema and
+    NEVER writes a scientific rating row.
+    """
+    existing = await session.execute(
+        select(League)
+        .where(
+            League.kind == LeagueKind.HUMANS_INCLUDED.value,
+            League.ruleset_id == ruleset_id,
+        )
+        .limit(1)
+    )
+    found = existing.scalar_one_or_none()
+    if found is not None:
+        return found
+    return await create(
+        session,
+        name=HUMANS_INCLUDED_LEAGUE_NAME,
+        ruleset_id=ruleset_id,
+        ranked=False,
+        kind=LeagueKind.HUMANS_INCLUDED,
+    )
 
 
 async def get(session: AsyncSession, league_id: uuid.UUID) -> League | None:

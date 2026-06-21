@@ -1,0 +1,215 @@
+"""CRUD helpers for the buffered human-chat hold (US-135).
+
+The authenticated human chat channel parks a submitted message here as a *held*
+row (``status='HELD'``) until the block-before-release moderation hook (US-140)
+verdicts it. The ``idempotency_key`` dedupes network retries: a row is unique per
+``(game_id, public_player_id, phase, idempotency_key)`` so a retried POST with the
+same key returns the already-held/released message instead of inserting a
+duplicate (no double-post).
+
+This repository imports no clock / RNG (the repository-purity guard forbids
+``time`` / ``secrets`` / ``random``): ``created_at`` / ``released_at`` are passed
+in from the impure API / runner shell.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import case, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from padrino.db.models import HumanChatMessage, HumanChatSequenceCounter, HumanChatSubmission
+
+STATUS_HELD = "HELD"
+STATUS_RELEASED = "RELEASED"
+STATUS_BLOCKED = "BLOCKED"
+
+
+async def get_by_idempotency_key(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    public_player_id: str,
+    phase: str,
+    idempotency_key: str,
+) -> HumanChatSubmission | None:
+    """Return the chat submission recorded under this exact key, or None."""
+    stmt = select(HumanChatSubmission).where(
+        HumanChatSubmission.game_id == game_id,
+        HumanChatSubmission.public_player_id == public_player_id,
+        HumanChatSubmission.phase == phase,
+        HumanChatSubmission.idempotency_key == idempotency_key,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def record_held(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    public_player_id: str,
+    phase: str,
+    channel: str,
+    idempotency_key: str,
+    raw_text: str,
+    created_at: datetime,
+) -> HumanChatSubmission:
+    """Insert a new chat submission into the buffer hold (``status='HELD'``).
+
+    The caller must first check :func:`get_by_idempotency_key` to honour
+    idempotency; this only ever inserts.
+    """
+    row = HumanChatSubmission(
+        game_id=game_id,
+        public_player_id=public_player_id,
+        phase=phase,
+        channel=channel,
+        idempotency_key=idempotency_key,
+        raw_text=raw_text,
+        status=STATUS_HELD,
+        created_at=created_at,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def next_sidecar_sequence(session: AsyncSession, *, game_id: uuid.UUID) -> int:
+    """Reserve and return the next per-game sidecar sequence.
+
+    The released raw text is paired to the :class:`padrino.db.models.HumanChatMessage`
+    sidecar (keyed by ``(game_id, sequence)``). A tiny per-game counter row
+    reserves the next ordinal via ``INSERT ... ON CONFLICT DO UPDATE`` so
+    concurrent writers receive distinct values instead of racing on
+    read-max-then-+1.
+    """
+    first_unreserved = await _first_unreserved_sidecar_sequence(session, game_id=game_id)
+    return await _claim_sidecar_sequence(
+        session, game_id=game_id, first_unreserved=first_unreserved
+    )
+
+
+async def _first_unreserved_sidecar_sequence(session: AsyncSession, *, game_id: uuid.UUID) -> int:
+    """Return one greater than the highest sequence already persisted for a game."""
+    sidecar_max = await session.scalar(
+        select(func.max(HumanChatMessage.sequence)).where(HumanChatMessage.game_id == game_id)
+    )
+    hold_max = await session.scalar(
+        select(func.max(HumanChatSubmission.sidecar_sequence)).where(
+            HumanChatSubmission.game_id == game_id,
+            HumanChatSubmission.sidecar_sequence.is_not(None),
+        )
+    )
+    existing = [seq for seq in (sidecar_max, hold_max) if seq is not None]
+    return (max(existing) + 1) if existing else 0
+
+
+async def _claim_sidecar_sequence(
+    session: AsyncSession, *, game_id: uuid.UUID, first_unreserved: int
+) -> int:
+    """Atomically increment the per-game counter and return the reserved value."""
+    bind = session.get_bind()
+    dialect_name = bind.dialect.name
+    next_sequence_expr = case(
+        (
+            HumanChatSequenceCounter.next_sequence < first_unreserved,
+            first_unreserved + 1,
+        ),
+        else_=HumanChatSequenceCounter.next_sequence + 1,
+    )
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = (
+            pg_insert(HumanChatSequenceCounter)
+            .values(game_id=game_id, next_sequence=first_unreserved + 1)
+            .on_conflict_do_update(
+                index_elements=["game_id"],
+                set_={"next_sequence": next_sequence_expr},
+            )
+            .returning(HumanChatSequenceCounter.next_sequence)
+        )
+    elif dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        stmt = (
+            sqlite_insert(HumanChatSequenceCounter)
+            .values(game_id=game_id, next_sequence=first_unreserved + 1)
+            .on_conflict_do_update(
+                index_elements=["game_id"],
+                set_={"next_sequence": next_sequence_expr},
+            )
+            .returning(HumanChatSequenceCounter.next_sequence)
+        )
+    else:
+        raise RuntimeError(f"unsupported dialect for sidecar sequence allocation: {dialect_name!r}")
+
+    next_sequence = (await session.execute(stmt)).scalar_one()
+    return int(next_sequence) - 1
+
+
+async def mark_ready_for_release(
+    session: AsyncSession,
+    *,
+    submission: HumanChatSubmission,
+    cleaned_text: str,
+) -> HumanChatSubmission:
+    """Store the moderation-approved text while keeping the message held.
+
+    US-159 deliberately does NOT flip the row to ``RELEASED`` inside the POST
+    request. The runner later releases every approved held message for the phase
+    on the human-aware tick's symmetric schedule.
+    """
+    submission.cleaned_text = cleaned_text
+    await session.flush()
+    return submission
+
+
+async def list_releasable_for_phase(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    phase: str,
+) -> list[HumanChatSubmission]:
+    """Return approved held messages for one phase in deterministic seat order."""
+    stmt = (
+        select(HumanChatSubmission)
+        .where(HumanChatSubmission.game_id == game_id)
+        .where(HumanChatSubmission.phase == phase)
+        .where(HumanChatSubmission.status == STATUS_HELD)
+        .where(HumanChatSubmission.cleaned_text.is_not(None))
+        .order_by(
+            HumanChatSubmission.public_player_id,
+            HumanChatSubmission.created_at,
+            HumanChatSubmission.id,
+        )
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
+async def mark_released(
+    session: AsyncSession,
+    *,
+    submission: HumanChatSubmission,
+    sidecar_sequence: int,
+    released_at: datetime,
+) -> HumanChatSubmission:
+    """Flip a held submission to ``status='RELEASED'`` after moderation passes."""
+    submission.status = STATUS_RELEASED
+    submission.sidecar_sequence = sidecar_sequence
+    submission.released_at = released_at
+    await session.flush()
+    return submission
+
+
+async def mark_blocked(
+    session: AsyncSession,
+    *,
+    submission: HumanChatSubmission,
+) -> HumanChatSubmission:
+    """Flip a held submission to ``status='BLOCKED'`` — never released/chained."""
+    submission.status = STATUS_BLOCKED
+    await session.flush()
+    return submission

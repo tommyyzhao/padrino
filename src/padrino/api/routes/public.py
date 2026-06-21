@@ -43,7 +43,7 @@ from padrino.api.auth import (
     _get_rate_limiter,
     get_auth_context,
 )
-from padrino.api.deps import get_session
+from padrino.api.deps import get_session, get_session_factory
 from padrino.api.pagination import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -53,7 +53,9 @@ from padrino.api.pagination import (
     encode_index_cursor,
     invalid_cursor_error,
 )
+from padrino.api.reveal import build_endgame_reveal
 from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
+from padrino.core.reveal import EndgameReveal
 from padrino.core.spectator_projection import project_events_for_spectator
 from padrino.db.models import (
     AgentBuild,
@@ -72,10 +74,16 @@ from padrino.gauntlets.evaluation import evaluate_gauntlet, redact_for_public
 from padrino.observability.metrics import broadcast_active_streams, record_broadcast_frame
 from padrino.public.broadcast_index import BroadcastState, list_live
 from padrino.public.broadcaster import CadenceConfig, default_cadence, plan_broadcast
+from padrino.public.composition_disclosure import CompositionCounts, composition_counts
 from padrino.public.game_analytics_store import (
     build_game_analytics_payload,
     get_materialized_analytics,
     materialize_game_analytics,
+)
+from padrino.public.live_tail import (
+    LiveTailConfig,
+    default_live_tail_config,
+    stream_live_tail,
 )
 from padrino.ratings.model_rollup import (
     detail_for_model,
@@ -451,6 +459,105 @@ async def public_game_transcript(
         outcome=outcome,
         forbidden_payload_keys=sorted(PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS),
     )
+
+
+# ---------------------------------------------------------------------------
+# Composition disclosure (US-142): counts only, frozen, never a per-seat map
+# ---------------------------------------------------------------------------
+
+
+class PublicCompositionResponse(BaseModel):
+    game_id: uuid.UUID
+    ruleset_id: str
+    composition: CompositionCounts
+
+
+@router.get(
+    "/public/games/{game_id}/composition",
+    response_model=PublicCompositionResponse,
+)
+async def public_game_composition(
+    game_id: uuid.UUID,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicCompositionResponse:
+    """Return the counts-only composition of a broadcastable game (US-142).
+
+    Decision 7: every player / spectator / lobby surface that shows composition
+    discloses ONLY how many humans vs AI are present, never which seat is which.
+    Counts come from the single canonical
+    :func:`padrino.core.composition.composition_summary` (via
+    :func:`composition_counts`) so the "counts only, never the seat map" rule
+    cannot drift between surfaces. The counts are frozen at game start: a silent
+    AI takeover (``HUMAN`` -> ``AI_TAKEOVER``) does NOT change them, so the
+    disclosure can be served identically while a game is LIVE or RECENT.
+
+    Served for any LIVE or RECENT broadcastable game; anything else 404s. The
+    response carries no per-seat field, so it cannot leak a human/AI seat map.
+    """
+    game = await session.get(Game, game_id)
+    if (
+        game is None
+        or not game.is_broadcastable
+        or game.broadcast_state
+        not in (
+            BroadcastState.LIVE.value,
+            BroadcastState.RECENT.value,
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="game_not_found_or_not_broadcastable",
+        )
+
+    seats_stmt = select(GameSeat).where(GameSeat.game_id == game_id)
+    seats = list((await session.execute(seats_stmt)).scalars())
+    return PublicCompositionResponse(
+        game_id=game_id,
+        ruleset_id=game.ruleset_id,
+        composition=composition_counts(seats),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endgame reveal (US-143): terminal-only full per-seat truth, always disclosed
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/public/games/{game_id}/reveal",
+    response_model=EndgameReveal,
+)
+async def public_game_reveal(
+    game_id: uuid.UUID,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> EndgameReveal:
+    """Return the canonical endgame reveal for a terminal game (US-143).
+
+    Decision 11: at the end of a game every player ALWAYS sees the full truth —
+    which seats were human, each seat's role / faction, the exact model for AI
+    seats, and any silent AI takeover provenance (HUMAN / AI / HUMAN_THEN_AI) —
+    even in anonymous mode. The reveal is gated on terminal state: only a RECENT
+    (broadcast-complete) game is served; a LIVE or not-yet-broadcastable game
+    404s so the truth is never disclosed one event early.
+
+    The per-seat truth is assembled by the single pure
+    :func:`padrino.core.reveal.project_endgame_reveal` from seat rows plus the
+    shell-resolved model identity, so every surface shares ONE reveal schema.
+    """
+    game = await session.get(Game, game_id)
+    if (
+        game is None
+        or not game.is_broadcastable
+        or game.broadcast_state != BroadcastState.RECENT.value
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="reveal_not_available",
+        )
+
+    return await build_endgame_reveal(session, game)
 
 
 # ---------------------------------------------------------------------------
@@ -961,14 +1068,25 @@ def _live_cadence() -> CadenceConfig:
     return default_cadence()
 
 
+def _live_tail_config() -> LiveTailConfig:
+    """Return the live-tail config for the SSE endpoint.
+
+    A FastAPI dependency so tests can inject a near-instant
+    :class:`LiveTailConfig` via ``app.dependency_overrides``.
+    """
+    return default_live_tail_config()
+
+
 @router.get("/public/games/{game_id}/live")
 async def public_game_live_sse(
     game_id: uuid.UUID,
     request: Request,
     after: int | None = Query(default=None, ge=0),
     speed: float = Query(default=1.0, ge=0.0001, le=_SSE_SPEED_MAX),
+    tail: bool = Query(default=False),
     _ctx: ApiKeyContext = Depends(require_public_read),
     cadence: CadenceConfig = Depends(_live_cadence),
+    tail_config: LiveTailConfig = Depends(_live_tail_config),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Stream a game's broadcast frames as Server-Sent Events.
@@ -983,6 +1101,12 @@ async def public_game_live_sse(
     The optional ``?speed=`` multiplier (capped at 100x) divides each
     frame's delay for debugging — the transport applies the delay before
     emitting each frame.
+
+    With ``?tail=true`` (US-133) the endpoint streams the committed prefix and
+    then keeps tailing the still-growing event log for newly committed PUBLIC
+    events, emitting keep-alive heartbeats while idle and closing on the
+    terminal frame. The tail uses short per-poll read transactions rather than
+    pacing a finished log, so it works on an in-progress game.
     """
     game = await session.get(Game, game_id)
     if (
@@ -1028,6 +1152,44 @@ async def public_game_live_sse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="invalid_last_event_id_header",
             ) from exc
+
+    if tail:
+        # Live-tail mode (US-133): stream the committed prefix then continue
+        # emitting newly committed PUBLIC events from the still-growing log,
+        # with keep-alive heartbeats and resume-by-sequence. Uses short per-poll
+        # read transactions via the session factory; no long-held DB session.
+        session_factory = get_session_factory(request)
+
+        async def _generate_tail() -> AsyncGenerator[str, None]:
+            _sse_active[ip_hash] = _sse_active.get(ip_hash, 0) + 1
+            broadcast_active_streams.inc()
+            try:
+                async for chunk in stream_live_tail(
+                    session_factory,
+                    game_id,
+                    after=cursor,
+                    config=tail_config,
+                ):
+                    yield chunk
+                    if chunk.startswith("id:"):
+                        record_broadcast_frame()
+            finally:
+                remaining = max(0, _sse_active.get(ip_hash, 0) - 1)
+                if remaining:
+                    _sse_active[ip_hash] = remaining
+                else:
+                    _sse_active.pop(ip_hash, None)
+                broadcast_active_streams.dec()
+
+        return StreamingResponse(
+            _generate_tail(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     stmt = select(GameEvent).where(GameEvent.game_id == game_id).order_by(GameEvent.sequence)
     if cursor is not None:
@@ -1104,6 +1266,9 @@ class PublicLiveGameEntry(BaseModel):
     ruleset_id: str
     current_phase: str | None
     players_alive: int
+    # Counts-only composition (US-142): how many humans vs AI, never a per-seat
+    # map. Frozen at game start; a silent AI takeover does not change it.
+    composition: CompositionCounts
 
 
 class PublicLiveIndexResponse(BaseModel):
@@ -1148,12 +1313,15 @@ async def public_live_index(
     live_entries = await list_live(session)
     game_ids = [e.game_id for e in live_entries]
     alive_counts: dict[uuid.UUID, int] = {}
+    # All seats per game so the counts-only composition disclosure (US-142) is
+    # derived from the single canonical counter, frozen at game start.
+    seats_by_game: dict[uuid.UUID, list[GameSeat]] = {}
     if game_ids:
-        seats_stmt = select(GameSeat).where(
-            GameSeat.game_id.in_(game_ids), GameSeat.alive.is_(True)
-        )
+        seats_stmt = select(GameSeat).where(GameSeat.game_id.in_(game_ids))
         for seat in (await session.execute(seats_stmt)).scalars():
-            alive_counts[seat.game_id] = alive_counts.get(seat.game_id, 0) + 1
+            seats_by_game.setdefault(seat.game_id, []).append(seat)
+            if seat.alive:
+                alive_counts[seat.game_id] = alive_counts.get(seat.game_id, 0) + 1
 
     items = [
         PublicLiveGameEntry(
@@ -1161,6 +1329,7 @@ async def public_live_index(
             ruleset_id=e.ruleset_id,
             current_phase=e.current_phase,
             players_alive=alive_counts.get(e.game_id, 0),
+            composition=composition_counts(seats_by_game.get(e.game_id, [])),
         )
         for e in live_entries
     ]
@@ -1331,6 +1500,7 @@ __all__ = [
     "PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS",
     "PublicChatEntry",
     "PublicClaimRecordAnalytics",
+    "PublicCompositionResponse",
     "PublicCounterClaimGroupAnalytics",
     "PublicEventEntry",
     "PublicEventsResponse",
@@ -1358,9 +1528,12 @@ __all__ = [
     "PublicTranscriptResponse",
     "PublicVotingAccuracyAnalytics",
     "_live_cadence",
+    "_live_tail_config",
     "_sse_active",
     "public_game_analytics",
+    "public_game_composition",
     "public_game_live_sse",
+    "public_game_reveal",
     "public_ladder",
     "public_live_index",
     "public_model_analytics",

@@ -50,6 +50,8 @@ from padrino.core.engine.events import (
     RolesAssigned,
     RolesAssignedPayload,
     SeatAssignment,
+    SeatTakenOver,
+    SeatTakenOverPayload,
     VoteSubmitted,
     VoteSubmittedPayload,
 )
@@ -216,6 +218,18 @@ def _all_events() -> list[Event]:
             actor_player_id="P03",
             payload=RoleClaimedPayload(claimed_role="DETECTIVE"),
         ),
+        SeatTakenOver(
+            sequence=19,
+            phase="DAY_1_DISCUSSION_R1",
+            actor_player_id=None,
+            payload=SeatTakenOverPayload(
+                public_player_id="P03",
+                day=1,
+                phase="DAY_1_DISCUSSION_R1",
+                reason="DISCONNECT_GRACE_EXPIRED",
+                replacement_agent_build_ref="agent_build_curated_42",
+            ),
+        ),
     ]
 
 
@@ -240,6 +254,7 @@ def test_event_types_catalog_covers_all_classes() -> None:
         "PhaseResolved",
         "GameTerminated",
         "RoleClaimed",
+        "SeatTakenOver",
     }
     assert set(EVENT_TYPES) == expected
 

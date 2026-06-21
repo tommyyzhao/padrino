@@ -33,7 +33,7 @@ Pure function. No DB / LLM / clock / network access.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict
@@ -43,6 +43,11 @@ from padrino.core.observations import Observation
 
 class RankedPrivacyViolation(ValueError):
     """Raised when a ranked observation contains forbidden information."""
+
+
+class AnonymityViolation(ValueError):
+    """Raised when a payload reaching a public/observation surface leaks a
+    human-vs-AI or model-identity marker before the endgame reveal."""
 
 
 class LeakFinding(BaseModel):
@@ -61,28 +66,75 @@ class LeakFinding(BaseModel):
     seat_owning_the_leak: str | None
 
 
-FORBIDDEN_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
+#: Human-multiplayer identity markers (Wave 9). Any of these reaching an
+#: observation / public / spectator surface before the endgame reveal would let
+#: a viewer tell which seat is human vs AI, or re-identify the AI behind a
+#: takeover. They are folded into :data:`FORBIDDEN_PAYLOAD_KEYS` so every
+#: existing deny-list consumer (ranked guard, spectator projection, public
+#: transcript, export bundle) inherits them for free.
+HUMAN_IDENTITY_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "is_human",
+        "controller_type",
+        "seat_kind",
+        "occupant_principal_id",
+        "occupant_user_id",
+        "human_player_id",
+        "takeover",
+        "taken_over_at_phase",
+        "takeover_agent_build_id",
+    }
+)
+
+FORBIDDEN_PAYLOAD_KEYS: Final[frozenset[str]] = (
+    frozenset(
+        {
+            "agent_build_id",
+            "model_id",
+            "model_name",
+            "provider",
+            "provider_name",
+            "rating",
+            "ratings",
+            "win_rate",
+            "win_rates",
+            "elo",
+            "openskill_mu",
+            "openskill_sigma",
+            "mu",
+            "sigma",
+            "gauntlet_clone_index",
+            "clone_index",
+            "role",
+            "faction",
+        }
+    )
+    | HUMAN_IDENTITY_KEYS
+)
+
+#: Model / provider / agent-build identity markers. Unlike the seat's OWN
+#: ``role`` / ``faction`` (which a seat legitimately sees about itself, hard
+#: rule 3), these may NEVER reach a playing seat's stream in anonymous mode —
+#: they would re-identify the AI behind a seat. This is the subset of
+#: :data:`FORBIDDEN_PAYLOAD_KEYS` that is purely an *identity* leak (no
+#: legitimate self-disclosure), so a per-seat observation stream can assert
+#: their absence WITHOUT tripping on the seat's allowed ``you.role`` /
+#: ``you.faction``.
+MODEL_IDENTITY_KEYS: Final[frozenset[str]] = frozenset(
     {
         "agent_build_id",
         "model_id",
         "model_name",
         "provider",
         "provider_name",
-        "rating",
-        "ratings",
-        "win_rate",
-        "win_rates",
-        "elo",
-        "openskill_mu",
-        "openskill_sigma",
-        "mu",
-        "sigma",
         "gauntlet_clone_index",
         "clone_index",
-        "role",
-        "faction",
     }
 )
+
+#: Every identity marker (human-vs-AI + model/provider) that must be absent
+#: from a per-seat observation stream in anonymous mode.
+IDENTITY_MARKER_KEYS: Final[frozenset[str]] = HUMAN_IDENTITY_KEYS | MODEL_IDENTITY_KEYS
 
 FORBIDDEN_MEMORY_TOKENS: Final[frozenset[str]] = frozenset(
     {
@@ -238,12 +290,160 @@ def _redact(value: Any) -> str:
     return f"<{type_name}>"
 
 
+# --------------------------------------------------------------------------- #
+# Wave 9: anonymity guard (human-vs-AI / model identity)
+# --------------------------------------------------------------------------- #
+
+#: The canonical identity modes. Kept as bare strings here (rather than
+#: importing an enum) so the pure guard has no forward dependency on the
+#: ``IdentityMode`` enum introduced later in the wave. ``ANONYMOUS`` is the
+#: fail-closed default.
+ANONYMOUS: Final[str] = "ANONYMOUS"
+TRANSPARENT: Final[str] = "TRANSPARENT"
+
+
+def coerce_identity_mode(mode: Any) -> str:
+    """Resolve ``mode`` to a canonical identity mode, FAILING CLOSED.
+
+    A missing / ``None`` / unrecognised mode coerces to :data:`ANONYMOUS`
+    (strip), never :data:`TRANSPARENT`. Only an explicit, exact
+    ``"TRANSPARENT"`` (case-insensitive, accepting an enum's ``.value`` too)
+    opts out of stripping. This is the single chokepoint every surface uses so
+    a forgotten / null ``identity_mode`` column can never silently reveal
+    identities.
+    """
+    if mode is None:
+        return ANONYMOUS
+    raw = getattr(mode, "value", mode)
+    if not isinstance(raw, str):
+        return ANONYMOUS
+    return TRANSPARENT if raw.strip().upper() == TRANSPARENT else ANONYMOUS
+
+
+def is_anonymous(mode: Any) -> bool:
+    """True when ``mode`` resolves (fail-closed) to anonymous stripping."""
+    return coerce_identity_mode(mode) == ANONYMOUS
+
+
+def assert_anonymous_safe(payload: Any) -> None:
+    """Raise :class:`AnonymityViolation` if ``payload`` carries a forbidden key.
+
+    Walks nested dicts / lists / tuples and raises on the FIRST
+    :data:`FORBIDDEN_PAYLOAD_KEYS` member (which now includes every
+    :data:`HUMAN_IDENTITY_KEYS` marker). Pure structural check — it inspects
+    keys only, never values, so it never re-leaks the secret it guards.
+    """
+    if isinstance(payload, Mapping):
+        for key, sub_value in payload.items():
+            if key in FORBIDDEN_PAYLOAD_KEYS:
+                raise AnonymityViolation(f"forbidden anonymity key {key!r} in payload")
+            assert_anonymous_safe(sub_value)
+    elif isinstance(payload, list | tuple):
+        for item in payload:
+            assert_anonymous_safe(item)
+
+
+#: Allowlist of seat-row fields that MAY reach a public / observation surface.
+#: Anything not listed (notably every :data:`HUMAN_IDENTITY_KEYS` column and a
+#: future new identity column) is dropped by :func:`project_seat_row` — so an
+#: identity column cannot leak even though it is not a *payload* key.
+PUBLIC_SEAT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "public_player_id",
+        "seat_index",
+        "alive",
+        "death_phase",
+    }
+)
+
+#: Allowlist of game-row fields that MAY reach a public / observation surface
+#: before the endgame reveal.
+PUBLIC_GAME_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "public_id",
+        "ruleset_id",
+        "status",
+        "broadcast_state",
+        "created_at",
+        "day",
+        "phase",
+    }
+)
+
+
+def project_row_through_allowlist(
+    row: Mapping[str, Any],
+    allowlist: frozenset[str],
+    *,
+    identity_mode: Any = None,
+) -> dict[str, Any]:
+    """Project a DB row dict through ``allowlist``, dropping every other field.
+
+    This is the COLUMN-level half of the guard: a new identity column added to
+    ``game_seats`` / ``games`` is dropped here even though it is not a payload
+    key. In :data:`TRANSPARENT` mode the allowlist is still applied (identity
+    surfacing is the caller's job via a wider projection), but the result is
+    additionally run through :func:`assert_anonymous_safe` in ANONYMOUS mode so
+    a mistakenly-allowlisted forbidden key still fails closed.
+    """
+    projected = {k: v for k, v in row.items() if k in allowlist}
+    if is_anonymous(identity_mode):
+        assert_anonymous_safe(projected)
+    return projected
+
+
+def assert_no_identity_markers(payload: Any) -> None:
+    """Raise :class:`AnonymityViolation` on any human-vs-AI / model marker.
+
+    A per-seat observation stream (US-136) legitimately carries the seat's OWN
+    ``role`` / ``faction`` (hard rule 3), so the broad :func:`assert_anonymous_safe`
+    deny-list (which forbids ``role`` / ``faction``) is too aggressive for it.
+    This narrower guard walks nested dicts / lists / tuples and raises only on an
+    :data:`IDENTITY_MARKER_KEYS` member (human-vs-AI or model/provider identity),
+    which a seat may never see about itself or others in anonymous mode. Keys
+    only are inspected, never values, so it never re-leaks the secret it guards.
+    """
+    if isinstance(payload, Mapping):
+        for key, sub_value in payload.items():
+            if key in IDENTITY_MARKER_KEYS:
+                raise AnonymityViolation(f"forbidden identity marker {key!r} in payload")
+            assert_no_identity_markers(sub_value)
+    elif isinstance(payload, list | tuple):
+        for item in payload:
+            assert_no_identity_markers(item)
+
+
+def project_seat_row(row: Mapping[str, Any], *, identity_mode: Any = None) -> dict[str, Any]:
+    """Project a single seat row for a public / observation surface (fail-closed)."""
+    return project_row_through_allowlist(row, PUBLIC_SEAT_FIELDS, identity_mode=identity_mode)
+
+
+def project_game_row(row: Mapping[str, Any], *, identity_mode: Any = None) -> dict[str, Any]:
+    """Project a single game row for a public / observation surface (fail-closed)."""
+    return project_row_through_allowlist(row, PUBLIC_GAME_FIELDS, identity_mode=identity_mode)
+
+
 __all__ = [
+    "ANONYMOUS",
     "FORBIDDEN_MEMORY_TOKENS",
     "FORBIDDEN_PAYLOAD_KEYS",
     "GAME_ID_KEYS",
+    "HUMAN_IDENTITY_KEYS",
+    "IDENTITY_MARKER_KEYS",
+    "MODEL_IDENTITY_KEYS",
+    "PUBLIC_GAME_FIELDS",
+    "PUBLIC_SEAT_FIELDS",
+    "TRANSPARENT",
+    "AnonymityViolation",
     "LeakFinding",
     "RankedPrivacyViolation",
+    "assert_anonymous_safe",
+    "assert_no_identity_markers",
     "assert_ranked_observation_safe",
     "audit_observation_log_for_seat",
+    "coerce_identity_mode",
+    "is_anonymous",
+    "project_game_row",
+    "project_row_through_allowlist",
+    "project_seat_row",
 ]

@@ -6,9 +6,11 @@ This file is read by autonomous coding agents (Ralph / Claude Code / Codex / Cur
 
 ## What Padrino is
 
-A **deterministic, event-sourced backend league engine** for benchmarking LLM agents in Mafia-style hidden-information social deduction games. v1 is **backend-only** — no frontend, no browser verification. Every game is replayable bit-for-bit from its archived event log.
+A **deterministic, event-sourced league engine** for benchmarking LLM agents in Mafia-style hidden-information social deduction games. Every game is replayable bit-for-bit from its archived event log. Since Wave 7 it also has a **SvelteKit spectator frontend** under `web/dashboard/`.
 
-The full vision lives in `prd.md`. The executable v1 plan lives in `ralph/prd.json`.
+Padrino now also has a **human-multiplayer layer** (`prd-v3.md`): humans play with/against models in **private friend lobbies**, default **anonymous**, always **casual**, and **strictly segregated** from the scientific benchmark.
+
+Vision docs: `prd.md` (v1 backend), `prd-v2.md` (v2 spectator site), `prd-v3.md` (v3 human multiplayer). The executable plan lives in `ralph/prd.json`.
 
 ---
 
@@ -57,9 +59,27 @@ Two rulesets ship today, resolved via `padrino.core.rulesets.get_ruleset(ruleset
 
 Both use `MAX_DAYS = 5`. Add a new ruleset as a module under `core/rulesets/` satisfying the `Ruleset` Protocol, then register it in `get_ruleset`; never hardcode a ruleset in routes, scheduler, tournaments, evaluations, or leaderboards. Every rating is stamped with `ruleset_id` so each variant gets its own leaderboard.
 
-### 6. Backend-only — no browser verification
+The human-multiplayer lane reuses `mini7_v1` / `bench10_v1` (decision 15); a buffered-cadence variant (`hcad7_v1` / `hcad10_v1`) is **deferred** past v1.
 
-Ignore the default Ralph "Verify in browser using dev-browser skill" criterion. Padrino has no UI in v1. Quality gates are `ruff` + `mypy` + `pytest`.
+### 6. Frontend is first-class (since Wave 7)
+
+The SvelteKit dashboard under `web/dashboard/` is part of the product. Frontend stories run the pnpm gates (`pnpm -C web/dashboard lint` / `check` / `test:e2e` via Playwright) in addition to the four backend gates. The pure-core firewall still applies only to `src/padrino/core/**`; it never blocks the TypeScript project under `web/`.
+
+### 7. Anonymity is identity-blind for humans too (Wave 9)
+
+On any live / observation / spectator surface, never reveal which seats are human vs AI, nor model/provider identity, before the **endgame reveal**. Guards **fail CLOSED** (a missing/None `identity_mode` coerces to ANONYMOUS). The guard covers DB **columns**, not only payload keys. Composition is disclosed as **counts only** ("N humans, M AI"), frozen at game start.
+
+### 8. Human games are segregated from the benchmark (Wave 9)
+
+A human-lane game writes **ZERO** rows to the scientific `Rating` / `RatingEvent` tables. Human ELO lives in a **dormant** sibling table under the "Humans-Included League" and is not written in v1 (casual).
+
+### 9. Human chat is stored out-of-band of the hash chain (Wave 9)
+
+Human free-text chat lives in a **sidecar** table; the paired core event carries only a reference/hash. This preserves the chat-firewall and makes GDPR erasure possible without breaking the hash chain or deterministic replay.
+
+### 10. Human games run on a separate worker lane (Wave 9)
+
+Minutes-to-hours human games run on a dedicated runner lane with **durable, rehydratable Postgres-snapshot** state, isolated from the benchmark scheduler's concurrency cap. **No Redis** (stack rule).
 
 ---
 
@@ -73,6 +93,8 @@ uv run pytest -m "not integration"          # unit + integration (no real LLM)
 ```
 
 CI runs the same on Python 3.11 and 3.12. Don't commit broken code. If a check fails: fix the root cause, re-stage, create a NEW commit (never `--amend` after a failed hook).
+
+Frontend stories additionally run: `pnpm -C web/dashboard lint`, `pnpm -C web/dashboard check`, `pnpm -C web/dashboard test:e2e` (Playwright).
 
 ---
 
@@ -95,6 +117,7 @@ padrino/
 │   ├── settings.py        # pydantic-settings .env loader
 │   ├── logging.py         # structlog setup
 │   └── cli.py             # typer CLI entry point
+├── web/dashboard/         # SvelteKit spectator frontend (pnpm + Playwright e2e)
 ├── tests/
 │   ├── core/              # pure-engine unit tests
 │   ├── agents/            # contract / sanitizer tests
@@ -116,6 +139,8 @@ Runtime: `pydantic>=2.7`, `pydantic-settings`, `fastapi`, `uvicorn[standard]`, `
 Dev: `pytest`, `pytest-asyncio`, `pytest-cov`, `hypothesis`, `mypy`, `ruff`.
 
 **Do not add new runtime dependencies** without justification in the progress log. Prefer stdlib.
+
+Wave 9 adds `authlib` (one-provider OAuth, US-129). Justify any other new runtime dependency in `progress.txt`. The durable human-game state uses the existing async DB (Postgres snapshots) — **do not** add Redis.
 
 ---
 

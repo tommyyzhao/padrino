@@ -277,6 +277,65 @@ def scheduler(
     asyncio.run(_run())
 
 
+@app.command("human-lane")
+def human_lane(
+    concurrency: int | None = typer.Option(
+        None,
+        "--concurrency",
+        help=(
+            "Max concurrent in-flight human games on this lane. Defaults to "
+            "padrino_human_lane_max_concurrent."
+        ),
+    ),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+) -> None:
+    """Run the isolated human-game worker lane until SIGTERM / SIGINT.
+
+    This is a SEPARATE process from ``padrino scheduler``: it drains human-lane
+    games (seats occupied by humans) under its own concurrency cap, so
+    minutes-to-hours human games never starve the benchmark scheduler.
+    """
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.runner.human_lane import run_human_lane
+    from padrino.settings import get_settings
+
+    resolved_concurrency = (
+        concurrency if concurrency is not None else get_settings().padrino_human_lane_max_concurrent
+    )
+
+    async def _run() -> None:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def _request_stop() -> None:
+                stop_event.set()
+
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, _request_stop)
+                except NotImplementedError:
+                    # Windows: signal handlers on loops are not supported.
+                    signal.signal(sig, lambda *_a: _request_stop())
+
+            await run_human_lane(
+                session_factory,
+                concurrency=resolved_concurrency,
+                stop_event=stop_event,
+            )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
 @app.command("bootstrap")
 def bootstrap(
     db_url: str = typer.Option(

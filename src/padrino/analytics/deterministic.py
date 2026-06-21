@@ -113,6 +113,46 @@ class ClaimAnalysis:
 
 
 @dataclass(frozen=True)
+class ParticipantStats:
+    """Deterministic single-game stats for one participant (US-145).
+
+    All metrics are derived purely from one game's internal event log plus the
+    participant's seat (``public_player_id``).  Counts (not floats) are the
+    storable primitives so they aggregate across games by summation; the rate
+    ``@property`` helpers are conveniences and are never persisted as floats.
+
+    ``faction`` / ``role`` are the participant's assignment in this game.
+    ``won`` / ``drew`` / ``lost`` are one-hot for the single game.  Survival is
+    1 when the participant was never eliminated before ``GameTerminated``.
+    Voting accuracy counts the participant's own non-abstain day votes that hit
+    an actual MAFIA seat; detection accuracy counts the participant's own
+    detective investigations that returned a ``MAFIA`` finding.
+    """
+
+    public_player_id: str
+    role: str
+    faction: str
+    won: int
+    drew: int
+    lost: int
+    survived: int
+    voting_total: int
+    voting_accurate: int
+    detection_total: int
+    detection_accurate: int
+
+    @property
+    def voting_accuracy(self) -> float:
+        """Fraction of the participant's non-abstain day votes that hit MAFIA."""
+        return self.voting_accurate / self.voting_total if self.voting_total > 0 else 0.0
+
+    @property
+    def detection_accuracy(self) -> float:
+        """Fraction of the participant's investigations that found MAFIA."""
+        return self.detection_accurate / self.detection_total if self.detection_total > 0 else 0.0
+
+
+@dataclass(frozen=True)
 class HeadToHeadEntry:
     """Cross-faction head-to-head record between two agents across one or more games.
 
@@ -370,16 +410,138 @@ def compute_head_to_head_matrix(
     )
 
 
+def _extract_eliminated(events: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Return the set of ``public_player_id`` eliminated during the game."""
+    eliminated: set[str] = set()
+    for event in events:
+        if event.get("event_type") == "PlayerEliminated":
+            pid = event.get("payload", {}).get("public_player_id")
+            if pid is not None:
+                eliminated.add(str(pid))
+    return eliminated
+
+
+def _per_seat_voting(
+    events: Sequence[Mapping[str, Any]],
+    role_map: dict[str, tuple[str, str]],
+) -> dict[str, list[int]]:
+    """Per-actor ``[total, accurate]`` for non-abstain day votes that hit MAFIA."""
+    mafia_players = {pid for pid, (_, faction) in role_map.items() if faction == "MAFIA"}
+    by_actor: dict[str, list[int]] = {}
+    for event in events:
+        if event.get("event_type") != "VoteSubmitted":
+            continue
+        actor = event.get("actor_player_id")
+        if actor is None:
+            continue
+        payload = event.get("payload", {})
+        if payload.get("is_abstain"):
+            continue
+        target = payload.get("target")
+        if target is None:
+            continue
+        acc = by_actor.setdefault(str(actor), [0, 0])
+        acc[0] += 1
+        if target in mafia_players:
+            acc[1] += 1
+    return by_actor
+
+
+def _per_seat_detection(events: Sequence[Mapping[str, Any]]) -> dict[str, list[int]]:
+    """Per-detective ``[total, accurate]`` from ``DetectiveResultDelivered`` events.
+
+    The detective's investigation finding (``MAFIA`` / ``TOWN``) is mechanical
+    truth; an accurate detection is one that surfaced an actual MAFIA seat.  Only
+    the structured event is read — free-text chat is never parsed (Hard rule 2).
+    """
+    by_actor: dict[str, list[int]] = {}
+    for event in events:
+        if event.get("event_type") != "DetectiveResultDelivered":
+            continue
+        actor = event.get("actor_player_id")
+        if actor is None:
+            continue
+        finding = event.get("payload", {}).get("finding")
+        if finding is None:
+            continue
+        acc = by_actor.setdefault(str(actor), [0, 0])
+        acc[0] += 1
+        if finding == "MAFIA":
+            acc[1] += 1
+    return by_actor
+
+
+def compute_participant_stats(
+    events: Sequence[Mapping[str, Any]],
+    participant_map: Mapping[str, object],
+) -> tuple[ParticipantStats, ...]:
+    """Compute per-participant single-game stats for the seats in ``participant_map``.
+
+    Parameters
+    ----------
+    events:
+        The complete raw internal event log for one game (must include the
+        SYSTEM ``RolesAssigned`` and the terminal ``GameTerminated``).
+    participant_map:
+        ``{public_player_id: principal_id}`` injected by the caller — the seat
+        identities to compute stats for (e.g. the human-occupied seats of a
+        human-lane game).  Keeps this function DB-free and pure; the
+        ``principal_id`` values are not read here (the caller keys persistence by
+        them), only the ``public_player_id`` keys select which seats to score.
+
+    Returns one :class:`ParticipantStats` per seat present in BOTH
+    ``participant_map`` and the game's role assignments, ordered by
+    ``public_player_id``.  Seats absent from the role map (unknown to the game)
+    are skipped.  A DRAW is neither a win nor a loss for any faction.
+    """
+    role_map = _extract_role_map(events)
+    winner = _extract_winner(events)
+    eliminated = _extract_eliminated(events)
+    voting = _per_seat_voting(events, role_map)
+    detection = _per_seat_detection(events)
+
+    results: list[ParticipantStats] = []
+    for pid in sorted(participant_map):
+        assignment = role_map.get(pid)
+        if assignment is None:
+            continue
+        role, faction = assignment
+        won = 1 if winner is not None and winner != "DRAW" and faction == winner else 0
+        drew = 1 if winner == "DRAW" else 0
+        lost = 1 if winner is not None and not won and not drew else 0
+        survived = 0 if pid in eliminated else 1
+        vote_acc = voting.get(pid, [0, 0])
+        det_acc = detection.get(pid, [0, 0])
+        results.append(
+            ParticipantStats(
+                public_player_id=pid,
+                role=role,
+                faction=faction,
+                won=won,
+                drew=drew,
+                lost=lost,
+                survived=survived,
+                voting_total=vote_acc[0],
+                voting_accurate=vote_acc[1],
+                detection_total=det_acc[0],
+                detection_accurate=det_acc[1],
+            )
+        )
+    return tuple(results)
+
+
 __all__ = [
     "ClaimAnalysis",
     "ClaimRecord",
     "CounterClaimGroup",
     "GameAnalytics",
     "HeadToHeadEntry",
+    "ParticipantStats",
     "RoleWinRate",
     "SurvivalPoint",
     "VotingAccuracy",
     "compute_claim_analysis",
     "compute_game_analytics",
     "compute_head_to_head_matrix",
+    "compute_participant_stats",
 ]
