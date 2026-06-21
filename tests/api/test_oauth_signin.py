@@ -581,6 +581,79 @@ async def test_failed_exchange_consumes_flow_durably(
 
 
 @pytest.mark.asyncio
+async def test_transient_exchange_failure_releases_flow_for_retry(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A transient provider outage releases the just-claimed flow for retry."""
+    state, verifier, _ = await _callback_cookies(client)
+    cookies = {OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier}
+    params = {"code": "auth-code", "state": state}
+
+    async def _temporary_failure(
+        config: object, *, code: str, code_verifier: str, nonce: str
+    ) -> OAuthUserInfo:
+        raise OAuthError(
+            "provider token endpoint unavailable",
+            error_class="provider_5xx",
+            transient=True,
+        )
+
+    set_resolve_user_info(_temporary_failure)
+    first = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert first.status_code == 400
+    assert first.json()["detail"] == "oauth_exchange_failed"
+
+    async with session_factory() as session:
+        flows_after_failure = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    assert flows_after_failure == []
+
+    _stub_subject("subject-after-transient")
+    second = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert second.status_code == 200
+
+    async with session_factory() as session:
+        principals = (await session.execute(select(Principal))).scalars().all()
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    assert len(principals) == 1
+    assert len(identities) == 1
+    assert len(flows) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_invalid_grant_keeps_flow_burned(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A terminal consumed-code response remains replay-blocking."""
+    state, verifier, _ = await _callback_cookies(client)
+    cookies = {OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier}
+    params = {"code": "auth-code", "state": state}
+
+    async def _invalid_grant(
+        config: object, *, code: str, code_verifier: str, nonce: str
+    ) -> OAuthUserInfo:
+        raise OAuthError("provider rejected code", error_class="invalid_grant")
+
+    set_resolve_user_info(_invalid_grant)
+    first = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert first.status_code == 400
+    assert first.json()["detail"] == "oauth_exchange_failed"
+
+    _stub_subject("subject-after-invalid-grant")
+    second = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert second.status_code == 400
+    assert second.json()["detail"] == "oauth_state_replayed"
+
+    async with session_factory() as session:
+        principals = (await session.execute(select(Principal))).scalars().all()
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    assert len(principals) == 0
+    assert len(identities) == 0
+    assert len(flows) == 1
+
+
+@pytest.mark.asyncio
 async def test_callback_does_not_prune_consumed_flows_on_every_attempt(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

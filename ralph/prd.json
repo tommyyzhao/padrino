@@ -61,7 +61,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: routes/human.py:599-617/658-674, oauth.py exchange_code OAuthError mapping. This is a UX refinement of the intended US-208 hardening, not a security regression; keep the replay gap closed. Lowest priority of the batch.",
-      "passes": false
+      "passes": true
     }
   ]
 }

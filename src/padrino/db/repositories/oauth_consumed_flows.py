@@ -85,4 +85,12 @@ async def prune_expired(
     return result.rowcount or 0
 
 
-__all__ = ["prune_expired", "try_consume_flow"]
+async def release_flow(session: AsyncSession, *, flow: str) -> bool:
+    """Release a previously claimed flow; return whether a row was removed."""
+    result = await session.execute(delete(OAuthConsumedFlow).where(OAuthConsumedFlow.flow == flow))
+    await session.flush()
+    assert isinstance(result, CursorResult)
+    return bool(result.rowcount)
+
+
+__all__ = ["prune_expired", "release_flow", "try_consume_flow"]

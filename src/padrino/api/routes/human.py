@@ -612,6 +612,8 @@ async def oauth_callback(
             nonce=nonce,
         )
     except OAuthError as exc:
+        if exc.transient:
+            await _release_oauth_flow_durably(request, flow_token=flow_token)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_exchange_failed"
         ) from exc
@@ -676,6 +678,15 @@ async def _try_consume_oauth_flow_durably(
         )
         await flow_session.commit()
     return claimed
+
+
+async def _release_oauth_flow_durably(request: Request, *, flow_token: str) -> bool:
+    """Release a transiently failed OAuth flow in its own transaction."""
+    session_factory = get_session_factory(request)
+    async with session_factory() as flow_session:
+        released = await oauth_flows_repo.release_flow(flow_session, flow=flow_token)
+        await flow_session.commit()
+    return released
 
 
 def _oauth_flow_prune_due(flow_token: str) -> bool:
