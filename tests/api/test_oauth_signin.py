@@ -27,8 +27,10 @@ from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.api.oauth import (
     OAuthUserInfo,
+    reset_clock,
     reset_oauth_io,
     reset_resolve_user_info,
+    set_clock,
     set_exchange_token,
     set_fetch_jwks,
     set_resolve_user_info,
@@ -48,6 +50,7 @@ _OAUTH_ENV = {
     "PADRINO_OAUTH_REDIRECT_URL": "https://app.example/human/oauth/google/callback",
     "PADRINO_OAUTH_ISSUER": "https://provider.example",
     "PADRINO_OAUTH_JWKS_URL": "https://provider.example/jwks.json",
+    "PADRINO_OAUTH_STATE_SIGNING_KEY": "dedicated-server-state-key",
     "PADRINO_HUMAN_SESSION_COOKIE_SECURE": "false",
     "CEREBRAS_API_KEY": "test-cerebras-key",
 }
@@ -69,6 +72,7 @@ def _restore_resolver() -> Iterator[None]:
     yield
     reset_resolve_user_info()
     reset_oauth_io()
+    reset_clock()
 
 
 @pytest_asyncio.fixture
@@ -117,19 +121,23 @@ def _signed_id_token(
     *,
     subject: str = "subject-token",
     nonce: str,
-    aud: str = "client-id-123",
+    aud: str | list[str] = "client-id-123",
     iss: str = "https://provider.example",
     exp: int | None = None,
     include_exp: bool = True,
+    azp: str | None = None,
+    iat: int | None = None,
 ) -> str:
-    claims = {
+    claims: dict[str, Any] = {
         "iss": iss,
         "sub": subject,
         "aud": aud,
         "nonce": nonce,
         "name": "Token Alice",
-        "iat": int(time()),
+        "iat": iat if iat is not None else int(time()),
     }
+    if azp is not None:
+        claims["azp"] = azp
     if include_exp:
         claims["exp"] = exp if exp is not None else int(time()) + 3600
     token = jwt.encode({"alg": "RS256", "kid": "test-key"}, claims, _OIDC_KEY)
@@ -443,21 +451,44 @@ async def test_callback_rejects_expired_id_token(client: AsyncClient) -> None:
     assert resp.status_code == 400
 
 
-def test_state_signing_key_is_not_the_client_secret() -> None:
-    """The state HMAC uses a dedicated signing key, not the client secret (US-193)."""
+def test_state_signing_key_is_not_derivable_from_client_secret() -> None:
+    """The state key must not be reconstructable from the client secret (US-201).
+
+    The earlier fallback derived the key as
+    ``base64url(HMAC(client_secret, domain-string))`` — fully reproducible by an
+    attacker holding only the client secret. Assert the resolved key is NOT that
+    derivation (and not the client secret), i.e. it is a genuinely independent
+    server secret.
+    """
+    import base64
+    import hashlib
+    import hmac
+
     from padrino.api.oauth import resolve_oauth_config
 
     settings = get_settings()
     config = resolve_oauth_config(settings, "google")
     assert config is not None
-    assert config.state_signing_key != config.client_secret
     assert config.state_signing_key
+    assert config.state_signing_key != config.client_secret
+    derived = (
+        base64.urlsafe_b64encode(
+            hmac.new(
+                config.client_secret.encode("utf-8"),
+                b"padrino.oauth.state-signing-key.v1",
+                hashlib.sha256,
+            ).digest()
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    assert config.state_signing_key != derived
 
 
-def test_explicit_state_signing_key_overrides_derivation(
+def test_explicit_state_signing_key_used_verbatim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An explicit server signing key is used verbatim for the state HMAC (US-193)."""
+    """An explicit server signing key is used verbatim for the state HMAC (US-201)."""
     from padrino.api.oauth import resolve_oauth_config
 
     monkeypatch.setenv("PADRINO_OAUTH_STATE_SIGNING_KEY", "dedicated-server-key")
@@ -469,6 +500,140 @@ def test_explicit_state_signing_key_overrides_derivation(
         assert config.state_signing_key != config.client_secret
     finally:
         get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_unset_state_signing_key_yields_no_oauth_config(
+    monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    """An unset/blank state-signing key is fail-closed: no usable config (US-201)."""
+    from padrino.api.oauth import resolve_oauth_config
+
+    if value is None:
+        monkeypatch.delenv("PADRINO_OAUTH_STATE_SIGNING_KEY", raising=False)
+    else:
+        monkeypatch.setenv("PADRINO_OAUTH_STATE_SIGNING_KEY", value)
+    get_settings.cache_clear()
+    try:
+        assert resolve_oauth_config(get_settings(), "google") is None
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_routes_503_without_state_signing_key(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no dedicated state key the OAuth routes 503 (fail-closed, US-201)."""
+    monkeypatch.delenv("PADRINO_OAUTH_STATE_SIGNING_KEY", raising=False)
+    get_settings.cache_clear()
+    try:
+        app = create_app(session_factory=session_factory, auth_required=True)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+            start = await ac.get("/human/oauth/google/start")
+            assert start.status_code == 503
+            cb = await ac.get("/human/oauth/google/callback", params={"code": "c", "state": "s"})
+            assert cb.status_code == 503
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_multi_audience_with_foreign_azp(
+    client: AsyncClient,
+) -> None:
+    """A token minted for another RP (aud=[us, other], azp=other) is rejected (US-201)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {
+            "id_token": _signed_id_token(
+                nonce=nonce,
+                aud=["client-id-123", "other-rp"],
+                azp="other-rp",
+            )
+        }
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_accepts_multi_audience_with_matching_azp(
+    client: AsyncClient,
+) -> None:
+    """A multi-aud token whose azp is THIS client is accepted (US-201)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {
+            "id_token": _signed_id_token(
+                nonce=nonce,
+                aud=["client-id-123", "other-rp"],
+                azp="client-id-123",
+            )
+        }
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_stale_but_unexpired_id_token(
+    client: AsyncClient,
+) -> None:
+    """A stale-iat token with a far-future exp is rejected by the max-age ceiling (US-201)."""
+    state, verifier, nonce = await _callback_cookies(client)
+
+    issued_at = int(time())
+    # iat is well beyond the max-age ceiling, but exp is far in the future so
+    # authlib's exp check alone would accept it.
+    stale_iat = issued_at - 4000
+    far_future_exp = issued_at + 10**6
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {"id_token": _signed_id_token(nonce=nonce, iat=stale_iat, exp=far_future_exp)}
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+    # Pin the clock just after issuance for the authlib exp/iat checks, then the
+    # max-age check measures the (large) gap to the stale iat.
+    set_clock(lambda: float(issued_at))
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 400
 
 
 @pytest.mark.asyncio

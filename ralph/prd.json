@@ -196,7 +196,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: oauth.py:123-141/246-263/341/365-369, settings.py:187, routes/human.py, test_oauth_signin.py:446-454/131/116-137/366-374. authlib JWTClaims.validate_aud/validate_iat. This is the api lane (pure-core firewall N/A); use the existing impure clock seam, never datetime.utcnow() in core. Do NOT relax iat-essential (finding #14 is intended).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-202",

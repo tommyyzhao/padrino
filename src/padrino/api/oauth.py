@@ -3,14 +3,19 @@
 ONE provider (e.g. Google) via Authlib's :class:`AsyncOAuth2Client`. The
 authorization-code flow is protected with a signed, session-bound CSRF
 ``state`` plus PKCE (``code_challenge_method=S256``); the state HMAC uses a
-dedicated server signing key (US-193), not the provider client secret. The provider client
-id/secret, endpoints, issuer, and JWKS URL come from
-:class:`padrino.settings.Settings` and are optional/None so the engine boots and
-the test suite runs without them; the client secret is never logged. No provider
-tokens are persisted beyond completing the exchange — only the stable
+dedicated server signing key (US-193) that is REQUIRED when OAuth is enabled and
+independent of the provider client secret — when it is unset the OAuth config is
+incomplete and the routes 503 (fail-closed; no key derivation from the client
+secret, US-201). The provider client id/secret, endpoints, issuer, and JWKS URL
+come from :class:`padrino.settings.Settings` and are optional/None so the engine
+boots and the test suite runs without them; the client secret is never logged. No
+provider tokens are persisted beyond completing the exchange — only the stable
 ``(provider, subject)`` identity is stored after validating the provider
-``id_token`` signature, audience, issuer, nonce, and a bounded lifetime
-(``exp``/``iat`` essential; a token with no ``exp`` is rejected fail-closed).
+``id_token`` signature, audience, issuer, nonce, authorized party
+(``azp == client_id`` when ``aud`` is multi-valued or ``azp`` present, US-201),
+and a bounded lifetime (``exp``/``iat`` essential; a token with no ``exp`` is
+rejected fail-closed; an ``iat`` older than a small max-age ceiling is rejected
+via the injected clock seam, US-201).
 
 Tests stub the network entirely via the ``resolve_user_info`` indirection or the
 lower-level token/JWKS seams, so no live provider is contacted.
@@ -22,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final
@@ -37,6 +43,31 @@ from padrino.settings import Settings
 _STATE_VERSION: Final[int] = 1
 # Small clock-skew tolerance for id_token exp/iat validation (US-193).
 _CLAIMS_LEEWAY_SECONDS: Final[int] = 60
+# Maximum accepted age of an id_token measured from its ``iat`` (US-201, low #12).
+# A signature-valid token whose ``iat`` is older than this ceiling (plus the
+# skew leeway) is rejected so acceptance lifetime is not bounded solely by the
+# provider-controlled ``exp``. OIDC sign-in id_tokens are minted at the moment of
+# the interactive flow, so a small ceiling is appropriate.
+_MAX_TOKEN_AGE_SECONDS: Final[int] = 300
+
+# Impure clock seam for the id_token max-age check (US-201). The api lane is
+# outside the pure-core firewall, so a real wall-clock read is allowed here; the
+# seam exists so tests can pin the clock without touching ``datetime.utcnow`` in
+# core. Defaults to ``time.time``.
+NowFn = Callable[[], float]
+_NOW: NowFn = time.time
+
+
+def set_clock(now_fn: NowFn) -> None:
+    """Override the wall-clock used for id_token max-age checks (test seam)."""
+    global _NOW
+    _NOW = now_fn
+
+
+def reset_clock() -> None:
+    """Restore the live wall-clock for id_token max-age checks."""
+    global _NOW
+    _NOW = time.time
 
 
 @dataclass(frozen=True)
@@ -85,6 +116,7 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         return None
     if provider != settings.padrino_oauth_provider:
         return None
+    state_signing_key = _resolve_state_signing_key(settings)
     required = (
         settings.padrino_oauth_client_id,
         settings.padrino_oauth_client_secret,
@@ -94,6 +126,10 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         settings.padrino_oauth_redirect_url,
         settings.padrino_oauth_issuer,
         settings.padrino_oauth_jwks_url,
+        # Fail-closed: a missing/blank dedicated state-signing key yields no
+        # usable OAuth config (so the routes 503) rather than silently deriving
+        # a forgeable key from the client secret (US-201).
+        state_signing_key,
     )
     if any(value is None for value in required):
         return None
@@ -105,6 +141,7 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
     assert settings.padrino_oauth_redirect_url is not None
     assert settings.padrino_oauth_issuer is not None
     assert settings.padrino_oauth_jwks_url is not None
+    assert state_signing_key is not None
     return OAuthConfig(
         provider=settings.padrino_oauth_provider,
         client_id=settings.padrino_oauth_client_id,
@@ -116,29 +153,26 @@ def resolve_oauth_config(settings: Settings, provider: str) -> OAuthConfig | Non
         issuer=settings.padrino_oauth_issuer,
         jwks_url=settings.padrino_oauth_jwks_url,
         scope=settings.padrino_oauth_scope,
-        state_signing_key=_resolve_state_signing_key(settings),
+        state_signing_key=state_signing_key,
     )
 
 
-def _resolve_state_signing_key(settings: Settings) -> str:
-    """Return the dedicated OAuth state-signing key (US-193).
+def _resolve_state_signing_key(settings: Settings) -> str | None:
+    """Return the dedicated OAuth state-signing key, or None if unset (US-201).
 
-    Uses the explicit server signing key when configured. Otherwise derives a
-    key from the client secret via a domain-separated HMAC so the state HMAC is
-    never keyed directly on ``client_secret`` (a leaked client secret cannot be
-    used to forge state tokens without also knowing the derivation), while the
-    flow still works with no extra deploy configuration.
+    The state HMAC MUST use a dedicated server signing key that is independent of
+    the provider client secret: a leaked client secret must not let an attacker
+    recompute the state-signing key and mint validly-signed CSRF/session-binding
+    state tokens. The earlier fallback that DERIVED the key from the client
+    secret (HMAC over a hardcoded, open-source domain string) was fully
+    reconstructable from the client secret alone, so it is removed. When the
+    dedicated key is unset/blank this returns ``None`` and the OAuth config is
+    treated as incomplete (the routes 503) — fail-closed, never derived.
     """
     explicit = settings.padrino_oauth_state_signing_key
     if explicit is not None and explicit.strip():
         return explicit
-    secret = settings.padrino_oauth_client_secret or ""
-    derived = hmac.new(
-        secret.encode("utf-8"),
-        b"padrino.oauth.state-signing-key.v1",
-        hashlib.sha256,
-    ).digest()
-    return _base64url_encode(derived)
+    return None
 
 
 def build_authorization_request(
@@ -263,7 +297,43 @@ def _user_info_from_id_token(
         claims.validate(leeway=_CLAIMS_LEEWAY_SECONDS)
     except (JoseError, TypeError, ValueError) as exc:
         raise OAuthError("OAuth provider id_token validation failed") from exc
-    return _user_info_from_payload(dict(claims))
+    payload = dict(claims)
+    _validate_authorized_party(payload, client_id=config.client_id)
+    _validate_token_age(payload)
+    return _user_info_from_payload(payload)
+
+
+def _validate_authorized_party(payload: dict[str, Any], *, client_id: str) -> None:
+    """Enforce ``azp == client_id`` when ``aud`` is multi-valued or ``azp`` set.
+
+    OIDC requires the ``azp`` (authorized party) claim to identify this relying
+    party when the ``aud`` claim is multi-valued or ``azp`` is present. Authlib's
+    ``validate_aud`` accepts a token whose ``aud`` merely CONTAINS ``client_id``,
+    so a token minted for another RP (``aud=[client_id, other-rp]``,
+    ``azp=other-rp``) would otherwise validate. Reject such tokens (US-201).
+    """
+    aud = payload.get("aud")
+    azp = payload.get("azp")
+    aud_is_multi = isinstance(aud, (list, tuple)) and len(aud) > 1
+    if (aud_is_multi or azp is not None) and azp != client_id:
+        raise OAuthError("OAuth provider id_token azp mismatch")
+
+
+def _validate_token_age(payload: dict[str, Any]) -> None:
+    """Reject an id_token whose ``iat`` is older than the max-age ceiling (US-201).
+
+    ``iat`` is already marked essential and authlib rejects future-dating, but it
+    imposes no upper bound on token age — acceptance lifetime is otherwise capped
+    only by the provider-controlled ``exp``. Enforce a small max-age using the
+    injected clock seam so a stale-but-unexpired token (e.g. far-future ``exp``)
+    is rejected.
+    """
+    iat = payload.get("iat")
+    if not isinstance(iat, (int, float)) or isinstance(iat, bool):
+        raise OAuthError("OAuth provider id_token iat missing")
+    age = _NOW() - float(iat)
+    if age > _MAX_TOKEN_AGE_SECONDS + _CLAIMS_LEEWAY_SECONDS:
+        raise OAuthError("OAuth provider id_token is too old")
 
 
 def _user_info_from_payload(payload: dict[str, Any]) -> OAuthUserInfo:
@@ -387,9 +457,11 @@ __all__ = [
     "build_authorization_request",
     "exchange_code",
     "oauth_session_binding",
+    "reset_clock",
     "reset_oauth_io",
     "reset_resolve_user_info",
     "resolve_oauth_config",
+    "set_clock",
     "set_exchange_token",
     "set_fetch_jwks",
     "set_resolve_user_info",
