@@ -149,3 +149,10 @@ def test_swap_unknown_seat_raises_with_known_seats() -> None:
     mux = SeatMultiplexAdapter({"P01": _TaggingAdapter("a")})
     with pytest.raises(KeyError, match="P03"):
         mux.swap_seat("P03", _TaggingAdapter("b"))
+
+
+def test_has_seat_reports_existing_dispatch_entries() -> None:
+    mux = SeatMultiplexAdapter({"P01": _TaggingAdapter("a")})
+
+    assert mux.has_seat("P01") is True
+    assert mux.has_seat("P03") is False

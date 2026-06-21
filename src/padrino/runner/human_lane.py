@@ -392,6 +392,11 @@ def _resync_committed_takeover(
     replacement_adapter: LlmAdapter,
 ) -> StoredEvent:
     """Mirror an already-committed takeover row into the in-memory structures."""
+    if not mux.has_seat(seat_id):
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for unknown seat {seat_id!r} cannot be mirrored into memory"
+        )
+
     events = event_log.events
     if event.sequence < len(events):
         existing = events[event.sequence]

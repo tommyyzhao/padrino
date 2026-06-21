@@ -70,6 +70,10 @@ class SeatMultiplexAdapter:
         self._adapters[seat] = adapter
         return previous
 
+    def has_seat(self, seat: str) -> bool:
+        """Return whether ``seat`` is already present in the dispatch table."""
+        return seat in self._adapters
+
     def force_swap_seat(self, seat: str, adapter: LlmAdapter) -> LlmAdapter | None:
         """Rebind ``seat`` even if normal swap validation failed post-commit.
 

@@ -31,7 +31,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: human_lane.py:436-460/403-424, disconnect_takeover.py:124-132, multiplex.py:73-83. Add a mux membership check (has_seat / expose keys) before force_swap_seat, or catch KeyError separately.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-212",
