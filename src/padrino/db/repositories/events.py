@@ -98,12 +98,31 @@ async def max_persisted_sequence(
     session: AsyncSession,
     game_id: uuid.UUID,
 ) -> int | None:
-    """Return the highest persisted ``sequence`` for ``game_id`` (``None`` if empty).
-
-    Used to make event persistence idempotent: a paired DB mutation may persist
-    its own event row in the same transaction (so the chain never lags the seat /
-    sidecar state across a crash), after which the outer loop must not re-insert
-    that already-committed row and trip ``uq_game_event_sequence``.
-    """
+    """Return the highest persisted ``sequence`` for ``game_id`` (``None`` if empty)."""
     stmt = select(func.max(GameEvent.sequence)).where(GameEvent.game_id == game_id)
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def persisted_sequences_from(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+    *,
+    from_sequence: int,
+) -> set[int]:
+    """Return the EXACT set of already-persisted sequences ``>= from_sequence``.
+
+    Used to make event persistence idempotent WITHOUT a max-threshold skip: a
+    paired DB mutation (human seat takeover / chat release) may persist its own
+    event row in the same transaction as the seat/sidecar write (so the chain
+    never lags that state across a crash), and that event can carry a HIGHER
+    sequence than sibling failure events (``ActionTimedOut`` / ``OutputInvalid``)
+    appended earlier in the same tick that are persisted nowhere else. A
+    max-based skip would drop those lower un-persisted rows; returning the
+    explicit committed set lets the outer loop skip ONLY the rows already
+    written and still persist every non-co-committed event below them.
+    """
+    stmt = select(GameEvent.sequence).where(
+        GameEvent.game_id == game_id,
+        GameEvent.sequence >= from_sequence,
+    )
+    return set((await session.execute(stmt)).scalars())
