@@ -195,7 +195,7 @@
         "All backend gates pass."
       ],
       "notes": "Prefer wrapping the existing public.moderation guard adapter over duplicating it, but only if it does not risk behaviour drift; otherwise leave the two adapters and note it.",
-      "passes": false
+      "passes": true
     }
   ]
 }

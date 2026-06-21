@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, LeagueKind, Role
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import bench10_v1, mini7_v1
 from padrino.db.models import (
     HumanRating,
     HumanRatingEvent,
@@ -200,6 +200,29 @@ async def test_humans_included_league_is_discriminated(
         )
     assert [lg.id for lg in human_leagues] == [human_a.id]
     assert [lg.id for lg in scientific_leagues] == [scientific.id]
+
+
+async def test_humans_included_league_is_scoped_by_ruleset(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each ruleset gets its own dormant humans-included league."""
+    async with session_factory() as session, session.begin():
+        mini = await leagues_repo.get_or_create_humans_included(
+            session, ruleset_id=mini7_v1.RULESET_ID
+        )
+        bench = await leagues_repo.get_or_create_humans_included(
+            session, ruleset_id=bench10_v1.RULESET_ID
+        )
+        mini_again = await leagues_repo.get_or_create_humans_included(
+            session, ruleset_id=mini7_v1.RULESET_ID
+        )
+
+    assert mini.id != bench.id
+    assert mini.id == mini_again.id
+    assert mini.ruleset_id == mini7_v1.RULESET_ID
+    assert bench.ruleset_id == bench10_v1.RULESET_ID
+    assert mini.kind == LeagueKind.HUMANS_INCLUDED.value
+    assert bench.kind == LeagueKind.HUMANS_INCLUDED.value
 
 
 async def test_human_lane_game_writes_zero_rating_rows(

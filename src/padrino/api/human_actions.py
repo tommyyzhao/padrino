@@ -28,15 +28,14 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.human_seat_auth import resolve_human_game_seat
 from padrino.api.rate_limit_store import InMemoryRateLimitStore, RateLimitStore
 from padrino.core.engine.actions import Action
 from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.enums import ActionType
 from padrino.core.observations import format_phase_id
-from padrino.db.models import GameSeat
 from padrino.db.repositories import human_action_submissions as submissions_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_state_cache import resolve_current_human_state
@@ -65,27 +64,6 @@ class AcceptedAction:
     idempotent_replay: bool
 
 
-async def _resolve_seat(
-    session: AsyncSession,
-    *,
-    game_id: uuid.UUID,
-    principal_id: uuid.UUID,
-) -> GameSeat:
-    """Return the seat the principal occupies in this game, or 403.
-
-    A human may act ONLY for the seat they occupy. A submission for a game the
-    principal has no seat in (or any other seat) is a wrong-seat rejection.
-    """
-    stmt = select(GameSeat).where(
-        GameSeat.game_id == game_id,
-        GameSeat.occupant_principal_id == principal_id,
-    )
-    seat = (await session.execute(stmt)).scalar_one_or_none()
-    if seat is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=WRONG_SEAT_DETAIL)
-    return seat
-
-
 async def submit_action(
     session: AsyncSession,
     *,
@@ -105,7 +83,12 @@ async def submit_action(
     action is stored; a retry with the same idempotency key returns the recorded
     action without inserting a duplicate (no double-vote).
     """
-    seat_row = await _resolve_seat(session, game_id=game_id, principal_id=principal_id)
+    seat_row = await resolve_human_game_seat(
+        session,
+        game_id=game_id,
+        principal_id=principal_id,
+        wrong_seat_detail=WRONG_SEAT_DETAIL,
+    )
     await presence_repo.record_heartbeat(
         session,
         game_id=game_id,

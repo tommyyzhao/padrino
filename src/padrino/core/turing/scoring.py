@@ -17,6 +17,7 @@ through the core's canonical-JSON discipline (hard rule 4: no floats in core).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from fractions import Fraction
 
 from pydantic import BaseModel, ConfigDict
 
@@ -44,17 +45,36 @@ def _truth_label(is_human: bool) -> str:
 
 
 def _accuracy_string(*, correct: int, total: int) -> str:
-    """Render ``correct / total`` as a stable string, never a bare float.
+    """Render ``correct / total`` exactly, never through binary float repr.
 
     A whole-number ratio (``0/2``, ``3/3``) renders without a decimal point
-    (``"0"`` / ``"1"``); a fractional ratio uses the deterministic float repr.
+    (``"0"`` / ``"1"``); finite decimals render as decimals, and repeating
+    fractions render as reduced ratios.
     """
     if total == 0:
         return "0"
-    ratio = correct / total
-    if ratio.is_integer():
-        return str(int(ratio))
-    return str(ratio)
+    fraction = Fraction(correct, total)
+    if fraction.denominator == 1:
+        return str(fraction.numerator)
+
+    denominator = fraction.denominator
+    twos = 0
+    while denominator % 2 == 0:
+        twos += 1
+        denominator //= 2
+    fives = 0
+    while denominator % 5 == 0:
+        fives += 1
+        denominator //= 5
+    if denominator != 1:
+        return f"{fraction.numerator}/{fraction.denominator}"
+
+    scale = max(twos, fives)
+    scaled = fraction.numerator * (2 ** (scale - twos)) * (5 ** (scale - fives))
+    digits = str(scaled).rjust(scale + 1, "0")
+    whole = digits[:-scale]
+    decimal = digits[-scale:].rstrip("0")
+    return whole if not decimal else f"{whole}.{decimal}"
 
 
 def score_guess(

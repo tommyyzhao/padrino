@@ -39,9 +39,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.human_seat_auth import resolve_human_game_seat
 from padrino.core.observation_privacy import (
     assert_no_identity_markers,
     coerce_identity_mode,
@@ -49,7 +49,7 @@ from padrino.core.observation_privacy import (
 )
 from padrino.core.observations import build_observation, format_phase_id
 from padrino.core.rulesets import get_ruleset
-from padrino.db.models import Game, GameSeat
+from padrino.db.models import Game
 from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_chat_observation import (
@@ -75,28 +75,6 @@ class SeatObservationSnapshot:
     identity_mode: str
     observation_frame: dict[str, Any]
     deadline_frame: dict[str, Any]
-
-
-async def _resolve_seat(
-    session: AsyncSession,
-    *,
-    game_id: uuid.UUID,
-    principal_id: uuid.UUID,
-) -> GameSeat:
-    """Return the seat the principal occupies in this game, or 403.
-
-    A human may observe ONLY the seat they occupy. A request for a game the
-    principal has no seat in (or any other seat) is a wrong-seat rejection — the
-    seat-scoped stream never leaks another seat's private view.
-    """
-    stmt = select(GameSeat).where(
-        GameSeat.game_id == game_id,
-        GameSeat.occupant_principal_id == principal_id,
-    )
-    seat = (await session.execute(stmt)).scalar_one_or_none()
-    if seat is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=WRONG_SEAT_DETAIL)
-    return seat
 
 
 def _as_aware(value: datetime | None) -> datetime | None:
@@ -139,7 +117,12 @@ async def build_seat_observation_snapshot(
     unknown game (404). Reuses the pure :func:`build_observation`; in anonymous
     mode the observation is asserted free of identity markers.
     """
-    seat_row = await _resolve_seat(session, game_id=game_id, principal_id=principal_id)
+    seat_row = await resolve_human_game_seat(
+        session,
+        game_id=game_id,
+        principal_id=principal_id,
+        wrong_seat_detail=WRONG_SEAT_DETAIL,
+    )
     await presence_repo.record_heartbeat(
         session,
         game_id=game_id,

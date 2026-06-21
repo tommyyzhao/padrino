@@ -33,15 +33,30 @@ def test_all_wrong_is_zero_accuracy() -> None:
     assert result.accuracy == "0"
 
 
-def test_partial_accuracy_is_a_decimal_string_not_a_float() -> None:
-    # 2 of 3 correct -> the core never emits floats (hard rule 4): a string.
+def test_repeating_partial_accuracy_is_an_exact_ratio_string() -> None:
+    # 2 of 3 correct is repeating decimal, so render the exact reduced ratio.
     truth = {"P02": True, "P03": False, "P04": True}
     guess = {"P02": GUESS_HUMAN, "P03": GUESS_AI, "P04": GUESS_AI}
     result = score_guess(guesser_public_id="P01", guess=guess, truth=truth)
     assert result.correct == 2
     assert result.total == 3
     assert isinstance(result.accuracy, str)
-    assert result.accuracy == "0.6666666666666666"
+    assert result.accuracy == "2/3"
+
+
+def test_terminating_partial_accuracy_is_an_exact_decimal_string() -> None:
+    truth = {"P02": True, "P03": False, "P04": False, "P05": False, "P06": False}
+    guess = {
+        "P02": GUESS_HUMAN,
+        "P03": GUESS_AI,
+        "P04": GUESS_AI,
+        "P05": GUESS_AI,
+        "P06": GUESS_HUMAN,
+    }
+    result = score_guess(guesser_public_id="P01", guess=guess, truth=truth)
+    assert result.correct == 4
+    assert result.total == 5
+    assert result.accuracy == "0.8"
 
 
 def test_guesser_seat_excluded_even_if_present_in_guess() -> None:

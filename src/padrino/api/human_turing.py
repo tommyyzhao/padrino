@@ -30,6 +30,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.human_seat_auth import resolve_human_game_seat
 from padrino.core.enums import SeatKind
 from padrino.core.turing import score_guess
 from padrino.db.models import GameSeat
@@ -52,23 +53,6 @@ class GuessOutcome:
     correct: int
     accuracy: str
     idempotent_replay: bool
-
-
-async def _resolve_seat(
-    session: AsyncSession,
-    *,
-    game_id: uuid.UUID,
-    principal_id: uuid.UUID,
-) -> GameSeat:
-    """Return the seat the principal occupies in this game, or 403."""
-    stmt = select(GameSeat).where(
-        GameSeat.game_id == game_id,
-        GameSeat.occupant_principal_id == principal_id,
-    )
-    seat = (await session.execute(stmt)).scalar_one_or_none()
-    if seat is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=WRONG_SEAT_DETAIL)
-    return seat
 
 
 def _seat_truth(seats: list[GameSeat]) -> dict[str, bool]:
@@ -97,7 +81,12 @@ async def submit_guess(
     seat). A re-submission returns the stored guess + score (a guesser guesses
     once).
     """
-    seat_row = await _resolve_seat(session, game_id=game_id, principal_id=principal_id)
+    seat_row = await resolve_human_game_seat(
+        session,
+        game_id=game_id,
+        principal_id=principal_id,
+        wrong_seat_detail=WRONG_SEAT_DETAIL,
+    )
 
     existing = await guesses_repo.get_for_guesser(
         session, game_id=game_id, guesser_public_id=seat_row.public_player_id
@@ -166,7 +155,12 @@ async def get_own_result(
     Gates the reveal endpoint's personal accuracy: a viewer sees their accuracy
     ONLY after submitting their guess (a 403 if they do not occupy a seat).
     """
-    seat_row = await _resolve_seat(session, game_id=game_id, principal_id=principal_id)
+    seat_row = await resolve_human_game_seat(
+        session,
+        game_id=game_id,
+        principal_id=principal_id,
+        wrong_seat_detail=WRONG_SEAT_DETAIL,
+    )
     existing = await guesses_repo.get_for_guesser(
         session, game_id=game_id, guesser_public_id=seat_row.public_player_id
     )

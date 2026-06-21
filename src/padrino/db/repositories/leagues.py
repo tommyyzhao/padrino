@@ -32,7 +32,7 @@ async def get_or_create_humans_included(
     *,
     ruleset_id: str,
 ) -> League:
-    """Return the single dormant casual humans-included league, creating it once.
+    """Return the dormant casual humans-included league for one ruleset.
 
     The humans-included league is ``ranked=False`` and discriminated by
     ``kind=HUMANS_INCLUDED`` so scientific vs human leagues are queryable. Human
@@ -40,7 +40,12 @@ async def get_or_create_humans_included(
     NEVER writes a scientific rating row.
     """
     existing = await session.execute(
-        select(League).where(League.kind == LeagueKind.HUMANS_INCLUDED.value).limit(1)
+        select(League)
+        .where(
+            League.kind == LeagueKind.HUMANS_INCLUDED.value,
+            League.ruleset_id == ruleset_id,
+        )
+        .limit(1)
     )
     found = existing.scalar_one_or_none()
     if found is not None:

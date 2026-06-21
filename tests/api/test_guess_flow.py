@@ -266,7 +266,7 @@ async def test_partial_accuracy(
     payload = resp.json()
     assert payload["total"] == 6
     assert payload["correct"] == 5
-    assert payload["accuracy"] == str(5 / 6)
+    assert payload["accuracy"] == "5/6"
 
 
 @pytest.mark.asyncio
