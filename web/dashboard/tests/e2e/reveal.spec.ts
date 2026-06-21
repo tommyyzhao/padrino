@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 
 // US-156: Frontend endgame reveal + spot-the-AI guess + profile/stats.
 //
-// /play/[gameId]/reveal is the post-terminal surface:
+// /play/[gameId]/reveal is the post-terminal private human-game surface:
 //   * the spot-the-AI guess UI (per-seat HUMAN/AI toggles + single submit) is
 //     shown FIRST, gating the reveal of the viewer's OWN detection accuracy,
 //   * after submitting the guess, the canonical endgame reveal is disclosed:
@@ -108,11 +108,13 @@ function observationSseBody(): string {
   return OBSERVATION_FRAMES.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('');
 }
 
-test.describe('endgame reveal + guess (US-156)', () => {
-  test('guess-then-reveal: guess gates the accuracy + reveal disclosure', async ({ page }) => {
+test.describe('endgame reveal + guess (US-156/US-163)', () => {
+  test('private anonymous game: participant reaches guess-gated reveal', async ({ page }) => {
     let guessPosted: Record<string, string> | null = null;
     let guessFetchedBeforeSubmit = false;
     let guessSubmitted = false;
+    let humanRevealRequested = false;
+    let publicRevealRequested = false;
 
     // Before the guess is submitted, GET turing-guess is 404 (no guess yet).
     // After submit, the accuracy is available.
@@ -162,13 +164,24 @@ test.describe('endgame reveal + guess (US-156)', () => {
       }
     });
 
-    // The canonical reveal is available once terminal.
-    await page.route(`**/public/games/${GAME_ID}/reveal`, async (route) => {
+    // The participant-gated canonical reveal is available once the private
+    // anonymous human game is terminal.
+    await page.route(`**/human/games/${GAME_ID}/reveal`, async (route) => {
       if (!isApi(route)) return route.continue();
+      humanRevealRequested = true;
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify(REVEAL_BODY)
+      });
+    });
+    await page.route(`**/public/games/${GAME_ID}/reveal`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      publicRevealRequested = true;
+      await route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'reveal_not_available' })
       });
     });
 
@@ -224,6 +237,8 @@ test.describe('endgame reveal + guess (US-156)', () => {
     // The guess payload was submitted once with the chosen per-seat values.
     expect(guessSubmitted).toBe(true);
     expect(guessFetchedBeforeSubmit).toBe(true);
+    expect(humanRevealRequested).toBe(true);
+    expect(publicRevealRequested).toBe(false);
     expect(guessPosted).toEqual({
       [SEAT_HUMAN]: 'HUMAN',
       [SEAT_AI]: 'AI',

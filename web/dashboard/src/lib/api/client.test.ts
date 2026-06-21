@@ -202,7 +202,7 @@ describe('PadrinoClient human-session play channels', () => {
     expect((fetchImpl.mock.calls[1][1] as RequestInit).method ?? 'GET').toBe('GET');
   });
 
-  it('reads the counts-only composition and the endgame reveal', async () => {
+  it('reads the counts-only composition and both reveal surfaces', async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(
@@ -214,14 +214,20 @@ describe('PadrinoClient human-session play channels', () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({ game_id: 'g1', ruleset_id: 'mini7_v1', winner: 'TOWN', seats: [] })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ game_id: 'g1', ruleset_id: 'mini7_v1', winner: 'TOWN', seats: [] })
       );
     const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
     const composition = await client.publicGameComposition('g1');
     expect(composition.composition).toEqual({ human_count: 1, ai_count: 6, total: 7 });
     const reveal = await client.publicGameReveal('g1');
     expect(reveal.winner).toBe('TOWN');
+    const humanReveal = await client.humanGameReveal('g1');
+    expect(humanReveal.winner).toBe('TOWN');
     expect(new URL(fetchImpl.mock.calls[0][0]).pathname).toBe('/public/games/g1/composition');
     expect(new URL(fetchImpl.mock.calls[1][0]).pathname).toBe('/public/games/g1/reveal');
+    expect(new URL(fetchImpl.mock.calls[2][0]).pathname).toBe('/human/games/g1/reveal');
   });
 
   it('drives the lobby create / join / ready / launch surface', async () => {

@@ -8,10 +8,9 @@
   // backend returns the viewer's accuracy and the per-seat reveal (human/AI,
   // role, faction, exact model, takeover provenance, themed sprite) is shown.
   //
-  // The guess + accuracy are cookie-authenticated human-session calls; the
-  // reveal is the canonical public terminal-only endpoint (US-143). The reveal
-  // is the ONLY surface that opens identity (AGENTS.md rule 7), gated on the
-  // terminal game state server-side.
+  // The guess, accuracy, and private-game reveal are cookie-authenticated
+  // human-session calls. The reveal is the ONLY surface that opens identity
+  // (AGENTS.md rule 7), gated on terminal game state server-side.
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
@@ -66,7 +65,7 @@
   async function loadReveal(): Promise<void> {
     if (!gameId) return;
     try {
-      reveal = await padrino.client.publicGameReveal(gameId);
+      reveal = await padrino.client.humanGameReveal(gameId);
     } catch (e) {
       error = (e as Error).message;
     }

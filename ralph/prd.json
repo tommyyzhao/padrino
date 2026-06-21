@@ -92,7 +92,7 @@
         "No reveal is served before terminal; anonymity holds pre-terminal. All backend + frontend gates (pnpm lint/check/test:e2e) pass."
       ],
       "notes": "This is the payoff of the imitation game; without it the spot-the-AI loop has no truth to reveal.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-164",

@@ -324,6 +324,11 @@ export class PadrinoClient {
     return this.request(`/public/games/${encodeURIComponent(gameId)}/reveal`);
   }
 
+  /** Participant-gated reveal for a private terminal human game (US-163). */
+  humanGameReveal(gameId: string): Promise<EndgameReveal> {
+    return this.request(`/human/games/${encodeURIComponent(gameId)}/reveal`);
+  }
+
   /** Per-human deterministic play stats; gated to the signed-in account (US-145). */
   getHumanStats(rulesetId: string): Promise<HumanPlayerStats> {
     return this.request('/human/stats', { ruleset_id: rulesetId });

@@ -54,7 +54,9 @@ from padrino.api.oauth import (
     exchange_code,
     resolve_oauth_config,
 )
+from padrino.api.reveal import build_participant_reveal
 from padrino.core.engine.actions import Action
+from padrino.core.reveal import EndgameReveal
 from padrino.db.repositories import human_principals as principals_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
 
@@ -300,6 +302,29 @@ async def get_seat_observation_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get(
+    "/human/games/{game_id}/reveal",
+    response_model=EndgameReveal,
+)
+async def get_human_game_reveal(
+    game_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> EndgameReveal:
+    """Return the canonical terminal reveal to a game participant.
+
+    Private human games are often never public-broadcastable, so the public
+    ``/reveal`` endpoint remains closed. This route is instead authenticated by
+    the human-session cookie and requires the caller to occupy a seat in the
+    terminal game. It reuses the single canonical reveal projection.
+    """
+    return await build_participant_reveal(
+        session,
+        game_id=game_id,
+        principal_id=ctx.principal_id,
     )
 
 
@@ -617,5 +642,6 @@ __all__ = [
     "GuestSummary",
     "TuringGuessResult",
     "TuringGuessSubmission",
+    "get_human_game_reveal",
     "router",
 ]
