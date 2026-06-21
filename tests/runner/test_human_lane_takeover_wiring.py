@@ -796,3 +796,88 @@ async def test_takeover_commit_failure_leaves_in_memory_uncorrupted(
     takeover_rows = [r for r in persisted_after if r.event_type == "SeatTakenOver"]
     assert len(takeover_rows) == 1
     assert takeover_rows[0].sequence == sequences_before[-1] + 1
+
+
+async def test_takeover_apply_failure_resyncs_committed_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """US-206: a post-commit apply failure must not leave DB ahead of memory."""
+    async with session_factory() as session, session.begin():
+        principal_id = await _seed_principal(session)
+        ai_build_id = await _seed_agent_build(session, label="failapply-ai")
+        await _seed_agent_build(session, label="failapply-takeover")
+        game_id = await _seed_game(
+            session,
+            principal_id=principal_id,
+            ai_build_id=ai_build_id,
+            status="RUNNING",
+        )
+        await _persist_vote_phase(session, game_id)
+        await presence_repo.mark_disconnected(
+            session,
+            game_id=game_id,
+            public_player_id=_HUMAN_SEAT,
+            disconnected_at=_NOW - timedelta(seconds=180),
+        )
+
+    rows = await _event_rows(session_factory, game_id)
+    state, event_log = replay_state_from_rows(rows)
+    sequences_before = [e.sequence for e in event_log.events]
+    adapter = await build_human_lane_adapter(
+        session_factory,
+        game_id=game_id,
+        settings=_settings(),
+        ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+    )
+    assert isinstance(adapter, SeatMultiplexAdapter)
+    assert isinstance(adapter._adapters[_HUMAN_SEAT], HumanAdapter)
+
+    boom = RuntimeError("simulated post-commit apply failure")
+
+    def _raise_once(*_args: Any, **_kwargs: Any) -> Any:
+        monkeypatch.undo()
+        raise boom
+
+    monkeypatch.setattr(human_lane, "apply_takeover", _raise_once)
+
+    applied = await _take_over_expired_human_seats(
+        session_factory,
+        game_id=game_id,
+        mux=adapter,
+        event_log=event_log,
+        state=state,
+        settings=_settings(),
+        ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+        now=_NOW,
+    )
+
+    assert [result.seat_id for result in applied] == [_HUMAN_SEAT]
+    assert not isinstance(adapter._adapters[_HUMAN_SEAT], HumanAdapter)
+    assert [e.body["event_type"] for e in event_log.events].count("SeatTakenOver") == 1
+    assert [e.sequence for e in event_log.events] == [*sequences_before, sequences_before[-1] + 1]
+
+    persisted = await _event_rows(session_factory, game_id)
+    takeover_rows = [r for r in persisted if r.event_type == "SeatTakenOver"]
+    assert len(takeover_rows) == 1
+    assert takeover_rows[0].sequence == event_log.events[-1].sequence
+    assert takeover_rows[0].event_hash == event_log.events[-1].event_hash
+
+    next_body = {
+        "event_type": "PhaseResolved",
+        "sequence": len(event_log.events),
+        "phase": "DAY_1_VOTE",
+        "visibility": "SYSTEM",
+        "actor_player_id": None,
+        "payload": {"phase_kind": "DAY_VOTE", "day": 1, "round": 0},
+    }
+    next_event = event_log.append(next_body)
+    async with session_factory() as session, session.begin():
+        await human_lane._persist_stored_event_row(session, game_id=game_id, stored=next_event)
+
+    persisted_after = await _event_rows(session_factory, game_id)
+    assert [row.sequence for row in persisted_after] == [
+        *sequences_before,
+        next_event.sequence - 1,
+        next_event.sequence,
+    ]

@@ -275,7 +275,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: human_lane.py:474-498/455, disconnect_takeover.py:104-132, multiplex.py:64-68, event_log.py:89. Symmetric closure of the build/apply-across-commit split US-197 introduced.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-207",

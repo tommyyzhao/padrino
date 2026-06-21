@@ -121,6 +121,10 @@ class AppliedTakeover:
     event: StoredEvent
 
 
+class TakeoverApplyRecoveryError(RuntimeError):
+    """Raised when a committed takeover cannot be mirrored into memory."""
+
+
 class _InjectedExecutorAdapter:
     """Adapter placeholder for tests that inject their own executor.
 
@@ -379,6 +383,83 @@ def _seat_has_in_memory_takeover(event_log: EventLog, seat_id: str) -> bool:
     )
 
 
+def _resync_committed_takeover(
+    *,
+    mux: SeatMultiplexAdapter,
+    event_log: EventLog,
+    event: StoredEvent,
+    seat_id: str,
+    replacement_adapter: LlmAdapter,
+) -> StoredEvent:
+    """Mirror an already-committed takeover row into the in-memory structures."""
+    events = event_log.events
+    if event.sequence < len(events):
+        existing = events[event.sequence]
+        if (
+            existing.prev_event_hash == event.prev_event_hash
+            and existing.event_hash == event.event_hash
+            and existing.body == event.body
+        ):
+            mux.force_swap_seat(seat_id, replacement_adapter)
+            return existing
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} collides with in-memory "
+            f"event at sequence {event.sequence}"
+        )
+    if event.sequence != len(events):
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} is not contiguous with "
+            f"in-memory log length {len(events)}"
+        )
+    if event.prev_event_hash != event_log.head_hash:
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} does not chain from the in-memory log head"
+        )
+
+    mux.force_swap_seat(seat_id, replacement_adapter)
+    appended = event_log.append(event.body)
+    if appended.event_hash != event.event_hash:
+        raise TakeoverApplyRecoveryError(
+            f"committed takeover for seat {seat_id!r} re-sealed to a different hash"
+        )
+    return appended
+
+
+def _apply_committed_takeover(
+    *,
+    mux: SeatMultiplexAdapter,
+    event_log: EventLog,
+    event: StoredEvent,
+    seat_id: str,
+    replacement_adapter: LlmAdapter,
+) -> StoredEvent:
+    """Apply a DB-committed takeover, recovering memory on post-commit failure."""
+    try:
+        result = apply_takeover(
+            mux=mux,
+            event_log=event_log,
+            event=event,
+            seat_id=seat_id,
+            replacement_adapter=replacement_adapter,
+        )
+    except Exception as exc:
+        synced = _resync_committed_takeover(
+            mux=mux,
+            event_log=event_log,
+            event=event,
+            seat_id=seat_id,
+            replacement_adapter=replacement_adapter,
+        )
+        _logger.warning(
+            "human_lane.takeover.apply_failed_resynced",
+            game_event_sequence=event.sequence,
+            seat_id=seat_id,
+            error=str(exc),
+        )
+        return synced
+    return result.event
+
+
 async def _take_over_expired_human_seats(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -489,7 +570,7 @@ async def _take_over_expired_human_seats(
         # The DB write committed; only now apply the irreversible in-memory swap
         # + log append (US-197 AC1). If the commit above raised, control never
         # reaches here and the in-memory state is untouched.
-        result = apply_takeover(
+        synced_event = _apply_committed_takeover(
             mux=mux,
             event_log=event_log,
             event=event,
@@ -500,7 +581,7 @@ async def _take_over_expired_human_seats(
             AppliedTakeover(
                 seat_id=seat_id,
                 replacement_agent_build_id=build_id,
-                event=result.event,
+                event=synced_event,
             )
         )
 
