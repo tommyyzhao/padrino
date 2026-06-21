@@ -281,6 +281,17 @@ def test_spent_janitor_has_no_clean_action() -> None:
     assert legal.legal_targets == []
 
 
+def test_spent_framer_has_no_frame_action() -> None:
+    actor = _seat("P08", 7, Role.FRAMER, Faction.MAFIA).model_copy(
+        update={"framer_frame_shots_remaining": 0}
+    )
+    seats = (*SEATS, actor)
+    phase = Phase(kind=PhaseKind.NIGHT_ACTIONS, day=2, round=0)
+    legal = legal_actions_for(_state(phase, seats), actor)
+    assert legal.allowed_action_types == [ActionType.NOOP]
+    assert legal.legal_targets == []
+
+
 def test_night_actions_villager_only_noop() -> None:
     phase = Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0)
     villager = SEATS[4]

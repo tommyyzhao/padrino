@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from padrino.core.enums import Faction, PhaseKind, Role, SeatKind
 
 JANITOR_CLEAN_SHOT_CAP: Final[int] = 1
+FRAMER_FRAME_SHOT_CAP: Final[int] = 1
 
 
 class QueuedInspection(BaseModel):
@@ -45,6 +46,8 @@ class Seat(BaseModel):
     # US-177: None means the role's default shot cap has not been materialized
     # yet, preserving legacy seat payloads and hand-built Janitor states.
     janitor_clean_shots_remaining: int | None = None
+    # US-178: same lazy materialization pattern for Framer's one successful mark.
+    framer_frame_shots_remaining: int | None = None
 
 
 class Phase(BaseModel):
@@ -107,3 +110,12 @@ def janitor_clean_shots_remaining(seat: Seat) -> int:
     if seat.janitor_clean_shots_remaining is None:
         return JANITOR_CLEAN_SHOT_CAP
     return max(seat.janitor_clean_shots_remaining, 0)
+
+
+def framer_frame_shots_remaining(seat: Seat) -> int:
+    """Return the deterministic remaining successful frames for a Framer seat."""
+    if seat.role is not Role.FRAMER:
+        return 0
+    if seat.framer_frame_shots_remaining is None:
+        return FRAMER_FRAME_SHOT_CAP
+    return max(seat.framer_frame_shots_remaining, 0)

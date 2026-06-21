@@ -24,7 +24,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from padrino.core.engine.actions import Action
-from padrino.core.engine.state import GameState, Seat, janitor_clean_shots_remaining
+from padrino.core.engine.state import (
+    GameState,
+    Seat,
+    framer_frame_shots_remaining,
+    janitor_clean_shots_remaining,
+)
 from padrino.core.enums import ActionType, Faction, Role
 
 FINDING_MAFIA: Literal["MAFIA"] = "MAFIA"
@@ -90,6 +95,7 @@ class MatrixEffect(StrEnum):
     RECORDS_VISIT = "RECORDS_VISIT"
     READS_RESOLVED_STATE = "READS_RESOLVED_STATE"
     SUPPRESSES_DEATH_REVEAL = "SUPPRESSES_DEATH_REVEAL"
+    FALSIFIES_INVESTIGATION = "FALSIFIES_INVESTIGATION"
 
 
 class ResolutionMatrixRow(BaseModel):
@@ -105,6 +111,7 @@ class ResolutionMatrixRow(BaseModel):
     redirected: MatrixEffect
     watched_tracked: MatrixEffect
     cleaned: MatrixEffect
+    investigation: MatrixEffect
     records_visit: bool
     records_visit_when_blocked: bool
 
@@ -119,6 +126,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.UNAFFECTED,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.UNAFFECTED,
         records_visit=True,
         records_visit_when_blocked=True,
     ),
@@ -131,6 +139,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.UNAFFECTED,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.UNAFFECTED,
         records_visit=True,
         records_visit_when_blocked=False,
     ),
@@ -143,6 +152,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.RETARGETS_ACTION,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.UNAFFECTED,
         records_visit=True,
         records_visit_when_blocked=False,
     ),
@@ -155,6 +165,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.RETARGETS_ACTION,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.UNAFFECTED,
         records_visit=True,
         records_visit_when_blocked=False,
     ),
@@ -167,6 +178,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.RETARGETS_ACTION,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.READS_RESOLVED_STATE,
         records_visit=True,
         records_visit_when_blocked=False,
     ),
@@ -179,6 +191,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.RETARGETS_ACTION,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.FALSIFIES_INVESTIGATION,
         records_visit=True,
         records_visit_when_blocked=False,
     ),
@@ -191,6 +204,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.RETARGETS_ACTION,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.UNAFFECTED,
         records_visit=True,
         records_visit_when_blocked=False,
     ),
@@ -203,6 +217,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.RETARGETS_ACTION,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.UNAFFECTED,
         records_visit=True,
         records_visit_when_blocked=False,
     ),
@@ -215,6 +230,7 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         redirected=MatrixEffect.RETARGETS_ACTION,
         watched_tracked=MatrixEffect.RECORDS_VISIT,
         cleaned=MatrixEffect.SUPPRESSES_DEATH_REVEAL,
+        investigation=MatrixEffect.UNAFFECTED,
         records_visit=True,
         records_visit_when_blocked=False,
     ),
@@ -314,6 +330,8 @@ class MatrixNightResolution(BaseModel):
     death_reveals: tuple[DeathReveal, ...] = ()
     cleaned_deaths: tuple[str, ...] = ()
     clean_spent_actor_ids: tuple[str, ...] = ()
+    framed_targets: tuple[str, ...] = ()
+    frame_spent_actor_ids: tuple[str, ...] = ()
     protect_outcomes: dict[str, ProtectOutcome] = Field(default_factory=dict)
     investigation_outcomes: dict[str, InvestigationOutcome] = Field(default_factory=dict)
 
@@ -356,7 +374,9 @@ def _alive_seat(state: GameState, public_player_id: str | None) -> Seat | None:
     return seat
 
 
-def _finding_for(target: Seat) -> Literal["MAFIA", "TOWN"]:
+def _finding_for(target: Seat, framed_targets: set[str]) -> Literal["MAFIA", "TOWN"]:
+    if target.public_player_id in framed_targets:
+        return FINDING_MAFIA
     if target.role is Role.GODFATHER:
         return FINDING_TOWN
     return FINDING_MAFIA if target.faction is Faction.MAFIA else FINDING_TOWN
@@ -384,7 +404,11 @@ def _valid_target_for_kind(
     if kind is NightActionKind.REDIRECT:
         return _alive_seat(state, redirect_target_id) is not None
     if kind is NightActionKind.FRAME:
-        return actor.role is Role.FRAMER and target_id != actor.public_player_id
+        return (
+            actor.role is Role.FRAMER
+            and target_id != actor.public_player_id
+            and framer_frame_shots_remaining(actor) > 0
+        )
     if kind is NightActionKind.TRACK:
         return actor.role is Role.TRACKER and target_id != actor.public_player_id
     if kind is NightActionKind.WATCH:
@@ -587,10 +611,27 @@ def _protection_feedback(
     )
 
 
+def _resolve_framed_targets(
+    state: GameState,
+    intents: Sequence[NightActionIntent],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    framed_targets = {
+        intent.target
+        for intent in _tier_intents(intents, NightActionKind.FRAME)
+        if intent.target is not None
+    }
+    framer_ids = {intent.actor for intent in _tier_intents(intents, NightActionKind.FRAME)}
+    return (
+        _sort_ids(state, {pid for pid in framed_targets if pid is not None}),
+        _sort_ids(state, framer_ids),
+    )
+
+
 def _resolve_investigations(
     state: GameState,
     intents: Sequence[NightActionIntent],
     eliminated: str | None,
+    framed_targets: tuple[str, ...],
 ) -> tuple[
     tuple[str, Literal["MAFIA", "TOWN"]] | None,
     dict[str, InvestigationOutcome],
@@ -599,12 +640,13 @@ def _resolve_investigations(
     detective_finding: tuple[str, Literal["MAFIA", "TOWN"]] | None = None
     outcomes: dict[str, InvestigationOutcome] = {}
     feedback: list[NightFeedback] = []
+    framed = set(framed_targets)
     for intent in _tier_intents(intents, NightActionKind.INVESTIGATE):
         assert intent.target is not None
         target = state.seat_by_public_id(intent.target)
         if target is None:
             continue
-        finding = _finding_for(target)
+        finding = _finding_for(target, framed)
         outcomes[intent.actor] = InvestigationOutcome(
             target=intent.target,
             finding=finding,
@@ -741,10 +783,12 @@ def resolve_night_actions(
         )
     )
 
+    framed_targets, frame_spent_actor_ids = _resolve_framed_targets(state, active_intents)
     detective_finding, investigation_outcomes, investigation_feedback = _resolve_investigations(
         state,
         active_intents,
         eliminated,
+        framed_targets,
     )
     feedback.extend(investigation_feedback)
     feedback.extend(_resolve_visit_graph_feedback(state, active_intents, visits))
@@ -767,6 +811,8 @@ def resolve_night_actions(
         death_reveals=death_reveals,
         cleaned_deaths=cleaned_deaths,
         clean_spent_actor_ids=clean_spent_actor_ids,
+        framed_targets=framed_targets,
+        frame_spent_actor_ids=frame_spent_actor_ids,
         protect_outcomes=protect_outcomes,
         investigation_outcomes=investigation_outcomes,
     )

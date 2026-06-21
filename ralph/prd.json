@@ -164,7 +164,7 @@
         "All backend gates pass."
       ],
       "notes": "Both reviewers: Framer adds the most noise. Add Godfather + Roleblocker + Janitor first; admit Framer to canonical only if measured variance stays within the pinned <=15% budget.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-179",

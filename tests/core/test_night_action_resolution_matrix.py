@@ -257,6 +257,103 @@ def test_godfather_investigation_falsifies_structured_feedback_only() -> None:
     }
 
 
+def test_framed_town_target_reads_as_mafia() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.FRAMER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FRAME, "P05"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P05"),
+        ),
+    )
+
+    feedback = result.feedback_by_code("INVESTIGATION_RESULT")[0]
+    assert result.detective_finding == ("P05", "MAFIA")
+    assert result.investigation_outcomes["P03"].finding == "MAFIA"
+    assert result.framed_targets == ("P05",)
+    assert result.frame_spent_actor_ids == ("P01",)
+    assert feedback.model_dump() == {
+        "recipient": "P03",
+        "code": "INVESTIGATION_RESULT",
+        "message": "Investigation result: P05 is MAFIA.",
+        "target": "P05",
+        "finding": "MAFIA",
+        "visited_player_ids": (),
+        "visitor_player_ids": (),
+    }
+
+
+def test_roleblocked_framer_does_not_mark_or_spend() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.FRAMER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FRAME, "P05"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P01"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P05"),
+        ),
+    )
+
+    assert result.blocked_actor_ids == ("P01",)
+    assert result.detective_finding == ("P05", "TOWN")
+    assert result.framed_targets == ()
+    assert result.frame_spent_actor_ids == ()
+
+
+def test_frame_overrides_godfather_passive_investigation() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.FRAMER, Faction.MAFIA),
+                _seat("P02", 1, Role.GODFATHER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FRAME, "P02"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P02"),
+        ),
+    )
+
+    assert RESOLUTION_MATRIX[NightActionKind.FRAME].investigation is (
+        MatrixEffect.FALSIFIES_INVESTIGATION
+    )
+    assert result.detective_finding == ("P02", "MAFIA")
+    assert result.investigation_outcomes["P03"].finding == "MAFIA"
+
+
 def test_protection_feedback_is_structured_and_deterministic() -> None:
     result = resolve_night_actions(
         _state(),

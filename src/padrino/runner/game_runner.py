@@ -708,6 +708,9 @@ def _resolve_night_events(
     if night.cleaned_deaths:
         night_payload["cleaned_deaths"] = night.cleaned_deaths
         night_payload["clean_spent_actor_ids"] = night.clean_spent_actor_ids
+    if night.framed_targets:
+        night_payload["framed_targets"] = night.framed_targets
+        night_payload["frame_spent_actor_ids"] = night.frame_spent_actor_ids
     events: list[dict[str, Any]] = [
         {
             "event_type": "NightResolved",

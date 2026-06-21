@@ -47,6 +47,7 @@ from padrino.core.engine.state import (
     Phase,
     QueuedInspection,
     Seat,
+    framer_frame_shots_remaining,
     janitor_clean_shots_remaining,
 )
 from padrino.core.enums import PhaseKind, Role
@@ -113,6 +114,24 @@ def _spend_janitor_clean_shots(state: GameState, actor_ids: tuple[str, ...]) -> 
     return state.model_copy(update={"seats": tuple(seats)})
 
 
+def _spend_framer_frame_shots(state: GameState, actor_ids: tuple[str, ...]) -> GameState:
+    if not actor_ids:
+        return state
+    spent = set(actor_ids)
+    changed = False
+    seats: list[Seat] = []
+    for seat in state.seats:
+        if seat.public_player_id in spent and seat.role is Role.FRAMER:
+            remaining = max(framer_frame_shots_remaining(seat) - 1, 0)
+            seats.append(seat.model_copy(update={"framer_frame_shots_remaining": remaining}))
+            changed = True
+        else:
+            seats.append(seat)
+    if not changed:
+        return state
+    return state.model_copy(update={"seats": tuple(seats)})
+
+
 def apply_event(state: GameState, event: Event) -> GameState:
     """Return the next :class:`GameState` after applying ``event``.
 
@@ -160,7 +179,8 @@ def apply_event(state: GameState, event: Event) -> GameState:
             state, event.actor_player_id, {"last_protected_target": event.payload.target}
         )
     if isinstance(event, NightResolved):
-        return _spend_janitor_clean_shots(state, event.payload.clean_spent_actor_ids)
+        state = _spend_janitor_clean_shots(state, event.payload.clean_spent_actor_ids)
+        return _spend_framer_frame_shots(state, event.payload.frame_spent_actor_ids)
     if isinstance(event, GameTerminated):
         return state.model_copy(
             update={

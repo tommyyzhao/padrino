@@ -211,6 +211,31 @@ def test_night_resolved_spends_successful_janitor_clean_shot() -> None:
     assert spent.janitor_clean_shots_remaining == 0
 
 
+def test_night_resolved_spends_successful_framer_frame_shot() -> None:
+    state = _bootstrapped()
+    framer = state.seats[1].model_copy(update={"role": Role.FRAMER})
+    state = state.model_copy(update={"seats": (state.seats[0], framer, *state.seats[2:])})
+
+    state = apply_event(
+        state,
+        NightResolved(
+            sequence=5,
+            phase="NIGHT_1_ACTIONS",
+            payload=NightResolvedPayload(
+                eliminated=None,
+                protected=None,
+                mafia_kill_target=None,
+                framed_targets=("P05",),
+                frame_spent_actor_ids=("P02",),
+            ),
+        ),
+    )
+
+    spent = state.seat_by_public_id("P02")
+    assert spent is not None
+    assert spent.framer_frame_shots_remaining == 0
+
+
 def test_detective_result_delivered_sets_queue() -> None:
     state = _bootstrapped()
     state = apply_event(

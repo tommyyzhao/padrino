@@ -150,6 +150,8 @@ class NightResolvedPayload(_FrozenModel):
     mafia_kill_target: str | None
     cleaned_deaths: tuple[str, ...] = ()
     clean_spent_actor_ids: tuple[str, ...] = ()
+    framed_targets: tuple[str, ...] = ()
+    frame_spent_actor_ids: tuple[str, ...] = ()
 
 
 class DetectiveResultDeliveredPayload(_FrozenModel):
