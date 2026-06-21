@@ -60,7 +60,7 @@
         "All backend gates pass."
       ],
       "notes": "Keep portable across SQLite + Postgres (sqlalchemy dialect-aware upsert or insert-with-on-conflict helper).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-193",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,25 +53,22 @@ async def record_heartbeat(
     public_player_id: str,
     seen_at: datetime,
 ) -> HumanSeatPresence:
-    """Upsert a connected heartbeat for one human seat."""
-    row = await get(session, game_id=game_id, public_player_id=public_player_id)
-    if row is None:
-        row = HumanSeatPresence(
-            game_id=game_id,
-            public_player_id=public_player_id,
-            connected=True,
-            last_seen_at=seen_at,
-            disconnected_at=None,
-            updated_at=seen_at,
-        )
-        session.add(row)
-    else:
-        row.connected = True
-        row.last_seen_at = seen_at
-        row.disconnected_at = None
-        row.updated_at = seen_at
-    await session.flush()
-    return row
+    """Atomically upsert a connected heartbeat for one human seat.
+
+    Uses ``INSERT ... ON CONFLICT (game_id, public_player_id) DO UPDATE`` so two
+    concurrent heartbeats for the same seat never both see "no row", both INSERT,
+    and the second violate ``uq_human_seat_presence`` (which previously surfaced
+    as a 500 on the presence/observation/action path).
+    """
+    return await _upsert_presence(
+        session,
+        game_id=game_id,
+        public_player_id=public_player_id,
+        connected=True,
+        last_seen_at=seen_at,
+        disconnected_at=None,
+        updated_at=seen_at,
+    )
 
 
 async def mark_disconnected(
@@ -80,23 +78,99 @@ async def mark_disconnected(
     public_player_id: str,
     disconnected_at: datetime,
 ) -> HumanSeatPresence:
-    """Upsert an explicit disconnect for one human seat."""
-    row = await get(session, game_id=game_id, public_player_id=public_player_id)
-    if row is None:
-        row = HumanSeatPresence(
-            game_id=game_id,
-            public_player_id=public_player_id,
-            connected=False,
-            last_seen_at=None,
-            disconnected_at=disconnected_at,
-            updated_at=disconnected_at,
+    """Atomically upsert an explicit disconnect for one human seat.
+
+    Shares the race-safe ``ON CONFLICT DO UPDATE`` path with
+    :func:`record_heartbeat`; concurrent calls cannot raise ``IntegrityError``.
+    A disconnect deliberately leaves ``last_seen_at`` untouched (the last live
+    heartbeat) so the worker lane can measure the grace window from it.
+    """
+    return await _upsert_presence(
+        session,
+        game_id=game_id,
+        public_player_id=public_player_id,
+        connected=False,
+        last_seen_at=_KEEP,
+        disconnected_at=disconnected_at,
+        updated_at=disconnected_at,
+    )
+
+
+# Sentinel for "do not change this column on conflict" (None is a real value).
+_KEEP = object()
+
+
+async def _upsert_presence(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    public_player_id: str,
+    connected: bool,
+    last_seen_at: datetime | None | object,
+    disconnected_at: datetime | None,
+    updated_at: datetime,
+) -> HumanSeatPresence:
+    """Dialect-aware ``INSERT ... ON CONFLICT DO UPDATE`` for one presence row.
+
+    The ORM-level ``id`` / ``updated_at`` defaults do not fire on a Core insert,
+    so every column is supplied explicitly. Portable across SQLite + Postgres.
+    """
+    insert_values: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "game_id": game_id,
+        "public_player_id": public_player_id,
+        "connected": connected,
+        "last_seen_at": None if last_seen_at is _KEEP else last_seen_at,
+        "disconnected_at": disconnected_at,
+        "updated_at": updated_at,
+    }
+    update_values: dict[str, Any] = {
+        "connected": connected,
+        "disconnected_at": disconnected_at,
+        "updated_at": updated_at,
+    }
+    if last_seen_at is not _KEEP:
+        update_values["last_seen_at"] = last_seen_at
+
+    bind = session.get_bind()
+    dialect_name = bind.dialect.name
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = (
+            pg_insert(HumanSeatPresence)
+            .values(**insert_values)
+            .on_conflict_do_update(
+                index_elements=["game_id", "public_player_id"],
+                set_=update_values,
+            )
+            .returning(HumanSeatPresence.id)
         )
-        session.add(row)
+    elif dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        stmt = (
+            sqlite_insert(HumanSeatPresence)
+            .values(**insert_values)
+            .on_conflict_do_update(
+                index_elements=["game_id", "public_player_id"],
+                set_=update_values,
+            )
+            .returning(HumanSeatPresence.id)
+        )
     else:
-        row.connected = False
-        row.disconnected_at = disconnected_at
-        row.updated_at = disconnected_at
+        raise RuntimeError(f"unsupported dialect for presence upsert: {dialect_name!r}")
+
+    await session.execute(stmt)
     await session.flush()
+    # The Core upsert bypasses the ORM, so any instance already in the identity
+    # map holds stale column values. Expire it before re-reading so the caller
+    # sees the values just written.
+    existing = await get(session, game_id=game_id, public_player_id=public_player_id)
+    if existing is not None:
+        session.expire(existing)
+    row = await get(session, game_id=game_id, public_player_id=public_player_id)
+    assert row is not None  # the upsert guarantees a row exists
     return row
 
 
