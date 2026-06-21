@@ -1,0 +1,67 @@
+{
+  "project": "Padrino",
+  "branchName": "ralph/padrino-v9-fixes-3",
+  "description": "v9-fixes-3 (DRAFT) - third hardening pass for the human-multiplayer layer. Captures the 4 NON-BLOCKING residuals from the final round-3 re-review of v9-fixes-2 (US-189..209, now merged to main at c209858). None blocked the merge (all medium/low; no crash/corruption/over-admission/security-bypass; casual human-MP lane). This batch closes them for production-robustness. DRAFT: not activated, not run - run via a ralph-codex loop when greenlit. Story ids continue monotonically after US-209.",
+  "userStories": [
+    {
+      "id": "US-210",
+      "title": "Eliminate rate-limit partial-burn under concurrency (atomic multi-bucket commit)",
+      "priority": 210,
+      "dependencies": [],
+      "description": "ROUND-3 RESIDUAL (MEDIUM, CONFIRMED). US-204 restored the atomic per-bucket rejection (raise 429 when record_request returns allowed=False) but the two buckets are still recorded sequentially - principal bucket FIRST, then game-phase bucket (human_actions.py:200-222; human_chat.py:252-274). Each record_request commits in its own transaction (rate_limit_store.py:160-168), and there is no compensation/decrement. Under concurrency on DatabaseRateLimitStore, if a concurrent request saturates the game-phase bucket in the TOCTOU window between this request's peek and its game-phase record, this request increments the per-principal bucket, then 429s on the game-phase bucket - permanently burning a cross-game/phase principal slot for a REJECTED request. Repeated concurrent bursts against a saturated game-phase bucket silently drain the per-principal budget, throttling the seat's legitimate actions/chat in its OTHER games/phases (self-heals at the 1-minute window rollover, hence medium). This is exactly the invariant the peek-then-commit comment (human_actions.py:204-206) promises.",
+      "acceptanceCriteria": [
+        "Multi-bucket rate-limit enforcement is atomic or compensating: a rejection by a later bucket does NOT leave an earlier bucket's per-minute count incremented - for BOTH the action channel (human_actions.py) and the chat channel (human_chat.py). Preferred: an atomic multi-bucket record_all on the store that increments all buckets in one transaction and rolls back if any exceeds its limit; acceptable alternative: a release/decrement of already-recorded buckets on a later-bucket rejection, or recording the narrowest (game-phase) bucket first AND only touching the principal bucket after game-phase admits.",
+        "A concurrency regression test contends on the GAME-PHASE bucket (saturated at limit) with interleaved requests and asserts the per-principal bucket count is UNCHANGED for the rejected request (no partial-burn), for both channels.",
+        "The US-204 property still holds: under concurrency at most `limit` requests are admitted per bucket (no over-admission); the US-191/203 property (a rejected request does not burn the principal budget on the common single-threaded reject path) also still holds.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Evidence: human_actions.py:200-222, human_chat.py:252-274, rate_limit_store.py:68-74/150-238. The robust fix is the atomic multi-bucket record_all noted in US-204's own notes. Add a refund/decrement to the RateLimitStore Protocol only if not doing record_all.",
+      "passes": false
+    },
+    {
+      "id": "US-211",
+      "title": "Takeover recovery must surface (not mask) an unknown-seat desync",
+      "priority": 211,
+      "dependencies": [],
+      "description": "ROUND-3 RESIDUAL (MEDIUM, PLAUSIBLE). US-206 added _apply_committed_takeover / _resync_committed_takeover (human_lane.py:436-460/403-424) which catch a broad `except Exception` from apply_takeover and recover via mux.force_swap_seat (multiplex.py:73-83). Unlike swap_seat, force_swap_seat does NOT require the seat to already exist in the dispatch table - it unconditionally does _adapters[seat]=adapter. So if apply_takeover failed because swap_seat raised KeyError for an UNKNOWN seat (a genuine mux/log/DB seat-identity desync), the recovery silently FABRICATES a brand-new dispatch entry for a seat that never legitimately existed, masking the real bug. Pre-diff this KeyError propagated and surfaced the desync. Precondition (seat in the DB-committed takeover yet absent from the mux) requires a real desync, so PLAUSIBLE not CONFIRMED; the masking is fully demonstrable given that state.",
+      "acceptanceCriteria": [
+        "The takeover recovery does NOT invent routing for an unknown seat: if apply_takeover raised because the seat is absent from the mux dispatch table (KeyError / not a post-commit memory-lag), surface it (re-raise as TakeoverApplyRecoveryError or propagate) rather than force_swap_seat-ing a fabricated entry. Only treat the failure as a recoverable post-commit memory-lag when the seat is genuinely known to the mux.",
+        "A test drives apply_takeover to raise KeyError for a seat absent from the mux and asserts the recovery does NOT create a new dispatch entry and instead raises/surfaces the desync.",
+        "The US-206 happy-path resync (post-commit failure on a KNOWN seat) and its existing test still pass.",
+        "All backend gates pass."
+      ],
+      "notes": "Evidence: human_lane.py:436-460/403-424, disconnect_takeover.py:124-132, multiplex.py:73-83. Add a mux membership check (has_seat / expose keys) before force_swap_seat, or catch KeyError separately.",
+      "passes": false
+    },
+    {
+      "id": "US-212",
+      "title": "Takeover resync: validate re-seal hash BEFORE mutating mux/log (atomic error path)",
+      "priority": 212,
+      "dependencies": [],
+      "description": "ROUND-3 RESIDUAL (LOW, PLAUSIBLE). In _resync_committed_takeover's clean-append branch (human_lane.py:419-424), mux.force_swap_seat runs, THEN event_log.append, THEN the re-seal assertion `if appended.event_hash != event.event_hash: raise TakeoverApplyRecoveryError`. If the committed body re-seals to a different hash (only reachable on an already-corrupt/tampered committed game_events row, since compute_event_hash is pure and prev_hash was already asserted), the error is raised AFTER the mux has been rebound and an event appended - a mux/log divergence on the error path (the in-memory dispatch table advanced past a consistent state even though recovery 'failed'). Contrived but a genuine non-atomic ordering bug.",
+      "acceptanceCriteria": [
+        "The recovery clean-append branch validates the committed row's hash against its own (prev_event_hash, body) BEFORE any mutation: pre-compute expected_hash = compute_event_hash(event.prev_event_hash, event.body) and raise TakeoverApplyRecoveryError if it != event.event_hash, leaving mux and event_log UNTOUCHED on the error path.",
+        "A test exercises the re-seal-mismatch branch (corrupt committed row) and asserts the mux dispatch table and event_log are unchanged after the recovery raises.",
+        "The successful resync path still works.",
+        "All backend gates pass."
+      ],
+      "notes": "Evidence: human_lane.py:419-424, core/engine/hashing.py compute_event_hash (pure sha256). Validate-before-mutate; the only trigger is an already-broken hash chain upstream, so severity low.",
+      "passes": false
+    },
+    {
+      "id": "US-213",
+      "title": "OAuth: release the single-use flow claim on a TRANSIENT exchange failure",
+      "priority": 213,
+      "dependencies": [],
+      "description": "ROUND-3 RESIDUAL (LOW, PLAUSIBLE / by-design refinement). US-208 made the consumed-flow claim durable (committed in its own session BEFORE exchange_code) so a replay-after-failed-exchange is rejected - this correctly closes the replay gap and is the intended, tested US-208 behavior. The cost: a TRANSIENT exchange failure (provider 503, network blip, JWKS fetch timeout) now permanently burns the flow token, so the user cannot retry the callback and must restart the entire OAuth authorization. Distinguish transient infra failures from a genuine code replay so a transient blip does not force a full re-auth, WITHOUT reopening the replay gap.",
+      "acceptanceCriteria": [
+        "Only a TERMINAL exchange failure (provider indicates the code is invalid/consumed, e.g. invalid_grant) keeps the flow durably burned; on a TRANSIENT/infrastructure failure (network error, 5xx, JWKS timeout) the just-claimed consumed-flow row is released (own committed session, mirroring the durable claim) so the (state cookie, code) callback can be retried.",
+        "OAuthError carries an error-class/transient flag so the callback can distinguish; the except OAuthError block releases the flow only for transient errors before returning oauth_exchange_failed.",
+        "Tests: a transient exchange failure leaves the flow RE-USABLE (retry succeeds); a terminal invalid_grant keeps it BURNED (replay rejected); the US-208 durable-on-terminal-failure test still passes.",
+        "All backend gates pass."
+      ],
+      "notes": "Evidence: routes/human.py:599-617/658-674, oauth.py exchange_code OAuthError mapping. This is a UX refinement of the intended US-208 hardening, not a security regression; keep the replay gap closed. Lowest priority of the batch.",
+      "passes": false
+    }
+  ]
+}
