@@ -320,7 +320,7 @@
         "All backend gates pass (including test_migrations_all_dialects)."
       ],
       "notes": "Evidence: human.py:598-600, oauth_consumed_flows.py:69-85, 0046_oauth_consumed_flows.py:30-33, models.py:836-856. The single-use INSERT/reject logic itself is correct -- leave it unchanged; this is purely the prune placement + index.",
-      "passes": false
+      "passes": true
     }
   ]
 }

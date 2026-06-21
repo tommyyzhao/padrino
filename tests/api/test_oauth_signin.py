@@ -11,6 +11,7 @@ when no provider is configured, and provider secrets/tokens are never persisted.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from time import time
 from typing import Any
@@ -577,6 +578,80 @@ async def test_failed_exchange_consumes_flow_durably(
     assert len(principals) == 0
     assert len(identities) == 0
     assert len(flows) == 1
+
+
+@pytest.mark.asyncio
+async def test_callback_does_not_prune_consumed_flows_on_every_attempt(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hot callback path claims the flow without sweeping on every request."""
+    from padrino.api.routes import human as human_routes
+    from padrino.db.repositories import oauth_consumed_flows as flows_repo
+
+    state, verifier, nonce = await _callback_cookies(client)
+    _stub_valid_token(nonce, subject="subject-no-hot-prune")
+
+    monkeypatch.setattr(human_routes, "_oauth_flow_prune_due", lambda _flow_token: False)
+
+    async def _raise_if_pruned(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("oauth callback pruned consumed flows on an unsampled request")
+
+    monkeypatch.setattr(flows_repo, "prune_expired", _raise_if_pruned)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_callback_opportunistic_prune_bounds_consumed_flow_table(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sampled callback sweeps expired rows while stale rows are otherwise inert."""
+    from padrino.api.routes import human as human_routes
+
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                OAuthConsumedFlow(
+                    flow="expired-flow-1",
+                    consumed_at=now - timedelta(seconds=3600),
+                ),
+                OAuthConsumedFlow(
+                    flow="expired-flow-2",
+                    consumed_at=now - timedelta(seconds=1800),
+                ),
+                OAuthConsumedFlow(flow="fresh-flow", consumed_at=now),
+            ]
+        )
+        await session.commit()
+
+    state, verifier, nonce = await _callback_cookies(client)
+    _stub_valid_token(nonce, subject="subject-pruned")
+    monkeypatch.setattr(human_routes, "_oauth_flow_prune_due", lambda _flow_token: True)
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+    async with session_factory() as session:
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    flow_names = {flow.flow for flow in flows}
+    assert "fresh-flow" in flow_names
+    assert "expired-flow-1" not in flow_names
+    assert "expired-flow-2" not in flow_names
+    assert len(flow_names) == 2
 
 
 @pytest.mark.asyncio

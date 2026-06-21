@@ -15,6 +15,7 @@ human session via :func:`padrino.api.human_auth.require_human`.
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -69,6 +70,7 @@ router = APIRouter()
 OAUTH_STATE_COOKIE = "padrino_oauth_state"
 OAUTH_VERIFIER_COOKIE = "padrino_oauth_verifier"
 _OAUTH_FLOW_TTL_SECONDS = 600
+_OAUTH_FLOW_PRUNE_SAMPLE_MODULUS = 16
 
 
 class GuestSummary(BaseModel):
@@ -662,10 +664,11 @@ async def _try_consume_oauth_flow_durably(
     """Claim an OAuth flow in its own transaction before provider exchange."""
     session_factory = get_session_factory(request)
     async with session_factory() as flow_session:
-        await oauth_flows_repo.prune_expired(
-            flow_session,
-            older_than=consumed_at - timedelta(seconds=_OAUTH_FLOW_TTL_SECONDS),
-        )
+        if _oauth_flow_prune_due(flow_token):
+            await oauth_flows_repo.prune_expired(
+                flow_session,
+                older_than=consumed_at - timedelta(seconds=_OAUTH_FLOW_TTL_SECONDS),
+            )
         claimed = await oauth_flows_repo.try_consume_flow(
             flow_session,
             flow=flow_token,
@@ -673,6 +676,18 @@ async def _try_consume_oauth_flow_durably(
         )
         await flow_session.commit()
     return claimed
+
+
+def _oauth_flow_prune_due(flow_token: str) -> bool:
+    """Return True for a stable 1/N sample of OAuth callbacks.
+
+    Expired consumed-flow rows are inert because every new authorization start
+    mints a fresh random flow token. Deferring most sweeps is therefore
+    functionally safe while avoiding a predicate DELETE on every callback.
+    """
+    digest = hashlib.sha256(flow_token.encode("utf-8")).digest()
+    bucket = int.from_bytes(digest[:8], byteorder="big") % _OAUTH_FLOW_PRUNE_SAMPLE_MODULUS
+    return bucket == 0
 
 
 async def _in_flight_guest_id(session: AsyncSession, request: Request) -> uuid.UUID | None:

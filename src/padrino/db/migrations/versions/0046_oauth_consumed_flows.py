@@ -32,7 +32,13 @@ def upgrade() -> None:
         sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("flow", name="pk_oauth_consumed_flows"),
     )
+    op.create_index(
+        "ix_oauth_consumed_flows_consumed_at",
+        "oauth_consumed_flows",
+        ["consumed_at"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_oauth_consumed_flows_consumed_at", table_name="oauth_consumed_flows")
     op.drop_table("oauth_consumed_flows")

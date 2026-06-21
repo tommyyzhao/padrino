@@ -851,6 +851,7 @@ class OAuthConsumedFlow(Base):
     """
 
     __tablename__ = "oauth_consumed_flows"
+    __table_args__ = (Index("ix_oauth_consumed_flows_consumed_at", "consumed_at"),)
 
     flow: Mapped[str] = mapped_column(String, primary_key=True)
     consumed_at: Mapped[datetime] = mapped_column(
