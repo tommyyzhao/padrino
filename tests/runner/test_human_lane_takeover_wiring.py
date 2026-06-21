@@ -439,6 +439,123 @@ async def test_reconnect_race_cancels_takeover_and_keeps_human_turn(
     assert responses[_HUMAN_SEAT].action == Action(type=ActionType.ABSTAIN, target=None)
 
 
+async def test_reconnect_in_revalidation_read_window_cancels_takeover(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """US-200(b): a reconnect committing in the revalidation read->commit window.
+
+    Unlike test_reconnect_race_cancels_takeover_and_keeps_human_turn (which
+    reconnects BEFORE revalidation), this one fires the reconnect inside
+    ``_expired_human_seat_for_update`` -- between the seat FOR UPDATE lock and the
+    presence read -- to model a heartbeat that commits AFTER the worker started
+    the takeover transaction. The FOR UPDATE presence read must observe the
+    fresher heartbeat and ``seats_past_grace`` re-evaluation must cancel the
+    takeover, leaving the human's seat and turn intact.
+    """
+    async with session_factory() as session, session.begin():
+        principal_id = await _seed_principal(session)
+        ai_build_id = await _seed_agent_build(session, label="window-ai")
+        game_id = await _seed_game(
+            session,
+            principal_id=principal_id,
+            ai_build_id=ai_build_id,
+            status="RUNNING",
+        )
+        await _persist_vote_phase(session, game_id)
+        await presence_repo.mark_disconnected(
+            session,
+            game_id=game_id,
+            public_player_id=_HUMAN_SEAT,
+            disconnected_at=_NOW - timedelta(seconds=180),
+        )
+        session.add(
+            HumanActionSubmission(
+                game_id=game_id,
+                public_player_id=_HUMAN_SEAT,
+                phase="DAY_1_VOTE",
+                idempotency_key="window-vote",
+                action_type=ActionType.ABSTAIN.value,
+                target=None,
+                created_at=_NOW,
+            )
+        )
+
+    rows = await _event_rows(session_factory, game_id)
+    state, event_log = replay_state_from_rows(rows)
+    adapter = await build_human_lane_adapter(
+        session_factory,
+        game_id=game_id,
+        settings=_settings(),
+        ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+    )
+    assert isinstance(adapter, SeatMultiplexAdapter)
+
+    real_get = presence_repo.get
+    fired = {"done": False}
+
+    async def get_with_reconnect_in_window(
+        session: AsyncSession,
+        *,
+        game_id: uuid.UUID,
+        public_player_id: str,
+        for_update: bool = False,
+    ) -> Any:
+        # Only the locking read inside revalidation passes for_update=True; fire
+        # the reconnect heartbeat (committed in its own session) ONCE, right
+        # before the locked read observes presence -- modelling a heartbeat that
+        # commits in the read->commit window.
+        if for_update and not fired["done"]:
+            fired["done"] = True
+            async with session_factory() as beat, beat.begin():
+                await presence_repo.record_heartbeat(
+                    beat,
+                    game_id=game_id,
+                    public_player_id=public_player_id,
+                    seen_at=_NOW,
+                )
+        return await real_get(
+            session,
+            game_id=game_id,
+            public_player_id=public_player_id,
+            for_update=for_update,
+        )
+
+    # human_lane imports this same module object, so patching it here is what the
+    # revalidation read inside _expired_human_seat_for_update will resolve.
+    monkeypatch.setattr(presence_repo, "get", get_with_reconnect_in_window)
+
+    applied = await _take_over_expired_human_seats(
+        session_factory,
+        game_id=game_id,
+        mux=adapter,
+        event_log=event_log,
+        state=state,
+        settings=_settings(),
+        ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+        now=_NOW,
+    )
+
+    assert fired["done"] is True
+    assert applied == []
+    assert [e.body["event_type"] for e in event_log.events].count("SeatTakenOver") == 0
+
+    async with session_factory() as session:
+        seat = (
+            await session.execute(
+                select(GameSeat).where(
+                    GameSeat.game_id == game_id,
+                    GameSeat.public_player_id == _HUMAN_SEAT,
+                )
+            )
+        ).scalar_one()
+    assert seat.seat_kind == SeatKind.HUMAN.value
+
+    human_state_seat = state.seat_by_public_id(_HUMAN_SEAT)
+    assert human_state_seat is not None
+    assert legal_actions_for(state, human_state_seat).allowed_action_types
+
+
 async def test_takeover_recheck_is_idempotent_after_seat_flips(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -262,7 +262,15 @@ async def _expired_human_seat_for_update(
     seat = (await session.execute(stmt)).scalar_one_or_none()
     if seat is None or seat.seat_kind != SeatKind.HUMAN.value:
         return None
-    row = await presence_repo.get(session, game_id=game_id, public_player_id=seat_id)
+    # US-200: lock the presence row FOR UPDATE so a reconnect heartbeat that
+    # commits inside this revalidation transaction's read->commit window is
+    # serialized against the takeover. Without the lock, under READ COMMITTED a
+    # racing heartbeat is invisible to a plain SELECT and the worker wrongly
+    # takes over a LIVE human seat (docstring guarantee at the takeover loop).
+    # seats_past_grace is re-evaluated below AFTER the lock is held.
+    row = await presence_repo.get(
+        session, game_id=game_id, public_player_id=seat_id, for_update=True
+    )
     presence = _presence_from_row(
         public_player_id=seat_id,
         row=row,

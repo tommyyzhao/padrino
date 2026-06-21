@@ -165,3 +165,85 @@ async def test_heartbeat_then_disconnect_preserves_last_seen(tmp_path: Path) -> 
             assert _naive(row.last_seen_at) == _naive(_BASE + timedelta(minutes=3))
     finally:
         await engine.dispose()
+
+
+async def test_older_heartbeat_committed_after_newer_does_not_regress(
+    tmp_path: Path,
+) -> None:
+    """US-200(a): an out-of-order older heartbeat cannot regress last_seen_at.
+
+    record_heartbeat(seen_at=newer) then record_heartbeat(seen_at=older) -- the
+    older write committing LAST must leave the row at the newer value, never
+    last-committer-wins.
+    """
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'presence-mono.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = create_session_factory(engine)
+    newer = _BASE + timedelta(seconds=10)
+    older = _BASE + timedelta(seconds=9)
+    try:
+        game_id = await _seed_game(session_factory)
+        async with session_factory() as session, session.begin():
+            await presence_repo.record_heartbeat(
+                session, game_id=game_id, public_player_id="P10", seen_at=newer
+            )
+        # The older write commits AFTER the newer one.
+        async with session_factory() as session, session.begin():
+            returned = await presence_repo.record_heartbeat(
+                session, game_id=game_id, public_player_id="P10", seen_at=older
+            )
+            # The no-op (older-loses) branch still returns the CURRENT row.
+            assert returned.connected is True
+            assert _naive(returned.last_seen_at) == _naive(newer)
+
+        async with session_factory() as session:
+            row = await presence_repo.get(session, game_id=game_id, public_player_id="P10")
+        assert row is not None
+        assert _naive(row.last_seen_at) == _naive(newer)
+        assert row.connected is True
+    finally:
+        await engine.dispose()
+
+
+async def test_stale_disconnect_does_not_overwrite_newer_connected_heartbeat(
+    tmp_path: Path,
+) -> None:
+    """US-200(a): a delayed disconnect cannot flip a strictly-newer reconnect.
+
+    A heartbeat at t=20 then a disconnect stamped t=10 committing afterwards must
+    leave the seat CONNECTED (the disconnect is older and loses the monotonic
+    guard).
+    """
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'presence-stale.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = create_session_factory(engine)
+    newer = _BASE + timedelta(seconds=20)
+    older = _BASE + timedelta(seconds=10)
+    try:
+        game_id = await _seed_game(session_factory)
+        async with session_factory() as session, session.begin():
+            await presence_repo.record_heartbeat(
+                session, game_id=game_id, public_player_id="P11", seen_at=newer
+            )
+        async with session_factory() as session, session.begin():
+            returned = await presence_repo.mark_disconnected(
+                session,
+                game_id=game_id,
+                public_player_id="P11",
+                disconnected_at=older,
+            )
+            # The stale disconnect loses; the current row is still connected.
+            assert returned.connected is True
+            assert returned.disconnected_at is None
+            assert _naive(returned.last_seen_at) == _naive(newer)
+
+        async with session_factory() as session:
+            row = await presence_repo.get(session, game_id=game_id, public_player_id="P11")
+        assert row is not None
+        assert row.connected is True
+        assert row.disconnected_at is None
+        assert _naive(row.last_seen_at) == _naive(newer)
+    finally:
+        await engine.dispose()

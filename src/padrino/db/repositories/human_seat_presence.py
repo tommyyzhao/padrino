@@ -23,12 +23,21 @@ async def get(
     *,
     game_id: uuid.UUID,
     public_player_id: str,
+    for_update: bool = False,
 ) -> HumanSeatPresence | None:
-    """Return one seat presence row, or ``None`` if no heartbeat was recorded."""
+    """Return one seat presence row, or ``None`` if no heartbeat was recorded.
+
+    Pass ``for_update=True`` to take a row lock (``SELECT ... FOR UPDATE``) so a
+    racing heartbeat is serialized against the caller's transaction. On SQLite
+    (no row-level locks) ``with_for_update`` is a portable no-op; the takeover
+    lane's correctness on SQLite already rests on its single-writer model.
+    """
     stmt = select(HumanSeatPresence).where(
         HumanSeatPresence.game_id == game_id,
         HumanSeatPresence.public_player_id == public_player_id,
     )
+    if for_update:
+        stmt = stmt.with_for_update()
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -110,10 +119,19 @@ async def _upsert_presence(
     disconnected_at: datetime | None,
     updated_at: datetime,
 ) -> HumanSeatPresence:
-    """Dialect-aware ``INSERT ... ON CONFLICT DO UPDATE`` for one presence row.
+    """Dialect-aware MONOTONIC ``INSERT ... ON CONFLICT DO UPDATE`` (US-200).
 
     The ORM-level ``id`` / ``updated_at`` defaults do not fire on a Core insert,
     so every column is supplied explicitly. Portable across SQLite + Postgres.
+
+    The update is guarded by ``WHERE excluded.updated_at >= existing.updated_at``
+    so an OLDER write (e.g. an out-of-order heartbeat, or a delayed disconnect
+    racing a newer reconnect) can never regress the row: the conflict becomes a
+    no-op and the freshly committed row is preserved. ``last_seen_at`` is set via
+    ``GREATEST``/``MAX`` as belt-and-braces against regressing the last live
+    heartbeat even under an equal-``updated_at`` edge. When the guard rejects the
+    write the caller still re-reads and returns the current row (no assertion
+    that THIS call wrote it).
     """
     insert_values: dict[str, Any] = {
         "id": uuid.uuid4(),
@@ -124,37 +142,56 @@ async def _upsert_presence(
         "disconnected_at": disconnected_at,
         "updated_at": updated_at,
     }
-    update_values: dict[str, Any] = {
-        "connected": connected,
-        "disconnected_at": disconnected_at,
-        "updated_at": updated_at,
-    }
-    if last_seen_at is not _KEEP:
-        update_values["last_seen_at"] = last_seen_at
 
     bind = session.get_bind()
     dialect_name = bind.dialect.name
     if dialect_name == "postgresql":
         from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy.sql import func as sql_func
 
+        pg_ins = pg_insert(HumanSeatPresence)
+        pg_excluded = pg_ins.excluded
+        pg_update: dict[str, Any] = {
+            "connected": pg_excluded.connected,
+            "disconnected_at": pg_excluded.disconnected_at,
+            "updated_at": pg_excluded.updated_at,
+        }
+        if last_seen_at is not _KEEP:
+            pg_update["last_seen_at"] = sql_func.greatest(
+                sql_func.coalesce(HumanSeatPresence.last_seen_at, pg_excluded.last_seen_at),
+                pg_excluded.last_seen_at,
+            )
         stmt = (
-            pg_insert(HumanSeatPresence)
-            .values(**insert_values)
+            pg_ins.values(**insert_values)
             .on_conflict_do_update(
                 index_elements=["game_id", "public_player_id"],
-                set_=update_values,
+                set_=pg_update,
+                where=pg_excluded.updated_at >= HumanSeatPresence.updated_at,
             )
             .returning(HumanSeatPresence.id)
         )
     elif dialect_name == "sqlite":
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        from sqlalchemy.sql import func as sql_func
 
+        sqlite_ins = sqlite_insert(HumanSeatPresence)
+        sqlite_excluded = sqlite_ins.excluded
+        sqlite_update: dict[str, Any] = {
+            "connected": sqlite_excluded.connected,
+            "disconnected_at": sqlite_excluded.disconnected_at,
+            "updated_at": sqlite_excluded.updated_at,
+        }
+        if last_seen_at is not _KEEP:
+            sqlite_update["last_seen_at"] = sql_func.max(
+                sql_func.coalesce(HumanSeatPresence.last_seen_at, sqlite_excluded.last_seen_at),
+                sqlite_excluded.last_seen_at,
+            )
         stmt = (
-            sqlite_insert(HumanSeatPresence)
-            .values(**insert_values)
+            sqlite_ins.values(**insert_values)
             .on_conflict_do_update(
                 index_elements=["game_id", "public_player_id"],
-                set_=update_values,
+                set_=sqlite_update,
+                where=sqlite_excluded.updated_at >= HumanSeatPresence.updated_at,
             )
             .returning(HumanSeatPresence.id)
         )
@@ -170,7 +207,11 @@ async def _upsert_presence(
     if existing is not None:
         session.expire(existing)
     row = await get(session, game_id=game_id, public_player_id=public_player_id)
-    assert row is not None  # the upsert guarantees a row exists
+    # A row always exists post-upsert: either THIS call inserted it, or a
+    # conflicting row was present (whether or not the monotonic WHERE guard let
+    # this older write update it). The no-op (older-write-loses) branch still
+    # returns the current, fresher row rather than asserting this call wrote.
+    assert row is not None
     return row
 
 

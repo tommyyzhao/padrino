@@ -181,7 +181,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: human_seat_presence.py:21-32/49-174/127-158, human_lane.py:256-274/198-213/370-372, human_observation.py:125, base.py (engine default READ COMMITTED). Existing tests (test_human_seat_presence_upsert.py; test_human_lane_takeover_wiring.py:348-411) only assert no-IntegrityError / single-row / heartbeat-before-revalidate; they do not cover monotonicity or the read->commit window. Option (a) presence FOR UPDATE in the revalidation is preferred (keeps the hot heartbeat path lock-light).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-201",
