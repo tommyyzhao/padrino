@@ -54,12 +54,14 @@ from padrino.api.oauth import (
     exchange_code,
     oauth_session_binding,
     resolve_oauth_config,
+    state_flow_token,
     validate_authorization_state,
 )
 from padrino.api.reveal import build_participant_reveal
 from padrino.core.engine.actions import Action
 from padrino.core.reveal import EndgameReveal
 from padrino.db.repositories import human_principals as principals_repo
+from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
 
 router = APIRouter()
@@ -582,6 +584,24 @@ async def oauth_callback(
             status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch"
         ) from exc
 
+    # Single-use guard (US-202): atomically claim this flow's unique token BEFORE
+    # exchanging the code so a replayed (state cookie, code) pair fails closed,
+    # independent of whether the provider has invalidated the code yet. A losing
+    # insert (the flow was already consumed) rejects the callback.
+    now = datetime.now(UTC)
+    try:
+        flow_token = state_flow_token(config, state)
+    except OAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_mismatch"
+        ) from exc
+    await oauth_flows_repo.prune_expired(
+        session, older_than=now - timedelta(seconds=_OAUTH_FLOW_TTL_SECONDS)
+    )
+    claimed = await oauth_flows_repo.try_consume_flow(session, flow=flow_token, consumed_at=now)
+    if not claimed:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_state_replayed")
+
     try:
         user_info = await exchange_code(
             config,
@@ -594,7 +614,6 @@ async def oauth_callback(
             status_code=status.HTTP_400_BAD_REQUEST, detail="oauth_exchange_failed"
         ) from exc
 
-    now = datetime.now(UTC)
     guest_id = await _in_flight_guest_id(session, request)
     account = await oauth_repo.find_or_create_account(
         session,

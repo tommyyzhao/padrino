@@ -215,7 +215,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: oauth.py:169-193/341, routes/human.py:567-629. Mirror the heartbeat ON CONFLICT upsert pattern for the atomic insert-or-reject. This is auth metadata (hash-chain rule 9 N/A). Keep severity-proportionate: a small short-TTL table, not a heavy session store.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-203",

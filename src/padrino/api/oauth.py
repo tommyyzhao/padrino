@@ -227,6 +227,25 @@ def validate_authorization_state(
     return nonce
 
 
+def state_flow_token(config: OAuthConfig, state: str) -> str:
+    """Return the per-flow unique token embedded in a signed OAuth ``state``.
+
+    The ``flow`` claim is a fresh random token minted per authorization request
+    in :func:`_encode_state`; it is the natural key for a server-side single-use
+    ledger so a replayed ``(state, code)`` pair fails closed (US-202). The state
+    signature is re-verified here (via :func:`_decode_state`) so a forged/tampered
+    state cannot inject an attacker-chosen flow key.
+    """
+    try:
+        payload = _decode_state(config, state)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OAuthError("OAuth state is invalid") from exc
+    flow = payload.get("flow")
+    if not isinstance(flow, str) or not flow:
+        raise OAuthError("OAuth state flow token missing")
+    return flow
+
+
 async def _default_resolve_user_info(
     config: OAuthConfig, *, code: str, code_verifier: str, nonce: str
 ) -> OAuthUserInfo:
@@ -465,5 +484,6 @@ __all__ = [
     "set_exchange_token",
     "set_fetch_jwks",
     "set_resolve_user_info",
+    "state_flow_token",
     "validate_authorization_state",
 ]

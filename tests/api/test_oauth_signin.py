@@ -36,7 +36,7 @@ from padrino.api.oauth import (
     set_resolve_user_info,
 )
 from padrino.api.routes.human import OAUTH_STATE_COOKIE, OAUTH_VERIFIER_COOKIE
-from padrino.db.models import OAuthIdentity, Principal
+from padrino.db.models import OAuthConsumedFlow, OAuthIdentity, Principal
 from padrino.db.repositories import human_principals as principals_repo
 from padrino.settings import get_settings
 
@@ -483,6 +483,100 @@ def test_state_signing_key_is_not_derivable_from_client_secret() -> None:
         .decode("ascii")
     )
     assert config.state_signing_key != derived
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_replayed_state_and_code(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Replaying the same (state cookie, code) yields one session + a rejection (US-202).
+
+    The first callback succeeds and mints exactly one account session; a second
+    callback with the IDENTICAL state cookie and code is rejected fail-closed
+    (``oauth_state_replayed``) by the server-side single-use store, independent of
+    whether the provider would have re-redeemed the code.
+    """
+    state, verifier, nonce = await _callback_cookies(client)
+    _stub_valid_token(nonce, subject="subject-replay")
+    cookies = {OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier}
+    params = {"code": "auth-code", "state": state}
+
+    first = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert first.status_code == 200
+    # The first login persisted a session cookie on the client jar; clear it so
+    # the replayed request carries the IDENTICAL session-binding context as the
+    # original (an attacker replaying the exact same request), isolating the
+    # single-use store as the thing that rejects the replay.
+    client.cookies.clear()
+
+    second = await client.get("/human/oauth/google/callback", params=params, cookies=cookies)
+    assert second.status_code == 400
+    assert second.json()["detail"] == "oauth_state_replayed"
+
+    async with session_factory() as session:
+        principals = (await session.execute(select(Principal))).scalars().all()
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    # Exactly one successful session/account, and exactly one consumed-flow row.
+    assert len(principals) == 1
+    assert len(identities) == 1
+    assert len(flows) == 1
+
+
+@pytest.mark.asyncio
+async def test_distinct_flows_each_consume_independently(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Two distinct start->callback flows both succeed (single-use is per-flow).
+
+    A fresh ``/start`` mints a new per-flow token, so a second legitimate sign-in
+    is never blocked by the single-use store (only an exact replay of the same
+    flow is rejected).
+    """
+
+    async def _login(subject: str) -> int:
+        state, verifier, nonce = await _callback_cookies(client)
+        _stub_valid_token(nonce, subject=subject)
+        resp = await client.get(
+            "/human/oauth/google/callback",
+            params={"code": "auth-code", "state": state},
+            cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+        )
+        return resp.status_code
+
+    assert await _login("subject-flow") == 200
+    assert await _login("subject-flow") == 200
+
+    async with session_factory() as session:
+        flows = (await session.execute(select(OAuthConsumedFlow))).scalars().all()
+    # Same account (repeat sign-in) but two distinct flows were consumed.
+    assert len(flows) == 2
+
+
+@pytest.mark.asyncio
+async def test_try_consume_flow_is_single_use(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The repo claim is atomic: the first call wins, every later call loses."""
+    from datetime import UTC, datetime, timedelta
+
+    from padrino.db.repositories import oauth_consumed_flows as flows_repo
+
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        assert await flows_repo.try_consume_flow(session, flow="flow-1", consumed_at=now) is True
+        assert await flows_repo.try_consume_flow(session, flow="flow-1", consumed_at=now) is False
+        # A distinct flow is still claimable.
+        assert await flows_repo.try_consume_flow(session, flow="flow-2", consumed_at=now) is True
+        await session.commit()
+
+    async with session_factory() as session:
+        # A replay across a fresh session/transaction is still rejected.
+        assert await flows_repo.try_consume_flow(session, flow="flow-1", consumed_at=now) is False
+        # Pruning past the TTL removes stale rows but is order-insensitive here.
+        removed = await flows_repo.prune_expired(session, older_than=now + timedelta(seconds=1))
+        assert removed == 2
+        await session.commit()
 
 
 def test_explicit_state_signing_key_used_verbatim(

@@ -833,6 +833,31 @@ class OAuthIdentity(Base):
     )
 
 
+class OAuthConsumedFlow(Base):
+    """A spent OAuth authorization flow, for single-use replay resistance (US-202).
+
+    OAuth ``state``/``nonce`` are stateless signed tokens with no server-side
+    single-use ledger, so within the short flow-cookie TTL the same
+    ``(state cookie, code)`` pair could be replayed and the only block on a second
+    session was the upstream provider invalidating the authorization code on first
+    redemption (a provider-dependent defense). This row records the per-flow unique
+    token (the ``flow`` claim embedded in the signed state) the moment the callback
+    begins the code exchange. The callback inserts-or-rejects atomically
+    (``INSERT ... ON CONFLICT DO NOTHING``) BEFORE the exchange, so a replayed flow
+    fails closed independent of provider behavior.
+
+    This is short-lived auth metadata (not game state, so the hash-chain rules do
+    not apply): rows older than the flow TTL are inert and may be swept.
+    """
+
+    __tablename__ = "oauth_consumed_flows"
+
+    flow: Mapped[str] = mapped_column(String, primary_key=True)
+    consumed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class HumanConsent(Base):
     """An append-only record of a human accepting a legal document (US-130).
 
@@ -1232,6 +1257,7 @@ __all__ = [
     "MaterializedGameAnalytics",
     "ModelConfig",
     "ModelProvider",
+    "OAuthConsumedFlow",
     "OAuthIdentity",
     "Principal",
     "PromptVersion",
