@@ -166,7 +166,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: 0045_unique_humans_included_league.py:29-37 (docstring 'Existing rows stay byte-identical' is true but irrelevant to duplicate safety), leagues.py get_or_create_humans_included:65-77. If FK repointing is broad, at minimum repoint games.league_id; fail loudly rather than emitting a raw duplicate-key error if an un-repointable reference remains.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-200",
