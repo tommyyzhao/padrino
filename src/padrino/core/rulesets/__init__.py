@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from padrino.core.engine.win_conditions import WinCondition
 from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
 
 
@@ -25,6 +26,7 @@ class Ruleset(Protocol):
     PLAYER_COUNT: int
     ROLE_COUNTS: dict[Role, int]
     ROLE_FACTIONS: dict[Role, Faction]
+    WIN_CONDITIONS: tuple[WinCondition, ...]
     ALT_WIN_CONDITIONS: tuple[str, ...]
     SOLO_FACTIONS: tuple[str, ...]
     FACTION_MUTATION_ALLOWED: bool

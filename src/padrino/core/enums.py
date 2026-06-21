@@ -10,6 +10,7 @@ class Faction(StrEnum):
 
     TOWN = "TOWN"
     MAFIA = "MAFIA"
+    SERIAL_KILLER = "SERIAL_KILLER"
 
 
 class Role(StrEnum):

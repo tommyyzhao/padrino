@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import pytest
 from pydantic import ValidationError
 
+from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import (
     REASON_ALL_MAFIA_ELIMINATED,
     REASON_MAX_DAYS_REACHED,
     REASON_PARITY_REACHED,
+    WinCondition,
+    WinConditionKind,
     WinResult,
     check_win,
 )
 from padrino.core.enums import Faction, PhaseKind, Role
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import bench10_v1, mini7_v1
+
+
+class _HasMaxDays(Protocol):
+    MAX_DAYS: int
 
 
 def _seat(
@@ -41,6 +50,7 @@ def _state(
     phase: Phase | None = None,
     terminal_result: str | None = None,
     terminal_reason: str | None = None,
+    win_condition_triggers: tuple[str, ...] = (),
 ) -> GameState:
     return GameState(
         ruleset_id="mini7_v1",
@@ -51,6 +61,7 @@ def _state(
         day=day,
         terminal_result=terminal_result,
         terminal_reason=terminal_reason,
+        win_condition_triggers=win_condition_triggers,
     )
 
 
@@ -72,6 +83,49 @@ def _full_mini7_seats(
     town_template = [
         (Role.DETECTIVE, Faction.TOWN),
         (Role.DOCTOR, Faction.TOWN),
+        (Role.VILLAGER, Faction.TOWN),
+        (Role.VILLAGER, Faction.TOWN),
+        (Role.VILLAGER, Faction.TOWN),
+    ]
+    pid_idx = 0
+    for i, (role, faction) in enumerate(mafia_template):
+        seats.append(
+            _seat(
+                f"P{pid_idx + 1:02d}",
+                pid_idx,
+                role,
+                faction,
+                alive=i < mafia_alive,
+            )
+        )
+        pid_idx += 1
+    for i, (role, faction) in enumerate(town_template):
+        seats.append(
+            _seat(
+                f"P{pid_idx + 1:02d}",
+                pid_idx,
+                role,
+                faction,
+                alive=i < town_alive,
+            )
+        )
+        pid_idx += 1
+    return tuple(seats)
+
+
+def _full_bench10_seats(
+    *,
+    mafia_alive: int = 3,
+    town_alive: int = 7,
+) -> tuple[Seat, ...]:
+    """Build a 10-seat bench10 lineup with the requested alive counts."""
+    seats: list[Seat] = []
+    mafia_template = [(Role.MAFIA_GOON, Faction.MAFIA)] * 3
+    town_template = [
+        (Role.DETECTIVE, Faction.TOWN),
+        (Role.DOCTOR, Faction.TOWN),
+        (Role.VILLAGER, Faction.TOWN),
+        (Role.VILLAGER, Faction.TOWN),
         (Role.VILLAGER, Faction.TOWN),
         (Role.VILLAGER, Faction.TOWN),
         (Role.VILLAGER, Faction.TOWN),
@@ -207,3 +261,182 @@ def test_zero_alive_anyone_returns_town_win() -> None:
     result = check_win(_state(seats, day=3), mini7_v1)
     assert result is not None
     assert result.winner == "TOWN"
+
+
+def test_three_faction_policy_blocks_two_faction_parity_until_solo_dead() -> None:
+    class SkRuleset:
+        MAX_DAYS = 5
+        WIN_CONDITIONS = (
+            WinCondition(
+                kind=WinConditionKind.TARGET_FACTIONS_ELIMINATED,
+                winner="TOWN",
+                reason="ALL_HOSTILES_ELIMINATED",
+                target_factions=(Faction.MAFIA, Faction.SERIAL_KILLER),
+            ),
+            WinCondition(
+                kind=WinConditionKind.SOLO_LAST_ALIVE,
+                winner="SERIAL_KILLER",
+                reason="SOLO_LAST_ALIVE",
+                faction=Faction.SERIAL_KILLER,
+            ),
+            WinCondition(
+                kind=WinConditionKind.FACTION_PARITY,
+                winner="MAFIA",
+                reason=REASON_PARITY_REACHED,
+                faction=Faction.MAFIA,
+                opponent_factions=(Faction.TOWN,),
+                blocked_by_alive_factions=(Faction.SERIAL_KILLER,),
+            ),
+            WinCondition(
+                kind=WinConditionKind.DAY_CAP,
+                winner="DRAW",
+                reason=REASON_MAX_DAYS_REACHED,
+            ),
+        )
+
+    state = _state(
+        (
+            _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+            _seat("P02", 1, Role.VILLAGER, Faction.TOWN),
+            _seat("P03", 2, Role.VILLAGER, Faction.SERIAL_KILLER),
+        )
+    )
+
+    assert check_win(state, SkRuleset()) is None
+
+
+def test_solo_faction_wins_when_last_alive() -> None:
+    class SkRuleset:
+        MAX_DAYS = 5
+        WIN_CONDITIONS = (
+            WinCondition(
+                kind=WinConditionKind.SOLO_LAST_ALIVE,
+                winner="SERIAL_KILLER",
+                reason="SOLO_LAST_ALIVE",
+                faction=Faction.SERIAL_KILLER,
+            ),
+        )
+
+    state = _state(
+        (
+            _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA, alive=False),
+            _seat("P02", 1, Role.VILLAGER, Faction.TOWN, alive=False),
+            _seat("P03", 2, Role.VILLAGER, Faction.SERIAL_KILLER),
+        )
+    )
+
+    result = check_win(state, SkRuleset())
+
+    assert result == WinResult(winner="SERIAL_KILLER", reason="SOLO_LAST_ALIVE")
+
+
+def test_alt_win_policy_resolves_from_state_trigger() -> None:
+    class JesterRuleset:
+        MAX_DAYS = 5
+        WIN_CONDITIONS = (
+            WinCondition(
+                kind=WinConditionKind.ALT_TRIGGER,
+                winner="JESTER",
+                reason="JESTER_LYNCHED",
+                trigger="JESTER_LYNCHED",
+            ),
+        )
+
+    state = _state(
+        _full_mini7_seats(mafia_alive=2, town_alive=5),
+        win_condition_triggers=("JESTER_LYNCHED",),
+    )
+
+    result = check_win(state, JesterRuleset())
+
+    assert result == WinResult(winner="JESTER", reason="JESTER_LYNCHED")
+
+
+def _legacy_check_win(state: GameState, ruleset: _HasMaxDays) -> WinResult | None:
+    alive_mafia = state.alive_count_by_faction(Faction.MAFIA)
+    alive_town = state.alive_count_by_faction(Faction.TOWN)
+
+    if alive_mafia == 0:
+        return WinResult(winner="TOWN", reason=REASON_ALL_MAFIA_ELIMINATED)
+    if alive_mafia >= alive_town:
+        return WinResult(winner="MAFIA", reason=REASON_PARITY_REACHED)
+    if state.day > ruleset.MAX_DAYS:
+        return WinResult(winner="DRAW", reason=REASON_MAX_DAYS_REACHED)
+    return None
+
+
+def _terminal_hash_chain_for(win: WinResult | None) -> tuple[str, ...]:
+    log = EventLog()
+    log.append(
+        {
+            "event_type": "GameCreated",
+            "sequence": 0,
+            "phase": "SETUP",
+            "visibility": "SYSTEM",
+            "actor_player_id": None,
+            "payload": {
+                "ruleset_id": "byte-stability",
+                "game_id": "G-BYTE-STABILITY",
+                "game_seed": "seed-byte-stability",
+                "player_count": 7,
+            },
+        }
+    )
+    if win is not None:
+        log.append(
+            {
+                "event_type": "GameTerminated",
+                "sequence": 1,
+                "phase": "TERMINAL",
+                "visibility": "PUBLIC",
+                "actor_player_id": None,
+                "payload": {"winner": win.winner, "reason": win.reason},
+            }
+        )
+    return tuple(stored.event_hash for stored in log.events)
+
+
+@pytest.mark.parametrize(
+    ("ruleset", "seats", "day"),
+    [
+        (mini7_v1, _full_mini7_seats(mafia_alive=0, town_alive=4), 2),
+        (mini7_v1, _full_mini7_seats(mafia_alive=1, town_alive=1), 3),
+        (mini7_v1, _full_mini7_seats(mafia_alive=1, town_alive=2), mini7_v1.MAX_DAYS + 1),
+        (mini7_v1, _full_mini7_seats(mafia_alive=2, town_alive=5), 1),
+        (mini7_v1, _full_mini7_seats(mafia_alive=0, town_alive=0), 3),
+        (
+            mini7_v1,
+            _full_mini7_seats(mafia_alive=1, town_alive=1),
+            mini7_v1.MAX_DAYS + 2,
+        ),
+        (mini7_v1, _full_mini7_seats(mafia_alive=0, town_alive=2), mini7_v1.MAX_DAYS + 2),
+        (mini7_v1, _full_mini7_seats(mafia_alive=2, town_alive=3), 2),
+        (
+            mini7_v1,
+            _full_mini7_seats(mafia_alive=2, town_alive=3),
+            mini7_v1.MAX_DAYS + 1,
+        ),
+        (mini7_v1, _full_mini7_seats(mafia_alive=2, town_alive=1), 3),
+        (bench10_v1, _full_bench10_seats(mafia_alive=0, town_alive=6), 2),
+        (bench10_v1, _full_bench10_seats(mafia_alive=2, town_alive=2), 4),
+        (
+            bench10_v1,
+            _full_bench10_seats(mafia_alive=1, town_alive=2),
+            bench10_v1.MAX_DAYS + 1,
+        ),
+        (bench10_v1, _full_bench10_seats(mafia_alive=3, town_alive=7), 1),
+        (bench10_v1, _full_bench10_seats(mafia_alive=3, town_alive=4), 4),
+    ],
+)
+def test_builtin_two_faction_policy_matches_legacy_results_and_hashes(
+    ruleset: _HasMaxDays,
+    seats: tuple[Seat, ...],
+    day: int,
+) -> None:
+    state = _state(seats, day=day)
+
+    legacy = _legacy_check_win(state, ruleset)
+    generalized = check_win(state, ruleset)
+
+    assert generalized == legacy
+    assert _terminal_hash_chain_for(generalized) == _terminal_hash_chain_for(legacy)

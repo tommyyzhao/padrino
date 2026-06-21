@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from padrino.core.engine.win_conditions import WinCondition, canonical_two_faction_win_conditions
 from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
 
 RULESET_ID: Final[str] = "mini7_v1"
@@ -45,6 +46,7 @@ ROLE_FACTIONS: Final[dict[Role, Faction]] = {
     Role.DOCTOR: Faction.TOWN,
     Role.VILLAGER: Faction.TOWN,
 }
+WIN_CONDITIONS: Final[tuple[WinCondition, ...]] = canonical_two_faction_win_conditions()
 ALT_WIN_CONDITIONS: Final[tuple[str, ...]] = ()
 SOLO_FACTIONS: Final[tuple[str, ...]] = ()
 FACTION_MUTATION_ALLOWED: Final[bool] = False

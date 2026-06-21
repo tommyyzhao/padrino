@@ -99,7 +99,7 @@
         "All backend gates pass."
       ],
       "notes": "Substrate prerequisite; US-183 (SK) and US-185 (Jester) are unbuildable on the strict 2-faction substrate.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-175",

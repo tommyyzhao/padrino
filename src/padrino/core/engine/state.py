@@ -65,6 +65,7 @@ class GameState(BaseModel):
     day: int
     terminal_result: str | None = None
     terminal_reason: str | None = None
+    win_condition_triggers: tuple[str, ...] = ()
 
     def living_seats(self) -> list[Seat]:
         """Return every seat with `alive=True`, preserving seat order."""
@@ -84,3 +85,11 @@ class GameState(BaseModel):
     def alive_count_by_faction(self, faction: Faction) -> int:
         """Return the number of living seats in `faction`."""
         return sum(1 for s in self.seats if s.alive and s.faction == faction)
+
+    def alive_counts_by_faction(self) -> dict[Faction, int]:
+        """Return living-seat counts for every faction currently present."""
+        counts: dict[Faction, int] = {}
+        for seat in self.seats:
+            if seat.alive:
+                counts[seat.faction] = counts.get(seat.faction, 0) + 1
+        return counts

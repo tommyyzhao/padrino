@@ -167,7 +167,7 @@ class PhaseResolvedPayload(_FrozenModel):
 
 
 class GameTerminatedPayload(_FrozenModel):
-    winner: Literal["TOWN", "MAFIA", "DRAW"]
+    winner: str
     reason: str
 
 
