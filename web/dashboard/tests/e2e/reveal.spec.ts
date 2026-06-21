@@ -359,4 +359,56 @@ test.describe('profile / stats page (US-156)', () => {
     expect(html).not.toContain('rating');
     expect(html).not.toContain('leaderboard');
   });
+
+  // US-203: the core renders some accuracy ratios as an exact 'num/den'
+  // fraction string (core/turing/scoring.py _accuracy_string). Number('2/3')
+  // is NaN, so the old pct() rendered an em-dash. pct() must now parse the
+  // ratio and show a percentage, not an em-dash.
+  test('fraction-string detection_accuracy renders a percentage (no em-dash)', async ({
+    page
+  }) => {
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          principal_id: 'cccccccc-0000-0000-0000-000000000000',
+          kind: 'account',
+          display_name: 'Bob'
+        })
+      });
+    });
+
+    await page.route('**/human/stats*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ruleset_id: 'mini7_v1',
+          principal_id: 'cccccccc-0000-0000-0000-000000000000',
+          games: 3,
+          wins: 1,
+          draws: 0,
+          losses: 2,
+          role_win_rates: [],
+          survival_rate: 0.5,
+          voting_accuracy: { total_votes: 3, accurate_votes: 2, rate: 0.6667 },
+          // The core fraction-string format that Number() turns into NaN.
+          detection_accuracy: '2/3'
+        })
+      });
+    });
+
+    await page.goto('/profile');
+    await expect(page.getByTestId('profile-stats')).toBeVisible({ timeout: 15_000 });
+
+    const detection = page.getByTestId('profile-detection-accuracy');
+    await expect(detection).toBeVisible();
+    // 2/3 -> 67%, NOT an em-dash and NOT a literal NaN.
+    await expect(detection).toContainText('67');
+    await expect(detection).not.toContainText('—');
+    await expect(detection).not.toContainText('NaN');
+  });
 });

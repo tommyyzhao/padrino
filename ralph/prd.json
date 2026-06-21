@@ -230,7 +230,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: human_actions.py:200-210, human_chat.py:253-254, rate_limit store (InMemory:93 / Database:137), profile/+page.svelte:21-25/99, core/turing/scoring.py:47-70 (_accuracy_string), reveal.spec.ts:249-253/340 (the format split + pinned '0.7500' decimal contract). Mixed backend+frontend story: run BOTH gate sets. Robust fix is the peek/commit split, not merely reversing bucket order.",
-      "passes": false
+      "passes": true
     }
   ]
 }
