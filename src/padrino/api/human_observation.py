@@ -51,6 +51,10 @@ from padrino.core.rulesets import get_ruleset
 from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
+from padrino.runner.human_chat_observation import (
+    hydrate_observation_human_chat,
+    load_released_human_chat_texts,
+)
 from padrino.runner.human_durability import replay_state_from_rows
 
 GAME_NOT_FOUND_DETAIL = "game_not_found"
@@ -153,6 +157,8 @@ async def build_seat_observation_snapshot(
 
     ruleset = get_ruleset(game.ruleset_id)
     observation = build_observation(state, core_seat, event_log, ruleset)
+    texts_by_sequence = await load_released_human_chat_texts(session, game_id=game_id)
+    observation = hydrate_observation_human_chat(observation, texts_by_sequence)
 
     identity_mode = coerce_identity_mode(game.identity_mode)
     observation_payload = observation.model_dump(mode="json")

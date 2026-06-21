@@ -55,6 +55,7 @@ from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
 from padrino.runner.game_runner import GameConfig, GamePersistence, drive_game_loop
+from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
 from padrino.runner.human_chat_release import release_held_chat_for_phase
 from padrino.runner.human_tick import Clock, HumanTickConfig, Sleep, run_human_tick
 from padrino.settings import Settings, get_settings
@@ -81,7 +82,7 @@ _CLAIMABLE_STATUSES: Final[frozenset[str]] = frozenset({"CREATED", "PENDING", ST
 AdapterFactory = Callable[[], LlmAdapter]
 AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
-HumanChatRelease = Callable[[str, float], Awaitable[None]]
+HumanChatRelease = Callable[[str, float, EventLog], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +206,11 @@ async def build_human_lane_adapter(
             if ai_adapter_factory is not None
             else build_heterogeneous_adapter(ai_assignments, settings=settings)
         )
+        ai_adapter = HumanChatHydratingAdapter(
+            inner=ai_adapter,
+            session_factory=session_factory,
+            game_id=game_id,
+        )
 
     adapters: dict[str, LlmAdapter] = {}
     for seat in rows:
@@ -250,7 +256,7 @@ async def _run_human_tick_responses(
         sleep=sleep,
     )
     if release_chat is not None:
-        await release_chat(format_phase_id(state.current_phase), result.settled_at)
+        await release_chat(format_phase_id(state.current_phase), result.settled_at, event_log)
     return result.responses
 
 
@@ -267,13 +273,14 @@ def _default_human_game_executor(settings: Settings) -> HumanGameExecutor:
     ) -> None:
         # Human-lane games are always casual (ranked=False) — they never write the
         # scientific Rating/RatingEvent tables (segregation, hard rule 8).
-        async def release_chat(phase: str, _settled_at: float) -> None:
+        async def release_chat(phase: str, _settled_at: float, release_log: EventLog) -> None:
             async with persistence.session_factory() as session, session.begin():
                 await release_held_chat_for_phase(
                     session,
                     game_id=persistence.game_id,
                     phase=phase,
                     released_at=datetime.now(UTC),
+                    event_log=release_log,
                 )
 
         async def tick_runner(

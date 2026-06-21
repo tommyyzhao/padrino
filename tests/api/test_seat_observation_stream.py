@@ -35,11 +35,14 @@ from padrino.api.human_observation import DEADLINE_FRAME, OBSERVATION_FRAME
 from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import IdentityMode, SeatKind
+from padrino.core.human_chat import human_chat_content_ref
 from padrino.core.observation_privacy import IDENTITY_MARKER_KEYS
 from padrino.core.rulesets import mini7_v1
 from padrino.db.models import Game, GameSeat, Principal
 from padrino.db.repositories import events as events_repo
+from padrino.db.repositories import human_chat as human_chat_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
+from padrino.runner.human_durability import replay_state_from_rows
 
 _GAME_SEED = "obs-seed"
 _PHASE = "DAY_1_VOTE"
@@ -214,6 +217,46 @@ def _has_marker(value: Any) -> bool:
     return False
 
 
+async def _append_released_human_chat(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    actor: str,
+    text: str,
+) -> None:
+    rows = await events_repo.list_events(session, game_id)
+    _, log = replay_state_from_rows(rows)
+    body: dict[str, Any] = {
+        "event_type": "PublicMessageSubmitted",
+        "sequence": len(log.events),
+        "phase": _PHASE,
+        "visibility": "PUBLIC",
+        "actor_player_id": actor,
+        "payload": {"text": "", "round_index": None, "content_ref": human_chat_content_ref(text)},
+    }
+    stored = log.append(body)
+    await events_repo.append_event(
+        session,
+        game_id=game_id,
+        sequence=stored.sequence,
+        event_type=body["event_type"],
+        phase=body["phase"],
+        visibility=body["visibility"],
+        actor_player_id=body["actor_player_id"],
+        payload=body["payload"],
+        prev_event_hash=stored.prev_event_hash,
+        event_hash=stored.event_hash,
+    )
+    await human_chat_repo.append_human_chat(
+        session,
+        game_id=game_id,
+        sequence=stored.sequence,
+        public_player_id=actor,
+        raw_text=text,
+        cleaned_text=text,
+    )
+
+
 @pytest.mark.asyncio
 async def test_seat_sees_own_observation_legal_actions_and_deadline(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
@@ -269,6 +312,39 @@ async def test_seat_does_not_see_other_seats_roles(
     for entry in obs["public_events"] + obs["private_events"]:
         assert "role" not in entry["payload"]
         assert "faction" not in entry["payload"]
+
+
+@pytest.mark.asyncio
+async def test_observation_stream_resolves_released_human_chat_from_sidecar(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    token = await _guest(client)
+    principal_id = await _principal_id(session_factory)
+    async with session_factory() as session, session.begin():
+        game_id = await _seed_human_game(session, principal_id=principal_id)
+        await _append_released_human_chat(
+            session,
+            game_id=game_id,
+            actor="P04",
+            text="Released human text for the player stream",
+        )
+
+    resp = await client.get(
+        f"/human/games/{game_id}/observation/stream",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert resp.status_code == 200
+    obs = next(f for f in _parse_frames(resp.text) if f["type"] == OBSERVATION_FRAME)
+    messages = [
+        entry
+        for entry in obs["public_events"]
+        if entry["event_type"] == "PublicMessageSubmitted" and entry["actor_player_id"] == "P04"
+    ]
+    assert len(messages) == 1
+    assert messages[0]["payload"]["text"] == "Released human text for the player stream"
+    assert messages[0]["payload"]["content_ref"] == human_chat_content_ref(
+        "Released human text for the player stream"
+    )
 
 
 @pytest.mark.asyncio

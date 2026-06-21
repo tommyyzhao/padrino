@@ -51,10 +51,12 @@ from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, Faction, Role, SeatKind
+from padrino.core.human_chat import human_chat_content_ref
 from padrino.core.observation_privacy import assert_anonymous_safe
 from padrino.core.observations import Observation, Ruleset
 from padrino.db.models import (
     Game,
+    GameEvent,
     GameSeat,
     HumanActionSubmission,
     HumanChatMessage,
@@ -466,13 +468,14 @@ async def test_human_game_full_spine_smoke(
     )
     release_base = datetime(2026, 6, 20, tzinfo=UTC)
 
-    async def release_chat(phase: str, settled_at: float) -> None:
+    async def release_chat(phase: str, settled_at: float, release_log: EventLog) -> None:
         async with session_factory() as session, session.begin():
             await release_held_chat_for_phase(
                 session,
                 game_id=game_id,
                 phase=phase,
                 released_at=release_base + timedelta(seconds=settled_at),
+                event_log=release_log,
             )
 
     async def tick_runner(
@@ -530,6 +533,26 @@ async def test_human_game_full_spine_smoke(
     assert len(sidecar) == 1
     assert sidecar[0].public_player_id == _HOST_SEAT
     assert sidecar[0].raw_text == "I think we should vote carefully today."
+    async with session_factory() as session:
+        chained = (
+            (
+                await session.execute(
+                    select(GameEvent)
+                    .where(GameEvent.game_id == game_id)
+                    .where(GameEvent.sequence == sidecar[0].sequence)
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert chained.event_type == "PublicMessageSubmitted"
+    assert chained.actor_player_id == _HOST_SEAT
+    assert chained.payload == {
+        "text": "",
+        "round_index": 1,
+        "content_ref": human_chat_content_ref("I think we should vote carefully today."),
+    }
+    assert "I think we should vote carefully today." not in str(chained.payload)
 
     # The host's structured actions genuinely flowed through the authenticated
     # POST action channel (US-134) - the human seat was driven, not shortcut.

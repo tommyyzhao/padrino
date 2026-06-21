@@ -29,6 +29,7 @@ from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import ActionType, Faction, Role, SeatKind
+from padrino.core.human_chat import human_chat_content_ref
 from padrino.core.observations import Observation
 from padrino.core.rulesets import mini7_v1
 from padrino.db.models import (
@@ -57,6 +58,7 @@ from padrino.runner.human_lane import (
     build_human_lane_adapter,
 )
 from padrino.runner.human_tick import HumanTickConfig, run_human_tick
+from padrino.runner.tick import run_tick
 from padrino.settings import Settings
 from tests.conftest import make_town_win_script
 
@@ -90,6 +92,28 @@ class _ScriptedSeatAdapter:
 
     async def complete(self, observation: Observation) -> AdapterResult:
         return await self._inner.complete(observation)
+
+
+class _CaptureAdapter:
+    """AI adapter that records the exact observation it received."""
+
+    def __init__(self) -> None:
+        self.observations: list[Observation] = []
+
+    async def complete(self, observation: Observation) -> AdapterResult:
+        self.observations.append(observation)
+        response = AgentResponse(
+            public_message=None,
+            private_message=None,
+            action=Action(type=ActionType.NOOP, target=None),
+            memory_update="",
+            rationale_summary=None,
+        )
+        return AdapterResult(
+            raw_response=response.model_dump_json(),
+            parsed_response=response,
+            latency_ms=0,
+        )
 
 
 def _call_names(path: Path) -> set[str]:
@@ -557,7 +581,7 @@ async def test_human_lane_releases_posted_chat_on_the_symmetric_tick_schedule(
     release_base = datetime(2026, 6, 20, tzinfo=UTC)
     tick_releases: list[float] = []
 
-    async def release_chat(phase: str, settled_at: float) -> None:
+    async def release_chat(phase: str, settled_at: float, release_log: EventLog) -> None:
         tick_releases.append(settled_at)
         async with session_factory() as session, session.begin():
             await release_held_chat_for_phase(
@@ -565,6 +589,7 @@ async def test_human_lane_releases_posted_chat_on_the_symmetric_tick_schedule(
                 game_id=game_id,
                 phase=phase,
                 released_at=release_base + timedelta(seconds=settled_at),
+                event_log=release_log,
             )
 
     responses = await _run_human_tick_responses(
@@ -598,3 +623,109 @@ async def test_human_lane_releases_posted_chat_on_the_symmetric_tick_schedule(
     assert len(sidecar) == 1
     assert sidecar[0].public_player_id == _HUMAN_SEAT
     assert sidecar[0].raw_text == "Human message from the same phase"
+    human_event = event_log.events[-1].body
+    assert human_event["event_type"] == "PublicMessageSubmitted"
+    assert human_event["actor_player_id"] == _HUMAN_SEAT
+    assert human_event["payload"] == {
+        "text": "",
+        "round_index": 1,
+        "content_ref": human_chat_content_ref("Human message from the same phase"),
+    }
+    assert sidecar[0].sequence == human_event["sequence"]
+    assert "Human message from the same phase" not in str(human_event)
+
+
+@pytest.mark.asyncio
+async def test_ai_observation_resolves_released_human_chat_from_sidecar(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    token = await _consenting_guest(client)
+    principal_id = await _principal_id(session_factory)
+    game_id = await _seed_mixed_game(session_factory, principal_id=principal_id)
+    async with session_factory() as session, session.begin():
+        await _persist_discussion_phase_log(session, game_id)
+
+    chat = await client.post(
+        f"/human/games/{game_id}/chat",
+        json={
+            "channel": "PUBLIC",
+            "text": "Sidecar-visible human read for AI",
+            "idempotency_key": "us160-chat",
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert chat.status_code == 200, chat.text
+
+    state, event_log = replay_state_from_rows(await _event_rows(session_factory, game_id))
+    async with session_factory() as session, session.begin():
+        released = await release_held_chat_for_phase(
+            session,
+            game_id=game_id,
+            phase=_DISCUSSION_PHASE,
+            released_at=datetime(2026, 6, 20, 12, tzinfo=UTC),
+            event_log=event_log,
+        )
+        assert len(released) == 1
+        stored = event_log.events[-1]
+        await events_repo.append_event(
+            session,
+            game_id=game_id,
+            sequence=stored.sequence,
+            event_type=stored.body["event_type"],
+            phase=stored.body["phase"],
+            visibility=stored.body["visibility"],
+            actor_player_id=stored.body["actor_player_id"],
+            payload=stored.body["payload"],
+            prev_event_hash=stored.prev_event_hash,
+            event_hash=stored.event_hash,
+        )
+
+    capture = _CaptureAdapter()
+
+    def ai_factory(_assignments: Mapping[str, LlmAgentBuild]) -> LlmAdapter:
+        return capture
+
+    adapter = await build_human_lane_adapter(
+        session_factory,
+        game_id=game_id,
+        settings=Settings(padrino_human_phase_deadline_seconds=0.35),
+        ai_adapter_factory=ai_factory,
+    )
+    ai_seat = next(seat for seat in state.living_seats() if seat.public_player_id != _HUMAN_SEAT)
+
+    await run_tick(
+        state,
+        event_log,
+        [ai_seat],
+        adapter,
+        timeout_s=0.35,
+        ruleset=mini7_v1,
+        ranked=False,
+    )
+
+    assert len(capture.observations) == 1
+    observed = capture.observations[0]
+    human_messages = [
+        entry
+        for entry in observed.public_events
+        if entry.event_type == "PublicMessageSubmitted" and entry.actor_player_id == _HUMAN_SEAT
+    ]
+    assert len(human_messages) == 1
+    assert human_messages[0].payload["text"] == "Sidecar-visible human read for AI"
+    assert human_messages[0].payload["content_ref"] == human_chat_content_ref(
+        "Sidecar-visible human read for AI"
+    )
+
+    async with session_factory() as session:
+        rows = await events_repo.list_events(session, game_id)
+    chained = next(
+        row
+        for row in rows
+        if row.event_type == "PublicMessageSubmitted" and row.actor_player_id == _HUMAN_SEAT
+    )
+    assert chained.payload["text"] == ""
+    assert chained.payload["content_ref"] == human_chat_content_ref(
+        "Sidecar-visible human read for AI"
+    )
+    assert "Sidecar-visible human read for AI" not in str(chained.payload)

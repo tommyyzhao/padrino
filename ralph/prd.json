@@ -47,7 +47,7 @@
         "All backend gates pass."
       ],
       "notes": "Keep GDPR-erasure safe: redacting the sidecar must leave the chain valid.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-161",
