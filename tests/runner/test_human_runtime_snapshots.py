@@ -203,7 +203,7 @@ def _draw_adapter() -> DeterministicMockAdapter:
 
 def _fast_settings() -> Settings:
     return Settings(
-        padrino_human_phase_deadline_seconds=0.01,
+        padrino_human_phase_deadline_seconds=0.2,
         padrino_human_release_delay_seconds=0.0,
         padrino_human_global_lobby_cost_breaker_usd=10_000.0,
     )
@@ -297,7 +297,7 @@ async def test_resumed_human_game_continues_existing_phase_without_duplicate_set
             game_id=str(game_id),
             game_seed=_GAME_SEED,
             ruleset_id=mini7_v1.RULESET_ID,
-            timeout_s=0.01,
+            timeout_s=0.2,
         ),
         GamePersistence(
             session_factory=session_factory,

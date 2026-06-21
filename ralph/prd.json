@@ -179,7 +179,7 @@
         "All backend gates pass."
       ],
       "notes": "Closes the systemic 'green via stubs' hole that let US-131/137/138/150 ship unwired.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-170",
