@@ -177,6 +177,15 @@ def test_night_actions_mafia_targets_living_non_mafia() -> None:
     assert legal.legal_targets == ["P03", "P04", "P05", "P06", "P07"]
 
 
+def test_night_actions_godfather_has_passive_mafia_kill_vote() -> None:
+    godfather = _seat("P01", 0, Role.GODFATHER, Faction.MAFIA)
+    seats = (godfather, *SEATS[1:])
+    phase = Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0)
+    legal = legal_actions_for(_state(phase, seats), godfather)
+    assert legal.allowed_action_types == [ActionType.MAFIA_KILL]
+    assert legal.legal_targets == ["P03", "P04", "P05", "P06", "P07"]
+
+
 def test_night_actions_mafia_excludes_dead_targets() -> None:
     dead_villager = SEATS[5].model_copy(update={"alive": False})
     seats = (*SEATS[:5], dead_villager, SEATS[6])

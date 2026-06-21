@@ -49,6 +49,7 @@ _FUTURE_NIGHT_ROLE_ACTIONS: dict[Role, ActionType] = {
     Role.WATCHER: ActionType.WATCH,
     Role.JANITOR: ActionType.CLEAN,
 }
+_FACTIONAL_KILL_ROLES = frozenset({Role.MAFIA_GOON, Role.GODFATHER})
 
 
 def action_requires_target(action_type: ActionType) -> bool:
@@ -92,7 +93,7 @@ def legal_actions_for(state: GameState, seat: Seat) -> LegalActions:
         return _EMPTY
 
     if kind is PhaseKind.NIGHT_ACTIONS:
-        if seat.role is Role.MAFIA_GOON:
+        if seat.role in _FACTIONAL_KILL_ROLES:
             targets = [
                 s.public_player_id for s in state.living_seats() if s.faction is not Faction.MAFIA
             ]

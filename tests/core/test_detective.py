@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import pytest
 from pydantic import ValidationError
 
@@ -86,6 +88,61 @@ def test_investigate_mafia_target_returns_mafia() -> None:
     assert result.target == "P01"
     assert result.finding == FINDING_MAFIA
     assert result.reason == REASON_RESOLVED
+
+
+def test_investigate_godfather_target_returns_town() -> None:
+    seats = (
+        _seat("P01", 0, Role.GODFATHER, Faction.MAFIA),
+        _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+        _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+        _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+        _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+        _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+        _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+    )
+    result = resolve_detective_investigation(_state(seats), _investigate("P01"))
+    assert result.target == "P01"
+    assert result.finding == FINDING_TOWN
+    assert result.reason == REASON_RESOLVED
+
+
+def test_godfather_diagnostic_detective_still_discriminates_mafia_goons() -> None:
+    seats = (
+        _seat("P01", 0, Role.GODFATHER, Faction.MAFIA),
+        _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+        _seat("P03", 2, Role.MAFIA_GOON, Faction.MAFIA),
+        _seat("P04", 3, Role.DETECTIVE, Faction.TOWN),
+        _seat("P05", 4, Role.DOCTOR, Faction.TOWN),
+        _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+        _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+        _seat("P08", 7, Role.VILLAGER, Faction.TOWN),
+        _seat("P09", 8, Role.VILLAGER, Faction.TOWN),
+        _seat("P10", 9, Role.VILLAGER, Faction.TOWN),
+    )
+    state = _state(seats)
+    findings = {
+        seat.public_player_id: resolve_detective_investigation(
+            state,
+            _investigate(seat.public_player_id),
+        ).finding
+        for seat in seats
+        if seat.role is not Role.DETECTIVE
+    }
+
+    assert {pid for pid, finding in findings.items() if finding == FINDING_MAFIA} == {
+        "P02",
+        "P03",
+    }
+    assert findings["P01"] == FINDING_TOWN
+    assert Fraction(2, 3) == Fraction(
+        sum(
+            1
+            for seat in seats
+            if seat.faction is Faction.MAFIA
+            and findings.get(seat.public_player_id) == FINDING_MAFIA
+        ),
+        sum(1 for seat in seats if seat.faction is Faction.MAFIA),
+    )
 
 
 def test_investigate_self_returns_none() -> None:

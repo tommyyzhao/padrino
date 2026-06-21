@@ -74,6 +74,7 @@ _ARCHETYPE_KEYS: tuple[str, ...] = (
 
 _SHIPPED_ROLE_SPRITES: tuple[Role, ...] = (
     Role.MAFIA_GOON,
+    Role.GODFATHER,
     Role.DETECTIVE,
     Role.DOCTOR,
     Role.VILLAGER,

@@ -13,6 +13,7 @@ def test_role_counts_sum_to_player_count() -> None:
 
 def test_role_counts_exact() -> None:
     assert mini7.ROLE_COUNTS[Role.MAFIA_GOON] == 2
+    assert Role.GODFATHER not in mini7.ROLE_COUNTS
     assert mini7.ROLE_COUNTS[Role.DETECTIVE] == 1
     assert mini7.ROLE_COUNTS[Role.DOCTOR] == 1
     assert mini7.ROLE_COUNTS[Role.VILLAGER] == 3

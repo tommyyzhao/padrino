@@ -154,6 +154,39 @@ def test_investigation_of_target_killed_same_night_still_returns_result() -> Non
     )
 
 
+def test_godfather_investigation_falsifies_structured_feedback_only() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.GODFATHER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (_intent("P03", NightActionKind.INVESTIGATE, "P01"),),
+    )
+
+    feedback = result.feedback_by_code("INVESTIGATION_RESULT")[0]
+    assert result.detective_finding == ("P01", "TOWN")
+    assert result.investigation_outcomes["P03"].finding == "TOWN"
+    assert feedback.model_dump() == {
+        "recipient": "P03",
+        "code": "INVESTIGATION_RESULT",
+        "message": "Investigation result: P01 is TOWN.",
+        "target": "P01",
+        "finding": "TOWN",
+        "visited_player_ids": (),
+        "visitor_player_ids": (),
+    }
+
+
 def test_protection_feedback_is_structured_and_deterministic() -> None:
     result = resolve_night_actions(
         _state(),

@@ -82,9 +82,9 @@ def _event_hash_chain_digest(outcome: GameOutcome) -> str:
                 "terminal_result": "DRAW",
                 "terminal_reason": "MAX_DAYS_REACHED",
                 "event_count": 125,
-                "final_event_hash": "c241612e044bbfa75e346e61f7da3d6e31176f95ac95d32eb92d971770b0aa5f",
+                "final_event_hash": "8c6933f2830252d90d38d30852d9c640a54c6b116528c2f421bc1f8e404e0640",
                 "event_hash_chain_sha256": (
-                    "918b471f1048def56fb8ee4d6333ae00e0fb72364c2768d8294cacc76343ac71"
+                    "c87ebf0e62a0479c5956f6fbb7f0ee63e487d966bab68cafdc3bec0763617ca4"
                 ),
             },
         ),

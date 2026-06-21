@@ -115,7 +115,7 @@
         "All backend gates pass."
       ],
       "notes": "Codex: add Godfather FIRST; measure whether Detective still discriminates skill. PASSIVE falsify - deliberately does NOT depend on US-214.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-176",

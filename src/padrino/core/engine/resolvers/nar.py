@@ -356,6 +356,8 @@ def _alive_seat(state: GameState, public_player_id: str | None) -> Seat | None:
 
 
 def _finding_for(target: Seat) -> Literal["MAFIA", "TOWN"]:
+    if target.role is Role.GODFATHER:
+        return FINDING_TOWN
     return FINDING_MAFIA if target.faction is Faction.MAFIA else FINDING_TOWN
 
 
