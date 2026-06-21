@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Final
 
 import structlog
@@ -41,7 +43,7 @@ from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, SeatKind
-from padrino.core.observations import Observation, Ruleset
+from padrino.core.observations import Observation, Ruleset, format_phase_id
 from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_action_submissions as human_actions_repo
@@ -53,7 +55,8 @@ from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
 from padrino.runner.game_runner import GameConfig, GamePersistence, drive_game_loop
-from padrino.runner.human_tick import HumanTickConfig, run_human_tick
+from padrino.runner.human_chat_release import release_held_chat_for_phase
+from padrino.runner.human_tick import Clock, HumanTickConfig, Sleep, run_human_tick
 from padrino.settings import Settings, get_settings
 
 _logger = structlog.get_logger("padrino.runner.human_lane")
@@ -78,6 +81,7 @@ _CLAIMABLE_STATUSES: Final[frozenset[str]] = frozenset({"CREATED", "PENDING", ST
 AdapterFactory = Callable[[], LlmAdapter]
 AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
+HumanChatRelease = Callable[[str, float], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +234,9 @@ async def _run_human_tick_responses(
     _timeout_s: float,
     *,
     config: HumanTickConfig,
+    clock: Clock = time.monotonic,
+    sleep: Sleep = asyncio.sleep,
+    release_chat: HumanChatRelease | None = None,
 ) -> dict[str, AgentResponse]:
     result = await run_human_tick(
         state,
@@ -239,7 +246,11 @@ async def _run_human_tick_responses(
         ruleset,
         config,
         ranked=ranked,
+        clock=clock,
+        sleep=sleep,
     )
+    if release_chat is not None:
+        await release_chat(format_phase_id(state.current_phase), result.settled_at)
     return result.responses
 
 
@@ -256,6 +267,15 @@ def _default_human_game_executor(settings: Settings) -> HumanGameExecutor:
     ) -> None:
         # Human-lane games are always casual (ranked=False) — they never write the
         # scientific Rating/RatingEvent tables (segregation, hard rule 8).
+        async def release_chat(phase: str, _settled_at: float) -> None:
+            async with persistence.session_factory() as session, session.begin():
+                await release_held_chat_for_phase(
+                    session,
+                    game_id=persistence.game_id,
+                    phase=phase,
+                    released_at=datetime.now(UTC),
+                )
+
         async def tick_runner(
             state: GameState,
             event_log: EventLog,
@@ -274,6 +294,7 @@ def _default_human_game_executor(settings: Settings) -> HumanGameExecutor:
                 ranked,
                 timeout_s,
                 config=tick_config,
+                release_chat=release_chat,
             )
 
         await drive_game_loop(

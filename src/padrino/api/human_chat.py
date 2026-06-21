@@ -18,9 +18,10 @@ This impure shell:
   game never halts;
 * enforces a per-principal AND per-game/phase chat rate limit via RateLimitStore
   on each genuinely new message;
-* on release routes the released/masked text to the out-of-band sidecar (US-123)
-  — it is NEVER inlined in a hash-chained payload — and flips the hold to
-  ``RELEASED``; a BLOCK is flipped to ``BLOCKED`` and never released/chained;
+* stores the moderation-approved release text on the hold row and leaves it
+  ``HELD`` until the human-aware tick flushes the phase on the same fixed
+  release schedule as AI messages (US-159); a BLOCK is flipped to ``BLOCKED`` and
+  never released/chained;
 * dedupes retries with an idempotency key so a network retry never double-posts.
 
 The chat firewall holds: nothing submitted here mutates game state — only a
@@ -50,7 +51,6 @@ from padrino.core.observations import format_phase_id
 from padrino.core.rulesets import get_ruleset
 from padrino.db.models import GameSeat
 from padrino.db.repositories import events as events_repo
-from padrino.db.repositories import human_chat as sidecar_repo
 from padrino.db.repositories import human_chat_submissions as holds_repo
 from padrino.runner.human_durability import replay_state_from_rows
 
@@ -112,14 +112,15 @@ async def submit_chat(
     per_principal_limit: int = 30,
     per_game_phase_limit: int = 120,
 ) -> AcceptedChat:
-    """Buffer and (stub-)moderate a human's chat message for their seat.
+    """Buffer and moderate a human's chat message for their seat.
 
     Raises :class:`fastapi.HTTPException` for an unknown game (404), a wrong-seat
     submission (403), an empty/over-limit message (422), or chat that is not
     legal for the seat's phase/channel (409). On success the message enters the
-    buffer hold and is released only after the moderation hook passes; the raw
-    text is routed to the sidecar on release. A retry with the same idempotency
-    key returns the recorded message without inserting a duplicate.
+    buffer hold, moderation stores its approved release text, and the row stays
+    ``HELD`` until the human-aware runner releases the whole phase after the
+    symmetric delay. A retry with the same idempotency key returns the recorded
+    message without inserting a duplicate.
     """
     seat_row = await _resolve_seat(session, game_id=game_id, principal_id=principal_id)
 
@@ -213,19 +214,15 @@ async def submit_chat(
             idempotent_replay=False,
         )
 
-    # ALLOW / SOFT_MASK release: route the raw + cleaned text to the sidecar
-    # (US-123), NEVER inline in a hash-chained payload.
-    sequence = await holds_repo.next_sidecar_sequence(session, game_id=game_id)
-    await sidecar_repo.append_human_chat(
+    # ALLOW / SOFT_MASK: remember the text that may be released later, but do
+    # NOT create the sidecar row or set released_at inside the POST request. The
+    # human-lane tick flushes approved held rows after the symmetric release
+    # delay, matching AI message timing (US-159).
+    cleaned_text = decision.cleaned_text if decision.cleaned_text is not None else text
+    await holds_repo.mark_ready_for_release(
         session,
-        game_id=game_id,
-        sequence=sequence,
-        public_player_id=seat_row.public_player_id,
-        raw_text=text,
-        cleaned_text=decision.cleaned_text,
-    )
-    await holds_repo.mark_released(
-        session, submission=held, sidecar_sequence=sequence, released_at=now
+        submission=held,
+        cleaned_text=cleaned_text,
     )
     return AcceptedChat(
         public_player_id=held.public_player_id,

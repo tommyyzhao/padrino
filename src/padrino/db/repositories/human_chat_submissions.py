@@ -9,7 +9,7 @@ duplicate (no double-post).
 
 This repository imports no clock / RNG (the repository-purity guard forbids
 ``time`` / ``secrets`` / ``random``): ``created_at`` / ``released_at`` are passed
-in from the impure API shell.
+in from the impure API / runner shell.
 """
 
 from __future__ import annotations
@@ -91,6 +91,45 @@ async def next_sidecar_sequence(session: AsyncSession, *, game_id: uuid.UUID) ->
     )
     existing = [seq for seq in (await session.execute(stmt)).scalars() if seq is not None]
     return (max(existing) + 1) if existing else 0
+
+
+async def mark_ready_for_release(
+    session: AsyncSession,
+    *,
+    submission: HumanChatSubmission,
+    cleaned_text: str,
+) -> HumanChatSubmission:
+    """Store the moderation-approved text while keeping the message held.
+
+    US-159 deliberately does NOT flip the row to ``RELEASED`` inside the POST
+    request. The runner later releases every approved held message for the phase
+    on the human-aware tick's symmetric schedule.
+    """
+    submission.cleaned_text = cleaned_text
+    await session.flush()
+    return submission
+
+
+async def list_releasable_for_phase(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    phase: str,
+) -> list[HumanChatSubmission]:
+    """Return approved held messages for one phase in deterministic seat order."""
+    stmt = (
+        select(HumanChatSubmission)
+        .where(HumanChatSubmission.game_id == game_id)
+        .where(HumanChatSubmission.phase == phase)
+        .where(HumanChatSubmission.status == STATUS_HELD)
+        .where(HumanChatSubmission.cleaned_text.is_not(None))
+        .order_by(
+            HumanChatSubmission.public_player_id,
+            HumanChatSubmission.created_at,
+            HumanChatSubmission.id,
+        )
+    )
+    return list((await session.execute(stmt)).scalars())
 
 
 async def mark_released(

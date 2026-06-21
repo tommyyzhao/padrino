@@ -861,6 +861,7 @@ class HumanChatSubmission(Base):
     channel: Mapped[str] = mapped_column(String, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
     raw_text: Mapped[str] = mapped_column(String, nullable=False)
+    cleaned_text: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="HELD", server_default="HELD"
     )

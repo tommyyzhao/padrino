@@ -31,7 +31,7 @@
         "All backend gates pass."
       ],
       "notes": "This is the exact channel US-138 was meant to close; verify against the real runner path, not a stub.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-160",

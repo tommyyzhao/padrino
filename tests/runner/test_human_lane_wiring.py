@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import uuid
 from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from pathlib import Path
 
@@ -23,10 +24,11 @@ from padrino.api.app import create_app
 from padrino.api.auth import RateLimiter
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.agents.contract import AgentResponse
+from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import Faction, Role, SeatKind
+from padrino.core.enums import ActionType, Faction, Role, SeatKind
 from padrino.core.observations import Observation
 from padrino.core.rulesets import mini7_v1
 from padrino.db.models import (
@@ -35,6 +37,8 @@ from padrino.db.models import (
     GameEvent,
     GameSeat,
     HumanActionSubmission,
+    HumanChatMessage,
+    HumanChatSubmission,
     ModelConfig,
     ModelProvider,
     Principal,
@@ -45,8 +49,13 @@ from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.llm.multiplex import SeatMultiplexAdapter
+from padrino.runner.human_chat_release import release_held_chat_for_phase
 from padrino.runner.human_durability import replay_state_from_rows
-from padrino.runner.human_lane import AiAdapterFactory, build_human_lane_adapter
+from padrino.runner.human_lane import (
+    AiAdapterFactory,
+    _run_human_tick_responses,
+    build_human_lane_adapter,
+)
 from padrino.runner.human_tick import HumanTickConfig, run_human_tick
 from padrino.settings import Settings
 from tests.conftest import make_town_win_script
@@ -55,6 +64,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src" / "padrino"
 _GAME_SEED = "us158-human-lane"
 _HUMAN_SEAT = "P01"
+_DISCUSSION_PHASE = "DAY_1_DISCUSSION_ROUND_1"
+
+
+class _FakeClock:
+    """Monotonic clock that advances only when the injected sleep is awaited."""
+
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def now(self) -> float:
+        return self._now
+
+    async def sleep(self, seconds: float) -> None:
+        self._now += seconds
 
 
 class _ScriptedSeatAdapter:
@@ -266,9 +289,66 @@ def _vote_phase_bodies() -> list[dict[str, object]]:
     ]
 
 
+def _discussion_phase_bodies() -> list[dict[str, object]]:
+    seats = assign_roles(_GAME_SEED, mini7_v1)
+    assignments = [
+        {
+            "public_player_id": seat.public_player_id,
+            "seat_index": seat.seat_index,
+            "role": seat.role.value,
+            "faction": seat.faction.value,
+            "seat_kind": (
+                SeatKind.HUMAN.value if seat.public_player_id == _HUMAN_SEAT else SeatKind.AI.value
+            ),
+        }
+        for seat in seats
+    ]
+    return [
+        {
+            "event_type": "GameCreated",
+            "sequence": 0,
+            "phase": "SETUP",
+            "visibility": "SYSTEM",
+            "actor_player_id": None,
+            "payload": {
+                "ruleset_id": mini7_v1.RULESET_ID,
+                "game_id": "us159",
+                "game_seed": _GAME_SEED,
+                "player_count": mini7_v1.PLAYER_COUNT,
+            },
+        },
+        {
+            "event_type": "RolesAssigned",
+            "sequence": 1,
+            "phase": "SETUP",
+            "visibility": "SYSTEM",
+            "actor_player_id": None,
+            "payload": {"assignments": assignments},
+        },
+        {
+            "event_type": "PhaseStarted",
+            "sequence": 2,
+            "phase": _DISCUSSION_PHASE,
+            "visibility": "SYSTEM",
+            "actor_player_id": None,
+            "payload": {"phase_kind": "DAY_DISCUSSION", "day": 1, "round": 1},
+        },
+    ]
+
+
 async def _persist_vote_phase_log(session: AsyncSession, game_id: uuid.UUID) -> None:
+    await _persist_phase_log(session, game_id, bodies=_vote_phase_bodies())
+
+
+async def _persist_discussion_phase_log(session: AsyncSession, game_id: uuid.UUID) -> None:
+    await _persist_phase_log(session, game_id, bodies=_discussion_phase_bodies())
+
+
+async def _persist_phase_log(
+    session: AsyncSession, game_id: uuid.UUID, *, bodies: list[dict[str, object]]
+) -> None:
     log = EventLog()
-    for raw in _vote_phase_bodies():
+    for raw in bodies:
         body = dict(raw)
         payload = body["payload"]
         assert isinstance(payload, dict)
@@ -326,6 +406,24 @@ def _ai_adapter_factory(
         )
 
     return factory
+
+
+def _discussion_script(seats: list[GameSeat]) -> dict[tuple[str, str], AgentResponse]:
+    ai_speaker = next(
+        seat.public_player_id for seat in seats if seat.public_player_id != _HUMAN_SEAT
+    )
+    script: dict[tuple[str, str], AgentResponse] = {}
+    for seat in seats:
+        script[(_DISCUSSION_PHASE, seat.public_player_id)] = AgentResponse(
+            public_message="AI message from the same phase"
+            if seat.public_player_id == ai_speaker
+            else None,
+            private_message=None,
+            action=Action(type=ActionType.NOOP, target=None),
+            memory_update="",
+            rationale_summary=None,
+        )
+    return script
 
 
 async def _event_rows(
@@ -404,3 +502,99 @@ async def test_human_lane_adapter_consumes_action_submitted_through_post_channel
     )
 
     assert result.responses[_HUMAN_SEAT].action == action
+
+
+@pytest.mark.asyncio
+async def test_human_lane_releases_posted_chat_on_the_symmetric_tick_schedule(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    token = await _consenting_guest(client)
+    principal_id = await _principal_id(session_factory)
+    game_id = await _seed_mixed_game(session_factory, principal_id=principal_id)
+    seats = await _seat_rows(session_factory, game_id)
+    script = _discussion_script(seats)
+    async with session_factory() as session, session.begin():
+        await _persist_discussion_phase_log(session, game_id)
+
+    chat = await client.post(
+        f"/human/games/{game_id}/chat",
+        json={
+            "channel": "PUBLIC",
+            "text": "Human message from the same phase",
+            "idempotency_key": "us159-chat",
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert chat.status_code == 200, chat.text
+    assert chat.json()["status"] == "HELD"
+
+    async with session_factory() as session:
+        early_holds = (await session.execute(select(HumanChatSubmission))).scalars().all()
+        early_sidecar = (await session.execute(select(HumanChatMessage))).scalars().all()
+    assert len(early_holds) == 1
+    assert early_holds[0].status == "HELD"
+    assert early_sidecar == []
+
+    action = await client.post(
+        f"/human/games/{game_id}/actions",
+        json={"action": {"type": "NOOP", "target": None}, "idempotency_key": "us159-noop"},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert action.status_code == 200, action.text
+
+    state, event_log = replay_state_from_rows(await _event_rows(session_factory, game_id))
+    adapter = await build_human_lane_adapter(
+        session_factory,
+        game_id=game_id,
+        settings=Settings(padrino_human_phase_deadline_seconds=0.35),
+        ai_adapter_factory=_ai_adapter_factory(script),
+    )
+    eligible = [
+        seat for seat in state.living_seats() if legal_actions_for(state, seat).allowed_action_types
+    ]
+    clock = _FakeClock()
+    release_base = datetime(2026, 6, 20, tzinfo=UTC)
+    tick_releases: list[float] = []
+
+    async def release_chat(phase: str, settled_at: float) -> None:
+        tick_releases.append(settled_at)
+        async with session_factory() as session, session.begin():
+            await release_held_chat_for_phase(
+                session,
+                game_id=game_id,
+                phase=phase,
+                released_at=release_base + timedelta(seconds=settled_at),
+            )
+
+    responses = await _run_human_tick_responses(
+        state,
+        event_log,
+        eligible,
+        adapter,
+        mini7_v1,
+        False,
+        0.35,
+        config=HumanTickConfig(phase_deadline_seconds=0.35, release_delay_seconds=4.0),
+        clock=clock.now,
+        sleep=clock.sleep,
+        release_chat=release_chat,
+    )
+
+    ai_speakers = [seat for seat, response in responses.items() if response.public_message]
+    assert len(ai_speakers) == 1
+    assert tick_releases == [4.0]
+
+    async with session_factory() as session:
+        holds = (await session.execute(select(HumanChatSubmission))).scalars().all()
+        sidecar = (await session.execute(select(HumanChatMessage))).scalars().all()
+    assert len(holds) == 1
+    assert holds[0].status == "RELEASED"
+    released_at = holds[0].released_at
+    assert released_at is not None
+    if released_at.tzinfo is None:
+        released_at = released_at.replace(tzinfo=UTC)
+    assert released_at == release_base + timedelta(seconds=4.0)
+    assert len(sidecar) == 1
+    assert sidecar[0].public_player_id == _HUMAN_SEAT
+    assert sidecar[0].raw_text == "Human message from the same phase"

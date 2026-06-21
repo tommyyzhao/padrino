@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 
 import pytest
@@ -47,9 +48,11 @@ from padrino.api.auth import SCOPE_SPECTATOR, RateLimiter, generate_raw_key
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
+from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, Faction, Role, SeatKind
 from padrino.core.observation_privacy import assert_anonymous_safe
-from padrino.core.observations import Observation
+from padrino.core.observations import Observation, Ruleset
 from padrino.db.models import (
     Game,
     GameSeat,
@@ -67,7 +70,10 @@ from padrino.llm.mock import DeterministicMockAdapter
 from padrino.llm.multiplex import SeatMultiplexAdapter
 from padrino.public.broadcast_index import BroadcastState
 from padrino.public.live_tail import LiveTailConfig, stream_live_tail
-from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
+from padrino.runner.game_runner import GameConfig, GamePersistence, drive_game_loop
+from padrino.runner.human_chat_release import release_held_chat_for_phase
+from padrino.runner.human_lane import _run_human_tick_responses
+from padrino.runner.human_tick import HumanTickConfig
 from tests.conftest import make_town_win_script
 
 _RULESET = "mini7_v1"
@@ -289,7 +295,7 @@ def _db_backed_human_pull(
                 cookies={HUMAN_SESSION_COOKIE: token},
             )
             assert chat.status_code == 200, chat.text
-            assert chat.json()["status"] == "RELEASED"
+            assert chat.json()["status"] == "HELD"
 
         action = scripted.action
         body: dict[str, object] = {"type": action.type.value}
@@ -458,11 +464,46 @@ async def test_human_game_full_spine_smoke(
         agent_builds={},  # human-lane: empty -> rating write path fails closed
         league_id=None,
     )
-    outcome = await run_game(
+    release_base = datetime(2026, 6, 20, tzinfo=UTC)
+
+    async def release_chat(phase: str, settled_at: float) -> None:
+        async with session_factory() as session, session.begin():
+            await release_held_chat_for_phase(
+                session,
+                game_id=game_id,
+                phase=phase,
+                released_at=release_base + timedelta(seconds=settled_at),
+            )
+
+    async def tick_runner(
+        state: GameState,
+        event_log: EventLog,
+        eligible_seats: Sequence[Seat],
+        tick_adapter: LlmAdapter,
+        ruleset: Ruleset,
+        ranked: bool,
+        timeout_s: float,
+    ) -> dict[str, AgentResponse]:
+        return await _run_human_tick_responses(
+            state,
+            event_log,
+            eligible_seats,
+            tick_adapter,
+            ruleset,
+            ranked,
+            timeout_s,
+            config=HumanTickConfig(phase_deadline_seconds=1.0, release_delay_seconds=0.0),
+            clock=clock.now,
+            sleep=clock.sleep,
+            release_chat=release_chat,
+        )
+
+    outcome = await drive_game_loop(
         GameConfig(game_id=str(game_id), game_seed=game_seed, ruleset_id=_RULESET, timeout_s=1.0),
         mux,
         ranked=False,
         persistence=persistence,
+        tick_runner=tick_runner,
     )
 
     # ---- terminal -----------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Authenticated POST chat channel into the buffered hold (US-135).
+"""Authenticated POST chat channel into the buffered hold (US-135/US-159).
 
 A human submits a public/private chat message over an authenticated POST. The
 message enters the buffer *hold* and is gated by the block-before-release
@@ -7,8 +7,8 @@ any release. On release the raw text is routed to the out-of-band sidecar
 (US-123), never inline in a hash-chained payload. Covers:
 
 * over-limit message rejected (422);
-* held-then-released (stub-pass): the hold row flips to RELEASED and the raw
-  text appears ONLY in the sidecar;
+* held-after-moderation (stub-pass): the hold row stays HELD after POST and no
+  sidecar row exists until the human-aware tick releases the phase;
 * idempotent retry: a retry with the same key never inserts a second hold row;
 * a stray structured ``action`` field is a 422 (chat firewall — the chat
   channel accepts ONLY chat);
@@ -189,7 +189,7 @@ async def _principal_id_for_token(
 
 
 @pytest.mark.asyncio
-async def test_held_then_released_routes_to_sidecar(
+async def test_post_holds_approved_message_without_sidecar_release(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     token = await _consenting_guest(client)
@@ -212,19 +212,19 @@ async def test_held_then_released_routes_to_sidecar(
     assert payload["accepted"] is True
     assert payload["public_player_id"] == _HUMAN_SEAT
     assert payload["channel"] == "PUBLIC"
-    # The stub-pass moderation hook (US-140 lands the real verdict) releases.
-    assert payload["status"] == "RELEASED"
+    # Moderation approves the message, but US-159 requires the POST path to hold
+    # it until the human-aware tick's symmetric release delay elapses.
+    assert payload["status"] == "HELD"
     assert payload["idempotent_replay"] is False
 
     async with session_factory() as session:
         holds = (await session.execute(select(HumanChatSubmission))).scalars().all()
         sidecar = (await session.execute(select(HumanChatMessage))).scalars().all()
     assert len(holds) == 1
-    assert holds[0].status == "RELEASED"
-    # Raw text routed to the sidecar (US-123), never inline in a hashed payload.
-    assert len(sidecar) == 1
-    assert sidecar[0].public_player_id == _HUMAN_SEAT
-    assert sidecar[0].raw_text == "I think P04 is suspicious."
+    assert holds[0].status == "HELD"
+    assert holds[0].cleaned_text == "I think P04 is suspicious."
+    # Raw text is not visible through the sidecar until the buffered tick release.
+    assert sidecar == []
 
 
 @pytest.mark.asyncio
@@ -281,9 +281,10 @@ async def test_idempotent_retry(
     async with session_factory() as session:
         holds = (await session.execute(select(HumanChatSubmission))).scalars().all()
         sidecar = (await session.execute(select(HumanChatMessage))).scalars().all()
-    # A network retry never inserts a second hold row nor a duplicate sidecar row.
+    # A network retry never inserts a second hold row and never releases early.
     assert len(holds) == 1
-    assert len(sidecar) == 1
+    assert holds[0].status == "HELD"
+    assert sidecar == []
 
 
 @pytest.mark.asyncio
