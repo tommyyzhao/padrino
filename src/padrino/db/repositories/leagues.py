@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import LeagueKind
@@ -39,24 +40,41 @@ async def get_or_create_humans_included(
     games reference it; it is the home of the dormant ``human_rating`` schema and
     NEVER writes a scientific rating row.
     """
-    existing = await session.execute(
-        select(League)
-        .where(
-            League.kind == LeagueKind.HUMANS_INCLUDED.value,
-            League.ruleset_id == ruleset_id,
+
+    def _select_existing() -> Select[tuple[League]]:
+        return (
+            select(League)
+            .where(
+                League.kind == LeagueKind.HUMANS_INCLUDED.value,
+                League.ruleset_id == ruleset_id,
+            )
+            .limit(1)
         )
-        .limit(1)
-    )
-    found = existing.scalar_one_or_none()
+
+    found = (await session.execute(_select_existing())).scalar_one_or_none()
     if found is not None:
         return found
-    return await create(
-        session,
+
+    obj = League(
         name=HUMANS_INCLUDED_LEAGUE_NAME,
         ruleset_id=ruleset_id,
         ranked=False,
-        kind=LeagueKind.HUMANS_INCLUDED,
+        kind=LeagueKind.HUMANS_INCLUDED.value,
     )
+    session.add(obj)
+    try:
+        # A savepoint isolates the conflicting insert: a concurrent creator that
+        # won the unique (kind, ruleset_id) race trips IntegrityError here, and
+        # we roll back to the savepoint and re-read its row rather than poisoning
+        # the caller's transaction.
+        async with session.begin_nested():
+            await session.flush()
+    except IntegrityError:
+        existing = (await session.execute(_select_existing())).scalar_one_or_none()
+        if existing is None:  # pragma: no cover - the unique winner must exist
+            raise
+        return existing
+    return obj
 
 
 async def get(session: AsyncSession, league_id: uuid.UUID) -> League | None:

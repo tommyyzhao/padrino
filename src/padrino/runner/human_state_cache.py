@@ -26,7 +26,7 @@ from padrino.core.engine.events import EventAdapter
 from padrino.core.engine.reducer import apply_event
 from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.core.engine.state import GameState
-from padrino.db.models import GameEvent
+from padrino.db.models import GameEvent, HumanGameRuntime
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.runner.human_durability import replay_state_from_rows
@@ -36,12 +36,19 @@ STATE_CACHE_VERSION = 1
 
 @dataclass(frozen=True, slots=True)
 class ResolvedHumanState:
-    """Current state/log resolved for one human request."""
+    """Current state/log resolved for one human request.
+
+    ``runtime`` is the ``human_game_runtime`` row read while resolving the cache
+    (``None`` for a legacy game with no runtime row). Exposing it lets callers
+    reuse the same row for transport-only fields like the phase deadline instead
+    of re-reading it.
+    """
 
     state: GameState
     event_log: EventLog
     used_cache: bool
     incremental_event_count: int
+    runtime: HumanGameRuntime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +96,7 @@ async def resolve_current_human_state(
                 event_log=event_log,
                 used_cache=True,
                 incremental_event_count=len(suffix),
+                runtime=runtime,
             )
         except (ReplayHashMismatchError, ValueError):
             # A stale/corrupt cache must not compromise correctness. Fall back to
@@ -104,6 +112,7 @@ async def resolve_current_human_state(
         event_log=event_log,
         used_cache=False,
         incremental_event_count=len(rows),
+        runtime=runtime,
     )
 
 

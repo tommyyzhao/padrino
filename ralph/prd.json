@@ -106,7 +106,7 @@
         "All backend + frontend gates pass (pnpm lint/check/test:e2e if the dashboard is touched)."
       ],
       "notes": "Pure cleanup/robustness; no behavior change beyond removing drift and a duplicate-league race.",
-      "passes": false
+      "passes": true
     }
   ]
 }
