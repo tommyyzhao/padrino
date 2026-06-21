@@ -37,7 +37,7 @@ from typing import Final
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.core.enums import Faction
+from padrino.core.enums import Faction, Role
 from padrino.db.models import (
     AgentBuild,
     Game,
@@ -73,6 +73,17 @@ class FactionAggregate:
 
 
 @dataclass(frozen=True, slots=True)
+class RoleAggregate:
+    """Exact-role sample-count diagnostic inside a model leaderboard entry."""
+
+    games: int
+    wins: int
+    draws: int
+    losses: int
+    win_rate: float
+
+
+@dataclass(frozen=True, slots=True)
 class ModelLeaderboardEntry:
     """One row in the per-model leaderboard.
 
@@ -95,6 +106,7 @@ class ModelLeaderboardEntry:
     losses: int
     town: FactionAggregate
     mafia: FactionAggregate
+    role_breakdown: dict[str, RoleAggregate]
     agent_build_count: int
     agent_build_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
 
@@ -163,6 +175,7 @@ class _ModelBucket:
     mafia_wins: int = 0
     mafia_draws: int = 0
     mafia_losses: int = 0
+    role_counts: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 def _aggregate_rating(samples: list[tuple[float, float, int]]) -> tuple[float, float]:
@@ -210,6 +223,21 @@ def _faction_aggregate(bucket: _ModelBucket, faction: str) -> FactionAggregate:
     )
 
 
+def _role_aggregates(bucket: _ModelBucket) -> dict[str, RoleAggregate]:
+    out: dict[str, RoleAggregate] = {}
+    for role, counts in sorted(bucket.role_counts.items()):
+        games = counts["games"]
+        wins = counts["wins"]
+        out[role] = RoleAggregate(
+            games=games,
+            wins=wins,
+            draws=counts["draws"],
+            losses=counts["losses"],
+            win_rate=(wins / games) if games else 0.0,
+        )
+    return out
+
+
 def _bucket_to_entry(bucket: _ModelBucket) -> ModelLeaderboardEntry:
     mu, sigma = _aggregate_rating(bucket.rating_samples.get(SCOPE_VALUE_GLOBAL, []))
     return ModelLeaderboardEntry(
@@ -227,6 +255,7 @@ def _bucket_to_entry(bucket: _ModelBucket) -> ModelLeaderboardEntry:
         losses=bucket.losses,
         town=_faction_aggregate(bucket, Faction.TOWN.value),
         mafia=_faction_aggregate(bucket, Faction.MAFIA.value),
+        role_breakdown=_role_aggregates(bucket),
         agent_build_count=len(bucket.agent_build_ids),
         agent_build_ids=tuple(sorted(bucket.agent_build_ids, key=str)),
     )
@@ -357,6 +386,51 @@ async def _seat_counters_per_build(
     return dict(out)
 
 
+async def _role_counters_per_build(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    ruleset_id: str,
+) -> dict[uuid.UUID, dict[str, dict[str, int]]]:
+    """Aggregate exact-role sample counts for terminal games in one league."""
+    stmt = (
+        select(
+            GameSeat.agent_build_id,
+            GameSeat.faction,
+            GameSeat.role,
+            Game.terminal_result,
+        )
+        .join(Game, Game.id == GameSeat.game_id)
+        .join(Gauntlet, Gauntlet.id == Game.gauntlet_id)
+        .where(
+            Gauntlet.league_id == league_id,
+            Game.ruleset_id == ruleset_id,
+            Game.status == _COMPLETED_STATUS,
+        )
+    )
+    out: dict[uuid.UUID, dict[str, dict[str, int]]] = {}
+    for ab_id, faction, role_value, terminal in (await session.execute(stmt)).all():
+        if ab_id is None:
+            continue
+        try:
+            role = Role(role_value)
+        except ValueError:
+            continue
+        ab_bucket = out.setdefault(ab_id, {})
+        role_bucket = ab_bucket.setdefault(
+            role.value, {"games": 0, "wins": 0, "draws": 0, "losses": 0}
+        )
+        role_bucket["games"] += 1
+        winner = terminal.get("winner") if isinstance(terminal, dict) else None
+        if winner == "DRAW":
+            role_bucket["draws"] += 1
+        elif winner == faction:
+            role_bucket["wins"] += 1
+        elif winner in {Faction.TOWN.value, Faction.MAFIA.value}:
+            role_bucket["losses"] += 1
+    return out
+
+
 async def rollup_by_model(
     session: AsyncSession,
     league_id: uuid.UUID,
@@ -384,7 +458,10 @@ async def rollup_by_model(
     seat_counters = await _seat_counters_per_build(
         session, league_id=league_id, ruleset_id=ruleset_id
     )
-    extra_ids = set(seat_counters.keys()) - ab_ids
+    role_counters = await _role_counters_per_build(
+        session, league_id=league_id, ruleset_id=ruleset_id
+    )
+    extra_ids = (set(seat_counters.keys()) | set(role_counters.keys())) - ab_ids
     if extra_ids:
         identities.update(await _build_identity_map(session, extra_ids))
 
@@ -439,6 +516,19 @@ async def rollup_by_model(
         bucket.mafia_wins += counts["mafia_wins"]
         bucket.mafia_draws += counts["mafia_draws"]
         bucket.mafia_losses += counts["mafia_losses"]
+
+    for ab_id, role_counts in role_counters.items():
+        bucket = _bucket_for(ab_id)
+        if bucket is None:
+            continue
+        for role, counts in role_counts.items():
+            bucket_counts = bucket.role_counts.setdefault(
+                role, {"games": 0, "wins": 0, "draws": 0, "losses": 0}
+            )
+            bucket_counts["games"] += counts["games"]
+            bucket_counts["wins"] += counts["wins"]
+            bucket_counts["draws"] += counts["draws"]
+            bucket_counts["losses"] += counts["losses"]
 
     entries = sorted(
         (_bucket_to_entry(b) for b in buckets.values()),
@@ -548,6 +638,15 @@ def entry_to_response(entry: ModelLeaderboardEntry) -> dict[str, object]:
             "losses": f.losses,
         }
 
+    def _role_dict(r: RoleAggregate) -> Mapping[str, float | int]:
+        return {
+            "games": r.games,
+            "wins": r.wins,
+            "draws": r.draws,
+            "losses": r.losses,
+            "win_rate": r.win_rate,
+        }
+
     return {
         "model_key": entry.model_key,
         "display_name": entry.display_name,
@@ -563,6 +662,9 @@ def entry_to_response(entry: ModelLeaderboardEntry) -> dict[str, object]:
         "losses": entry.losses,
         "town": _faction_dict(entry.town),
         "mafia": _faction_dict(entry.mafia),
+        "role_breakdown": {
+            role: _role_dict(aggregate) for role, aggregate in entry.role_breakdown.items()
+        },
         "agent_build_count": entry.agent_build_count,
     }
 
@@ -574,6 +676,7 @@ __all__ = [
     "ModelDetail",
     "ModelLeaderboardEntry",
     "ModelRollup",
+    "RoleAggregate",
     "detail_for_model",
     "entry_to_response",
     "model_key_for",

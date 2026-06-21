@@ -20,7 +20,7 @@ from padrino.core.engine.replay import replay_event_log, replay_events
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED
 from padrino.core.enums import ActionType, Faction, Role
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import Ruleset, bench10_v1, mini7_v1
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.runner.game_runner import GameConfig, GameOutcome, run_game
 from tests.conftest import (
@@ -49,6 +49,31 @@ def _adapter(script: Mapping[tuple[str, str], AgentResponse]) -> DeterministicMo
 
 def _config() -> GameConfig:
     return GameConfig(game_id="G-RUNNER", game_seed=_GAME_SEED, timeout_s=1.0)
+
+
+def _phase_ids_for(ruleset: Ruleset) -> tuple[str, ...]:
+    """All promptable phase ids for the current canonical phase skeleton."""
+    out: list[str] = ["NIGHT_0_MAFIA_INTRO"]
+    for day in range(1, ruleset.MAX_DAYS + 1):
+        for round_index in range(1, ruleset.DISCUSSION_ROUNDS_PER_DAY + 1):
+            out.append(f"DAY_{day}_DISCUSSION_ROUND_{round_index}")
+        out.append(f"DAY_{day}_VOTE")
+        out.append(f"NIGHT_{day}_MAFIA_DISCUSSION")
+        out.append(f"NIGHT_{day}_ACTIONS")
+    return tuple(out)
+
+
+async def _passive_draw_outcome(ruleset: Ruleset, *, seed: str, game_id: str) -> GameOutcome:
+    seats = assign_roles(seed, ruleset)
+    seat_ids = [seat.public_player_id for seat in seats]
+    script = make_villager_script(seat_ids, _phase_ids_for(ruleset))
+    config = GameConfig(
+        game_id=game_id,
+        game_seed=seed,
+        ruleset_id=ruleset.RULESET_ID,
+        timeout_s=1.0,
+    )
+    return await run_game(config, _adapter(script), ranked=False)
 
 
 def _typed_events(outcome: GameOutcome) -> list[Event]:
@@ -90,6 +115,30 @@ async def test_draw_scenario_terminates_at_max_days() -> None:
     assert bodies[-1]["event_type"] == "GameTerminated"
     assert bodies[-1]["payload"]["winner"] == "DRAW"
     assert bodies[-1]["payload"]["reason"] == REASON_MAX_DAYS_REACHED
+
+
+async def test_passive_day_cap_hash_chain_stable_for_canonical_rulesets() -> None:
+    for ruleset in (mini7_v1, bench10_v1):
+        ruleset_id = ruleset.RULESET_ID
+        first = await _passive_draw_outcome(
+            ruleset, seed=f"{ruleset_id}-day-cap", game_id=f"G-{ruleset_id}"
+        )
+        second = await _passive_draw_outcome(
+            ruleset, seed=f"{ruleset_id}-day-cap", game_id=f"G-{ruleset_id}"
+        )
+
+        first_bodies = [stored.body for stored in first.event_log.events]
+        second_bodies = [stored.body for stored in second.event_log.events]
+        assert first_bodies[-1]["payload"] == {
+            "winner": "DRAW",
+            "reason": REASON_MAX_DAYS_REACHED,
+        }
+        assert first.final_state.terminal_result == "DRAW"
+        assert first.final_state.terminal_reason == REASON_MAX_DAYS_REACHED
+        assert first_bodies[-1] == second_bodies[-1]
+        assert [event.event_hash for event in first.event_log.events] == [
+            event.event_hash for event in second.event_log.events
+        ]
 
 
 # --- log shape & invariants -------------------------------------------------

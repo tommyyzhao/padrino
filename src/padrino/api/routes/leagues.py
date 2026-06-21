@@ -93,6 +93,8 @@ class LeaderboardEntryResponse(BaseModel):
     timeout_rate: float
     invalid_action_rate: float
     public_message_avg_chars: float
+    faction_breakdown: dict[str, dict[str, float]]
+    role_breakdown: dict[str, dict[str, float]]
     role_family_breakdown: dict[str, dict[str, float]]
     provisional: bool
 

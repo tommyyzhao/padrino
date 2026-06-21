@@ -50,7 +50,7 @@
         "All backend gates pass."
       ],
       "notes": "Gemini: need a 'mathematically clean tie-breaker' to avoid degenerate metas - already in-tree as DRAW(MAX_DAYS). Codex: track town/mafia win rates + per-role sample counts as diagnostics, not just one blended ELO.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-174",

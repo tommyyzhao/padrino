@@ -276,12 +276,52 @@ async def test_draw_equal_rank_keeps_mu_near_initial(
         ab_id = abs_by_seat[sid]
         r = ratings_by_key[(ab_id, "GLOBAL", "global")]
         assert r.sigma < INITIAL_SIGMA
+        assert r.mu == pytest.approx(INITIAL_MU)
         if faction is Faction.TOWN:
             town_mus.add(round(r.mu, 9))
         else:
             mafia_mus.add(round(r.mu, 9))
     assert len(town_mus) == 1
     assert len(mafia_mus) == 1
+
+
+async def test_repeated_draws_never_create_mu_gain(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league, builds, game = await _seed(session_factory, hash_prefix="draw-farm")
+    seat_factions, abs_by_seat = _seven_seat_layout(builds)
+
+    for idx in range(3):
+        game_id = game.id
+        if idx > 0:
+            async with session_factory() as session, session.begin():
+                extra = await games.create(
+                    session,
+                    ruleset_id="mini7_v1",
+                    game_seed=f"draw-farm-{idx}",
+                    status="COMPLETED",
+                )
+                game_id = extra.id
+        async with session_factory() as session, session.begin():
+            await update_ratings_for_game(
+                session,
+                league_id=league.id,
+                game_result=GameResult(game_id=game_id, winner="DRAW", seat_factions=seat_factions),
+                agent_builds_by_seat=abs_by_seat,
+            )
+
+    ratings_by_key = await _fetch_ratings(session_factory, league.id)
+    for sid in seat_factions:
+        ab_id = abs_by_seat[sid]
+        for scope_type, scope_value in (
+            ("GLOBAL", "global"),
+            ("FACTION", seat_factions[sid].value),
+        ):
+            row = ratings_by_key[(ab_id, scope_type, scope_value)]
+            assert row.games == 3
+            assert row.mu == pytest.approx(INITIAL_MU)
+            assert row.sigma < INITIAL_SIGMA
+            assert row.conservative_score == pytest.approx(row.mu - 3.0 * row.sigma)
 
 
 async def test_role_family_scope_not_updated_in_v1(

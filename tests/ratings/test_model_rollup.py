@@ -19,7 +19,7 @@ import uuid
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.core.enums import Faction
+from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
 from padrino.db.models import AgentBuild, ModelProvider, Rating
 from padrino.db.repositories import (
@@ -194,7 +194,7 @@ async def _build_gauntlet_with_seats(
                     public_player_id=f"P{j + 1:02d}",
                     seat_index=j,
                     agent_build_id=ab_id,
-                    role="MAFIOSO" if faction is Faction.MAFIA else "VILLAGER",
+                    role=Role.MAFIA_GOON.value if faction is Faction.MAFIA else Role.VILLAGER.value,
                     faction=faction.value,
                 )
 
@@ -714,3 +714,55 @@ async def test_faction_scope_ratings_aggregate_independently(
     # separate.
     assert math.isclose(entry.mu, 25.0)
     assert entry.town.mu != entry.mu
+
+
+async def test_model_rollup_carries_exact_role_sample_counts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id = await _seed_league(session_factory)
+    async with session_factory() as session, session.begin():
+        ab = await _make_agent_build(
+            session,
+            display_name="alpha",
+            provider_name="p",
+            model_name="m",
+            model_version="1.0",
+            suffix="role-samples",
+        )
+        _insert_rating(
+            session,
+            league_id=league_id,
+            agent_build_id=ab.id,
+            scope_type=SCOPE_GLOBAL,
+            scope_value=SCOPE_VALUE_GLOBAL,
+            mu=25.0,
+            sigma=5.0,
+            games=6,
+        )
+
+    await _build_gauntlet_with_seats(
+        session_factory,
+        league_id=league_id,
+        game_outcomes=[
+            (
+                Faction.TOWN.value,
+                [(ab.id, Faction.MAFIA), (ab.id, Faction.TOWN), (ab.id, Faction.TOWN)],
+            ),
+            (
+                Faction.MAFIA.value,
+                [(ab.id, Faction.MAFIA), (ab.id, Faction.TOWN), (ab.id, Faction.TOWN)],
+            ),
+        ],
+    )
+
+    async with session_factory() as session:
+        rollup = await rollup_by_model(session, league_id, mini7_v1.RULESET_ID)
+
+    entry = rollup.entries[0]
+    assert set(entry.role_breakdown) == {Role.MAFIA_GOON.value, Role.VILLAGER.value}
+    assert entry.role_breakdown[Role.MAFIA_GOON.value].games == 2
+    assert entry.role_breakdown[Role.MAFIA_GOON.value].wins == 1
+    assert entry.role_breakdown[Role.MAFIA_GOON.value].losses == 1
+    assert entry.role_breakdown[Role.VILLAGER.value].games == 4
+    assert entry.role_breakdown[Role.VILLAGER.value].wins == 2
+    assert entry.role_breakdown[Role.VILLAGER.value].losses == 2

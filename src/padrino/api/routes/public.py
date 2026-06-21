@@ -807,6 +807,14 @@ class PublicModelFactionAggregate(BaseModel):
     losses: int
 
 
+class PublicModelRoleAggregate(BaseModel):
+    games: int
+    wins: int
+    draws: int
+    losses: int
+    win_rate: float
+
+
 class PublicModelEntryResponse(BaseModel):
     model_key: str
     display_name: str
@@ -822,6 +830,7 @@ class PublicModelEntryResponse(BaseModel):
     losses: int
     town: PublicModelFactionAggregate
     mafia: PublicModelFactionAggregate
+    role_breakdown: dict[str, PublicModelRoleAggregate]
     agent_build_count: int
 
 

@@ -39,6 +39,7 @@ from padrino.gauntlets.completion import (
 from padrino.ratings.openskill_service import (
     INITIAL_MU,
     INITIAL_SIGMA,
+    SCOPE_FACTION,
     SCOPE_GLOBAL,
     SCOPE_VALUE_GLOBAL,
 )
@@ -81,6 +82,8 @@ class LeaderboardEntry:
     timeout_rate: float
     invalid_action_rate: float
     public_message_avg_chars: float
+    faction_breakdown: dict[str, dict[str, float]]
+    role_breakdown: dict[str, dict[str, float]]
     role_family_breakdown: dict[str, dict[str, float]]
     provisional: bool
 
@@ -142,22 +145,23 @@ async def _seats_for_games(session: AsyncSession, game_ids: Iterable[uuid.UUID])
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def _ratings_global(
+async def _ratings_by_scope(
     session: AsyncSession,
     *,
     league_id: uuid.UUID,
     agent_build_ids: Iterable[uuid.UUID],
-) -> dict[uuid.UUID, Rating]:
+) -> dict[tuple[uuid.UUID, str, str], Rating]:
     ids = list(agent_build_ids)
     if not ids:
         return {}
     stmt = select(Rating).where(
         Rating.league_id == league_id,
-        Rating.scope_type == SCOPE_GLOBAL,
-        Rating.scope_value == SCOPE_VALUE_GLOBAL,
         Rating.agent_build_id.in_(ids),
     )
-    return {r.agent_build_id: r for r in (await session.execute(stmt)).scalars().all()}
+    return {
+        (rating.agent_build_id, rating.scope_type, rating.scope_value): rating
+        for rating in (await session.execute(stmt)).scalars().all()
+    }
 
 
 async def _agent_build_display_names(
@@ -234,6 +238,71 @@ def _per_ab_counters(
         elif winner is not None:
             bucket["losses"] += 1
     return counters
+
+
+def _empty_counter() -> dict[str, float]:
+    return {"games": 0.0, "wins": 0.0, "draws": 0.0, "losses": 0.0, "win_rate": 0.0}
+
+
+def _finalize_rate_counters(
+    counters: dict[uuid.UUID, dict[str, dict[str, float]]],
+) -> dict[uuid.UUID, dict[str, dict[str, float]]]:
+    for ab_bucket in counters.values():
+        for bucket in ab_bucket.values():
+            games = bucket["games"]
+            bucket["win_rate"] = (bucket["wins"] / games) if games else 0.0
+    return counters
+
+
+def _per_ab_faction_breakdown(
+    seats: list[GameSeat],
+    winners: dict[uuid.UUID, str],
+) -> dict[uuid.UUID, dict[str, dict[str, float]]]:
+    """Aggregate exact per-faction seat-game counters by agent build."""
+    out: dict[uuid.UUID, dict[str, dict[str, float]]] = {}
+    for seat in seats:
+        if seat.agent_build_id is None or seat.faction not in {
+            Faction.TOWN.value,
+            Faction.MAFIA.value,
+        }:
+            continue
+        ab_bucket = out.setdefault(seat.agent_build_id, {})
+        faction_bucket = ab_bucket.setdefault(seat.faction, _empty_counter())
+        faction_bucket["games"] += 1
+        winner = winners.get(seat.game_id)
+        if winner == "DRAW":
+            faction_bucket["draws"] += 1
+        elif winner == seat.faction:
+            faction_bucket["wins"] += 1
+        elif winner is not None:
+            faction_bucket["losses"] += 1
+    return _finalize_rate_counters(out)
+
+
+def _per_ab_role_breakdown(
+    seats: list[GameSeat],
+    winners: dict[uuid.UUID, str],
+) -> dict[uuid.UUID, dict[str, dict[str, float]]]:
+    """Aggregate exact per-role seat-game counters by agent build."""
+    out: dict[uuid.UUID, dict[str, dict[str, float]]] = {}
+    for seat in seats:
+        if seat.agent_build_id is None:
+            continue
+        try:
+            role = Role(seat.role)
+        except ValueError:
+            continue
+        ab_bucket = out.setdefault(seat.agent_build_id, {})
+        role_bucket = ab_bucket.setdefault(role.value, _empty_counter())
+        role_bucket["games"] += 1
+        winner = winners.get(seat.game_id)
+        if winner == "DRAW":
+            role_bucket["draws"] += 1
+        elif winner == seat.faction:
+            role_bucket["wins"] += 1
+        elif winner is not None:
+            role_bucket["losses"] += 1
+    return _finalize_rate_counters(out)
 
 
 def _per_ab_role_family_breakdown(
@@ -320,6 +389,9 @@ def _build_entry(
     counts: dict[str, int],
     metrics: dict[str, float] | None,
     rating: Rating | None,
+    faction_breakdown: dict[str, dict[str, float]],
+    faction_ratings: dict[str, Rating],
+    role_breakdown: dict[str, dict[str, float]],
     role_family_breakdown: dict[str, dict[str, float]],
 ) -> LeaderboardEntry:
     submissions = (metrics or {}).get("submissions", 0.0)
@@ -341,6 +413,20 @@ def _build_entry(
         sigma = INITIAL_SIGMA
         cs = INITIAL_MU - 3.0 * INITIAL_SIGMA
 
+    decorated_factions: dict[str, dict[str, float]] = {}
+    for faction in (Faction.TOWN.value, Faction.MAFIA.value):
+        stats = dict(faction_breakdown.get(faction, _empty_counter()))
+        faction_rating = faction_ratings.get(faction)
+        if faction_rating is not None:
+            stats["mu"] = float(faction_rating.mu)
+            stats["sigma"] = float(faction_rating.sigma)
+            stats["conservative_score"] = float(faction_rating.conservative_score)
+        else:
+            stats["mu"] = INITIAL_MU
+            stats["sigma"] = INITIAL_SIGMA
+            stats["conservative_score"] = INITIAL_MU - 3.0 * INITIAL_SIGMA
+        decorated_factions[faction] = stats
+
     return LeaderboardEntry(
         agent_build_id=ab_id,
         display_name=display_name,
@@ -354,6 +440,8 @@ def _build_entry(
         timeout_rate=timeout_rate,
         invalid_action_rate=invalid_rate,
         public_message_avg_chars=pm_avg,
+        faction_breakdown=decorated_factions,
+        role_breakdown=role_breakdown,
         role_family_breakdown=role_family_breakdown,
         provisional=_is_provisional(counts["games"], counts["town_games"], counts["mafia_games"]),
     )
@@ -385,9 +473,18 @@ async def compute_leaderboard(
     ruleset = get_ruleset(ruleset_id)
     counters = _per_ab_counters(seats, winners)
     metrics = _per_ab_event_metrics(events, seat_by_game_actor)
+    faction_breakdowns = _per_ab_faction_breakdown(seats, winners)
+    role_breakdowns = _per_ab_role_breakdown(seats, winners)
     role_family_breakdowns = _per_ab_role_family_breakdown(seats, winners, ruleset)
 
-    ratings = await _ratings_global(session, league_id=league_id, agent_build_ids=counters.keys())
+    ratings_by_scope = await _ratings_by_scope(
+        session, league_id=league_id, agent_build_ids=counters.keys()
+    )
+    ratings = {
+        ab_id: rating
+        for (ab_id, scope_type, scope_value), rating in ratings_by_scope.items()
+        if scope_type == SCOPE_GLOBAL and scope_value == SCOPE_VALUE_GLOBAL
+    }
     display_names = await _agent_build_display_names(session, counters.keys())
     prompt_version = await _league_prompt_version(session, league_id)
 
@@ -398,6 +495,13 @@ async def compute_leaderboard(
             counts=counts,
             metrics=metrics.get(ab_id),
             rating=ratings.get(ab_id),
+            faction_breakdown=faction_breakdowns.get(ab_id, {}),
+            faction_ratings={
+                faction: rating
+                for (rating_ab, scope_type, faction), rating in ratings_by_scope.items()
+                if rating_ab == ab_id and scope_type == SCOPE_FACTION
+            },
+            role_breakdown=role_breakdowns.get(ab_id, {}),
             role_family_breakdown=role_family_breakdowns.get(ab_id, {}),
         )
         for ab_id, counts in counters.items()
@@ -428,6 +532,8 @@ def entry_to_response(entry: LeaderboardEntry) -> dict[str, Any]:
         "timeout_rate": entry.timeout_rate,
         "invalid_action_rate": entry.invalid_action_rate,
         "public_message_avg_chars": entry.public_message_avg_chars,
+        "faction_breakdown": entry.faction_breakdown,
+        "role_breakdown": entry.role_breakdown,
         "role_family_breakdown": entry.role_family_breakdown,
         "provisional": entry.provisional,
     }

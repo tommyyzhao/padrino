@@ -121,7 +121,7 @@ async def _apply_scope_update(
             await _persist_one(
                 session,
                 row=row,
-                new_mu=new.mu,
+                new_mu=row.mu if winner == "DRAW" else new.mu,
                 new_sigma=new.sigma,
                 league_id=league_id,
                 game_id=game_id,
@@ -140,7 +140,7 @@ async def _apply_scope_update(
             await _persist_one(
                 session,
                 row=row,
-                new_mu=new.mu,
+                new_mu=row.mu if winner == "DRAW" else new.mu,
                 new_sigma=new.sigma,
                 league_id=league_id,
                 game_id=game_id,
