@@ -13,10 +13,11 @@ This impure shell:
 
 * resolves the caller's seat from ``occupant_principal_id`` (a human may only
   observe the seat they occupy — 403 otherwise);
-* replays the hash-chained event log to recover the deterministic
-  :class:`~padrino.core.engine.state.GameState`, then reuses the PURE
-  :func:`padrino.core.observations.build_observation` to project that seat's
-  view (no new branching in core);
+* resolves the deterministic :class:`~padrino.core.engine.state.GameState` and
+  :class:`~padrino.core.engine.event_log.EventLog` from the durable human runtime
+  cache, reading only events committed after the cached head when possible, then
+  reuses the PURE :func:`padrino.core.observations.build_observation` to project
+  that seat's view (no new branching in core);
 * reads the phase deadline from the impure ``human_game_runtime`` row — the
   deadline is **transport-only** and is NEVER written to the hash-chained log
   (hard rule 4: a wall-clock value never enters a hashed event);
@@ -49,14 +50,13 @@ from padrino.core.observation_privacy import (
 from padrino.core.observations import build_observation, format_phase_id
 from padrino.core.rulesets import get_ruleset
 from padrino.db.models import Game, GameSeat
-from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_chat_observation import (
     hydrate_observation_human_chat,
     load_released_human_chat_texts,
 )
-from padrino.runner.human_durability import replay_state_from_rows
+from padrino.runner.human_state_cache import resolve_current_human_state
 
 GAME_NOT_FOUND_DETAIL = "game_not_found"
 WRONG_SEAT_DETAIL = "wrong_seat"
@@ -151,11 +151,12 @@ async def build_seat_observation_snapshot(
     if game is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GAME_NOT_FOUND_DETAIL)
 
-    rows = await events_repo.list_events(session, game_id)
-    if not rows:
+    resolved = await resolve_current_human_state(session, game_id)
+    if resolved is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GAME_NOT_FOUND_DETAIL)
 
-    state, event_log = replay_state_from_rows(rows)
+    state = resolved.state
+    event_log = resolved.event_log
     core_seat = state.seat_by_public_id(seat_row.public_player_id)
     if core_seat is None:
         # The seat is in the DB but not yet in the replayed state — treat as

@@ -7,9 +7,10 @@ This impure shell:
   may only chat from the seat they occupy — a wrong-seat submission is rejected);
 * validates the message respects the ruleset ``message_limits`` (over-limit is a
   422 at the request schema; an empty message is rejected here);
-* validates the chat *channel* is legal for the seat in the current phase
-  (PUBLIC chat in day discussion/vote; PRIVATE mafia chat in the night mafia
-  channel), reusing the pure :func:`legal_actions_for` phase reading;
+* resolves the current phase from the durable human runtime cache, reading only
+  events committed after the cached head when possible, then validates the chat
+  *channel* is legal for the seat in that phase (PUBLIC chat in day
+  discussion/vote; PRIVATE mafia chat in the night mafia channel);
 * parks the message in the buffer **hold** (``status='HELD'``) and runs it
   through the block-before-release moderation gate (US-140's
   :class:`RealtimeModerationHook`: deterministic first-pass + sanitizer +
@@ -50,10 +51,9 @@ from padrino.core.enums import Faction, PhaseKind
 from padrino.core.observations import format_phase_id
 from padrino.core.rulesets import get_ruleset
 from padrino.db.models import GameSeat
-from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_chat_submissions as holds_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
-from padrino.runner.human_durability import replay_state_from_rows
+from padrino.runner.human_state_cache import resolve_current_human_state
 
 CHANNEL_PUBLIC = "PUBLIC"
 CHANNEL_PRIVATE = "PRIVATE"
@@ -138,11 +138,11 @@ async def submit_chat(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=EMPTY_MESSAGE_DETAIL
         )
 
-    rows = await events_repo.list_events(session, game_id)
-    if not rows:
+    resolved = await resolve_current_human_state(session, game_id)
+    if resolved is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GAME_NOT_FOUND_DETAIL)
 
-    state, _event_log = replay_state_from_rows(rows)
+    state = resolved.state
     if state.terminal_result is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=CHAT_NOT_ALLOWED_DETAIL)
 

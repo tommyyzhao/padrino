@@ -9,9 +9,10 @@ human game from two sources:
    the pure :func:`padrino.core.engine.replay.replay_event_log`, never read from
    the snapshot. If the snapshot ever disagreed with the event log, the event
    log wins (hard rule 4).
-2. The ``human_game_runtime`` row — the *impure* live scaffolding only: the
+2. The ``human_game_runtime`` row — the live scaffolding used for resume: the
    current phase, the phase wall-clock deadline, and a buffer snapshot of
-   in-flight human submissions awaiting release.
+   in-flight human submissions awaiting release. Its optional US-168 state cache
+   is ignored here; restart rehydration still rebuilds from the event log.
 
 This uses the existing async DB; there is no Redis (stack rule).
 

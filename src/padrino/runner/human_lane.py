@@ -62,6 +62,7 @@ from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, 
 from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
 from padrino.runner.human_chat_release import release_held_chat_for_phase
 from padrino.runner.human_durability import RehydratedHumanGame, rehydrate_active_human_games
+from padrino.runner.human_state_cache import build_state_cache
 from padrino.runner.human_tick import Clock, HumanTickConfig, Sleep, run_human_tick
 from padrino.settings import Settings, get_settings
 
@@ -598,6 +599,7 @@ async def persist_human_runtime_snapshot(
     phase: str,
     deadline_at: datetime | None,
     updated_at: datetime,
+    state: GameState | None = None,
     event_log: EventLog,
 ) -> None:
     """Persist the current human-lane runtime scaffold for one phase.
@@ -613,6 +615,7 @@ async def persist_human_runtime_snapshot(
             phase=phase,
             deadline_at=deadline_at,
             buffer_snapshot=buffer_snapshot,
+            state_cache=build_state_cache(state, event_log) if state is not None else None,
             updated_at=updated_at,
         )
         if event_log.events:
@@ -652,6 +655,7 @@ class _RuntimeSnapshotter:
             phase=phase,
             deadline_at=deadline_at,
             updated_at=updated_at,
+            state=_state,
             event_log=event_log,
         )
 

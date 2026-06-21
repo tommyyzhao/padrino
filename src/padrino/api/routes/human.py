@@ -182,6 +182,7 @@ async def post_action(
     """
     settings = _get_auth_settings(request)
     await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
+    rate_limit_store = _get_rate_limiter(request).store
     accepted = await submit_action(
         session,
         game_id=game_id,
@@ -189,6 +190,9 @@ async def post_action(
         action=body.action,
         idempotency_key=body.idempotency_key,
         now=datetime.now(UTC),
+        rate_limit=rate_limit_store,
+        per_principal_limit=settings.padrino_rate_limit_human_action_per_minute,
+        per_game_phase_limit=settings.padrino_rate_limit_human_action_per_game_phase_per_minute,
     )
     return ActionResult(
         accepted=True,

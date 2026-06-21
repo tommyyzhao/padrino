@@ -1,10 +1,11 @@
 """CRUD helpers for :class:`padrino.db.models.HumanGameRuntime` (US-131).
 
-The human-lane runner persists its *impure* live scaffolding here — the current
-phase, the phase wall-clock deadline, and a buffer snapshot of in-flight human
-submissions — so an in-progress human game survives a process restart. The
-deterministic core state is never stored here; it is reconstructed by replaying
-the hash-chained ``game_events`` log.
+The human-lane runner persists its live scaffolding here — the current phase,
+the phase wall-clock deadline, and a buffer snapshot of in-flight human
+submissions — so an in-progress human game survives a process restart. US-168
+adds an optional state/log cache for request-path performance; the hash-chained
+``game_events`` log stays authoritative and callers validate the cached head
+before using it.
 
 This repository never imports a clock or RNG (the repository-purity guard
 forbids ``time`` / ``secrets`` / ``random``): the ``deadline_at`` and
@@ -31,6 +32,7 @@ async def upsert(
     deadline_at: datetime | None,
     buffer_snapshot: dict[str, Any],
     updated_at: datetime,
+    state_cache: dict[str, Any] | None = None,
 ) -> HumanGameRuntime:
     """Insert or update the one runtime row for ``game_id`` and return it."""
     row = await session.get(HumanGameRuntime, game_id)
@@ -40,6 +42,7 @@ async def upsert(
             phase=phase,
             deadline_at=deadline_at,
             buffer_snapshot=buffer_snapshot,
+            state_cache=state_cache,
             updated_at=updated_at,
         )
         session.add(row)
@@ -47,6 +50,7 @@ async def upsert(
         row.phase = phase
         row.deadline_at = deadline_at
         row.buffer_snapshot = buffer_snapshot
+        row.state_cache = state_cache
         row.updated_at = updated_at
     await session.flush()
     return row

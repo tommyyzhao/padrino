@@ -9,7 +9,7 @@ hashing by :mod:`padrino.core.engine.hashing`.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -47,6 +47,33 @@ class EventLog:
     def events(self) -> tuple[StoredEvent, ...]:
         """Immutable snapshot of all stored events in append order."""
         return tuple(self._events)
+
+    @classmethod
+    def from_stored(cls, stored_events: Sequence[StoredEvent]) -> EventLog:
+        """Build a log from already-verified stored envelopes.
+
+        This preserves the supplied envelopes without re-hashing their bodies.
+        Callers that load a trusted cached prefix can then append and verify only
+        a new suffix. Contiguity and hash-chain pointers are still checked so a
+        malformed cache cannot produce an impossible in-memory log.
+        """
+        log = cls()
+        previous_hash = GENESIS_HASH
+        copied: list[StoredEvent] = []
+        for expected_sequence, stored in enumerate(stored_events):
+            if stored.sequence != expected_sequence:
+                raise ValueError(
+                    f"stored event sequence {stored.sequence} is not contiguous at "
+                    f"{expected_sequence}"
+                )
+            if stored.prev_event_hash != previous_hash:
+                raise ValueError(
+                    f"stored event {stored.sequence} does not chain from previous hash"
+                )
+            copied.append(stored)
+            previous_hash = stored.event_hash
+        log._events = copied
+        return log
 
     def append(self, event_body: Mapping[str, Any]) -> StoredEvent:
         """Seal ``event_body`` into the chain and return the StoredEvent."""

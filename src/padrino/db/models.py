@@ -794,16 +794,16 @@ class HumanGameRuntime(Base):
     """Durable, rehydratable live scaffolding for an in-progress human game (US-131).
 
     A human-lane game can last minutes to hours, so a process restart must not
-    lose it. This row holds ONLY the *impure* live runner scaffolding — the
-    current ``phase``, the wall-clock ``deadline_at`` for that phase, and an
-    opaque ``buffer_snapshot`` of in-flight per-seat human submissions awaiting
-    release. It is keyed one-to-one by ``game_id``.
+    lose it. This row holds the *impure* live runner scaffolding — the current
+    ``phase``, the wall-clock ``deadline_at`` for that phase, and an opaque
+    ``buffer_snapshot`` of in-flight per-seat human submissions awaiting release
+    — plus an optional validated state/log cache used to avoid full-log reads on
+    every human request. It is keyed one-to-one by ``game_id``.
 
-    The deterministic core game state is NEVER stored here: it is always
-    reconstructed by replaying the hash-chained ``game_events`` log (hard rule
-    4). The snapshot exists only so the impure shell (deadlines, buffered human
-    input) survives a restart; if it disagreed with the event log, the event log
-    wins. This uses the existing async DB — there is no Redis (stack rule).
+    The hash-chained ``game_events`` log remains authoritative (hard rule 4).
+    The cache is accepted only when its sequence/hash head still matches the DB
+    chain; if it disagrees with the event log, callers fall back to verified
+    replay. This uses the existing async DB — there is no Redis (stack rule).
     """
 
     __tablename__ = "human_game_runtime"
@@ -814,6 +814,7 @@ class HumanGameRuntime(Base):
     phase: Mapped[str] = mapped_column(String, nullable=False)
     deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     buffer_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    state_cache: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
     )

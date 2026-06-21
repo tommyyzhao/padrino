@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     # same RateLimitStore, keyed by the session hash so it shares no bucket with
     # any api_key.
     padrino_rate_limit_human_per_minute: int = 120
+    # Human action POST channel (US-168). These ceilings are distinct from the
+    # shared per-session human read bucket and from chat buckets, so action spam
+    # cannot consume observation/chat capacity or bypass a channel-specific cap.
+    padrino_rate_limit_human_action_per_minute: int = 60
+    padrino_rate_limit_human_action_per_game_phase_per_minute: int = 30
     # Block-before-release human chat moderation (US-140/US-167). Two message
     # ceilings, both via RateLimitStore: a per-human-principal chat ceiling and a
     # per-game/phase/principal ceiling so one seat cannot exhaust another seat's

@@ -61,3 +61,34 @@ async def list_events(
     stmt = stmt.order_by(GameEvent.sequence)
     result = await session.execute(stmt)
     return list(result.scalars())
+
+
+async def get_event_at_sequence(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+    *,
+    sequence: int,
+) -> GameEvent | None:
+    """Return one event by sequence, or ``None`` when it does not exist."""
+    stmt = select(GameEvent).where(
+        GameEvent.game_id == game_id,
+        GameEvent.sequence == sequence,
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def list_events_after(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+    *,
+    after_sequence: int,
+) -> list[GameEvent]:
+    """Return events whose sequence is greater than ``after_sequence``."""
+    stmt = (
+        select(GameEvent)
+        .where(GameEvent.game_id == game_id, GameEvent.sequence > after_sequence)
+        .order_by(GameEvent.sequence)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars())

@@ -165,7 +165,7 @@
         "All backend gates pass."
       ],
       "notes": "Correctness must not regress: the snapshot must stay consistent with the event log (US-161).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-169",

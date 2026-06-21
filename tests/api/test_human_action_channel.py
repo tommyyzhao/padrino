@@ -25,13 +25,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
+from padrino.api.auth import RateLimiter
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
+from padrino.api.rate_limit_store import InMemoryRateLimitStore
 from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import SeatKind
 from padrino.core.rulesets import mini7_v1
 from padrino.db.models import Game, GameSeat, HumanActionSubmission, Principal
 from padrino.db.repositories import events as events_repo
+from padrino.settings import Settings
 
 _GAME_SEED = "act-seed"
 _PHASE = "DAY_1_VOTE"
@@ -347,3 +350,48 @@ async def test_chat_field_rejected_by_schema(
     async with session_factory() as session:
         rows = (await session.execute(select(HumanActionSubmission))).scalars().all()
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_action_channel_has_dedicated_rate_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = InMemoryRateLimitStore()
+    app = create_app(
+        session_factory=session_factory,
+        auth_required=True,
+        rate_limiter=RateLimiter(store=store),
+    )
+    app.state.auth_settings = Settings(
+        padrino_rate_limit_human_per_minute=10_000,
+        padrino_rate_limit_human_action_per_minute=1,
+        padrino_rate_limit_human_action_per_game_phase_per_minute=1,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        token = await _consenting_guest(ac)
+        principal_id = await _principal_id_for_token(session_factory)
+        async with session_factory() as session, session.begin():
+            game_id = await _seed_human_game(session, principal_id=principal_id)
+
+        first = await ac.post(
+            f"/human/games/{game_id}/actions",
+            json={"action": {"type": "VOTE", "target": "P04"}, "idempotency_key": "k1"},
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert first.status_code == 200
+
+        limited = await ac.post(
+            f"/human/games/{game_id}/actions",
+            json={"action": {"type": "VOTE", "target": "P05"}, "idempotency_key": "k2"},
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+
+    assert limited.status_code == 429
+    assert limited.json()["detail"] == "action_rate_limited"
+    assert "Retry-After" in limited.headers
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(HumanActionSubmission))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].idempotency_key == "k1"
