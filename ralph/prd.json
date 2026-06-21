@@ -1,7 +1,7 @@
 {
   "project": "Padrino",
   "branchName": "ralph/padrino-v9-fixes-2",
-  "description": "v9-fixes-2 - second hardening wave for the human-multiplayer layer. US-189..195 (DONE, merged-pending) addressed the residual findings from the post-merge /code-review re-run. US-196..203 (ROUND-2) fix the 13 actionable bugs surfaced by the independent adversarial review of the US-189..195 diff (1 critical chat-release replay-gap, 4 high: launch admission leak + reservation double-count + takeover rollback + migration 0045 dedup, 3 medium: presence monotonicity + takeover presence-lock + OAuth state-key, 5 low: OAuth azp/iat-age/single-use-state + rate-limit peek + profile fraction-string). Once US-196..203 are green and re-reviewed, this branch merges to main. Recommended to run BEFORE the Wave 10 role-expansion (prd-v10-roles.json) so the human-MP foundation is hardened before it is extended.",
+  "description": "v9-fixes-2 - second hardening wave for the human-multiplayer layer. US-189..195 (DONE, merged-pending) addressed the residual findings from the post-merge /code-review re-run. US-196..203 (ROUND-2) fix the 13 actionable bugs surfaced by the independent adversarial review of the US-189..195 diff (1 critical chat-release replay-gap, 4 high: launch admission leak + reservation double-count + takeover rollback + migration 0045 dedup, 3 medium: presence monotonicity + takeover presence-lock + OAuth state-key, 5 low: OAuth azp/iat-age/single-use-state + rate-limit peek + profile fraction-string). US-204..209 (ROUND-3) fix the 6 regressions the final re-review found in the ROUND-2 fixes (R1 rate-limit peek-then-commit dropped the atomic decision -> concurrent over-admission; R2 migration 0045 dedup collides on league_id-scoped unique constraints; R3 takeover apply-after-commit DB-ahead-of-memory gap; R4 OAuth iat max-age too strict + not configurable; R5 OAuth single-use claim rolled back on failed exchange; R6 oauth_consumed_flows prune in the hot path). The 13 original findings are all confirmed resolved. Once US-204..209 are green and re-reviewed, this branch merges to main. Recommended to run BEFORE the Wave 10 role-expansion (prd-v10-roles.json) so the human-MP foundation is hardened before it is extended.",
   "userStories": [
     {
       "id": "US-189",
@@ -231,6 +231,96 @@
       ],
       "notes": "Evidence: human_actions.py:200-210, human_chat.py:253-254, rate_limit store (InMemory:93 / Database:137), profile/+page.svelte:21-25/99, core/turing/scoring.py:47-70 (_accuracy_string), reveal.spec.ts:249-253/340 (the format split + pinned '0.7500' decimal contract). Mixed backend+frontend story: run BOTH gate sets. Robust fix is the peek/commit split, not merely reversing bucket order.",
       "passes": true
+    },
+    {
+      "id": "US-204",
+      "title": "Restore atomic rate-limit enforcement under peek-then-commit (honor record_request)",
+      "priority": 204,
+      "dependencies": [],
+      "description": "ROUND-3 REGRESSION R1 (HIGH, CONFIRMED) introduced by US-203. The peek-then-commit refactor gates admission on the read-only peek_request loop, then in a SECOND loop calls rate_limit.record_request(...) but DISCARDS the returned RateLimitDecision (human_actions.py:215-216, human_chat.py:267-268). peek_request is a separate non-locking SELECT (rate_limit_store.py:174-193). Under concurrency on the multi-worker DatabaseRateLimitStore (the designed-for case, app.py:82-87 selects it when padrino_api_workers>1), K requests at count==limit-1 all peek-pass, then all record (count -> limit+1...), and because the authoritative record_request rejection (new_count>limit) is thrown away, ALL are admitted. The original code (3c1d85a) was atomic increment-and-check (INSERT ... ON CONFLICT DO UPDATE ... RETURNING count, then allowed=False if new_count>limit) and is explicitly tested for two concurrent workers admitting exactly limit (test_rate_limit_store.py:140-161). US-203 removed that atomic guarantee while fixing the lower-severity per-principal-budget-burn issue.",
+      "acceptanceCriteria": [
+        "The commit phase HONORS the atomic decision: the record loop captures each record_request result and raises 429 if any bucket returns allowed=False (restoring the atomic increment-and-reject ceiling), for BOTH the action channel (human_actions.py) and the chat channel (human_chat.py). The peek pass that prevents burning the per-principal budget on a guaranteed-reject is retained.",
+        "A concurrency regression test against DatabaseRateLimitStore fires K simultaneous _enforce_*_rate_limits calls sharing one principal bucket at count==limit-1 and asserts at most limit are admitted (no over-admission).",
+        "The US-191/US-203 property still holds: a request rejected by the per-game-phase bucket does not consume the per-principal budget (the all-or-nothing peek still guards the common reject path).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Evidence: rate_limit_store.py:150-238/174-193, human_actions.py:200-216, human_chat.py:249-268, app.py:82-87. The robust fix is an atomic multi-bucket check-and-increment (one transaction that increments all buckets and rolls back / returns the limiting decision if any exceeds) -- but at minimum the record loop must re-check the decision (do NOT discard it). Keep the peek loop for the budget-burn fix.",
+      "passes": false
+    },
+    {
+      "id": "US-205",
+      "title": "Migration 0045 dedup: resolve scope-unique collisions before repointing rating rows",
+      "priority": 205,
+      "dependencies": [],
+      "description": "ROUND-3 REGRESSION R2 (HIGH, CONFIRMED, reproduced) introduced by US-199. _dedup_humans_included_leagues blind-repoints every dependent FK row: UPDATE {table} SET league_id=:keeper WHERE league_id=:loser (0045_*.py:81-84) for all _DEPENDENT_LEAGUE_FKS, which includes ratings and human_rating. Those tables carry league_id-scoped UNIQUE constraints: uq_rating_scope=(league_id,agent_build_id,scope_type,scope_value) and uq_human_rating_scope=(league_id,human_player_id,scope_type,scope_value). On a dirty DB where a keeper and a loser HUMANS_INCLUDED league each hold a row for the same scope key, the repoint collides on the unique index and raises IntegrityError, ABORTING the very upgrade the dedup was added to rescue. Reproduced live: seed two HUMANS_INCLUDED leagues for mini7_v1 each with a human_rating row for (player1,GLOBAL,all), then alembic 0044->0045 fails with UNIQUE constraint failed: human_rating(...). (Note: rating_events/human_rating_event are keyed on game_id, NOT league_id, so they do not collide; gauntlets/lobbies have no league_id-scoped unique, so they are safe.)",
+      "acceptanceCriteria": [
+        "Before repointing into a table whose UNIQUE constraint includes league_id (ratings, human_rating), the dedup first removes the loser rows whose remaining scope tuple already exists under the keeper (e.g. DELETE FROM ratings WHERE league_id=:loser AND (agent_build_id,scope_type,scope_value) IN (SELECT ... FROM ratings WHERE league_id=:keeper); analogously for human_rating on (human_player_id,scope_type,scope_value)), then repoints the survivors. Plain repoint remains for gauntlets/lobbies/rating_events/human_rating_event.",
+        "Folded into 0045 in place (no new revision; chain stays single-head at 0046).",
+        "A migration test seeds COLLIDING ratings and human_rating rows under both keeper and loser HUMANS_INCLUDED leagues and asserts the upgrade SUCCEEDS with the keeper's scope row retained (the existing test only seeds a collision-safe gauntlets row).",
+        "All backend gates pass (including test_migrations_all_dialects)."
+      ],
+      "notes": "Evidence: 0045_*.py:42-49/81-84, 0003_ratings.py uq_rating_scope, 0025_human_rating_siblings.py uq_human_rating_scope, models.py:390-396/511-517, tests/db/test_migration_0045_dedup.py:96-105. Per AGENTS.md rule 8 these tables are dormant in v1 so the collision is not reachable on a pure-v1 DB, but the migration must be defensively correct (fixtures / forward-port / v2 human-ELO activation make it live). A delete-loser-duplicate-scope-row is sufficient; merging stats into the keeper is optional.",
+      "passes": false
+    },
+    {
+      "id": "US-206",
+      "title": "Takeover apply-after-commit: guard against DB-ahead-of-memory on apply failure",
+      "priority": 206,
+      "dependencies": [],
+      "description": "ROUND-3 REGRESSION R3 (HIGH, PLAUSIBLE) introduced by US-197. US-197 correctly fixed the memory-ahead-of-DB direction by splitting build_takeover_event + _persist_stored_event_row (inside the session.begin() block, committing at human_lane.py:488) from apply_takeover (the mux.swap_seat + event_log.append) which now runs AFTER the commit at human_lane.py:492-498 with NO try/except. This newly creates the OPPOSITE gap: if apply_takeover raises after the commit (apply_takeover can raise a seal-mismatch ValueError or a mux.swap_seat KeyError, disconnect_takeover.py:104-132 / multiplex.py:64-68), the DB holds the SeatTakenOver row at sequence N but the in-memory event_log never appends N -> the next in-memory event is built at sequence N and collides on persist (IntegrityError), or rehydrate re-seals non-contiguously (ReplayHashMismatchError). NOT currently triggerable (no await between commit and apply; every human seat is registered in the long-lived mux; the recheck guards double-apply) -- but an unguarded latent crash-consistency fragility that a future change would activate.",
+      "acceptanceCriteria": [
+        "A post-commit apply_takeover failure cannot leave the DB ahead of the in-memory log: wrap apply_takeover (human_lane.py:492-498) so that on any exception the in-memory state is deterministically re-synced to the already-committed row (re-append the committed event body after asserting it still seals, and force the mux swap) OR a dedicated fatal error halts the loop BEFORE any further event is built at the now-colliding sequence. Invariant: never a committed game_events row at sequence N with no matching in-memory event that a later tick will collide with.",
+        "A regression test forces a failure in the POST-commit apply_takeover step (monkeypatch apply_takeover / swap_seat to raise after the DB commit) and asserts the persisted chain and the in-memory log stay consistent and a subsequent tick does not collide / IntegrityError.",
+        "The US-197 memory-ahead protection and its existing test (test_takeover_commit_failure_leaves_in_memory_uncorrupted) still hold.",
+        "All backend gates pass."
+      ],
+      "notes": "Evidence: human_lane.py:474-498/455, disconnect_takeover.py:104-132, multiplex.py:64-68, event_log.py:89. Symmetric closure of the build/apply-across-commit split US-197 introduced.",
+      "passes": false
+    },
+    {
+      "id": "US-207",
+      "title": "Configurable OAuth id_token max-age ceiling with a sane default",
+      "priority": 207,
+      "dependencies": [],
+      "description": "ROUND-3 REGRESSION R4 (HIGH, PLAUSIBLE) introduced by US-201. _validate_token_age (oauth.py:341-355) enforces a HARDCODED ceiling _MAX_TOKEN_AGE_SECONDS=300 (+60s leeway) with NO settings override: it rejects any signature-valid, unexpired id_token whose iat is older than 360s. A 6-minute ceiling is tight for a legitimate auth round-trip when provider/host clock skew exceeds the single 60s leeway, or for an IdP that mints iat earlier in the flow / from a quirky enterprise OIDC bridge -> a false-positive auth break (400 oauth_exchange_failed) for a valid login that worked before US-201, with no operator escape hatch. (Per OIDC iat is the mint time and major IdPs mint fresh, so the common case is fine; this hardens the false-positive risk, not removes the control.)",
+      "acceptanceCriteria": [
+        "The max-token-age ceiling is operator-configurable: add padrino_oauth_max_token_age_seconds (int | None) to Settings, thread it into _validate_token_age via OAuthConfig; None disables the extra age check (exp still bounds the token). The hardcoded Final is replaced by the configured value.",
+        "The DEFAULT ceiling is widened to comfortably cover a legitimate slow authorization round-trip plus realistic clock skew (e.g. 600-900s), retaining iat-essential and the future-dating rejection.",
+        "Tests: a token older than the configured ceiling (far-future exp) is rejected; a token within the ceiling is accepted; setting the override (or None) changes the behavior accordingly.",
+        "All backend gates pass."
+      ],
+      "notes": "Evidence: oauth.py:46-50/341-355/316/321, settings.py:170-187, tests/api/test_oauth_signin.py:699-730. Optionally make it auth_time-aware (do not reject on auth_time being old; bound strictly on iat). Use the impure clock seam (_NOW), never datetime.utcnow() in core. Document it as defense-in-depth supplementing exp, not an OIDC requirement.",
+      "passes": false
+    },
+    {
+      "id": "US-208",
+      "title": "Durable OAuth single-use flow claim across a failed code exchange",
+      "priority": 208,
+      "dependencies": [],
+      "description": "ROUND-3 REGRESSION R5 (MEDIUM, CONFIRMED) introduced by US-202. try_consume_flow (oauth_consumed_flows.py:64-66) only session.flush()es; the whole oauth_callback runs in one get_session transaction that rolls back on ANY raised exception (deps.py:24-30). So if exchange_code raises (human.py:612-615 -> 400) or find_or_create_account / create_session later raises, the consumed-flow INSERT is rolled back -> the flow is NOT recorded as consumed and a replay of that (state, code) is still re-attemptable. This contradicts the docstrings (models.py:845-847; human.py:587-590) that claim the row is recorded the moment the callback begins the code exchange and that a replayed flow fails closed independent of provider behavior. The atomic ON CONFLICT only blocks two concurrently in-flight replays; it does NOT give the durable single-use guarantee the docstrings assert for the failure paths.",
+      "acceptanceCriteria": [
+        "Make the single-use guarantee match its contract: the consumed-flow claim is durable independent of the rest of the callback succeeding -- commit the claim in its own transaction / savepoint (or a separate session) right after try_consume_flow so a later rollback of exchange/account/session does not erase it; a replay of a (state, code) whose first attempt FAILED at/after exchange is rejected with oauth_state_replayed.",
+        "Exactly one consumed-flow row persists per flow even when the first callback fails after the claim.",
+        "A regression test drives a callback where exchange_code (or find_or_create_account / create_session) raises, then asserts a replay of the same (state, code) is rejected and exactly one consumed-flow row exists.",
+        "All backend gates pass."
+      ],
+      "notes": "Evidence: oauth_consumed_flows.py:64-66, deps.py:22-30, human.py:587-590/601/605-629, models.py:845-847. If a durable autonomous commit is deemed too heavy, the acceptable alternative is to NARROW the docstrings to 'holds for successfully-completed flows; the atomic insert blocks concurrent in-flight replays' -- but durable consume is preferred since it is what the security claim promises.",
+      "passes": false
+    },
+    {
+      "id": "US-209",
+      "title": "Move oauth_consumed_flows prune out of the hot callback path + index",
+      "priority": 209,
+      "dependencies": [],
+      "description": "ROUND-3 REGRESSION R6 (LOW, CONFIRMED) introduced by US-202. Every OAuth callback unconditionally runs prune_expired -> DELETE FROM oauth_consumed_flows WHERE consumed_at < now-600 (human.py:598-600; oauth_consumed_flows.py:69-85), inside the request transaction and BEFORE the consume INSERT. There is NO index on consumed_at (migration 0046 / models.py:836-856 define only flow PK + a plain consumed_at column), so the predicate DELETE is a sequential scan on every sign-in; under concurrent load it serializes a delete-then-insert against the same table per request and the work is rolled back + repeated on any later failure. Write amplification + lock footprint per sign-in.",
+      "acceptanceCriteria": [
+        "The per-callback hot path no longer issues an unconditional full-predicate DELETE every request: move the sweep to a periodic/background job OR an opportunistic probabilistic sweep (e.g. ~1/N callbacks) OR a separate short transaction outside the auth transaction; stale rows are documented as inert so deferring is functionally safe.",
+        "Add an index on oauth_consumed_flows.consumed_at so any remaining prune is an index range scan, not a sequential scan (edit migration 0046 in place since it is part of this unmerged wave; no new revision; chain stays single-head).",
+        "A test asserts pruning still bounds table growth (expired rows are eventually removed) without a DELETE on every callback.",
+        "All backend gates pass (including test_migrations_all_dialects)."
+      ],
+      "notes": "Evidence: human.py:598-600, oauth_consumed_flows.py:69-85, 0046_oauth_consumed_flows.py:30-33, models.py:836-856. The single-use INSERT/reject logic itself is correct -- leave it unchanged; this is purely the prune placement + index.",
+      "passes": false
     }
   ]
 }
