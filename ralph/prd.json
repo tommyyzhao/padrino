@@ -16,7 +16,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Cleanest fix: append+persist the event in the same session/txn as the DB mutation (or persist_pending_events before returning control across the await/sleep). Keep replay deterministic.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-190",

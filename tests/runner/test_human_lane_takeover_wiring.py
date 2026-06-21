@@ -15,7 +15,9 @@ import padrino.runner.human_lane as human_lane
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.events import EventAdapter
 from padrino.core.engine.legal_actions import legal_actions_for
+from padrino.core.engine.reducer import compute_seat_provenance
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import ActionType, Faction, Role, SeatKind
 from padrino.core.observations import Observation
@@ -490,3 +492,83 @@ async def test_takeover_recheck_is_idempotent_after_seat_flips(
     assert [result.seat_id for result in first] == [_HUMAN_SEAT]
     assert second == []
     assert [e.body["event_type"] for e in event_log.events].count("SeatTakenOver") == 1
+
+
+async def test_takeover_event_row_is_co_committed_with_seat_mutation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """US-189: the SeatTakenOver row lands atomically with the seat_kind flip.
+
+    Simulate an interrupted run: drive only the takeover (the seat mutation +
+    paired event), WITHOUT the outer game loop's persist_pending_events, then
+    rehydrate from game_events alone and assert the reconstructed state still
+    carries the takeover provenance (no AI_TAKEOVER seat missing its event).
+    """
+    async with session_factory() as session, session.begin():
+        principal_id = await _seed_principal(session)
+        ai_build_id = await _seed_agent_build(session, label="atomic-ai")
+        await _seed_agent_build(session, label="atomic-takeover")
+        game_id = await _seed_game(
+            session,
+            principal_id=principal_id,
+            ai_build_id=ai_build_id,
+            status="RUNNING",
+        )
+        await _persist_vote_phase(session, game_id)
+        await presence_repo.mark_disconnected(
+            session,
+            game_id=game_id,
+            public_player_id=_HUMAN_SEAT,
+            disconnected_at=_NOW - timedelta(seconds=180),
+        )
+
+    rows = await _event_rows(session_factory, game_id)
+    state, event_log = replay_state_from_rows(rows)
+    adapter = await build_human_lane_adapter(
+        session_factory,
+        game_id=game_id,
+        settings=_settings(),
+        ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+    )
+    assert isinstance(adapter, SeatMultiplexAdapter)
+
+    applied = await _take_over_expired_human_seats(
+        session_factory,
+        game_id=game_id,
+        mux=adapter,
+        event_log=event_log,
+        state=state,
+        settings=_settings(),
+        ai_adapter_factory=_ai_adapter_factory(_script_for_game()),
+        now=_NOW,
+    )
+    assert [result.seat_id for result in applied] == [_HUMAN_SEAT]
+    takeover_sequence = applied[0].event.sequence
+
+    # The committed seat mutation has a matching game_events row at the expected
+    # sequence even though persist_pending_events never ran (crash window).
+    persisted = await _event_rows(session_factory, game_id)
+    takeover_rows = [row for row in persisted if row.event_type == "SeatTakenOver"]
+    assert len(takeover_rows) == 1
+    assert takeover_rows[0].sequence == takeover_sequence
+    assert takeover_rows[0].payload["public_player_id"] == _HUMAN_SEAT
+
+    async with session_factory() as session:
+        seat = (
+            await session.execute(
+                select(GameSeat).where(
+                    GameSeat.game_id == game_id,
+                    GameSeat.public_player_id == _HUMAN_SEAT,
+                )
+            )
+        ).scalar_one()
+    assert seat.seat_kind == SeatKind.AI_TAKEOVER.value
+
+    # Rehydrate from game_events ONLY: the takeover provenance is reconstructable
+    # (no AI_TAKEOVER seat is left without its SeatTakenOver event).
+    _rehydrated_state, rehydrated_log = replay_state_from_rows(
+        await _event_rows(session_factory, game_id)
+    )
+    decoded = [EventAdapter.validate_python(e.body) for e in rehydrated_log.events]
+    provenance = compute_seat_provenance(decoded)
+    assert provenance[_HUMAN_SEAT] == PROVENANCE_HUMAN_THEN_AI

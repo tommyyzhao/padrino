@@ -46,6 +46,7 @@ from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
 from padrino.db.models import Game, GameSeat, HumanActionSubmission, HumanChatSubmission
+from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_action_submissions as human_actions_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
@@ -323,6 +324,35 @@ async def _takeover_replacement_adapter(
     )
 
 
+async def _persist_stored_event_row(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    stored: StoredEvent,
+) -> None:
+    """Append one in-memory event envelope to ``game_events`` in ``session``.
+
+    Used to co-commit a SeatTakenOver / chat content_ref event row with its
+    paired DB mutation so the persisted hash chain never lags that state across
+    a crash (hard rule 4). The outer loop's ``persist_pending_events`` is
+    idempotent against an already-committed sequence, so this row is not
+    re-inserted later.
+    """
+    body = stored.body
+    await events_repo.append_event(
+        session,
+        game_id=game_id,
+        sequence=stored.sequence,
+        event_type=str(body["event_type"]),
+        phase=str(body["phase"]),
+        visibility=str(body["visibility"]),
+        actor_player_id=body.get("actor_player_id"),
+        payload=dict(body.get("payload", {})),
+        prev_event_hash=stored.prev_event_hash,
+        event_hash=stored.event_hash,
+    )
+
+
 async def _take_over_expired_human_seats(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -415,6 +445,10 @@ async def _take_over_expired_human_seats(
             seat.seat_kind = SeatKind.AI_TAKEOVER.value
             seat.taken_over_at_phase = phase
             seat.takeover_agent_build_id = build_id
+            # Persist the paired SeatTakenOver event row in the SAME transaction
+            # as the seat mutation (hard rule 4): a crash can never leave an
+            # AI_TAKEOVER seat without its provenance event in game_events.
+            await _persist_stored_event_row(session, game_id=game_id, stored=result.event)
             applied.append(
                 AppliedTakeover(
                     seat_id=seat_id,

@@ -717,7 +717,16 @@ async def drive_game_loop(
     async def persist_pending_events(log_before: int) -> None:
         if persistence is None:
             return
+        # A paired DB mutation (human seat takeover / chat release) may have
+        # already persisted its own event row in the SAME transaction as the
+        # seat/sidecar write, so the chain never lags that state across a crash.
+        # Skip any sequence already committed so we never re-insert it and trip
+        # uq_game_event_sequence.
+        async with persistence.session_factory() as session:
+            persisted_head = await events_repo.max_persisted_sequence(session, persistence.game_id)
         for stored in event_log.events[log_before:]:
+            if persisted_head is not None and stored.sequence <= persisted_head:
+                continue
             await _persist_stored_event(persistence, stored)
 
     async def snapshot_phase(game_state: GameState, phase_id: str) -> None:

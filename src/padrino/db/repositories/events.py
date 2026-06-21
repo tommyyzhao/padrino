@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.db.models import GameEvent
@@ -92,3 +92,18 @@ async def list_events_after(
     )
     result = await session.execute(stmt)
     return list(result.scalars())
+
+
+async def max_persisted_sequence(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+) -> int | None:
+    """Return the highest persisted ``sequence`` for ``game_id`` (``None`` if empty).
+
+    Used to make event persistence idempotent: a paired DB mutation may persist
+    its own event row in the same transaction (so the chain never lags the seat /
+    sidecar state across a crash), after which the outer loop must not re-insert
+    that already-committed row and trip ``uq_game_event_sequence``.
+    """
+    stmt = select(func.max(GameEvent.sequence)).where(GameEvent.game_id == game_id)
+    return (await session.execute(stmt)).scalar_one_or_none()

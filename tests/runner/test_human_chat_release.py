@@ -13,6 +13,7 @@ from padrino.core.engine.events import EventAdapter
 from padrino.core.engine.replay import replay_event_log
 from padrino.core.human_chat import human_chat_content_ref
 from padrino.db.models import Game
+from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_chat as sidecar_repo
 from padrino.db.repositories import human_chat_submissions as holds_repo
 from padrino.runner.human_chat_release import release_held_chat_for_phase
@@ -147,3 +148,88 @@ async def test_private_human_chat_release_appends_content_ref_event_only(
     assert sidecar is not None
     assert sidecar.raw_text == _PRIVATE_TEXT
     assert sidecar.cleaned_text == _PRIVATE_TEXT
+
+
+@pytest.mark.asyncio
+async def test_chat_release_co_commits_event_row_and_resumes_without_uq_collision(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """US-189: sidecar row + hold flip + content_ref event row are one txn.
+
+    A crash window after the sidecar commit but before the event row would leave
+    the DB ahead of the chain and wedge the next release on a sequence collision.
+    Co-committing prevents that: after a release the sidecar sequence has a
+    matching game_events row, and a fresh release rehydrating the log from
+    game_events resumes at the next sequence without a uq collision.
+    """
+    phase = "DAY_1_DISCUSSION_ROUND_1"
+    async with session_factory() as session, session.begin():
+        game_id = await _seed_game(session)
+        await _approved_hold(
+            session,
+            game_id=game_id,
+            player_id="P01",
+            phase=phase,
+            channel="PUBLIC",
+            text=_PUBLIC_TEXT,
+        )
+        first = await release_held_chat_for_phase(
+            session,
+            game_id=game_id,
+            phase=phase,
+            released_at=datetime(2026, 6, 20, 12, tzinfo=UTC),
+            event_log=EventLog(),
+        )
+    assert len(first) == 1
+    first_sequence = first[0].sidecar_sequence
+
+    # The committed sidecar row has a matching game_events row at the same
+    # sequence (the chain never lags the sidecar across a crash).
+    async with session_factory() as session:
+        sidecar = await sidecar_repo.get_human_chat(
+            session, game_id=game_id, sequence=first_sequence
+        )
+        rows = await events_repo.list_events(session, game_id)
+    assert sidecar is not None
+    event_rows = [r for r in rows if r.sequence == first_sequence]
+    assert len(event_rows) == 1
+    assert event_rows[0].event_type == "PublicMessageSubmitted"
+    assert event_rows[0].payload["content_ref"] == human_chat_content_ref(_PUBLIC_TEXT)
+
+    # A fresh release rehydrates the in-memory log from the persisted event rows
+    # and resumes at the next sequence — no uq_human_chat_message_sequence clash.
+    async with session_factory() as session, session.begin():
+        await _approved_hold(
+            session,
+            game_id=game_id,
+            player_id="P03",
+            phase=phase,
+            channel="PUBLIC",
+            text="second human line",
+        )
+        resumed_log = EventLog()
+        for row in await events_repo.list_events(session, game_id):
+            resumed_log.append(
+                {
+                    "event_type": row.event_type,
+                    "sequence": row.sequence,
+                    "phase": row.phase,
+                    "visibility": row.visibility,
+                    "actor_player_id": row.actor_player_id,
+                    "payload": dict(row.payload),
+                }
+            )
+        second = await release_held_chat_for_phase(
+            session,
+            game_id=game_id,
+            phase=phase,
+            released_at=datetime(2026, 6, 20, 12, 1, tzinfo=UTC),
+            event_log=resumed_log,
+        )
+    assert len(second) == 1
+    assert second[0].sidecar_sequence == first_sequence + 1
+
+    async with session_factory() as session:
+        rows = await events_repo.list_events(session, game_id)
+    sequences = sorted(r.sequence for r in rows)
+    assert sequences == [first_sequence, first_sequence + 1]

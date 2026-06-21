@@ -667,19 +667,8 @@ async def test_ai_observation_resolves_released_human_chat_from_sidecar(
             event_log=event_log,
         )
         assert len(released) == 1
-        stored = event_log.events[-1]
-        await events_repo.append_event(
-            session,
-            game_id=game_id,
-            sequence=stored.sequence,
-            event_type=stored.body["event_type"],
-            phase=stored.body["phase"],
-            visibility=stored.body["visibility"],
-            actor_player_id=stored.body["actor_player_id"],
-            payload=stored.body["payload"],
-            prev_event_hash=stored.prev_event_hash,
-            event_hash=stored.event_hash,
-        )
+        # US-189: release_held_chat_for_phase now co-commits the paired
+        # content_ref game_events row in this same transaction.
 
     capture = _CaptureAdapter()
 

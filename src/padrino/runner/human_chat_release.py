@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.engine.event_log import EventLog
 from padrino.core.human_chat import human_chat_content_ref
+from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import human_chat as sidecar_repo
 from padrino.db.repositories import human_chat_submissions as holds_repo
 
@@ -106,7 +107,7 @@ async def release_held_chat_for_phase(
             continue
         sequence = len(event_log.events)
         content_ref = human_chat_content_ref(submission.raw_text)
-        event_log.append(
+        stored = event_log.append(
             _message_event_body(
                 sequence=sequence,
                 phase=phase,
@@ -114,6 +115,25 @@ async def release_held_chat_for_phase(
                 channel=submission.channel,
                 content_ref=content_ref,
             )
+        )
+        # Co-commit the content_ref event row with the sidecar row + hold flip in
+        # this single transaction (hard rule 4): a crash can never leave a sidecar
+        # row at sequence N without its game_events row, which would otherwise let
+        # the next release re-derive sequence N and collide on
+        # uq_human_chat_message_sequence. The outer loop's persist_pending_events
+        # is idempotent against an already-committed sequence.
+        body = stored.body
+        await events_repo.append_event(
+            session,
+            game_id=game_id,
+            sequence=stored.sequence,
+            event_type=str(body["event_type"]),
+            phase=str(body["phase"]),
+            visibility=str(body["visibility"]),
+            actor_player_id=body.get("actor_player_id"),
+            payload=dict(body.get("payload", {})),
+            prev_event_hash=stored.prev_event_hash,
+            event_hash=stored.event_hash,
         )
         await sidecar_repo.append_human_chat(
             session,
