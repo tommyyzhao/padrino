@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectIdentityBlind } from './helpers/identityBlind';
 
 // US-092: Live/recent lobby page.
 //
@@ -259,10 +260,7 @@ test.describe('lobby UI (US-154)', () => {
     await expect(page.getByTestId('lobby-ready-state')).toHaveText('Ready');
 
     // Anonymity: the rendered roster exposes no human/AI seat markers.
-    const rosterHtml = (await page.getByTestId('lobby-roster').innerHTML()).toLowerCase();
-    expect(rosterHtml).not.toContain('seat_kind');
-    expect(rosterHtml).not.toContain('is_human');
-    expect(rosterHtml).not.toContain('agent_build');
+    await expectIdentityBlind(page.getByTestId('lobby-roster'));
   });
 
   test('create form shows ruleset, identity mode, and CASUAL stakes', async ({ page }) => {

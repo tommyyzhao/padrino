@@ -23,6 +23,13 @@
     text: string;
   }
 
+  interface NightOutcomeEntry {
+    sequence: number;
+    phase: string;
+    public_player_id: string;
+    cause: string | null;
+  }
+
   let gameId = $derived($page.params.id);
 
   let frameCount = $state(0);
@@ -30,6 +37,7 @@
   // player_id -> alive
   let playerAlive = $state<Record<string, boolean>>({});
   let chatEntries = $state<ChatEntry[]>([]);
+  let nightOutcomeEntries = $state<NightOutcomeEntry[]>([]);
   // voter_id -> target_id
   let votesByVoter = $state<Record<string, string>>({});
   let terminalResult = $state<Record<string, unknown> | null>(null);
@@ -38,6 +46,14 @@
   let error = $state<string | null>(null);
 
   let sse: EventSource | null = null;
+
+  function asString(value: unknown): string | null {
+    return typeof value === 'string' ? value : null;
+  }
+
+  function isNightOutcome(phase: string, cause: string | null): boolean {
+    return phase.toUpperCase().startsWith('NIGHT_') || (cause ?? '').toUpperCase().includes('NIGHT');
+  }
 
   function processFrame(frame: PublicFrame): void {
     currentPhase = frame.phase;
@@ -51,15 +67,22 @@
 
     switch (frame.event_type) {
       case 'PlayerEliminated': {
-        const pid = frame.actor_player_id;
+        const pid = asString(payload['public_player_id']) ?? frame.actor_player_id;
         if (pid !== null) {
           playerAlive = { ...playerAlive, [pid]: false };
+        }
+        const cause = asString(payload['cause']);
+        if (pid !== null && isNightOutcome(frame.phase, cause)) {
+          nightOutcomeEntries = [
+            ...nightOutcomeEntries,
+            { sequence: frame.sequence, phase: frame.phase, public_player_id: pid, cause }
+          ];
         }
         break;
       }
       case 'PublicMessageSubmitted': {
         const actor = frame.actor_player_id;
-        const text = typeof payload['text'] === 'string' ? payload['text'] : null;
+        const text = asString(payload['text']);
         if (actor !== null && text !== null) {
           chatEntries = [
             ...chatEntries,
@@ -68,12 +91,18 @@
         }
         break;
       }
+      case 'VoteSubmitted':
       case 'VoteCast': {
         const voter = frame.actor_player_id;
-        const target =
-          typeof payload['target_player_id'] === 'string' ? payload['target_player_id'] : null;
-        if (voter !== null && target !== null) {
-          votesByVoter = { ...votesByVoter, [voter]: target };
+        const target = asString(payload['target']) ?? asString(payload['target_player_id']);
+        if (voter !== null) {
+          const nextVotes = { ...votesByVoter };
+          if (target !== null && payload['is_abstain'] !== true) {
+            nextVotes[voter] = target;
+          } else {
+            delete nextVotes[voter];
+          }
+          votesByVoter = nextVotes;
         }
         break;
       }
@@ -259,6 +288,26 @@
             >
               <span class="font-mono">{v.player.slice(0, 8)}</span>
               <span class="font-semibold">{v.count}</span>
+            </li>
+          {/each}
+        </ul>
+      </Card>
+    {/if}
+
+    {#if nightOutcomeEntries.length > 0}
+      <Card>
+        <h2 class="mb-2 text-sm font-semibold">Night</h2>
+        <ul class="flex flex-col gap-1" data-testid="watch-night-outcomes">
+          {#each nightOutcomeEntries as entry (entry.sequence)}
+            <li
+              class="text-xs"
+              data-testid="watch-night-outcome"
+              data-player-id={entry.public_player_id}
+              data-cause={entry.cause ?? ''}
+            >
+              <span class="font-mono text-muted-foreground">[{entry.phase}]</span>
+              <span class="ml-1 font-mono">{entry.public_player_id.slice(0, 8)}</span>
+              <span> was eliminated overnight.</span>
             </li>
           {/each}
         </ul>

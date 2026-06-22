@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Spectator watch NAR outcomes (US-225): render public night deaths only from
+  the projected PUBLIC `PlayerEliminated.payload.public_player_id` /
+  `payload.cause`; `actor_player_id` is normally `None` for resolved
+  eliminations. Do not invent a public no-death/NAR summary from
+  `NightResolved`, because it is SYSTEM and dropped by spectator projection.
+  Keep shared Playwright identity-blind assertions in
+  `web/dashboard/tests/e2e/helpers/identityBlind.ts`.
 - Server-driven play actions (US-224): the human play UI must treat
   `SeatObservationFrame.legal_actions.allowed_action_types` as the action
   universe. For night actions, select the server-provided targeted non-vote
@@ -2285,3 +2292,36 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Extra in-app Browser smoke was attempted after starting a temporary dev
   server, but the Browser plugin setup failed before exposing a usable tab; the
   required Playwright e2e suite covered the changed play surface.
+
+## 2026-06-22T14:54 PDT - US-225
+- Updated the spectator watch page to fold real public projection frames:
+  `VoteSubmitted.payload.target` for votes and
+  `PlayerEliminated.payload.public_player_id` for eliminated seats.
+- Added an identity-blind Night card that renders only projected public night
+  eliminations, including cleaned no-reveal deaths where `role` / `faction` are
+  absent; private NAR feedback and SYSTEM `NightResolved` summaries remain
+  unrendered.
+- Added explicit backend projection tests proving `NightFeedbackDelivered`
+  private codes (`INVESTIGATION_RESULT`, `TRACK_RESULT`, `WATCH_RESULT`,
+  `ACTION_BLOCKED`) and representative `NightResolved` payloads return `None`
+  from `project_event_for_spectator`.
+- Added shared Playwright identity-blind helper coverage and reused it in
+  play, watch, lobby, and leaderboard specs.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/core/test_spectator_projection.py`,
+  `web/dashboard/src/routes/watch/[id]/+page.svelte`,
+  `web/dashboard/tests/e2e/helpers/identityBlind.ts`,
+  `web/dashboard/tests/e2e/watch.spec.ts`,
+  `web/dashboard/tests/e2e/play.spec.ts`,
+  `web/dashboard/tests/e2e/lobby.spec.ts`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- watch.spec.ts` failed on the old
+  payload/renderer behavior; focused GREEN same command -> 3 passed; focused
+  `uv run pytest tests/core/test_spectator_projection.py -q` -> 15 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2477
+  passed / 47 skipped / 10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 24
+  passed / 3 skipped.

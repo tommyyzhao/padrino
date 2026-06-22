@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectIdentityBlind, ROLE_AND_FACTION_TOKENS } from './helpers/identityBlind';
 
 // US-091: consumer live-viewer page.
 //
@@ -9,8 +10,10 @@ import { expect, test } from '@playwright/test';
 //   2. Events ending with GameTerminated → outcome banner appears with winner.
 
 const GAME_ID = '11111111-2222-3333-4444-aaaaaaaaaaaa';
+const NAR_GAME_ID = '22222222-3333-4444-5555-bbbbbbbbbbbb';
 const ALICE_ID = 'aaaaaaaa-bbbb-cccc-dddd-ee0000000000';
 const BOB_ID = 'bbbbbbbb-cccc-dddd-eeee-ff0000000000';
+const CLEANED_ID = 'cccccccc-dddd-eeee-ffff-000000000000';
 
 function mkFrame(
   seq: number,
@@ -41,8 +44,22 @@ function buildSseBody(frames: Record<string, unknown>[]): string {
 const BASE_FRAMES = [
   mkFrame(1, 'PhaseStarted', 'Day 1', null, {}),
   mkFrame(2, 'PublicMessageSubmitted', 'Day 1', ALICE_ID, { text: 'Hello everyone!' }),
-  mkFrame(3, 'VoteCast', 'Day 1', ALICE_ID, { target_player_id: BOB_ID }),
-  mkFrame(4, 'PlayerEliminated', 'Day 1', BOB_ID, {})
+  mkFrame(3, 'VoteSubmitted', 'Day 1', ALICE_ID, { target: BOB_ID, is_abstain: false }),
+  mkFrame(4, 'PlayerEliminated', 'Day 1', null, {
+    public_player_id: BOB_ID,
+    cause: 'DAY_VOTE'
+  })
+];
+
+const NAR_NIGHT_FRAMES = [
+  mkFrame(1, 'PhaseStarted', 'NIGHT_1_ACTIONS', null, {}),
+  mkFrame(2, 'PublicMessageSubmitted', 'DAY_1_DISCUSSION_ROUND_1', ALICE_ID, {
+    text: 'Keep the votes structured.'
+  }),
+  mkFrame(3, 'PlayerEliminated', 'NIGHT_1_ACTIONS', null, {
+    public_player_id: CLEANED_ID,
+    cause: 'night_kill'
+  })
 ];
 
 const TERMINAL_FRAME = mkFrame(5, 'GameTerminated', 'End', null, {
@@ -95,6 +112,40 @@ test.describe('watch', () => {
 
     // No outcome banner (spoiler safety)
     await expect(page.getByTestId('watch-outcome-banner')).toHaveCount(0);
+    await expectIdentityBlind(page.getByTestId('watch-shell'));
+  });
+
+  test('renders projected NAR night death from payload only and stays identity-blind', async ({
+    page
+  }) => {
+    let firstRequest = true;
+    await page.route(`**/public/games/${NAR_GAME_ID}/live*`, async (route) => {
+      if (firstRequest) {
+        firstRequest = false;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: buildSseBody(NAR_NIGHT_FRAMES)
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    await page.goto(`/watch/${NAR_GAME_ID}`);
+    await expect(page.getByTestId('watch-title')).toBeVisible();
+
+    await expect(page.getByTestId('watch-night-outcomes')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('watch-night-outcome')).toHaveCount(1);
+    await expect(page.getByTestId('watch-night-outcome')).toContainText(
+      CLEANED_ID.slice(0, 8)
+    );
+    await expect(
+      page.locator(`[data-testid="watch-seat-row"][data-player-id="${CLEANED_ID}"]`)
+    ).toHaveAttribute('data-alive', 'false');
+
+    await expectIdentityBlind(page.getByTestId('watch-shell'), ROLE_AND_FACTION_TOKENS);
   });
 
   test('shows outcome banner after terminal frame streams', async ({ page }) => {

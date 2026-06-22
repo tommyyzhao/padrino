@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectIdentityBlind } from './helpers/identityBlind';
 
 // US-155: Frontend in-game play surface.
 //
@@ -205,12 +206,7 @@ test.describe('play surface (US-155)', () => {
     expect(chatPosted).toBe(true);
 
     // Anonymity: the rendered board exposes no human/AI or model markers.
-    const shellHtml = (await page.getByTestId('play-shell').innerHTML()).toLowerCase();
-    expect(shellHtml).not.toContain('seat_kind');
-    expect(shellHtml).not.toContain('is_human');
-    expect(shellHtml).not.toContain('agent_build');
-    expect(shellHtml).not.toContain('controller_type');
-    expect(shellHtml).not.toContain('takeover');
+    await expectIdentityBlind(page.getByTestId('play-shell'));
   });
 
   test('server-driven NAR night action: presents ROLEBLOCK and submits its target', async ({

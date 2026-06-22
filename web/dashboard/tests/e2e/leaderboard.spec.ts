@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectIdentityBlind } from './helpers/identityBlind';
 
 // US-070 / US-111 / US-118 / US-186: the leaderboard is a
 // public-surface-only page sourced exclusively from `/public/leaderboard`.
@@ -191,6 +192,7 @@ test.describe('leaderboard', () => {
     await expect(experimentalCards.filter({ hasText: 'Jester 8 lynch-bait' })).toContainText(
       'CI 35-49%'
     );
+    await expectIdentityBlind(page.locator('body'));
   });
 
   test('matches the leaderboard visual snapshot', async ({ page }) => {

@@ -38,7 +38,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Source of truth for visibility = core/spectator_projection.py (PRIVATE/SYSTEM dropped, FORBIDDEN_PAYLOAD_KEYS stripped). The only spectator-PUBLIC night-resolution event is PlayerEliminated (events.py:410); NightFeedbackDelivered (PRIVATE, events.py:347) and NightResolved (SYSTEM, events.py:392) are dropped wholesale - DO NOT try to render roleblock/protect/investigate/track/watch from them. Terminal reveal stays in reveal.py. Richer public night narration needs a NEW PUBLIC core event = out of scope.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-226",
