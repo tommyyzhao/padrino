@@ -301,7 +301,7 @@
         "All backend gates pass."
       ],
       "notes": "DEFER until NAR is solid. Tracker/Watcher (visit-graph inference) split out from Ninja (now US-187b).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-187b",

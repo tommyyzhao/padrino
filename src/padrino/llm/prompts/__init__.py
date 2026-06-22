@@ -76,6 +76,7 @@ _BUNDLED_PROMPT_DIRS: Final[dict[str, str]] = {
     "bench10_v1": "bench10_v1",
     "roleblock10_v1": "bench10_v1",
     "deception13_v1": "bench10_v1",
+    "visit12_v1": "bench10_v1",
     "sk12_v1": "bench10_v1",
     "jester8_v1": "bench10_v1",
 }

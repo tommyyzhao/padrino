@@ -408,6 +408,41 @@ def test_track_and_watch_feedback_use_public_player_ids_only() -> None:
     assert watch.visited_player_ids == ()
 
 
+def test_tracker_and_watcher_read_roleblock_visit_but_not_blocked_action() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.TRACKER, Faction.TOWN),
+                _seat("P05", 4, Role.WATCHER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P02", NightActionKind.ROLEBLOCK, "P03"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P01"),
+            _intent("P04", NightActionKind.TRACK, "P02"),
+            _intent("P05", NightActionKind.WATCH, "P03"),
+        ),
+    )
+
+    assert {(visit.actor, visit.target, visit.blocked) for visit in result.visits} == {
+        ("P02", "P03", False),
+        ("P04", "P02", False),
+        ("P05", "P03", False),
+    }
+    assert result.blocked_actor_ids == ("P03",)
+    assert result.detective_finding is None
+    assert result.feedback_by_code("TRACK_RESULT")[0].visited_player_ids == ("P03",)
+    assert result.feedback_by_code("WATCH_RESULT")[0].visitor_player_ids == ("P02",)
+
+
 def test_cleaned_death_suppresses_death_reveal_only() -> None:
     state = _state().model_copy(
         update={

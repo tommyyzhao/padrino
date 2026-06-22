@@ -15,6 +15,7 @@ from padrino.core.rulesets import (
     mini7_v1,
     roleblock10_v1,
     sk12_v1,
+    visit12_v1,
 )
 
 
@@ -359,6 +360,9 @@ def _canonical_seats(ruleset_id: str) -> tuple[Seat, ...]:
     elif ruleset_id == deception13_v1.RULESET_ID:
         role_counts = deception13_v1.ROLE_COUNTS
         role_factions = deception13_v1.ROLE_FACTIONS
+    elif ruleset_id == visit12_v1.RULESET_ID:
+        role_counts = visit12_v1.ROLE_COUNTS
+        role_factions = visit12_v1.ROLE_FACTIONS
     elif ruleset_id == sk12_v1.RULESET_ID:
         role_counts = sk12_v1.ROLE_COUNTS
         role_factions = sk12_v1.ROLE_FACTIONS
@@ -399,6 +403,10 @@ def _canonical_seats(ruleset_id: str) -> tuple[Seat, ...]:
         (
             deception13_v1.RULESET_ID,
             '{"P01":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P02":{"allowed_action_types":["ROLEBLOCK"],"legal_targets":["P01","P03","P04","P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P03":{"allowed_action_types":["CLEAN"],"legal_targets":["P01","P02","P04","P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P04":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P05":{"allowed_action_types":["INVESTIGATE"],"legal_targets":["P01","P02","P03","P04","P06","P07","P08","P09","P10","P11","P12","P13"]},"P06":{"allowed_action_types":["PROTECT"],"legal_targets":["P01","P02","P03","P04","P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P07":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P08":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P09":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P10":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P11":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P12":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P13":{"allowed_action_types":["NOOP"],"legal_targets":[]}}',
+        ),
+        (
+            visit12_v1.RULESET_ID,
+            '{"P01":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10","P11","P12"]},"P02":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10","P11","P12"]},"P03":{"allowed_action_types":["ROLEBLOCK"],"legal_targets":["P01","P02","P04","P05","P06","P07","P08","P09","P10","P11","P12"]},"P04":{"allowed_action_types":["INVESTIGATE"],"legal_targets":["P01","P02","P03","P05","P06","P07","P08","P09","P10","P11","P12"]},"P05":{"allowed_action_types":["PROTECT"],"legal_targets":["P01","P02","P03","P04","P05","P06","P07","P08","P09","P10","P11","P12"]},"P06":{"allowed_action_types":["TRACK"],"legal_targets":["P01","P02","P03","P04","P05","P07","P08","P09","P10","P11","P12"]},"P07":{"allowed_action_types":["WATCH"],"legal_targets":["P01","P02","P03","P04","P05","P06","P08","P09","P10","P11","P12"]},"P08":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P09":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P10":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P11":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P12":{"allowed_action_types":["NOOP"],"legal_targets":[]}}',
         ),
         (
             sk12_v1.RULESET_ID,
