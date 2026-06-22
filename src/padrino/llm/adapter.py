@@ -55,6 +55,7 @@ class AdapterResult(BaseModel):
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None
+    model_id: str | None = None
     provider_response_id: str | None = None
     status: AdapterStatus = "ok"
     error: str | None = None

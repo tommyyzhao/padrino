@@ -55,6 +55,7 @@ from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
+from padrino.economics.human_cost_governance import price_turn_usd
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
@@ -82,6 +83,7 @@ from padrino.ratings.solo_rate_service import (
     update_solo_rate_ratings_for_game,
 )
 from padrino.runner.tick import run_tick
+from padrino.settings import Settings, get_settings
 
 _logger = structlog.get_logger("padrino.runner")
 
@@ -145,6 +147,7 @@ class GamePersistence:
     agent_builds: Mapping[str, uuid.UUID] = field(default_factory=dict)
     league_id: uuid.UUID | None = None
     resume: GameResume | None = None
+    settings: Settings | None = None
 
 
 class GameConfig(BaseModel):
@@ -549,6 +552,17 @@ def _parsed_response_to_json(result: AdapterResult) -> dict[str, Any] | None:
     return None
 
 
+def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float:
+    settings = persistence.settings or get_settings()
+    return price_turn_usd(
+        settings,
+        response_cost=result.cost_usd,
+        model=result.model_id or "default",
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+    )
+
+
 async def _persist_llm_call(
     persistence: GamePersistence,
     observation: Observation,
@@ -574,7 +588,7 @@ async def _persist_llm_call(
             latency_ms=result.latency_ms,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
-            cost_usd=result.cost_usd,
+            cost_usd=_priced_cost_usd(persistence, result),
             provider_response_id=result.provider_response_id,
         )
 

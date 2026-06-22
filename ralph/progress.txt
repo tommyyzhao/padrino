@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- LLM cost fallback persist seam (US-232): keep
+  `llm/litellm_adapter._extract_cost` response-local and returning only
+  LiteLLM `_hidden_params.response_cost` or `None`. Carry the actual attempted
+  LiteLLM model string on `AdapterResult.model_id`, then resolve persisted
+  `LlmCall.cost_usd` in `runner/game_runner._persist_llm_call` with
+  `price_turn_usd(settings, response_cost, model, input_tokens, output_tokens)`.
+  Human-lane breaker/spend accounting reads the persisted row, so fallback
+  pricing must be applied before `llm_calls_repo.record_call`.
 - Human cost-governance cap tests (US-231): `admit_human` checks global
   inference reservation, then per-principal inference reservation, then the
   action's count cap. Count-cap tests must set the inference budget high enough
@@ -2530,4 +2538,24 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   formatting for `tests/economics/test_human_cost_governance.py`, then passed
   after `uv run ruff format tests/economics/test_human_cost_governance.py`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2497
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T17:05 PDT - US-232
+- Wired token fallback pricing into the LLM call persistence boundary. The
+  LiteLLM adapter still records raw `response_cost` only, but now also carries
+  the actual attempted model string on `AdapterResult.model_id`; the runner
+  uses that plus token counts and settings to persist a priced `LlmCall.cost_usd`.
+- Added persistence tests for missing `response_cost`, response-cost precedence,
+  settings-driven model price overrides, and human-lane global spend summing a
+  fallback-priced human-game turn.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/llm/adapter.py`,
+  `src/padrino/llm/litellm_adapter.py`, `src/padrino/runner/game_runner.py`,
+  `tests/llm/test_litellm_adapter.py`,
+  `tests/runner/test_llm_call_cost_persistence.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/runner/test_llm_call_cost_persistence.py tests/llm/test_litellm_adapter.py -q`
+  -> 34 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2502
   passed / 48 skipped / 10 deselected.

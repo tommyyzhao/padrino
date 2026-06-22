@@ -155,7 +155,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: the persist boundary (Settings+model+tokens in scope) wires price_turn_usd; llm/litellm_adapter._extract_cost (response-only, lines ~377-383, called at L315) keeps returning response_cost or None - do NOT thread Settings into it. economics/human_cost_governance.price_turn_usd (the fallback already exists, prefers response_cost when present, L110), settings.padrino_human_fallback_token_price_per_1k, db/models.LlmCall.cost_usd. The fix is wiring at the persist seam, not net-new math.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-233",

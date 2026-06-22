@@ -276,6 +276,7 @@ class LiteLlmAdapter:
                     details=f"{exc.error_kind}: {exc.error_message}",
                 ),
                 latency_ms=latency_ms,
+                model_id=model_id,
                 status="provider_error",
                 error=f"{exc.error_kind}: {exc.error_message}",
                 failure=failure,
@@ -290,6 +291,7 @@ class LiteLlmAdapter:
                     details=f"{type(exc).__name__}: {exc}",
                 ),
                 latency_ms=latency_ms,
+                model_id=model_id,
                 status="provider_error",
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -313,6 +315,7 @@ class LiteLlmAdapter:
             input_tokens=_extract_input_tokens(response),
             output_tokens=_extract_output_tokens(response),
             cost_usd=_extract_cost(response),
+            model_id=model_id,
             provider_response_id=_extract_response_id(response),
             status=status,
         )
