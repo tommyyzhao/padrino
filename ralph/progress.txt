@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Placement terminal scoring (US-219): wire non-canonical PLACEMENT contexts
+  from the runner terminal transaction, like SOLO_RATE, using
+  `declared_for_ruleset` to fail closed and skipping mirror-pair games until
+  paired placement scoring is defined. Derive placement groups from assigned
+  seat factions, treat `DRAW` as an all-groups tie with mu frozen and sigma
+  shrinking, and reject any single agent build spanning multiple placement
+  outcome groups so it cannot double-count.
 - Same-night-death feedback suppression (US-218): when a night role produces
   private resolved-state feedback, pass `eliminated_player_ids` into that
   feedback path and skip recipients killed that night. Apply this consistently
@@ -204,6 +211,29 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 - Disconnect grace + silent AI takeover (US-150): a dropped human gets a short reconnect grace window; on expiry a curated AI silently takes the seat so the game continues, invisibly in anonymous mode. TWO modules, no schema change, no new deps. (1) PURE `core/disconnect.py` (data-in/data-out with an INJECTED `now` — never reads a clock): `SeatPresence{public_player_id, connected, disconnected_at}` + `is_within_grace(presence, *, now, grace_seconds)` (connected -> always within; disconnected within window -> reconnectable; a disconnected seat with NO drop instant treated as just-dropped) + `seats_past_grace(presences, *, now, grace_seconds) -> [seat_id]` (the disconnected seats whose window expired, in input order — a reconnect BEFORE expiry flips `connected=True` so the seat is never listed: "reconnect returns the seat") + `project_presence_for_viewer(presences, *, viewer_seat_id, identity_mode) -> [{seat_id, connected}]` (the IDENTITY-BLIND presence frame: in ANONYMOUS mode — the fail-closed default via `observation_privacy.is_anonymous`, so None coerces anonymous — it carries ONLY the viewer's OWN seat; other seats' presence/reconnecting state is NEVER exposed because an AI never disconnects, so any per-seat presence signal would out a human; TRANSPARENT may show all; each entry is `{seat_id, connected}` ONLY — never a drop timestamp or human/AI marker). `core/disconnect.py` imports `datetime` for pure grace ARITHMETIC (timedelta only) — add it to `tests/core/test_purity.py::ALLOWED_FORBIDDEN_IMPORTS` ("disconnect.py": frozenset({"datetime"})) EXACTLY like `scheduling/__init__.py`; the `test_allowed_datetime_modules_make_no_wallclock_calls` guard then enforces no `.now()/.utcnow()/.today()` (the module uses `value.replace(tzinfo=UTC)` for the SQLite-naive coercion — `replace` is not a wall-clock attr). (2) IMPURE `runner/disconnect_takeover.py::take_over_seat(*, mux, event_log, state, seat_id, replacement_adapter, replacement_agent_build_ref, reason="disconnect_grace_expired") -> TakeoverResult{event, replaced_adapter}`: REUSES US-139's `SeatMultiplexAdapter.swap_seat(seat, adapter)` (rebinds the dispatch table between ticks, returns the replaced human adapter, KeyError on an unknown seat — a takeover replaces an existing occupant) + US-122's `SeatTakenOver` event appended to the hash-chained `EventLog` with `day`/`phase` read from `state.current_phase` (pure logical values via `core.observations.format_phase_id` — NO wall clock/random in the payload). The takeover is REVEAL-ONLY: `SeatTakenOver` is SYSTEM-visibility so it NEVER lands on a PUBLIC/live frame (no mid-game leak); it surfaces only at the endgame reveal where `reducer.compute_seat_provenance(typed_events)` derives HUMAN_THEN_AI for the seat (requires the seat marked seat_kind=HUMAN in RolesAssigned, i.e. the US-149 launch handoff). New setting `padrino_human_reconnect_grace_seconds: float = 90.0` (wall-clock value consumed only in the impure runner; the pure decision reads it as plain data). Test `tests/runner/test_disconnect_takeover.py` (12): pure grace decisions (connected always within, recent-within/old-past, seats_past_grace lists only expired, reconnect-returns-seat, naive-timestamp coercion); identity-blind projection (anonymous shows only viewer's own seat, None fails closed, other-seat reconnecting never exposed, transparent shows all); runner orchestration reuses the US-139 `_TakeoverMux` + `_FakeClock` + `make_town_win_script`: a HUMAN seat is taken over mid-DAY_1_VOTE (swap on the real mux, `seats_past_grace` decides), the game still reaches TOWN, no PUBLIC frame carries SeatTakenOver, the committed log (incl. the appended SeatTakenOver) replays bit-for-bit, and `take_over_seat` on a hand-built HUMAN-marked RolesAssigned+state yields a SYSTEM-visibility pure-data event + HUMAN_THEN_AI provenance + KeyError on an unknown seat.
 
 ---
+
+## 2026-06-21T21:47 PDT - US-219
+- Wired non-canonical PLACEMENT scoring into `game_runner` terminal persistence
+  with an `apply_placement` gate based on `declared_for_ruleset`, complete
+  build coverage, ranked execution, and no mirror-pair metadata.
+- Added runner integration coverage proving a terminal `sk12_v1` game writes
+  `placement_ratings` / `placement_rating_events` while writing zero scientific
+  `Rating` / `RatingEvent` rows.
+- Hardened placement OpenSkill updates so `DRAW` is a neutral sigma-only update
+  and a single agent build cannot be credited in multiple outcome groups.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/ratings/test_openskill_service.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED placement draw / shared-build tests and
+  focused RED `sk12_v1` runner placement integration; focused GREEN same
+  tests; adjacent
+  `uv run pytest tests/ratings/test_openskill_service.py tests/runner/test_rating_integration.py tests/runner/test_jester_solo_rate_integration.py -q`
+  -> 22 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2462
+  passed / 47 skipped / 10 deselected.
 
 ## 2026-06-21T21:30 PDT - US-217
 - Added `tests/integration/test_canonical_byte_stability.py`, a runner-level

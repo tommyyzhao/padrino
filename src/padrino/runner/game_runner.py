@@ -47,13 +47,14 @@ from padrino.core.engine.resolvers.night import resolve_night
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED, check_win
-from padrino.core.enums import ActionType, Faction, PhaseKind, Role
+from padrino.core.enums import ActionType, Faction, PhaseKind, RatingContextKind, Role
 from padrino.core.observations import Observation, format_phase_id
 from padrino.core.rulesets import Ruleset as CoreRuleset
 from padrino.core.rulesets import get_ruleset, mini7_v1
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
+from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
@@ -69,6 +70,8 @@ from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
 from padrino.ratings.openskill_service import (
     GameResult,
+    PlacementGameResult,
+    update_placement_ratings_for_game,
     update_ratings_for_completed_pair,
     update_ratings_for_game,
 )
@@ -358,6 +361,26 @@ def _should_apply_solo_rate(
     return all(s.public_player_id in persistence.agent_builds for s in state.seats)
 
 
+def _should_apply_placement(
+    persistence: GamePersistence,
+    ranked: bool,
+    state: GameState,
+    game: Any | None,
+) -> bool:
+    if not ranked or not persistence.agent_builds:
+        return False
+    if game is None or game.pair_id is not None:
+        return False
+    if state.terminal_result is None:
+        return False
+    if not all(s.public_player_id in persistence.agent_builds for s in state.seats):
+        return False
+    declared = rating_contexts_repo.declared_for_ruleset(game.ruleset_id)
+    if declared is None:
+        return False
+    return declared.kind is RatingContextKind.PLACEMENT and not declared.is_canonical
+
+
 def _solo_rate_result_for(state: GameState, game_id: uuid.UUID) -> SoloRateGameResult | None:
     jester_attempts = tuple(
         SoloRateAttempt(
@@ -374,6 +397,15 @@ def _solo_rate_result_for(state: GameState, game_id: uuid.UUID) -> SoloRateGameR
         game_id=game_id,
         outcome_label="JESTER_LYNCH_BAIT",
         attempts=jester_attempts,
+    )
+
+
+def _placement_result_for(state: GameState, game_id: uuid.UUID) -> PlacementGameResult:
+    assert state.terminal_result is not None
+    return PlacementGameResult(
+        game_id=game_id,
+        winner=state.terminal_result,
+        seat_groups={seat.public_player_id: seat.faction.value for seat in state.seats},
     )
 
 
@@ -400,6 +432,7 @@ async def _persist_terminated_event(
     }
     async with persistence.session_factory() as session, session.begin():
         game = await games_repo.get(session, persistence.game_id)
+        apply_placement = _should_apply_placement(persistence, ranked, state, game)
         if game is not None and game.status == STATUS_COMPLETED:
             _logger.info(
                 "Game already terminated and completed; skipping rating application and status updates.",
@@ -460,6 +493,12 @@ async def _persist_terminated_event(
                     game_result=solo_result,
                     agent_builds_by_seat=persistence.agent_builds,
                 )
+        if apply_placement:
+            await update_placement_ratings_for_game(
+                session,
+                game_result=_placement_result_for(state, persistence.game_id),
+                agent_builds_by_seat=persistence.agent_builds,
+            )
 
 
 def _request_prompt_hash(observation: Observation) -> str:

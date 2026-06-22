@@ -456,7 +456,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: game_runner.py:394-462 (_finalize_game dispatches), openskill_service.py:341/359-371/492, public_leaderboard.py:660-680 (_placement_cards), sk12_v1.py:20. Mirror the apply_solo_rate pattern; preserve the firewall.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-220",

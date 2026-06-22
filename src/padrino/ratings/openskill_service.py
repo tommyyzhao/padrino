@@ -45,6 +45,7 @@ INITIAL_SIGMA: Final[float] = 25.0 / 3.0
 SCOPE_GLOBAL: Final[str] = "GLOBAL"
 SCOPE_VALUE_GLOBAL: Final[str] = "global"
 SCOPE_FACTION: Final[str] = "FACTION"
+PLACEMENT_DRAW: Final[str] = "DRAW"
 
 
 def _conservative(mu: float, sigma: float) -> float:
@@ -338,7 +339,7 @@ def _placement_groups_for(result: PlacementGameResult) -> list[str]:
     groups = sorted(set(result.seat_groups.values()))
     if len(groups) < 2:
         raise ValueError("placement rating requires at least two outcome groups")
-    if result.winner not in groups:
+    if result.winner != PLACEMENT_DRAW and result.winner not in groups:
         raise ValueError(f"placement winner {result.winner!r} is not present in seat_groups")
     return groups
 
@@ -356,12 +357,24 @@ async def _apply_placement_scope_update(
     """Run one multi-team placement update for the placement GLOBAL scope."""
     groups = _placement_groups_for(game_result)
     entries_by_group: dict[str, list[tuple[str, PlacementRating]]] = {group: [] for group in groups}
+    group_by_build: dict[uuid.UUID, str] = {}
     for public_player_id in sorted(game_result.seat_groups):
         group = game_result.seat_groups[public_player_id]
+        agent_build_id = agent_builds_by_seat[public_player_id]
+        existing_group = group_by_build.get(agent_build_id)
+        if existing_group is not None:
+            if existing_group != group:
+                msg = (
+                    f"agent build {agent_build_id} maps to multiple placement outcome groups: "
+                    f"{existing_group!r} and {group!r}"
+                )
+                raise ValueError(msg)
+            continue
+        group_by_build[agent_build_id] = group
         row = await placement_ratings_repo.get_or_create_placement_rating(
             session,
             rating_context_id=context.id,
-            agent_build_id=agent_builds_by_seat[public_player_id],
+            agent_build_id=agent_build_id,
             scope_type=SCOPE_GLOBAL,
             scope_value=SCOPE_VALUE_GLOBAL,
             initial_mu=INITIAL_MU,
@@ -374,7 +387,8 @@ async def _apply_placement_scope_update(
         [model.create_rating([row.mu, row.sigma], name=str(row.id)) for _sid, row in entries]
         for entries in (entries_by_group[group] for group in groups)
     ]
-    ranks = [1.0 if group == game_result.winner else 2.0 for group in groups]
+    is_draw = game_result.winner == PLACEMENT_DRAW
+    ranks = [1.0 if is_draw or group == game_result.winner else 2.0 for group in groups]
     new_teams = model.rate(rating_teams, ranks=ranks)
 
     events: list[PlacementRatingEvent] = []
@@ -389,7 +403,7 @@ async def _apply_placement_scope_update(
                 await _persist_one_placement(
                     session,
                     row=row,
-                    new_mu=new.mu,
+                    new_mu=row.mu if is_draw else new.mu,
                     new_sigma=new.sigma,
                     game_id=game.id,
                     rating_context_id=context.id,

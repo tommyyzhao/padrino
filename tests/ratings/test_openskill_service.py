@@ -342,6 +342,84 @@ async def test_placement_context_rates_winner_first_and_rest_tied(
     )
 
 
+async def test_placement_draw_is_neutral_sigma_only_update(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    builds, game, context = await _seed_placement_game(
+        session_factory,
+        hash_prefix="placement-draw",
+    )
+    groups_by_seat = {
+        "P01": "TOWN",
+        "P02": "TOWN",
+        "P03": "MAFIA",
+        "P04": "MAFIA",
+        "P05": "SERIAL_KILLER",
+    }
+    builds_by_seat = {f"P{i + 1:02d}": builds[i].id for i in range(5)}
+
+    async with session_factory() as session, session.begin():
+        events = await update_placement_ratings_for_game(
+            session,
+            game_result=PlacementGameResult(
+                game_id=game.id,
+                winner="DRAW",
+                seat_groups=groups_by_seat,
+            ),
+            agent_builds_by_seat=builds_by_seat,
+        )
+
+    assert len(events) == 5
+    async with session_factory() as session:
+        placement_rows = (await session.execute(select(PlacementRating))).scalars().all()
+        placement_events = (await session.execute(select(PlacementRatingEvent))).scalars().all()
+
+    assert {row.rating_context_id for row in placement_rows} == {context.id}
+    assert {event.team_outcome for event in placement_events} == {"DRAW"}
+    assert {event.public_player_id for event in placement_events} == set(groups_by_seat)
+    assert all(row.mu == pytest.approx(INITIAL_MU) for row in placement_rows)
+    assert all(row.sigma < INITIAL_SIGMA for row in placement_rows)
+    assert all(row.games == 1 for row in placement_rows)
+    assert all(event.after_mu == pytest.approx(event.before_mu) for event in placement_events)
+    assert all(event.after_sigma < event.before_sigma for event in placement_events)
+
+
+async def test_placement_context_rejects_one_build_in_multiple_outcome_groups(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    builds, game, _context = await _seed_placement_game(
+        session_factory,
+        hash_prefix="placement-shared-build",
+    )
+    groups_by_seat = {
+        "P01": "TOWN",
+        "P02": "TOWN",
+        "P03": "MAFIA",
+        "P04": "MAFIA",
+        "P05": "SERIAL_KILLER",
+    }
+    builds_by_seat = {f"P{i + 1:02d}": builds[i].id for i in range(5)}
+    builds_by_seat["P03"] = builds_by_seat["P01"]
+
+    with pytest.raises(ValueError, match="multiple placement outcome groups"):
+        async with session_factory() as session, session.begin():
+            await update_placement_ratings_for_game(
+                session,
+                game_result=PlacementGameResult(
+                    game_id=game.id,
+                    winner="SERIAL_KILLER",
+                    seat_groups=groups_by_seat,
+                ),
+                agent_builds_by_seat=builds_by_seat,
+            )
+
+    async with session_factory() as session:
+        placement_rows = (await session.execute(select(PlacementRating))).scalars().all()
+        placement_events = (await session.execute(select(PlacementRatingEvent))).scalars().all()
+    assert placement_rows == []
+    assert placement_events == []
+
+
 async def test_sk12_placement_context_rates_serial_killer_outcome_without_canonical_writes(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

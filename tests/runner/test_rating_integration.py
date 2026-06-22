@@ -20,11 +20,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.core.agents.contract import AgentResponse
+from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import StoredEvent
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import Faction, Role
-from padrino.core.rulesets import mini7_v1
-from padrino.db.models import Rating, RatingEvent
+from padrino.core.enums import ActionType, Faction, Role
+from padrino.core.rulesets import mini7_v1, sk12_v1
+from padrino.db.models import PlacementRating, PlacementRatingEvent, Rating, RatingEvent
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -63,6 +65,61 @@ def _split_factions() -> tuple[list[str], list[str], str, str]:
     doctor = next(s.public_player_id for s in seats if s.role is Role.DOCTOR)
     detective = next(s.public_player_id for s in seats if s.role is Role.DETECTIVE)
     return mafia, town, doctor, detective
+
+
+def _response(action_type: ActionType, target: str | None = None) -> AgentResponse:
+    return AgentResponse(
+        public_message=None,
+        private_message=None,
+        action=Action(type=action_type, target=target),
+        memory_update="",
+        rationale_summary=None,
+    )
+
+
+def _phase_default(phase_id: str) -> AgentResponse:
+    if phase_id.endswith("_VOTE"):
+        return _response(ActionType.ABSTAIN)
+    return _response(ActionType.NOOP)
+
+
+def _phase_ids_for_sk12() -> tuple[str, ...]:
+    phase_ids: list[str] = ["NIGHT_0_MAFIA_INTRO"]
+    for day in range(1, sk12_v1.MAX_DAYS + 1):
+        for round_index in range(1, sk12_v1.DISCUSSION_ROUNDS_PER_DAY + 1):
+            phase_ids.append(f"DAY_{day}_DISCUSSION_ROUND_{round_index}")
+        phase_ids.append(f"DAY_{day}_VOTE")
+        phase_ids.append(f"NIGHT_{day}_MAFIA_DISCUSSION")
+        phase_ids.append(f"NIGHT_{day}_ACTIONS")
+    return tuple(phase_ids)
+
+
+def _sk12_town_win_script(
+    *,
+    seat_ids: list[str],
+    mafia_ids: list[str],
+    serial_killer_id: str,
+) -> dict[tuple[str, str], AgentResponse]:
+    script: dict[tuple[str, str], AgentResponse] = {
+        (phase_id, seat_id): _phase_default(phase_id)
+        for phase_id in _phase_ids_for_sk12()
+        for seat_id in seat_ids
+    }
+    targets_by_day = {
+        1: serial_killer_id,
+        2: mafia_ids[0],
+        3: mafia_ids[1],
+        4: mafia_ids[2],
+    }
+    for day, target in targets_by_day.items():
+        fallback_target = next(seat_id for seat_id in seat_ids if seat_id != target)
+        phase_id = f"DAY_{day}_VOTE"
+        for seat_id in seat_ids:
+            if seat_id == target:
+                script[(phase_id, seat_id)] = _response(ActionType.VOTE, fallback_target)
+            else:
+                script[(phase_id, seat_id)] = _response(ActionType.VOTE, target)
+    return script
 
 
 async def _seed_ranked_setup(
@@ -122,6 +179,59 @@ async def _seed_ranked_setup(
         game_id = game.id
     agent_builds_by_seat = {f"P{i + 1:02d}": builds[i] for i in range(mini7_v1.PLAYER_COUNT)}
     return league_id, game_id, agent_builds_by_seat
+
+
+async def _seed_sk12_placement_setup(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_seed: str,
+    hash_prefix: str,
+) -> tuple[uuid.UUID, uuid.UUID, dict[str, uuid.UUID]]:
+    async with session_factory() as session, session.begin():
+        provider = await providers_repo.create(
+            session, name="cerebras", auth_secret_ref="CEREBRAS_API_KEY"
+        )
+        mc = await model_configs_repo.create(
+            session,
+            provider_id=provider.id,
+            model_name="glm-4.7",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        builds: list[uuid.UUID] = []
+        for i in range(sk12_v1.PLAYER_COUNT):
+            pv = await prompt_versions_repo.create(
+                session,
+                ruleset_id=sk12_v1.RULESET_ID,
+                version=f"sk12-{i + 1}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"{hash_prefix}-{i}",
+            )
+            ab = await agent_builds_repo.create(
+                session,
+                display_name=f"sk12-build-{i}",
+                model_config_id=mc.id,
+                prompt_version_id=pv.id,
+                adapter_version="2026.05",
+                inference_params={"temperature": 0.7},
+                active=True,
+            )
+            builds.append(ab.id)
+        league = await leagues_repo.create(
+            session, name="sk12-placement", ruleset_id=sk12_v1.RULESET_ID, ranked=True
+        )
+        game = await games_repo.create(
+            session,
+            ruleset_id=sk12_v1.RULESET_ID,
+            game_seed=game_seed,
+            status="RUNNING",
+        )
+    agent_builds_by_seat = {f"P{i + 1:02d}": builds[i] for i in range(sk12_v1.PLAYER_COUNT)}
+    return league.id, game.id, agent_builds_by_seat
 
 
 async def test_town_win_updates_town_up_mafia_down(
@@ -189,6 +299,60 @@ async def test_town_win_updates_town_up_mafia_down(
         assert evt.before_sigma == pytest.approx(INITIAL_SIGMA)
         assert evt.league_id == league_id
         assert evt.scope_type in {"GLOBAL", "FACTION"}
+
+
+async def test_sk12_terminal_game_writes_placement_ratings_not_scientific_ratings(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_seed = "seed-sk12-placement-runner-001"
+    seats = assign_roles(game_seed, sk12_v1)
+    seat_ids = [seat.public_player_id for seat in seats]
+    mafia_ids = [seat.public_player_id for seat in seats if seat.faction is Faction.MAFIA]
+    serial_killer_id = next(
+        seat.public_player_id for seat in seats if seat.faction is Faction.SERIAL_KILLER
+    )
+    script = _sk12_town_win_script(
+        seat_ids=seat_ids,
+        mafia_ids=mafia_ids,
+        serial_killer_id=serial_killer_id,
+    )
+    league_id, game_id, builds_by_seat = await _seed_sk12_placement_setup(
+        session_factory,
+        game_seed=game_seed,
+        hash_prefix="sk12-runner-placement",
+    )
+
+    outcome = await run_game(
+        GameConfig(
+            game_id="G-SK12-PLACEMENT",
+            game_seed=game_seed,
+            ruleset_id=sk12_v1.RULESET_ID,
+            timeout_s=1.0,
+        ),
+        DeterministicMockAdapter(script),
+        ranked=True,
+        persistence=GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds=builds_by_seat,
+            league_id=league_id,
+        ),
+    )
+
+    assert outcome.final_state.terminal_result == Faction.TOWN.value
+
+    async with session_factory() as session:
+        scientific_rows = (await session.execute(select(Rating))).scalars().all()
+        scientific_events = (await session.execute(select(RatingEvent))).scalars().all()
+        placement_rows = (await session.execute(select(PlacementRating))).scalars().all()
+        placement_events = (await session.execute(select(PlacementRatingEvent))).scalars().all()
+
+    assert scientific_rows == []
+    assert scientific_events == []
+    assert len(placement_rows) == sk12_v1.PLAYER_COUNT
+    assert len(placement_events) == sk12_v1.PLAYER_COUNT
+    assert {event.team_outcome for event in placement_events} == {Faction.TOWN.value}
+    assert {event.agent_build_id for event in placement_events} == set(builds_by_seat.values())
 
 
 async def test_unranked_game_skips_rating_updates(
