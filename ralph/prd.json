@@ -469,7 +469,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: canonicality.py:56-87, tests/core/test_rating_context_rulesets.py. Stub/monkeypatch the win-condition to force the deviant winner over enumerated alive-counts. Proves layer-2 rejects, guarding against signature drift / swallowed-exception regressions.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-221",

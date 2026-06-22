@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Canonicality layer-2 negative tests (US-220): to prove
+  `_observed_terminal_outcomes` is not a no-op, build a minimal canonical-looking
+  ruleset that passes all layer-1 flags and monkeypatch
+  `rulesets.canonicality.check_win` to return deviant observed winners. This
+  exercises the terminal-outcome audit directly without weakening built-in
+  ruleset declarations.
 - Placement terminal scoring (US-219): wire non-canonical PLACEMENT contexts
   from the runner terminal transaction, like SOLO_RATE, using
   `declared_for_ruleset` to fail closed and skipping mirror-pair games until
@@ -2117,4 +2123,20 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest tests/core/test_night_resolution.py tests/runner/test_game_runner.py -q`
   -> 34 passed; `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2459
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:52 PDT - US-220
+- Added canonicality layer-2 negative coverage using a minimal ruleset that
+  passes the canonical-team layer-1 flags while monkeypatched `check_win`
+  produces either a non-canonical winner or an asymmetric ranked outcome set.
+- The new tests assert `CanonicalRulesetError` messages for both
+  `non-canonical terminal winners` and `ranked outcomes must be exactly`, so
+  the introspection branch cannot be silently bypassed.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/core/test_rating_context_rulesets.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/core/test_rating_context_rulesets.py -q` -> 12 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2464
   passed / 47 skipped / 10 deselected.
