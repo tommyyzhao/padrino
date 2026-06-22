@@ -26,6 +26,8 @@ async def get_or_create_rating(
     initial_mu: float,
     initial_sigma: float,
     initial_conservative_score: float,
+    ruleset_id: str | None = None,
+    rating_context_id: uuid.UUID | None = None,
 ) -> Rating:
     """Return the existing rating row for the scope, or insert a new one."""
     stmt = select(Rating).where(
@@ -36,10 +38,18 @@ async def get_or_create_rating(
     )
     existing = (await session.execute(stmt)).scalar_one_or_none()
     if existing is not None:
+        if ruleset_id is not None and existing.ruleset_id is None:
+            existing.ruleset_id = ruleset_id
+        if rating_context_id is not None and existing.rating_context_id is None:
+            existing.rating_context_id = rating_context_id
+        if ruleset_id is not None or rating_context_id is not None:
+            await session.flush()
         return existing
 
     obj = Rating(
         league_id=league_id,
+        ruleset_id=ruleset_id,
+        rating_context_id=rating_context_id,
         agent_build_id=agent_build_id,
         scope_type=scope_type,
         scope_value=scope_value,
@@ -93,11 +103,19 @@ async def record_rating_event(
     after_mu: float,
     after_sigma: float,
     public_player_id: str | None = None,
+    ruleset_id: str | None = None,
+    rating_context_id: uuid.UUID | None = None,
+    game_seed: str | None = None,
+    team_outcome: str | None = None,
 ) -> RatingEvent:
     """Append a rating-event audit row for the given (league, game, build, scope)."""
     obj = RatingEvent(
         league_id=league_id,
         game_id=game_id,
+        ruleset_id=ruleset_id,
+        rating_context_id=rating_context_id,
+        game_seed=game_seed,
+        team_outcome=team_outcome,
         agent_build_id=agent_build_id,
         scope_type=scope_type,
         scope_value=scope_value,

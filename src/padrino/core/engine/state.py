@@ -7,11 +7,14 @@ in-place edits.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from padrino.core.enums import Faction, PhaseKind, Role, SeatKind
+
+JANITOR_CLEAN_SHOT_CAP: Final[int] = 1
+FRAMER_FRAME_SHOT_CAP: Final[int] = 1
 
 
 class QueuedInspection(BaseModel):
@@ -40,6 +43,11 @@ class Seat(BaseModel):
     # to None so replaying a pre-Wave-9 event log reproduces identical state and
     # mechanics are entirely unaffected.
     seat_kind: SeatKind | None = None
+    # US-177: None means the role's default shot cap has not been materialized
+    # yet, preserving legacy seat payloads and hand-built Janitor states.
+    janitor_clean_shots_remaining: int | None = None
+    # US-178: same lazy materialization pattern for Framer's one successful mark.
+    framer_frame_shots_remaining: int | None = None
 
 
 class Phase(BaseModel):
@@ -65,6 +73,7 @@ class GameState(BaseModel):
     day: int
     terminal_result: str | None = None
     terminal_reason: str | None = None
+    win_condition_triggers: tuple[str, ...] = ()
 
     def living_seats(self) -> list[Seat]:
         """Return every seat with `alive=True`, preserving seat order."""
@@ -84,3 +93,29 @@ class GameState(BaseModel):
     def alive_count_by_faction(self, faction: Faction) -> int:
         """Return the number of living seats in `faction`."""
         return sum(1 for s in self.seats if s.alive and s.faction == faction)
+
+    def alive_counts_by_faction(self) -> dict[Faction, int]:
+        """Return living-seat counts for every faction currently present."""
+        counts: dict[Faction, int] = {}
+        for seat in self.seats:
+            if seat.alive:
+                counts[seat.faction] = counts.get(seat.faction, 0) + 1
+        return counts
+
+
+def janitor_clean_shots_remaining(seat: Seat) -> int:
+    """Return the deterministic remaining successful cleans for a Janitor seat."""
+    if seat.role is not Role.JANITOR:
+        return 0
+    if seat.janitor_clean_shots_remaining is None:
+        return JANITOR_CLEAN_SHOT_CAP
+    return max(seat.janitor_clean_shots_remaining, 0)
+
+
+def framer_frame_shots_remaining(seat: Seat) -> int:
+    """Return the deterministic remaining successful frames for a Framer seat."""
+    if seat.role is not Role.FRAMER:
+        return 0
+    if seat.framer_frame_shots_remaining is None:
+        return FRAMER_FRAME_SHOT_CAP
+    return max(seat.framer_frame_shots_remaining, 0)

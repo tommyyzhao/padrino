@@ -6,8 +6,8 @@ Validates ``GET /leagues/{id}/leaderboard``:
   prompt_version, rating_model, entries[]).
 * Entries are sorted by conservative_score desc and include the required
   per-agent_build counters + provisional flag.
-* role_family_breakdown is populated per (agent_build, role_family) seat-game
-  bucket (US-052).
+* faction_breakdown, role_breakdown, and role_family_breakdown are populated
+  per agent_build diagnostic bucket.
 """
 
 from __future__ import annotations
@@ -206,6 +206,42 @@ async def _build_league_with_two_agents(
                 games=9,
             )
         )
+        session.add(
+            Rating(
+                league_id=league.id,
+                agent_build_id=ab_a.id,
+                scope_type="FACTION",
+                scope_value=Faction.TOWN.value,
+                mu=28.0,
+                sigma=4.0,
+                conservative_score=28.0 - 3.0 * 4.0,
+                games=6,
+            )
+        )
+        session.add(
+            Rating(
+                league_id=league.id,
+                agent_build_id=ab_a.id,
+                scope_type="FACTION",
+                scope_value=Faction.MAFIA.value,
+                mu=21.0,
+                sigma=6.0,
+                conservative_score=21.0 - 3.0 * 6.0,
+                games=6,
+            )
+        )
+        session.add(
+            Rating(
+                league_id=league.id,
+                agent_build_id=ab_b.id,
+                scope_type="FACTION",
+                scope_value=Faction.TOWN.value,
+                mu=31.0,
+                sigma=3.5,
+                conservative_score=31.0 - 3.0 * 3.5,
+                games=9,
+            )
+        )
 
     for i, winner in enumerate(winners):
         async with session_factory() as session, session.begin():
@@ -315,6 +351,8 @@ async def test_leaderboard_entry_fields_and_provisional(
         "timeout_rate",
         "invalid_action_rate",
         "public_message_avg_chars",
+        "faction_breakdown",
+        "role_breakdown",
         "role_family_breakdown",
         "provisional",
     }
@@ -322,6 +360,36 @@ async def test_leaderboard_entry_fields_and_provisional(
         assert required.issubset(entry.keys())
         # Only 3 games — total below the 30-game threshold for everyone.
         assert entry["provisional"] is True
+
+    assert set(a_entry["faction_breakdown"].keys()) == {"TOWN", "MAFIA"}
+    assert a_entry["faction_breakdown"]["TOWN"]["games"] == 6
+    assert a_entry["faction_breakdown"]["TOWN"]["wins"] == 4
+    assert a_entry["faction_breakdown"]["TOWN"]["losses"] == 2
+    assert a_entry["faction_breakdown"]["TOWN"]["mu"] == 28.0
+    assert a_entry["faction_breakdown"]["MAFIA"]["games"] == 6
+    assert a_entry["faction_breakdown"]["MAFIA"]["wins"] == 2
+    assert a_entry["faction_breakdown"]["MAFIA"]["losses"] == 4
+    assert a_entry["faction_breakdown"]["MAFIA"]["mu"] == 21.0
+
+    assert set(b_entry["faction_breakdown"].keys()) == {"TOWN", "MAFIA"}
+    assert b_entry["faction_breakdown"]["TOWN"]["games"] == 9
+    assert b_entry["faction_breakdown"]["TOWN"]["wins"] == 6
+    assert b_entry["faction_breakdown"]["TOWN"]["losses"] == 3
+    assert b_entry["faction_breakdown"]["TOWN"]["mu"] == 31.0
+    assert b_entry["faction_breakdown"]["MAFIA"]["games"] == 0
+
+    assert set(a_entry["role_breakdown"].keys()) == {"MAFIA_GOON", "VILLAGER"}
+    assert a_entry["role_breakdown"]["MAFIA_GOON"]["games"] == 6
+    assert a_entry["role_breakdown"]["MAFIA_GOON"]["wins"] == 2
+    assert a_entry["role_breakdown"]["MAFIA_GOON"]["losses"] == 4
+    assert a_entry["role_breakdown"]["VILLAGER"]["games"] == 6
+    assert a_entry["role_breakdown"]["VILLAGER"]["wins"] == 4
+    assert a_entry["role_breakdown"]["VILLAGER"]["losses"] == 2
+
+    assert set(b_entry["role_breakdown"].keys()) == {"VILLAGER"}
+    assert b_entry["role_breakdown"]["VILLAGER"]["games"] == 9
+    assert b_entry["role_breakdown"]["VILLAGER"]["wins"] == 6
+    assert b_entry["role_breakdown"]["VILLAGER"]["losses"] == 3
 
     # A: 12 seat-games split as 6 DECEPTIVE (mafia goon) + 6 VANILLA_TOWN
     # (villager) — wins balance across the (TOWN, TOWN, MAFIA) winner tuple.

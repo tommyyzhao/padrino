@@ -47,12 +47,14 @@ from padrino.core.engine.resolvers.night import resolve_night
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED, check_win
-from padrino.core.enums import ActionType, Faction, PhaseKind, Role
-from padrino.core.observations import Observation, Ruleset, format_phase_id
-from padrino.core.rulesets import bench10_v1, mini7_v1
+from padrino.core.enums import ActionType, Faction, PhaseKind, RatingContextKind, Role
+from padrino.core.observations import Observation, format_phase_id
+from padrino.core.rulesets import Ruleset as CoreRuleset
+from padrino.core.rulesets import get_ruleset, mini7_v1
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
+from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
@@ -66,7 +68,19 @@ from padrino.observability.events import (
 from padrino.observability.metrics import record_game_completed
 from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
-from padrino.ratings.openskill_service import GameResult, update_ratings_for_game
+from padrino.ratings.openskill_service import (
+    PLACEMENT_DRAW,
+    GameResult,
+    PlacementGameResult,
+    update_placement_ratings_for_game,
+    update_ratings_for_completed_pair,
+    update_ratings_for_game,
+)
+from padrino.ratings.solo_rate_service import (
+    SoloRateAttempt,
+    SoloRateGameResult,
+    update_solo_rate_ratings_for_game,
+)
 from padrino.runner.tick import run_tick
 
 _logger = structlog.get_logger("padrino.runner")
@@ -75,11 +89,18 @@ MAFIA_CHANNEL_ID: Final[str] = "mafia"
 CAUSE_DAY_VOTE: Final[str] = "day_vote"
 CAUSE_NIGHT_KILL: Final[str] = "night_kill"
 STATUS_COMPLETED: Final[str] = "COMPLETED"
+OBSERVATION_FEEDBACK_CODES: Final[frozenset[str]] = frozenset(
+    {"ACTION_BLOCKED", "COMMUTER_UNTARGETABLE", "TRACK_RESULT", "WATCH_RESULT"}
+)
 
-_RULESETS: Final[dict[str, Any]] = {
-    mini7_v1.RULESET_ID: mini7_v1,
-    bench10_v1.RULESET_ID: bench10_v1,
-}
+_RULESETS: dict[str, Any] = {}
+
+
+def _ruleset_for(ruleset_id: str) -> CoreRuleset:
+    override = _RULESETS.get(ruleset_id)
+    if override is not None:
+        return cast(CoreRuleset, override)
+    return get_ruleset(ruleset_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +159,7 @@ class GameConfig(BaseModel):
 
 
 TickRunner = Callable[
-    [GameState, EventLog, Sequence[Seat], LlmAdapter, Ruleset, bool, float],
+    [GameState, EventLog, Sequence[Seat], LlmAdapter, CoreRuleset, bool, float],
     Awaitable[dict[str, AgentResponse]],
 ]
 
@@ -327,6 +348,108 @@ def _should_apply_ratings(
     return all(s.public_player_id in persistence.agent_builds for s in state.seats)
 
 
+def _should_apply_solo_rate(
+    persistence: GamePersistence,
+    ranked: bool,
+    state: GameState,
+) -> bool:
+    if not ranked or not persistence.agent_builds:
+        return False
+    if state.terminal_result is None:
+        return False
+    if not any(s.role is Role.JESTER for s in state.seats):
+        return False
+    return all(s.public_player_id in persistence.agent_builds for s in state.seats)
+
+
+def _should_apply_placement(
+    persistence: GamePersistence,
+    ranked: bool,
+    state: GameState,
+    game: Any | None,
+) -> bool:
+    if not ranked or not persistence.agent_builds:
+        return False
+    if game is None or game.pair_id is not None:
+        return False
+    if state.terminal_result is None:
+        return False
+    if not all(s.public_player_id in persistence.agent_builds for s in state.seats):
+        return False
+    declared = rating_contexts_repo.declared_for_ruleset(game.ruleset_id)
+    if declared is None:
+        return False
+    return declared.kind is RatingContextKind.PLACEMENT and not declared.is_canonical
+
+
+def _solo_rate_result_for(state: GameState, game_id: uuid.UUID) -> SoloRateGameResult | None:
+    jester_attempts = tuple(
+        SoloRateAttempt(
+            public_player_id=seat.public_player_id,
+            role=Role.JESTER.value,
+            succeeded=state.terminal_result == "JESTER",
+        )
+        for seat in state.seats
+        if seat.role is Role.JESTER
+    )
+    if not jester_attempts:
+        return None
+    return SoloRateGameResult(
+        game_id=game_id,
+        outcome_label="JESTER_LYNCH_BAIT",
+        attempts=jester_attempts,
+    )
+
+
+def _placement_result_for(state: GameState, game_id: uuid.UUID) -> PlacementGameResult | None:
+    assert state.terminal_result is not None
+    seat_groups = {seat.public_player_id: seat.faction.value for seat in state.seats}
+    groups = set(seat_groups.values())
+    if state.terminal_result != PLACEMENT_DRAW and state.terminal_result not in groups:
+        _logger.warning(
+            "placement.rating.skipped",
+            game_id=str(game_id),
+            winner=state.terminal_result,
+            reason="winner_not_in_seat_groups",
+            seat_groups=sorted(groups),
+        )
+        return None
+    return PlacementGameResult(
+        game_id=game_id,
+        winner=state.terminal_result,
+        seat_groups=seat_groups,
+    )
+
+
+async def _apply_placement_after_finalization(
+    persistence: GamePersistence,
+    game_result: PlacementGameResult,
+) -> None:
+    """Best-effort placement scoring after terminal state is durable."""
+    try:
+        async with persistence.session_factory() as session, session.begin():
+            events = await update_placement_ratings_for_game(
+                session,
+                game_result=game_result,
+                agent_builds_by_seat=persistence.agent_builds,
+            )
+    except Exception:
+        _logger.exception(
+            "placement.rating.skipped",
+            game_id=str(persistence.game_id),
+            winner=game_result.winner,
+            reason="placement_rating_failed",
+        )
+        return
+    if events:
+        _logger.info(
+            "placement.rating.updated",
+            game_id=str(persistence.game_id),
+            winner=game_result.winner,
+            events=len(events),
+        )
+
+
 async def _persist_terminated_event(
     persistence: GamePersistence,
     stored: StoredEvent,
@@ -334,14 +457,10 @@ async def _persist_terminated_event(
     ranked: bool,
     day_terminated: int,
 ) -> None:
-    """Persist the ``GameTerminated`` row, game-row finalize, and ratings atomically.
-
-    Inside one ``session.begin()`` we write the terminal event row, flip
-    ``Game.status='COMPLETED'`` with ``Game.terminal_result`` = ``{winner,
-    reason, day_terminated}``, and (when applicable) every rating update +
-    audit row so partial failures roll back together.
-    """
+    """Persist the ``GameTerminated`` row, game-row finalize, and ratings."""
     apply_ratings = _should_apply_ratings(persistence, ranked, state)
+    apply_solo_rate = _should_apply_solo_rate(persistence, ranked, state)
+    placement_result: PlacementGameResult | None = None
     terminal_result_payload: dict[str, Any] = {
         "winner": state.terminal_result,
         "reason": state.terminal_reason,
@@ -349,6 +468,9 @@ async def _persist_terminated_event(
     }
     async with persistence.session_factory() as session, session.begin():
         game = await games_repo.get(session, persistence.game_id)
+        apply_placement = _should_apply_placement(persistence, ranked, state, game)
+        if apply_placement:
+            placement_result = _placement_result_for(state, persistence.game_id)
         if game is not None and game.status == STATUS_COMPLETED:
             _logger.info(
                 "Game already terminated and completed; skipping rating application and status updates.",
@@ -367,27 +489,50 @@ async def _persist_terminated_event(
         )
         if apply_ratings:
             assert persistence.league_id is not None
-            winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
-            seat_factions: dict[str, Faction] = {s.public_player_id: s.faction for s in state.seats}
-            agent_builds_by_seat: dict[str, uuid.UUID] = {
-                sid: persistence.agent_builds[sid] for sid in seat_factions
-            }
-            await update_ratings_for_game(
-                session,
-                league_id=persistence.league_id,
-                game_result=GameResult(
-                    game_id=persistence.game_id,
+            if game is not None and game.pair_id is not None:
+                rating_events = await update_ratings_for_completed_pair(
+                    session,
+                    league_id=persistence.league_id,
+                    pair_id=game.pair_id,
+                )
+                rated_seat_count = len(persistence.agent_builds)
+                winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
+            else:
+                winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
+                seat_factions: dict[str, Faction] = {
+                    s.public_player_id: s.faction for s in state.seats
+                }
+                agent_builds_by_seat: dict[str, uuid.UUID] = {
+                    sid: persistence.agent_builds[sid] for sid in seat_factions
+                }
+                rating_events = await update_ratings_for_game(
+                    session,
+                    league_id=persistence.league_id,
+                    game_result=GameResult(
+                        game_id=persistence.game_id,
+                        winner=winner,
+                        seat_factions=seat_factions,
+                    ),
+                    agent_builds_by_seat=agent_builds_by_seat,
+                )
+                rated_seat_count = len(agent_builds_by_seat)
+            if rating_events:
+                _logger.info(
+                    EVENT_RATING_UPDATED,
+                    league_id=str(persistence.league_id),
                     winner=winner,
-                    seat_factions=seat_factions,
-                ),
-                agent_builds_by_seat=agent_builds_by_seat,
-            )
-            _logger.info(
-                EVENT_RATING_UPDATED,
-                league_id=str(persistence.league_id),
-                winner=winner,
-                seats=len(agent_builds_by_seat),
-            )
+                    seats=rated_seat_count,
+                )
+        if apply_solo_rate:
+            solo_result = _solo_rate_result_for(state, persistence.game_id)
+            if solo_result is not None:
+                await update_solo_rate_ratings_for_game(
+                    session,
+                    game_result=solo_result,
+                    agent_builds_by_seat=persistence.agent_builds,
+                )
+    if placement_result is not None:
+        await _apply_placement_after_finalization(persistence, placement_result)
 
 
 def _request_prompt_hash(observation: Observation) -> str:
@@ -474,7 +619,7 @@ async def _default_tick_runner(
     event_log: EventLog,
     eligible_seats: Sequence[Seat],
     adapter: LlmAdapter,
-    ruleset: Ruleset,
+    ruleset: CoreRuleset,
     ranked: bool,
     timeout_s: float,
 ) -> dict[str, AgentResponse]:
@@ -591,6 +736,66 @@ def _submission_events_for(
                     "payload": {"target": action.target},
                 }
             )
+        elif action.type is ActionType.ROLEBLOCK:
+            events.append(
+                {
+                    "event_type": "RoleblockSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.FRAME:
+            events.append(
+                {
+                    "event_type": "FrameSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.TRACK:
+            events.append(
+                {
+                    "event_type": "TrackSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.WATCH:
+            events.append(
+                {
+                    "event_type": "WatchSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.CLEAN:
+            events.append(
+                {
+                    "event_type": "CleanSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
+        elif action.type is ActionType.SERIAL_KILL:
+            events.append(
+                {
+                    "event_type": "SerialKillSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
 
     return events
 
@@ -602,17 +807,23 @@ def _resolve_day_vote_events(
 ) -> list[dict[str, Any]]:
     submissions = {sid: r.action for sid, r in responses.items()}
     result = resolve_day_vote(state, submissions)
+    payload: dict[str, Any] = {
+        "eliminated": result.eliminated,
+        "vote_tally": dict(result.vote_tally),
+        "reason": result.reason,
+    }
+    if any(weight != 1 for weight in result.voter_weights.values()):
+        payload["voter_weights"] = dict(result.voter_weights)
+        payload["total_vote_weight"] = result.total_vote_weight
+        payload["hammer_threshold"] = result.hammer_threshold
+
     events: list[dict[str, Any]] = [
         {
             "event_type": "DayVoteResolved",
             "phase": phase_id,
             "visibility": "PUBLIC",
             "actor_player_id": None,
-            "payload": {
-                "eliminated": result.eliminated,
-                "vote_tally": dict(result.vote_tally),
-                "reason": result.reason,
-            },
+            "payload": payload,
         }
     ]
     if result.eliminated is not None:
@@ -642,34 +853,52 @@ def _resolve_night_events(
 ) -> list[dict[str, Any]]:
     submissions = {sid: r.action for sid, r in responses.items()}
     night = resolve_night(state, submissions)
+    night_payload: dict[str, Any] = {
+        "eliminated": night.eliminated,
+        "protected": night.protected,
+        "mafia_kill_target": night.mafia_kill_target,
+    }
+    if night.cleaned_deaths:
+        night_payload["cleaned_deaths"] = night.cleaned_deaths
+        night_payload["clean_spent_actor_ids"] = night.clean_spent_actor_ids
+    if night.framed_targets:
+        night_payload["framed_targets"] = night.framed_targets
+        night_payload["frame_spent_actor_ids"] = night.frame_spent_actor_ids
+    if night.serial_kill_target is not None:
+        night_payload["serial_kill_target"] = night.serial_kill_target
+        night_payload["eliminated_player_ids"] = night.eliminated_player_ids
+    elif len(night.eliminated_player_ids) > 1:
+        night_payload["eliminated_player_ids"] = night.eliminated_player_ids
     events: list[dict[str, Any]] = [
         {
             "event_type": "NightResolved",
             "phase": phase_id,
             "visibility": "SYSTEM",
             "actor_player_id": None,
-            "payload": {
-                "eliminated": night.eliminated,
-                "protected": night.protected,
-                "mafia_kill_target": night.mafia_kill_target,
-            },
+            "payload": night_payload,
         }
     ]
-    if night.eliminated is not None:
-        target_seat = state.seat_by_public_id(night.eliminated)
-        if target_seat is not None:
+    for eliminated in night.eliminated_player_ids:
+        death_reveal = next(
+            (reveal for reveal in night.death_reveals if reveal.public_player_id == eliminated),
+            None,
+        )
+        if death_reveal is not None:
+            payload: dict[str, Any] = {
+                "public_player_id": death_reveal.public_player_id,
+                "cause": CAUSE_NIGHT_KILL,
+            }
+            if death_reveal.role is not None:
+                payload["role"] = death_reveal.role.value
+            if death_reveal.faction is not None:
+                payload["faction"] = death_reveal.faction.value
             events.append(
                 {
                     "event_type": "PlayerEliminated",
                     "phase": phase_id,
                     "visibility": "PUBLIC",
                     "actor_player_id": None,
-                    "payload": {
-                        "public_player_id": night.eliminated,
-                        "role": target_seat.role.value,
-                        "faction": target_seat.faction.value,
-                        "cause": CAUSE_NIGHT_KILL,
-                    },
+                    "payload": payload,
                 }
             )
     if night.detective_finding is not None:
@@ -685,6 +914,24 @@ def _resolve_night_events(
                     "payload": {"target": target, "finding": finding},
                 }
             )
+    for feedback in night.feedback:
+        if feedback.code not in OBSERVATION_FEEDBACK_CODES:
+            continue
+        events.append(
+            {
+                "event_type": "NightFeedbackDelivered",
+                "phase": phase_id,
+                "visibility": "PRIVATE",
+                "actor_player_id": feedback.recipient,
+                "payload": {
+                    "code": feedback.code,
+                    "target": feedback.target,
+                    "finding": feedback.finding,
+                    "visited_player_ids": feedback.visited_player_ids,
+                    "visitor_player_ids": feedback.visitor_player_ids,
+                },
+            }
+        )
     return events
 
 
@@ -708,7 +955,7 @@ async def drive_game_loop(
     ``tick_runner`` defaults to the benchmark tick barrier. The human lane uses
     the same deterministic game loop but supplies a human-aware tick wrapper.
     """
-    ruleset = _RULESETS[config.ruleset_id]
+    ruleset = _ruleset_for(config.ruleset_id)
     event_log = resume.event_log if resume is not None else EventLog()
     llm_calls: list[AdapterResult] = []
     recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls, persistence)

@@ -34,33 +34,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction
 from padrino.db.models import Game, GameEvent, GameSeat, Gauntlet
+from padrino.diagnostics.submissions import (
+    INVALID_EVENT_TYPE,
+    PUBLIC_MESSAGE_EVENT_TYPE,
+    SUBMISSION_EVENT_TYPES,
+    TIMEOUT_EVENT_TYPE,
+)
 
 PROVISIONAL_TOTAL_GAMES: Final[int] = 30
 PROVISIONAL_MAFIA_GAMES: Final[int] = 5
 PROVISIONAL_TOWN_GAMES: Final[int] = 15
 
 _COMPLETED_STATUS: Final[str] = "COMPLETED"
-_PUBLIC_MESSAGE_EVENT_TYPE: Final[str] = "PublicMessageSubmitted"
-_TIMEOUT_EVENT_TYPE: Final[str] = "ActionTimedOut"
-_INVALID_EVENT_TYPE: Final[str] = "OutputInvalid"
-
-# Submission events that count toward the rate denominator. Failure events
-# are included so the denominator is "total turn-attempts" rather than only
-# successful submissions; that keeps timeout / invalid percentages bounded
-# in [0, 1] even when most turns failed.
-_SUBMISSION_EVENT_TYPES: Final[frozenset[str]] = frozenset(
-    {
-        "PublicMessageSubmitted",
-        "PrivateMessageSubmitted",
-        "VoteSubmitted",
-        "MafiaKillVoteSubmitted",
-        "ProtectSubmitted",
-        "InvestigateSubmitted",
-        "ActionTimedOut",
-        "OutputInvalid",
-        "OutputTruncated",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +173,7 @@ async def diagnostics_for_games(
         select(GameEvent.event_type, func.count())
         .where(
             GameEvent.game_id.in_(game_ids),
-            GameEvent.event_type.in_(_SUBMISSION_EVENT_TYPES),
+            GameEvent.event_type.in_(SUBMISSION_EVENT_TYPES),
         )
         .group_by(GameEvent.event_type)
     )
@@ -196,14 +181,14 @@ async def diagnostics_for_games(
         row[0]: int(row[1]) for row in (await session.execute(counts_stmt)).all()
     }
     total_attempts = sum(counts.values())
-    timeout_count = counts.get(_TIMEOUT_EVENT_TYPE, 0)
-    invalid_count = counts.get(_INVALID_EVENT_TYPE, 0)
+    timeout_count = counts.get(TIMEOUT_EVENT_TYPE, 0)
+    invalid_count = counts.get(INVALID_EVENT_TYPE, 0)
     timeout_rate = (timeout_count / total_attempts) if total_attempts else 0.0
     invalid_rate = (invalid_count / total_attempts) if total_attempts else 0.0
 
     pm_stmt = select(GameEvent.payload).where(
         GameEvent.game_id.in_(game_ids),
-        GameEvent.event_type == _PUBLIC_MESSAGE_EVENT_TYPE,
+        GameEvent.event_type == PUBLIC_MESSAGE_EVENT_TYPE,
     )
     pm_payloads = list((await session.execute(pm_stmt)).scalars().all())
     pm_total_chars = 0

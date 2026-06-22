@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import mini7_v1, sk12_v1
 
 
 @pytest_asyncio.fixture
@@ -24,7 +24,10 @@ async def client(
 
 
 async def _seed_world(
-    client: AsyncClient, *, prompt_ruleset: str = mini7_v1.RULESET_ID
+    client: AsyncClient,
+    *,
+    prompt_ruleset: str = mini7_v1.RULESET_ID,
+    player_count: int = mini7_v1.PLAYER_COUNT,
 ) -> tuple[str, list[str]]:
     """Create provider, model config, prompt, 7 agent builds. Return (prompt_id, roster)."""
     pr = await client.post(
@@ -63,7 +66,7 @@ async def _seed_world(
     prompt_id = pv.json()["id"]
 
     roster: list[str] = []
-    for i in range(mini7_v1.PLAYER_COUNT):
+    for i in range(player_count):
         ab = await client.post(
             "/agent-builds",
             json={
@@ -110,10 +113,15 @@ async def test_create_league_validation_rejects_empty_name(client: AsyncClient) 
     assert response.status_code == 422
 
 
-async def _create_league(client: AsyncClient, *, ranked: bool = True) -> str:
+async def _create_league(
+    client: AsyncClient,
+    *,
+    ranked: bool = True,
+    ruleset_id: str = mini7_v1.RULESET_ID,
+) -> str:
     resp = await client.post(
         "/leagues",
-        json={"name": "L", "ruleset_id": mini7_v1.RULESET_ID, "ranked": ranked},
+        json={"name": "L", "ruleset_id": ruleset_id, "ranked": ranked},
     )
     assert resp.status_code == 201, resp.text
     return str(resp.json()["id"])
@@ -259,6 +267,33 @@ async def test_create_gauntlet_rejects_clone_count_too_high(client: AsyncClient)
     )
     assert response.status_code == 422
     assert "clone_count" in response.json()["detail"].lower()
+
+
+async def test_create_gauntlet_rejects_placement_duplicate_build_across_factions(
+    client: AsyncClient,
+) -> None:
+    prompt_id, roster = await _seed_world(
+        client,
+        prompt_ruleset=sk12_v1.RULESET_ID,
+        player_count=sk12_v1.PLAYER_COUNT,
+    )
+    league_id = await _create_league(client, ruleset_id=sk12_v1.RULESET_ID)
+    bad_roster = [roster[0] for _ in roster]
+
+    response = await client.post(
+        "/gauntlets",
+        json={
+            "league_id": league_id,
+            "ruleset_id": sk12_v1.RULESET_ID,
+            "prompt_version_id": prompt_id,
+            "clone_count": 1,
+            "gauntlet_seed": "sk12-placement-shared-build",
+            "roster": bad_roster,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "multiple factions" in response.json()["detail"].lower()
 
 
 async def test_create_gauntlet_rejects_incompatible_prompt_ruleset(client: AsyncClient) -> None:

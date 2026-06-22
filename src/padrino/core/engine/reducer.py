@@ -16,13 +16,16 @@ from __future__ import annotations
 
 from padrino.core.engine.events import (
     ActionTimedOut,
+    CleanSubmitted,
     DayVoteResolved,
     DetectiveResultDelivered,
     Event,
+    FrameSubmitted,
     GameCreated,
     GameTerminated,
     InvestigateSubmitted,
     MafiaKillVoteSubmitted,
+    NightFeedbackDelivered,
     NightResolved,
     OutputInvalid,
     OutputTruncated,
@@ -32,12 +35,26 @@ from padrino.core.engine.events import (
     PrivateMessageSubmitted,
     ProtectSubmitted,
     PublicMessageSubmitted,
+    RoleblockSubmitted,
     RolesAssigned,
     SeatTakenOver,
+    SerialKillSubmitted,
+    TrackSubmitted,
     VoteSubmitted,
+    WatchSubmitted,
 )
-from padrino.core.engine.state import GameState, Phase, QueuedInspection, Seat
-from padrino.core.enums import PhaseKind
+from padrino.core.engine.state import (
+    GameState,
+    Phase,
+    QueuedInspection,
+    Seat,
+    framer_frame_shots_remaining,
+    janitor_clean_shots_remaining,
+)
+from padrino.core.enums import PhaseKind, Role
+
+JESTER_DAY_VOTED_OUT_TRIGGER = "JESTER_DAY_VOTED_OUT"
+_DAY_VOTE_CAUSES = frozenset({"day_vote", "DAY_VOTE"})
 
 # Event classes that are recorded in the log but do not mutate mechanical
 # state. Chat events are part of this set per the chat-vs-action firewall.
@@ -47,6 +64,13 @@ _RECORDED_ONLY: tuple[type[Event], ...] = (
     VoteSubmitted,
     MafiaKillVoteSubmitted,
     InvestigateSubmitted,
+    RoleblockSubmitted,
+    FrameSubmitted,
+    TrackSubmitted,
+    WatchSubmitted,
+    CleanSubmitted,
+    SerialKillSubmitted,
+    NightFeedbackDelivered,
     ActionTimedOut,
     OutputTruncated,
     OutputInvalid,
@@ -75,6 +99,54 @@ def _update_seat(state: GameState, public_player_id: str, updates: dict[str, obj
         for s in state.seats
     )
     return state.model_copy(update={"seats": new_seats})
+
+
+def _spend_janitor_clean_shots(state: GameState, actor_ids: tuple[str, ...]) -> GameState:
+    if not actor_ids:
+        return state
+    spent = set(actor_ids)
+    changed = False
+    seats: list[Seat] = []
+    for seat in state.seats:
+        if seat.public_player_id in spent and seat.role is Role.JANITOR:
+            remaining = max(janitor_clean_shots_remaining(seat) - 1, 0)
+            seats.append(seat.model_copy(update={"janitor_clean_shots_remaining": remaining}))
+            changed = True
+        else:
+            seats.append(seat)
+    if not changed:
+        return state
+    return state.model_copy(update={"seats": tuple(seats)})
+
+
+def _spend_framer_frame_shots(state: GameState, actor_ids: tuple[str, ...]) -> GameState:
+    if not actor_ids:
+        return state
+    spent = set(actor_ids)
+    changed = False
+    seats: list[Seat] = []
+    for seat in state.seats:
+        if seat.public_player_id in spent and seat.role is Role.FRAMER:
+            remaining = max(framer_frame_shots_remaining(seat) - 1, 0)
+            seats.append(seat.model_copy(update={"framer_frame_shots_remaining": remaining}))
+            changed = True
+        else:
+            seats.append(seat)
+    if not changed:
+        return state
+    return state.model_copy(update={"seats": tuple(seats)})
+
+
+def _add_win_condition_trigger(state: GameState, trigger: str) -> GameState:
+    if trigger in state.win_condition_triggers:
+        return state
+    return state.model_copy(
+        update={"win_condition_triggers": (*state.win_condition_triggers, trigger)}
+    )
+
+
+def _jester_day_vote_triggered(event: PlayerEliminated) -> bool:
+    return event.payload.role is Role.JESTER and event.payload.cause in _DAY_VOTE_CAUSES
 
 
 def apply_event(state: GameState, event: Event) -> GameState:
@@ -111,11 +183,14 @@ def apply_event(state: GameState, event: Event) -> GameState:
         )
         return state.model_copy(update={"current_phase": new_phase, "day": event.payload.day})
     if isinstance(event, PlayerEliminated):
-        return _update_seat(
+        state = _update_seat(
             state,
             event.payload.public_player_id,
             {"alive": False, "death_phase": event.phase},
         )
+        if _jester_day_vote_triggered(event):
+            return _add_win_condition_trigger(state, JESTER_DAY_VOTED_OUT_TRIGGER)
+        return state
     if isinstance(event, DetectiveResultDelivered):
         queued = QueuedInspection(target=event.payload.target, finding=event.payload.finding)
         return _update_seat(state, event.actor_player_id, {"queued_inspection_result": queued})
@@ -123,6 +198,9 @@ def apply_event(state: GameState, event: Event) -> GameState:
         return _update_seat(
             state, event.actor_player_id, {"last_protected_target": event.payload.target}
         )
+    if isinstance(event, NightResolved):
+        state = _spend_janitor_clean_shots(state, event.payload.clean_spent_actor_ids)
+        return _spend_framer_frame_shots(state, event.payload.frame_spent_actor_ids)
     if isinstance(event, GameTerminated):
         return state.model_copy(
             update={

@@ -40,17 +40,11 @@ from padrino.api.rate_limit_store import (
     RateLimitStore,
 )
 from padrino.core.engine.actions import Action
-from padrino.core.engine.legal_actions import legal_actions_for
-from padrino.core.enums import ActionType
+from padrino.core.engine.legal_actions import action_requires_target, legal_actions_for
 from padrino.core.observations import format_phase_id
 from padrino.db.repositories import human_action_submissions as submissions_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_state_cache import resolve_current_human_state
-
-# Targeted actions require a legal ``target``; the rest must carry no target.
-_TARGETED_ACTION_TYPES = frozenset(
-    {ActionType.VOTE, ActionType.MAFIA_KILL, ActionType.PROTECT, ActionType.INVESTIGATE}
-)
 
 GAME_NOT_FOUND_DETAIL = "game_not_found"
 WRONG_SEAT_DETAIL = "wrong_seat"
@@ -149,7 +143,7 @@ async def submit_action(
         detail = OUT_OF_PHASE_DETAIL if not legal.allowed_action_types else ILLEGAL_ACTION_DETAIL
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
-    if action.type in _TARGETED_ACTION_TYPES:
+    if action_requires_target(action.type):
         if action.target is None or action.target not in legal.legal_targets:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ILLEGAL_ACTION_DETAIL)
     elif action.target is not None:

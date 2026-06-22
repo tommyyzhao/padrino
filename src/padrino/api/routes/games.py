@@ -112,6 +112,12 @@ _ACTION_EVENT_TYPES = (
     "MafiaKillVoteSubmitted",
     "ProtectSubmitted",
     "InvestigateSubmitted",
+    "RoleblockSubmitted",
+    "FrameSubmitted",
+    "TrackSubmitted",
+    "WatchSubmitted",
+    "CleanSubmitted",
+    "SerialKillSubmitted",
 )
 
 

@@ -13,7 +13,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from padrino.core.engine.state import GameState, Seat
+from padrino.core.engine.state import (
+    GameState,
+    Seat,
+    framer_frame_shots_remaining,
+    janitor_clean_shots_remaining,
+)
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role
 
 
@@ -28,6 +33,44 @@ class LegalActions(BaseModel):
 
 _EMPTY = LegalActions(allowed_action_types=[], legal_targets=[])
 _NOOP_ONLY = LegalActions(allowed_action_types=[ActionType.NOOP], legal_targets=[])
+TARGETED_ACTION_TYPES = frozenset(
+    {
+        ActionType.VOTE,
+        ActionType.MAFIA_KILL,
+        ActionType.PROTECT,
+        ActionType.INVESTIGATE,
+        ActionType.ROLEBLOCK,
+        ActionType.FRAME,
+        ActionType.TRACK,
+        ActionType.WATCH,
+        ActionType.CLEAN,
+        ActionType.SERIAL_KILL,
+    }
+)
+
+_FUTURE_NIGHT_ROLE_ACTIONS: dict[Role, ActionType] = {
+    Role.MAFIA_ROLEBLOCKER: ActionType.ROLEBLOCK,
+    Role.FRAMER: ActionType.FRAME,
+    Role.TRACKER: ActionType.TRACK,
+    Role.WATCHER: ActionType.WATCH,
+    Role.JANITOR: ActionType.CLEAN,
+    Role.SERIAL_KILLER: ActionType.SERIAL_KILL,
+}
+_FACTIONAL_KILL_ROLES = frozenset({Role.MAFIA_GOON, Role.NINJA, Role.GODFATHER})
+
+
+def action_requires_target(action_type: ActionType) -> bool:
+    """Return whether ``action_type`` must name a target from ``legal_targets``."""
+
+    return action_type in TARGETED_ACTION_TYPES
+
+
+def _living_others(state: GameState, seat: Seat) -> list[str]:
+    return [
+        s.public_player_id
+        for s in state.living_seats()
+        if s.public_player_id != seat.public_player_id
+    ]
 
 
 def legal_actions_for(state: GameState, seat: Seat) -> LegalActions:
@@ -57,7 +100,7 @@ def legal_actions_for(state: GameState, seat: Seat) -> LegalActions:
         return _EMPTY
 
     if kind is PhaseKind.NIGHT_ACTIONS:
-        if seat.role is Role.MAFIA_GOON:
+        if seat.role in _FACTIONAL_KILL_ROLES:
             targets = [
                 s.public_player_id for s in state.living_seats() if s.faction is not Faction.MAFIA
             ]
@@ -85,6 +128,23 @@ def legal_actions_for(state: GameState, seat: Seat) -> LegalActions:
                 allowed_action_types=[ActionType.INVESTIGATE],
                 legal_targets=targets,
             )
+        if seat.role in _FUTURE_NIGHT_ROLE_ACTIONS:
+            if seat.role is Role.JANITOR and janitor_clean_shots_remaining(seat) <= 0:
+                return _NOOP_ONLY
+            if seat.role is Role.FRAMER and framer_frame_shots_remaining(seat) <= 0:
+                return _NOOP_ONLY
+            return LegalActions(
+                allowed_action_types=[_FUTURE_NIGHT_ROLE_ACTIONS[seat.role]],
+                legal_targets=_living_others(state, seat),
+            )
         return _NOOP_ONLY
 
     return _EMPTY
+
+
+__all__ = [
+    "TARGETED_ACTION_TYPES",
+    "LegalActions",
+    "action_requires_target",
+    "legal_actions_for",
+]

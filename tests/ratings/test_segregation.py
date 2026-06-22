@@ -22,17 +22,25 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import Faction, LeagueKind, Role
-from padrino.core.rulesets import bench10_v1, mini7_v1
+from padrino.core.enums import Faction, LeagueKind, RatingContextKind, Role
+from padrino.core.rulesets import bench10_v1, mini7_v1, roleblock10_v1
+from padrino.core.rulesets.canonicality import (
+    assert_ruleset_canonical_pure,
+    canonical_team_ranks_for_outcome,
+)
 from padrino.db.models import (
+    AgentBuild,
     HumanRating,
     HumanRatingEvent,
     League,
+    PlacementRating,
+    PlacementRatingEvent,
     Rating,
+    RatingContext,
     RatingEvent,
 )
 from padrino.db.repositories import (
@@ -53,7 +61,14 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     providers as providers_repo,
 )
+from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.llm.mock import DeterministicMockAdapter
+from padrino.ratings.openskill_service import (
+    GameResult,
+    PlacementGameResult,
+    update_placement_ratings_for_game,
+    update_ratings_for_game,
+)
 from padrino.runner.game_runner import (
     GameConfig,
     GamePersistence,
@@ -152,6 +167,60 @@ async def _count_all_rating_rows(
             await session.execute(select(func.count()).select_from(HumanRatingEvent))
         ).scalar_one()
     return ratings, rating_events, human_ratings, human_rating_events
+
+
+async def _seed_scientific_all_ai_game(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    hash_prefix: str,
+) -> tuple[uuid.UUID, uuid.UUID, dict[str, uuid.UUID]]:
+    """Seed an all-AI scientific mini7 game for canonical rating gates."""
+    async with session_factory() as session, session.begin():
+        provider = await providers_repo.create(
+            session, name="cerebras", auth_secret_ref="CEREBRAS_API_KEY"
+        )
+        mc = await model_configs_repo.create(
+            session,
+            provider_id=provider.id,
+            model_name="glm-4.7",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        builds: dict[str, uuid.UUID] = {}
+        for i in range(mini7_v1.PLAYER_COUNT):
+            seat_id = f"P{i + 1:02d}"
+            pv = await prompt_versions_repo.create(
+                session,
+                ruleset_id=mini7_v1.RULESET_ID,
+                version=f"canonical-{i + 1}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"{hash_prefix}-{i}",
+            )
+            ab = await agent_builds_repo.create(
+                session,
+                display_name=f"canonical-build-{i}",
+                model_config_id=mc.id,
+                prompt_version_id=pv.id,
+                adapter_version="2026.05",
+                inference_params={"temperature": 0.7},
+                active=True,
+            )
+            builds[seat_id] = ab.id
+        league = await leagues_repo.create(
+            session, name="scientific", ruleset_id=mini7_v1.RULESET_ID, ranked=True
+        )
+        game = await games_repo.create(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed=f"{hash_prefix}-seed",
+            status="COMPLETED",
+        )
+        await rating_contexts_repo.ensure_declared_context(session, ruleset_id=mini7_v1.RULESET_ID)
+    return league.id, game.id, builds
 
 
 async def test_humans_included_league_is_discriminated(
@@ -291,3 +360,209 @@ async def test_human_seat_fails_closed_even_if_ranked_true(
 
     counts = await _count_all_rating_rows(session_factory)
     assert counts == (0, 0, 0, 0)
+
+
+async def test_non_canonical_context_writes_zero_scientific_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A non-canonical context is scored outside the sacred Rating tables."""
+    experimental_ruleset = "experimental_placement_v1"
+    async with session_factory() as session, session.begin():
+        provider = await providers_repo.create(
+            session, name="cerebras", auth_secret_ref="CEREBRAS_API_KEY"
+        )
+        mc = await model_configs_repo.create(
+            session,
+            provider_id=provider.id,
+            model_name="glm-4.7",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        builds: dict[str, uuid.UUID] = {}
+        for seat_index in range(7):
+            pv = await prompt_versions_repo.create(
+                session,
+                ruleset_id=experimental_ruleset,
+                version=f"v{seat_index}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"noncanonical-{seat_index}",
+            )
+            ab = await agent_builds_repo.create(
+                session,
+                display_name=f"build-{seat_index}",
+                model_config_id=mc.id,
+                prompt_version_id=pv.id,
+                adapter_version="2026.05",
+                inference_params={"temperature": 0.7},
+                active=True,
+            )
+            builds[f"P{seat_index + 1:02d}"] = ab.id
+        league = await leagues_repo.create(
+            session,
+            name="experimental",
+            ruleset_id=experimental_ruleset,
+            ranked=True,
+        )
+        game = await games_repo.create(
+            session,
+            ruleset_id=experimental_ruleset,
+            game_seed="experimental-seed",
+            status="COMPLETED",
+        )
+        session.add(
+            RatingContext(
+                kind=RatingContextKind.PLACEMENT.value,
+                ruleset_id=experimental_ruleset,
+                is_canonical=False,
+                display_label="Experimental placement",
+            )
+        )
+
+    seat_factions = {
+        "P01": Faction.MAFIA,
+        "P02": Faction.MAFIA,
+        "P03": Faction.TOWN,
+        "P04": Faction.TOWN,
+        "P05": Faction.TOWN,
+        "P06": Faction.TOWN,
+        "P07": Faction.TOWN,
+    }
+    async with session_factory() as session, session.begin():
+        events = await update_ratings_for_game(
+            session,
+            league_id=league.id,
+            game_result=GameResult(
+                game_id=game.id,
+                winner="TOWN",
+                seat_factions=seat_factions,
+            ),
+            agent_builds_by_seat=builds,
+        )
+
+    assert events == []
+    counts = await _count_all_rating_rows(session_factory)
+    assert counts == (0, 0, 0, 0)
+
+    async with session_factory() as session, session.begin():
+        placement_events = await update_placement_ratings_for_game(
+            session,
+            game_result=PlacementGameResult(
+                game_id=game.id,
+                winner="TOWN",
+                seat_groups={seat_id: faction.value for seat_id, faction in seat_factions.items()},
+            ),
+            agent_builds_by_seat=builds,
+        )
+
+    assert placement_events
+    counts = await _count_all_rating_rows(session_factory)
+    assert counts == (0, 0, 0, 0)
+    async with session_factory() as session:
+        placement_rating_count = (
+            await session.execute(select(func.count()).select_from(PlacementRating))
+        ).scalar_one()
+        placement_event_count = (
+            await session.execute(select(func.count()).select_from(PlacementRatingEvent))
+        ).scalar_one()
+    assert placement_rating_count == 7
+    assert placement_event_count == 7
+
+
+def test_canonical_ruleset_purity_gate_introspects_builtin_rulesets() -> None:
+    """Canonical ladders admit exactly Town/Mafia outcomes, with draw as a tie."""
+    for ruleset in (mini7_v1, bench10_v1, roleblock10_v1):
+        assert_ruleset_canonical_pure(ruleset)
+
+    assert canonical_team_ranks_for_outcome("TOWN") == {"TOWN": 1, "MAFIA": 2}
+    assert canonical_team_ranks_for_outcome("MAFIA") == {"TOWN": 2, "MAFIA": 1}
+    assert canonical_team_ranks_for_outcome("DRAW") == {"TOWN": 1, "MAFIA": 1}
+
+
+async def test_missing_canonical_context_writes_zero_scientific_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A missing context is unrated; it never defaults into canonical ELO."""
+    league_id, game_id, builds = await _seed_scientific_all_ai_game(
+        session_factory, hash_prefix="missing-canonical-context"
+    )
+    seats = assign_roles(_GAME_SEED, mini7_v1)
+    seat_factions = {seat.public_player_id: seat.faction for seat in seats}
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            delete(RatingContext).where(RatingContext.ruleset_id == mini7_v1.RULESET_ID)
+        )
+
+    async with session_factory() as session, session.begin():
+        events = await update_ratings_for_game(
+            session,
+            league_id=league_id,
+            game_result=GameResult(
+                game_id=game_id,
+                winner="TOWN",
+                seat_factions=seat_factions,
+            ),
+            agent_builds_by_seat=builds,
+        )
+
+    assert events == []
+    counts = await _count_all_rating_rows(session_factory)
+    assert counts == (0, 0, 0, 0)
+
+
+async def test_canonical_rating_events_carry_required_metadata(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Canonical audit rows are complete enough to prove context purity."""
+    league_id, game_id, builds = await _seed_scientific_all_ai_game(
+        session_factory, hash_prefix="canonical-event-metadata"
+    )
+    seats = assign_roles(_GAME_SEED, mini7_v1)
+    seat_factions = {seat.public_player_id: seat.faction for seat in seats}
+
+    async with session_factory() as session, session.begin():
+        events = await update_ratings_for_game(
+            session,
+            league_id=league_id,
+            game_result=GameResult(
+                game_id=game_id,
+                winner="MAFIA",
+                seat_factions=seat_factions,
+            ),
+            agent_builds_by_seat=builds,
+        )
+
+    assert events
+    async with session_factory() as session:
+        context = await rating_contexts_repo.get_by_ruleset_kind(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            kind=RatingContextKind.CANONICAL_TEAM,
+        )
+        assert context is not None
+        rows = (await session.execute(select(RatingEvent))).scalars().all()
+        build_rows = (
+            (
+                await session.execute(
+                    select(AgentBuild).where(
+                        AgentBuild.id.in_({row.agent_build_id for row in rows})
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(rows) == mini7_v1.PLAYER_COUNT * 2
+    assert {row.ruleset_id for row in rows} == {mini7_v1.RULESET_ID}
+    assert {row.rating_context_id for row in rows} == {context.id}
+    assert {row.game_seed for row in rows} == {"canonical-event-metadata-seed"}
+    assert {row.team_outcome for row in rows} == {"MAFIA"}
+    assert {row.agent_build_id for row in rows} == set(builds.values())
+    assert {row.public_player_id for row in rows} == set(builds)
+    assert build_rows
+    assert all(row.model_config_id is not None for row in build_rows)
+    assert all(row.prompt_version_id is not None for row in build_rows)

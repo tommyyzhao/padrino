@@ -1,15 +1,20 @@
 """bench10_v1 ruleset constants and helpers (Wave 6).
 
-Ruleset: 10 players, 3 Mafia Goons, 1 Detective, 1 Doctor, 5 Villagers. MAX_DAYS=5.
+Ruleset: 10 players, 3 Mafia Goons, 1 Detective, 1 Doctor, 5 Villagers.
+MAX_DAYS=5.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from padrino.core.enums import Faction, Role, RoleFamily
+from padrino.core.engine.win_conditions import WinCondition, canonical_two_faction_win_conditions
+from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
 
 RULESET_ID: Final[str] = "bench10_v1"
+RATING_CONTEXT_KIND: Final[RatingContextKind] = RatingContextKind.CANONICAL_TEAM
+IS_CANONICAL: Final[bool] = True
+RATING_CONTEXT_DISPLAY_LABEL: Final[str] = "Bench 10 canonical team"
 PLAYER_COUNT: Final[int] = 10
 
 ROLE_COUNTS: Final[dict[Role, int]] = {
@@ -42,6 +47,11 @@ ROLE_FACTIONS: Final[dict[Role, Faction]] = {
     Role.DOCTOR: Faction.TOWN,
     Role.VILLAGER: Faction.TOWN,
 }
+WIN_CONDITIONS: Final[tuple[WinCondition, ...]] = canonical_two_faction_win_conditions()
+ALT_WIN_CONDITIONS: Final[tuple[str, ...]] = ()
+SOLO_FACTIONS: Final[tuple[str, ...]] = ()
+FACTION_MUTATION_ALLOWED: Final[bool] = False
+KINGMAKING_OBJECTIVE: Final[bool] = False
 
 
 def role_family_for(role: Role) -> RoleFamily:

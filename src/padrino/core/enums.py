@@ -10,14 +10,28 @@ class Faction(StrEnum):
 
     TOWN = "TOWN"
     MAFIA = "MAFIA"
+    SERIAL_KILLER = "SERIAL_KILLER"
+    JESTER = "JESTER"
 
 
 class Role(StrEnum):
     """Specific role assigned to a seat."""
 
     MAFIA_GOON = "MAFIA_GOON"
+    NINJA = "NINJA"
+    GODFATHER = "GODFATHER"
+    MAFIA_ROLEBLOCKER = "MAFIA_ROLEBLOCKER"
+    FRAMER = "FRAMER"
+    JANITOR = "JANITOR"
     DETECTIVE = "DETECTIVE"
     DOCTOR = "DOCTOR"
+    TRACKER = "TRACKER"
+    WATCHER = "WATCHER"
+    MAYOR = "MAYOR"
+    COMMUTER = "COMMUTER"
+    MASON = "MASON"
+    SERIAL_KILLER = "SERIAL_KILLER"
+    JESTER = "JESTER"
     VILLAGER = "VILLAGER"
 
 
@@ -39,6 +53,12 @@ class ActionType(StrEnum):
     MAFIA_KILL = "MAFIA_KILL"
     PROTECT = "PROTECT"
     INVESTIGATE = "INVESTIGATE"
+    ROLEBLOCK = "ROLEBLOCK"
+    FRAME = "FRAME"
+    TRACK = "TRACK"
+    WATCH = "WATCH"
+    CLEAN = "CLEAN"
+    SERIAL_KILL = "SERIAL_KILL"
 
 
 class SeatKind(StrEnum):
@@ -66,6 +86,19 @@ class LeagueKind(StrEnum):
 
     SCIENTIFIC = "SCIENTIFIC"
     HUMANS_INCLUDED = "HUMANS_INCLUDED"
+
+
+class RatingContextKind(StrEnum):
+    """Scoring lane discriminator for a ruleset.
+
+    ``CANONICAL_TEAM`` is the sacred two-faction OpenSkill ladder reached only
+    through a SCIENTIFIC league. ``PLACEMENT`` and ``SOLO_RATE`` are sibling
+    contexts that never write to ``ratings`` / ``rating_events``.
+    """
+
+    CANONICAL_TEAM = "CANONICAL_TEAM"
+    PLACEMENT = "PLACEMENT"
+    SOLO_RATE = "SOLO_RATE"
 
 
 class IdentityMode(StrEnum):

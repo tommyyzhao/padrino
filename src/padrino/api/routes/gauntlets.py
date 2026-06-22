@@ -31,6 +31,7 @@ from padrino.api.pagination import (
     CursorPage,
     paginate_keyset,
 )
+from padrino.core.rulesets import get_ruleset
 from padrino.db.models import Game, Gauntlet
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
@@ -53,6 +54,7 @@ from padrino.gauntlets.scheduler import (
     MAX_CLONE_COUNT,
     MIN_CLONE_COUNT,
     derive_game_seed,
+    validate_placement_roster_faction_uniqueness,
 )
 
 router = APIRouter()
@@ -123,10 +125,19 @@ async def create_gauntlet_route(
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> GauntletCreateResponse:
-    if len(body.roster) != 7:
+    try:
+        ruleset = get_ruleset(body.ruleset_id)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"roster must have exactly 7 entries, got {len(body.roster)}",
+            detail=str(exc),
+        ) from exc
+    if len(body.roster) != ruleset.PLAYER_COUNT:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"roster must have exactly {ruleset.PLAYER_COUNT} entries, got {len(body.roster)}"
+            ),
         )
     if not (MIN_CLONE_COUNT <= body.clone_count <= MAX_CLONE_COUNT):
         raise HTTPException(
@@ -168,6 +179,18 @@ async def create_gauntlet_route(
             )
 
     seed = body.gauntlet_seed if body.gauntlet_seed is not None else _generate_gauntlet_seed()
+    try:
+        validate_placement_roster_faction_uniqueness(
+            ruleset_id=body.ruleset_id,
+            gauntlet_seed=seed,
+            clone_count=body.clone_count,
+            roster=body.roster,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
     gauntlet = await gauntlets_repo.create(
         session,

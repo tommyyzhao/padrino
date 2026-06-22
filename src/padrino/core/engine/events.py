@@ -95,6 +95,38 @@ class InvestigateSubmittedPayload(_FrozenModel):
     target: str | None
 
 
+class RoleblockSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class FrameSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class TrackSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class WatchSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class CleanSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class SerialKillSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
+class NightFeedbackDeliveredPayload(_FrozenModel):
+    code: str
+    target: str | None = None
+    finding: Literal["MAFIA", "TOWN"] | None = None
+    visited_player_ids: tuple[str, ...] = ()
+    visitor_player_ids: tuple[str, ...] = ()
+
+
 class ActionTimedOutPayload(_FrozenModel):
     expected_action_type: str
     defaulted_to: str
@@ -114,12 +146,21 @@ class DayVoteResolvedPayload(_FrozenModel):
     eliminated: str | None
     vote_tally: dict[str, int]
     reason: str
+    voter_weights: dict[str, int] = Field(default_factory=dict)
+    total_vote_weight: int | None = None
+    hammer_threshold: int | None = None
 
 
 class NightResolvedPayload(_FrozenModel):
     eliminated: str | None
     protected: str | None
     mafia_kill_target: str | None
+    eliminated_player_ids: tuple[str, ...] = ()
+    serial_kill_target: str | None = None
+    cleaned_deaths: tuple[str, ...] = ()
+    clean_spent_actor_ids: tuple[str, ...] = ()
+    framed_targets: tuple[str, ...] = ()
+    frame_spent_actor_ids: tuple[str, ...] = ()
 
 
 class DetectiveResultDeliveredPayload(_FrozenModel):
@@ -129,9 +170,9 @@ class DetectiveResultDeliveredPayload(_FrozenModel):
 
 class PlayerEliminatedPayload(_FrozenModel):
     public_player_id: str
-    role: Role
-    faction: Faction
     cause: str
+    role: Role | None = None
+    faction: Faction | None = None
 
 
 class PhaseResolvedPayload(_FrozenModel):
@@ -139,7 +180,7 @@ class PhaseResolvedPayload(_FrozenModel):
 
 
 class GameTerminatedPayload(_FrozenModel):
-    winner: Literal["TOWN", "MAFIA", "DRAW"]
+    winner: str
     reason: str
 
 
@@ -247,6 +288,69 @@ class InvestigateSubmitted(_FrozenModel):
     visibility: Literal["PRIVATE"] = "PRIVATE"
     actor_player_id: str
     payload: InvestigateSubmittedPayload
+
+
+class RoleblockSubmitted(_FrozenModel):
+    event_type: Literal["RoleblockSubmitted"] = "RoleblockSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: RoleblockSubmittedPayload
+
+
+class FrameSubmitted(_FrozenModel):
+    event_type: Literal["FrameSubmitted"] = "FrameSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: FrameSubmittedPayload
+
+
+class TrackSubmitted(_FrozenModel):
+    event_type: Literal["TrackSubmitted"] = "TrackSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: TrackSubmittedPayload
+
+
+class WatchSubmitted(_FrozenModel):
+    event_type: Literal["WatchSubmitted"] = "WatchSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: WatchSubmittedPayload
+
+
+class CleanSubmitted(_FrozenModel):
+    event_type: Literal["CleanSubmitted"] = "CleanSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: CleanSubmittedPayload
+
+
+class SerialKillSubmitted(_FrozenModel):
+    event_type: Literal["SerialKillSubmitted"] = "SerialKillSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: SerialKillSubmittedPayload
+
+
+class NightFeedbackDelivered(_FrozenModel):
+    event_type: Literal["NightFeedbackDelivered"] = "NightFeedbackDelivered"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: NightFeedbackDeliveredPayload
 
 
 class ActionTimedOut(_FrozenModel):
@@ -362,6 +466,13 @@ Event = Annotated[
     | MafiaKillVoteSubmitted
     | ProtectSubmitted
     | InvestigateSubmitted
+    | RoleblockSubmitted
+    | FrameSubmitted
+    | TrackSubmitted
+    | WatchSubmitted
+    | CleanSubmitted
+    | SerialKillSubmitted
+    | NightFeedbackDelivered
     | ActionTimedOut
     | OutputTruncated
     | OutputInvalid
@@ -388,6 +499,13 @@ EVENT_TYPES: tuple[str, ...] = (
     "MafiaKillVoteSubmitted",
     "ProtectSubmitted",
     "InvestigateSubmitted",
+    "RoleblockSubmitted",
+    "FrameSubmitted",
+    "TrackSubmitted",
+    "WatchSubmitted",
+    "CleanSubmitted",
+    "SerialKillSubmitted",
+    "NightFeedbackDelivered",
     "ActionTimedOut",
     "OutputTruncated",
     "OutputInvalid",
@@ -406,12 +524,16 @@ __all__ = [
     "EVENT_TYPES",
     "ActionTimedOut",
     "ActionTimedOutPayload",
+    "CleanSubmitted",
+    "CleanSubmittedPayload",
     "DayVoteResolved",
     "DayVoteResolvedPayload",
     "DetectiveResultDelivered",
     "DetectiveResultDeliveredPayload",
     "Event",
     "EventAdapter",
+    "FrameSubmitted",
+    "FrameSubmittedPayload",
     "GameCreated",
     "GameCreatedPayload",
     "GameTerminated",
@@ -420,6 +542,8 @@ __all__ = [
     "InvestigateSubmittedPayload",
     "MafiaKillVoteSubmitted",
     "MafiaKillVoteSubmittedPayload",
+    "NightFeedbackDelivered",
+    "NightFeedbackDeliveredPayload",
     "NightResolved",
     "NightResolvedPayload",
     "OutputInvalid",
@@ -440,12 +564,20 @@ __all__ = [
     "PublicMessageSubmittedPayload",
     "RoleClaimed",
     "RoleClaimedPayload",
+    "RoleblockSubmitted",
+    "RoleblockSubmittedPayload",
     "RolesAssigned",
     "RolesAssignedPayload",
     "SeatAssignment",
     "SeatTakenOver",
     "SeatTakenOverPayload",
+    "SerialKillSubmitted",
+    "SerialKillSubmittedPayload",
+    "TrackSubmitted",
+    "TrackSubmittedPayload",
     "Visibility",
     "VoteSubmitted",
     "VoteSubmittedPayload",
+    "WatchSubmitted",
+    "WatchSubmittedPayload",
 ]

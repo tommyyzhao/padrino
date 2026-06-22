@@ -28,8 +28,22 @@ from padrino.api.auth import (
     generate_raw_key,
 )
 from padrino.api.routes.public import PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS
-from padrino.db.repositories import api_keys as api_keys_repo
-from padrino.db.repositories import ingested_games as ingested_games_repo
+from padrino.core.enums import RatingContextKind
+from padrino.db.models import AgentBuild, PlacementRating, Rating, SoloRateRating
+from padrino.db.repositories import (
+    agent_builds,
+    leagues,
+    model_configs,
+    prompt_versions,
+    providers,
+)
+from padrino.db.repositories import (
+    api_keys as api_keys_repo,
+)
+from padrino.db.repositories import (
+    ingested_games as ingested_games_repo,
+)
+from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.ratings.public_leaderboard import RATING_MODEL, reset_cache
 from padrino.settings import get_settings
 
@@ -221,6 +235,145 @@ def _auth(raw: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {raw}"}
 
 
+async def _seed_context_card_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Seed canonical, placement, and solo-rate rows for the card contract."""
+    async with session_factory() as session, session.begin():
+        provider = await providers.create(
+            session,
+            name="cerebras",
+            auth_secret_ref="CEREBRAS_API_KEY",
+        )
+        mc = await model_configs.create(
+            session,
+            provider_id=provider.id,
+            model_name="glm-4.7",
+            model_version="2026-06",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+
+        async def build_for(ruleset_id: str, suffix: str) -> AgentBuild:
+            pv = await prompt_versions.create(
+                session,
+                ruleset_id=ruleset_id,
+                version=f"{ruleset_id}-{suffix}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"context-card-{ruleset_id}-{suffix}",
+            )
+            return await agent_builds.create(
+                session,
+                display_name=f"Atlas {suffix}",
+                model_config_id=mc.id,
+                prompt_version_id=pv.id,
+                adapter_version="2026.05",
+                inference_params={"temperature": 0.7},
+                active=True,
+            )
+
+        canonical_ranked = await build_for("mini7_v1", "ranked")
+        canonical_provisional = await build_for("mini7_v1", "provisional")
+        placement_build = await build_for("sk12_v1", "placement")
+        solo_ranked = await build_for("jester8_v1", "solo-ranked")
+        solo_provisional = await build_for("jester8_v1", "solo-provisional")
+
+        canonical_league = await leagues.create(
+            session,
+            name="context-card-canonical",
+            ruleset_id="mini7_v1",
+            ranked=True,
+        )
+        canonical_context = await rating_contexts_repo.get_by_ruleset_kind(
+            session,
+            ruleset_id="mini7_v1",
+            kind=RatingContextKind.CANONICAL_TEAM,
+        )
+        assert canonical_context is not None
+        session.add_all(
+            [
+                Rating(
+                    league_id=canonical_league.id,
+                    ruleset_id="mini7_v1",
+                    rating_context_id=canonical_context.id,
+                    agent_build_id=canonical_ranked.id,
+                    scope_type="GLOBAL",
+                    scope_value="global",
+                    mu=31.2,
+                    sigma=2.1,
+                    conservative_score=24.9,
+                    games=12,
+                ),
+                Rating(
+                    league_id=canonical_league.id,
+                    ruleset_id="mini7_v1",
+                    rating_context_id=canonical_context.id,
+                    agent_build_id=canonical_provisional.id,
+                    scope_type="GLOBAL",
+                    scope_value="global",
+                    mu=50.0,
+                    sigma=1.0,
+                    conservative_score=47.0,
+                    games=2,
+                ),
+            ]
+        )
+
+        placement_context = await rating_contexts_repo.ensure_declared_context(
+            session,
+            ruleset_id="sk12_v1",
+        )
+        assert placement_context is not None
+        session.add(
+            PlacementRating(
+                rating_context_id=placement_context.id,
+                agent_build_id=placement_build.id,
+                scope_type="GLOBAL",
+                scope_value="global",
+                mu=24.8,
+                sigma=4.9,
+                conservative_score=10.1,
+                games=14,
+            )
+        )
+
+        solo_context = await rating_contexts_repo.ensure_declared_context(
+            session,
+            ruleset_id="jester8_v1",
+        )
+        assert solo_context is not None
+        session.add_all(
+            [
+                SoloRateRating(
+                    rating_context_id=solo_context.id,
+                    agent_build_id=solo_ranked.id,
+                    scope_type="ROLE",
+                    scope_value="JESTER",
+                    successes=7,
+                    attempts=12,
+                    posterior_alpha=8.0,
+                    posterior_beta=6.0,
+                    mean_success_rate=8.0 / 14.0,
+                ),
+                SoloRateRating(
+                    rating_context_id=solo_context.id,
+                    agent_build_id=solo_provisional.id,
+                    scope_type="ROLE",
+                    scope_value="JESTER",
+                    successes=8,
+                    attempts=9,
+                    posterior_alpha=9.0,
+                    posterior_beta=2.0,
+                    mean_success_rate=9.0 / 11.0,
+                ),
+            ]
+        )
+
+
 @pytest_asyncio.fixture
 async def client(
     session_factory: async_sessionmaker[AsyncSession],
@@ -250,6 +403,64 @@ async def anonymous_client(
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
+
+
+async def test_leaderboard_returns_separated_context_cards_without_cross_sort(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    raw, _ = await _seed_key(session_factory, scopes=[SCOPE_SPECTATOR], label="lurker")
+    await _seed_context_card_rows(session_factory)
+
+    response = await client.get("/public/leaderboard", headers=_auth(raw))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ruleset_id"] is None
+    assert body["entries"] == []
+    assert set(body) >= {"canonical_cards", "experimental_cards"}
+
+    canonical = body["canonical_cards"]
+    experimental = body["experimental_cards"]
+    assert canonical
+    assert experimental
+    assert {card["section"] for card in canonical} == {"canonical"}
+    assert {card["section_label"] for card in canonical} == {"Ranked canonical"}
+    assert {card["context_kind"] for card in canonical} == {"CANONICAL_TEAM"}
+    assert {card["section"] for card in experimental} == {"experimental"}
+    assert {card["section_label"] for card in experimental} == {"Experimental context"}
+    assert {card["context_kind"] for card in experimental} == {"PLACEMENT", "SOLO_RATE"}
+
+    canonical_ranked = next(card for card in canonical if card["display_name"] == "Atlas ranked")
+    canonical_provisional = next(
+        card for card in canonical if card["display_name"] == "Atlas provisional"
+    )
+    assert canonical_ranked["rank"] == 1
+    assert canonical_ranked["provisional"] is False
+    assert canonical_provisional["rank"] is None
+    assert canonical_provisional["provisional"] is True
+    assert canonical_provisional["conservative_score"] > canonical_ranked["conservative_score"]
+    assert "10 games" in canonical_provisional["provisional_reason"]
+
+    placement = next(card for card in experimental if card["context_kind"] == "PLACEMENT")
+    assert placement["context_label"] == "Serial Killer 12 placement"
+    assert placement["rank"] == 1
+    assert placement["metric"] == "openskill_conservative"
+    assert placement["conservative_score"] == pytest.approx(10.1)
+
+    solo_ranked = next(card for card in experimental if card["display_name"] == "Atlas solo-ranked")
+    solo_provisional = next(
+        card for card in experimental if card["display_name"] == "Atlas solo-provisional"
+    )
+    assert solo_ranked["context_label"] == "Jester 8 lynch-bait"
+    assert solo_ranked["rank"] == 1
+    assert solo_ranked["metric"] == "solo_success_rate"
+    assert solo_ranked["credible_interval_low"] < solo_ranked["mean_success_rate"]
+    assert solo_ranked["credible_interval_high"] > solo_ranked["mean_success_rate"]
+    assert solo_provisional["rank"] is None
+    assert solo_provisional["provisional"] is True
+    assert solo_provisional["sample_count"] == 9
+    assert "10 attempts" in solo_provisional["provisional_reason"]
 
 
 async def test_leaderboard_sorted_by_conservative_score(

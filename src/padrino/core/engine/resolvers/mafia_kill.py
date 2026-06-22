@@ -17,12 +17,12 @@ from collections.abc import Mapping
 from pydantic import BaseModel, ConfigDict
 
 from padrino.core.engine.actions import Action
+from padrino.core.engine.resolvers import nar as _nar
 from padrino.core.engine.state import GameState
-from padrino.core.enums import ActionType, Faction
 
-REASON_UNIQUE_PLURALITY = "unique_plurality"
-REASON_TIE = "tie"
-REASON_ALL_INVALID = "all_invalid"
+REASON_UNIQUE_PLURALITY = _nar.REASON_UNIQUE_PLURALITY
+REASON_TIE = _nar.REASON_TIE
+REASON_ALL_INVALID = _nar.REASON_ALL_INVALID
 
 
 class MafiaKillResult(BaseModel):
@@ -40,31 +40,9 @@ def resolve_mafia_kill(
     mafia_submissions: Mapping[str, Action],
 ) -> MafiaKillResult:
     """Resolve the mafia night kill and return the targeting result."""
-    living_non_mafia: set[str] = {
-        s.public_player_id for s in state.seats if s.alive and s.faction is not Faction.MAFIA
-    }
-
-    tally: dict[str, int] = {}
-    for seat in state.seats:
-        if not seat.alive or seat.faction is not Faction.MAFIA:
-            continue
-        action = mafia_submissions.get(seat.public_player_id)
-        if action is None or action.type is not ActionType.MAFIA_KILL:
-            continue
-        target = action.target
-        if target is None or target not in living_non_mafia:
-            continue
-        tally[target] = tally.get(target, 0) + 1
-
-    if not tally:
-        return MafiaKillResult(target=None, vote_tally={}, reason=REASON_ALL_INVALID)
-
-    top_count = max(tally.values())
-    winners = [pid for pid, count in tally.items() if count == top_count]
-    if len(winners) == 1:
-        return MafiaKillResult(
-            target=winners[0],
-            vote_tally=tally,
-            reason=REASON_UNIQUE_PLURALITY,
-        )
-    return MafiaKillResult(target=None, vote_tally=tally, reason=REASON_TIE)
+    result = _nar.resolve_current_mafia_kill(state, mafia_submissions)
+    return MafiaKillResult(
+        target=result.target,
+        vote_tally=dict(result.vote_tally),
+        reason=result.reason,
+    )

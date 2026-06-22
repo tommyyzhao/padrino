@@ -20,18 +20,18 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict
 
 from padrino.core.engine.actions import Action
-from padrino.core.engine.state import GameState, Seat
-from padrino.core.enums import ActionType, Faction, Role
+from padrino.core.engine.resolvers import nar as _nar
+from padrino.core.engine.state import GameState
 
-FINDING_MAFIA = "MAFIA"
-FINDING_TOWN = "TOWN"
+FINDING_MAFIA = _nar.FINDING_MAFIA
+FINDING_TOWN = _nar.FINDING_TOWN
 
-REASON_RESOLVED = "resolved"
-REASON_SELF_TARGET = "self_target"
-REASON_INVALID_TARGET = "invalid_target"
-REASON_NO_SUBMISSION = "no_submission"
-REASON_DEAD_DETECTIVE = "dead_detective"
-REASON_NO_DETECTIVE = "no_detective"
+REASON_RESOLVED = _nar.REASON_RESOLVED
+REASON_SELF_TARGET = _nar.REASON_SELF_TARGET
+REASON_INVALID_TARGET = _nar.REASON_INVALID_TARGET
+REASON_NO_SUBMISSION = _nar.REASON_NO_SUBMISSION
+REASON_DEAD_DETECTIVE = _nar.REASON_DEAD_DETECTIVE
+REASON_NO_DETECTIVE = _nar.REASON_NO_DETECTIVE
 
 
 class DetectiveResult(BaseModel):
@@ -44,38 +44,10 @@ class DetectiveResult(BaseModel):
     reason: str
 
 
-def _find_detective(state: GameState) -> Seat | None:
-    for seat in state.seats:
-        if seat.role is Role.DETECTIVE:
-            return seat
-    return None
-
-
 def resolve_detective_investigation(
     state: GameState,
     detective_submission: Action | None,
 ) -> DetectiveResult:
     """Resolve the detective's night investigation and return the outcome."""
-    detective = _find_detective(state)
-    if detective is None:
-        return DetectiveResult(target=None, finding=None, reason=REASON_NO_DETECTIVE)
-    if not detective.alive:
-        return DetectiveResult(target=None, finding=None, reason=REASON_DEAD_DETECTIVE)
-    if detective_submission is None:
-        return DetectiveResult(target=None, finding=None, reason=REASON_NO_SUBMISSION)
-    if detective_submission.type is not ActionType.INVESTIGATE:
-        return DetectiveResult(target=None, finding=None, reason=REASON_INVALID_TARGET)
-
-    target_id = detective_submission.target
-    if target_id is None:
-        return DetectiveResult(target=None, finding=None, reason=REASON_INVALID_TARGET)
-
-    if target_id == detective.public_player_id:
-        return DetectiveResult(target=None, finding=None, reason=REASON_SELF_TARGET)
-
-    target_seat = state.seat_by_public_id(target_id)
-    if target_seat is None or not target_seat.alive:
-        return DetectiveResult(target=None, finding=None, reason=REASON_INVALID_TARGET)
-
-    finding = FINDING_MAFIA if target_seat.faction is Faction.MAFIA else FINDING_TOWN
-    return DetectiveResult(target=target_id, finding=finding, reason=REASON_RESOLVED)
+    result = _nar.resolve_current_detective_investigation(state, detective_submission)
+    return DetectiveResult(target=result.target, finding=result.finding, reason=result.reason)

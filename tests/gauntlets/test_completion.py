@@ -551,7 +551,7 @@ async def test_diagnostics_aggregate_over_child_games(
                 _terminated_body(),
             ],
         )
-        # Game 1: 1 PublicMessage("hi!!"), 1 OutputInvalid.
+        # Game 1: 1 PublicMessage("hi!!"), 1 newer role action, 1 OutputInvalid.
         await _append_chained(
             session,
             game_id=gauntlet.game_ids[1],
@@ -562,6 +562,13 @@ async def test_diagnostics_aggregate_over_child_games(
                     "visibility": "PUBLIC",
                     "actor_player_id": "P05",
                     "payload": {"text": "hi!!", "round_index": 1},
+                },
+                {
+                    "event_type": "RoleblockSubmitted",
+                    "phase": "NIGHT_ACTIONS:1:0",
+                    "visibility": "PRIVATE",
+                    "actor_player_id": "P06",
+                    "payload": {"target": "P03"},
                 },
                 {
                     "event_type": "OutputInvalid",
@@ -596,10 +603,10 @@ async def test_diagnostics_aggregate_over_child_games(
     assert diag.games_completed == 2
     # Submission/failure denominator across both games:
     #   game0: PublicMessage + Vote + ActionTimedOut = 3
-    #   game1: PublicMessage + OutputInvalid = 2
-    #   total = 5
-    assert diag.timeout_rate == pytest.approx(1 / 5)
-    assert diag.invalid_action_rate == pytest.approx(1 / 5)
+    #   game1: PublicMessage + RoleblockSubmitted + OutputInvalid = 3
+    #   total = 6
+    assert diag.timeout_rate == pytest.approx(1 / 6)
+    assert diag.invalid_action_rate == pytest.approx(1 / 6)
     # Public messages: "hello"(5) + "hi!!"(4) → 9 chars over 2 messages.
     assert diag.average_public_message_chars == pytest.approx(9 / 2)
 

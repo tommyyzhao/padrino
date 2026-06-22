@@ -71,12 +71,25 @@ class PromptTemplate(BaseModel):
     prompt_hash: str
 
 
+_BUNDLED_PROMPT_DIRS: Final[dict[str, str]] = {
+    "mini7_v1": "mini7_v1",
+    "bench10_v1": "bench10_v1",
+    "roleblock10_v1": "bench10_v1",
+    "deception13_v1": "bench10_v1",
+    "visit12_v1": "bench10_v1",
+    "ninja13_v1": "bench10_v1",
+    "sk12_v1": "bench10_v1",
+    "jester8_v1": "bench10_v1",
+}
+
+
 def _bundled_dir(ruleset_id: str) -> str:
-    if ruleset_id not in ("mini7_v1", "bench10_v1"):
+    bundled = _BUNDLED_PROMPT_DIRS.get(ruleset_id)
+    if bundled is None:
         raise UnknownCanonicalPromptError(
             f"no canonical prompts bundled for ruleset_id={ruleset_id!r}"
         )
-    return ruleset_id
+    return bundled
 
 
 class UnknownCanonicalPromptError(LookupError):
@@ -143,7 +156,7 @@ def canonical_prompts_by_role(
 
     ruleset = get_ruleset(ruleset_id)
     out: dict[Role, str] = {}
-    for role in Role:
+    for role in ruleset.ROLE_COUNTS:
         role_family = ruleset.role_family_for(role)
         out[role] = load_canonical(ruleset_id, role_family).system_prompt
     return out

@@ -47,13 +47,19 @@ _DRAW_KEY: Final[str] = "DRAW"
 
 # Submission events that count as a real (non-NOOP / non-ABSTAIN) action. A
 # NOOP emits no event at all; an ABSTAIN emits ``VoteSubmitted`` with
-# ``payload.is_abstain == True``. The four real action event types below are
-# the canonical source per the wave-3 US-071 learnings.
+# ``payload.is_abstain == True``. The real action event types below are the
+# canonical source per the wave-3 US-071 learnings.
 _REAL_ACTION_EVENT_TYPES: Final[frozenset[str]] = frozenset(
     {
         "MafiaKillVoteSubmitted",
         "ProtectSubmitted",
         "InvestigateSubmitted",
+        "RoleblockSubmitted",
+        "FrameSubmitted",
+        "TrackSubmitted",
+        "WatchSubmitted",
+        "CleanSubmitted",
+        "SerialKillSubmitted",
     }
 )
 

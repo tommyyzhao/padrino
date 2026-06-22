@@ -28,7 +28,7 @@ import json
 import uuid
 from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Any, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -95,6 +95,7 @@ from padrino.ratings.model_rollup import (
 from padrino.ratings.openskill_service import SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL
 from padrino.ratings.provisional_and_decay import apply_decay, days_idle, is_provisional, to_ordinal
 from padrino.ratings.public_leaderboard import (
+    card_to_response,
     compute_public_leaderboard,
     entry_to_response,
 )
@@ -201,7 +202,7 @@ async def require_public_read(
 class PublicLeaderboardQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    ruleset_id: str = Field(min_length=1)
+    ruleset_id: str | None = Field(default=None, min_length=1)
     gauntlet_id: str | None = None
     limit: int = Field(default=DEFAULT_LIMIT, ge=MIN_LIMIT, le=MAX_LIMIT)
     cursor: str | None = None
@@ -223,12 +224,47 @@ class PublicLeaderboardEntryResponse(BaseModel):
     conservative_score: float
 
 
-class PublicLeaderboardResponse(BaseModel):
+class PublicRatingCardResponse(BaseModel):
+    card_id: str
+    section: Literal["canonical", "experimental"]
+    section_label: str
+    context_kind: str
+    context_label: str
     ruleset_id: str
+    entity_id: str
+    display_name: str
+    model_provider: str
+    model_name: str
+    model_version: str | None
+    prompt_version: str
+    scope_type: str
+    scope_value: str
+    metric: Literal["openskill_conservative", "solo_success_rate"]
+    metric_label: str
+    score: float
+    rank: int | None
+    provisional: bool
+    provisional_reason: str | None
+    sample_count: int
+    games: int | None
+    attempts: int | None
+    successes: int | None
+    mu: float | None
+    sigma: float | None
+    conservative_score: float | None
+    mean_success_rate: float | None
+    credible_interval_low: float | None
+    credible_interval_high: float | None
+
+
+class PublicLeaderboardResponse(BaseModel):
+    ruleset_id: str | None
     gauntlet_id: str | None
     rating_model: str
     cache_tag: str
     entries: list[PublicLeaderboardEntryResponse]
+    canonical_cards: list[PublicRatingCardResponse]
+    experimental_cards: list[PublicRatingCardResponse]
     next_cursor: str | None = None
     total_estimate: int
 
@@ -239,13 +275,16 @@ class PublicLeaderboardResponse(BaseModel):
 )
 async def public_leaderboard(
     query: Annotated[PublicLeaderboardQuery, Query()],
+    request: Request,
     _ctx: ApiKeyContext = Depends(require_public_read),
     session: AsyncSession = Depends(get_session),
 ) -> PublicLeaderboardResponse:
+    cfg: Any = getattr(request.app.state, "auth_settings", None) or get_settings()
     leaderboard = await compute_public_leaderboard(
         session,
         ruleset_id=query.ruleset_id,
         gauntlet_id=query.gauntlet_id,
+        provisional_games_threshold=cfg.padrino_provisional_game_threshold,
     )
     entries = list(leaderboard.entries)
     page, next_cursor = _paginate_index(entries, query.limit, query.cursor)
@@ -255,6 +294,14 @@ async def public_leaderboard(
         rating_model=leaderboard.rating_model,
         cache_tag=leaderboard.cache_tag,
         entries=[PublicLeaderboardEntryResponse(**entry_to_response(e)) for e in page],
+        canonical_cards=[
+            PublicRatingCardResponse(**card_to_response(card))
+            for card in leaderboard.canonical_cards
+        ],
+        experimental_cards=[
+            PublicRatingCardResponse(**card_to_response(card))
+            for card in leaderboard.experimental_cards
+        ],
         next_cursor=next_cursor,
         total_estimate=len(entries),
     )
@@ -807,6 +854,14 @@ class PublicModelFactionAggregate(BaseModel):
     losses: int
 
 
+class PublicModelRoleAggregate(BaseModel):
+    games: int
+    wins: int
+    draws: int
+    losses: int
+    win_rate: float
+
+
 class PublicModelEntryResponse(BaseModel):
     model_key: str
     display_name: str
@@ -820,8 +875,11 @@ class PublicModelEntryResponse(BaseModel):
     wins: int
     draws: int
     losses: int
+    timeout_rate: float
+    invalid_action_rate: float
     town: PublicModelFactionAggregate
     mafia: PublicModelFactionAggregate
+    role_breakdown: dict[str, PublicModelRoleAggregate]
     agent_build_count: int
 
 
@@ -1519,6 +1577,7 @@ __all__ = [
     "PublicModelEntryResponse",
     "PublicModelFactionAggregate",
     "PublicModelLeaderboardResponse",
+    "PublicRatingCardResponse",
     "PublicRecentGameEntry",
     "PublicRecentIndexResponse",
     "PublicRoleWinRateAnalytics",

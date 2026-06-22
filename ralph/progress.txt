@@ -3,6 +3,154 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Frozen migration snapshots (US-223): historical migrations must not import
+  live core/ruleset declarations. Seed and backfill only frozen literal rows
+  that existed at the migration's ship point; newer rulesets should be
+  materialized by the runtime `ensure_declared_context` path unless a future
+  forward migration adds its own frozen historical backfill.
+- Placement terminal resilience (US-222): keep experimental PLACEMENT rating
+  writes outside the `GameTerminated` event/status transaction, and let the
+  direct rating service remain strict for malformed Plackett-Luce inputs. The
+  terminal path should validate winner membership against the per-game
+  `seat_groups` and skip/log invalid non-faction winners, while gauntlet intake
+  uses deterministic `assign_roles(derive_game_seed(...))` per clone to reject
+  duplicate builds that would span placement outcome factions.
+- Data-driven migration backfills (US-221): when a migration stamps historical
+  rating rows from ruleset metadata, query the distinct persisted
+  `SCIENTIFIC` league `ruleset_id`s and resolve each through the current
+  ruleset registry's declared `RATING_CONTEXT_KIND` / `IS_CANONICAL` /
+  display-label contract. Do not hardcode the sacred pair; fresh future
+  scientific canonical rulesets such as `roleblock10_v1` must receive the same
+  additive marker without re-rating.
+- Canonicality layer-2 negative tests (US-220): to prove
+  `_observed_terminal_outcomes` is not a no-op, build a minimal canonical-looking
+  ruleset that passes all layer-1 flags and monkeypatch
+  `rulesets.canonicality.check_win` to return deviant observed winners. This
+  exercises the terminal-outcome audit directly without weakening built-in
+  ruleset declarations.
+- Placement terminal scoring (US-219): wire non-canonical PLACEMENT contexts
+  from the runner terminal transaction, like SOLO_RATE, using
+  `declared_for_ruleset` to fail closed and skipping mirror-pair games until
+  paired placement scoring is defined. Derive placement groups from assigned
+  seat factions, treat `DRAW` as an all-groups tie with mu frozen and sigma
+  shrinking, and reject any single agent build spanning multiple placement
+  outcome groups so it cannot double-count.
+- Same-night-death feedback suppression (US-218): when a night role produces
+  private resolved-state feedback, pass `eliminated_player_ids` into that
+  feedback path and skip recipients killed that night. Apply this consistently
+  for investigation-style feedback and visit-graph reads so dead observers do
+  not receive post-death private state.
+- Canonical full-game byte-stability (US-217): protect sacred ladders with
+  runner-level golden fixtures that exercise structured night actions, not by
+  asserting on NAR internals. For `mini7_v1` / `bench10_v1`, use seeded
+  scripted games that include mafia kills, Doctor protects, and Detective
+  investigations of every mafia seat, then pin terminal result/reason,
+  eliminated sequence, event count, final event hash, and chain digest.
+- Sacred canonical rulesets (US-216): never mutate an existing canonical
+  ruleset roster such as `mini7_v1` or `bench10_v1` to admit a new role. Put
+  new canonical role mixes behind a new `ruleset_id`, keep the old corpus
+  hashes pinned, and require every built-in `IS_CANONICAL` ruleset to have a
+  regression-corpus hash so future roster drift fails closed.
+- Engine-stress utility roles (US-188): keep Mayor / Commuter / Mason as
+  generic deterministic engine roles without admitting them to canonical
+  built-in rulesets. Mayor vote weight lives in the pure day-vote resolver as
+  public weighted tally metadata behind a disabled variance gate; Commuter is a
+  passive NAR target bounce before visits/effects are recorded; Mason is a
+  structured observation fact (`mason_partners`) keyed only by public player id,
+  never a chat channel.
+- Ninja visit suppression (US-187b): model Ninja as a Mafia role that uses the
+  existing `MAFIA_KILL` / `FACTIONAL_KILL` path, not a new action type. Keep
+  suppression at the pure NAR visit-recording seam: a Ninja factional kill
+  omits only that actor's kill visit, while same-night roleblock visits remain
+  visible to Tracker/Watcher. Use a dedicated canonical 10p+ ruleset
+  (`ninja13_v1`) rather than mutating earlier ruleset payloads.
+- Visit-graph investigative roles (US-187): keep Tracker/Watcher as pure reads
+  over the NAR `VisitRecord` list. Roleblock visits are recorded at the
+  roleblock tier, but a blocked actor's nullified action still does not record
+  its own visit; Tracker reports the tracked actor's visited public ids and
+  Watcher reports visitors to the watched public id. Ship visit-graph roles in
+  a dedicated canonical 10p+ ruleset (`visit12_v1`) rather than changing older
+  legacy ruleset payloads.
+- Multi-context public presentation (US-186): keep public rating cards as a
+  read-side contract, not a write path. Query canonical cards only through the
+  scientific `Rating` rows with a canonical `RatingContext`; query
+  experimental cards only from the sibling `placement_ratings` /
+  `solo_rate_ratings` tables. Return `canonical_cards` and
+  `experimental_cards` as separate arrays, assign ranks only within exact
+  `(context_kind, ruleset_id, scope_type, scope_value, metric)` groups, and
+  set provisional cards' `rank` to `None` even if their raw score is higher.
+- SOLO_RATE alt-win roles (US-185): model the objective as a pure
+  `ALT_TRIGGER` win condition on a non-canonical ruleset, fold the trigger from
+  structured mechanical events (Jester: `PlayerEliminated` with `role=JESTER`
+  and day-vote cause), and have the runner write one role-scoped
+  `SoloRateAttempt` from terminal state. Do not parse chat, do not expose
+  model/build identity in the signal, and keep canonical/placement paths
+  returning zero rows.
+- SOLO_RATE scoring (US-184): keep alt-win / orthogonal solo objectives out of
+  every team-ELO path. Resolve only an explicit non-canonical `SOLO_RATE`
+  context, write success/attempt counts to `solo_rate_ratings` /
+  `solo_rate_rating_events`, and expose read-side cards only after a
+  minimum-attempt gate with Beta-posterior credible intervals.
+- Solo-faction placement rulesets (US-183): keep solo / three-faction variants
+  non-canonical with `RATING_CONTEXT_KIND = PLACEMENT` and an explicit
+  `SOLO_FACTIONS` declaration. Model terminal logic with ordered
+  `WIN_CONDITIONS`: Town eliminates every threat faction, solo wins through
+  `SOLO_LAST_ALIVE`, and Mafia parity is blocked by the live solo faction.
+  Independent solo kills should be first-class NAR actions that populate
+  `MatrixNightResolution.eliminated_player_ids`, while legacy `eliminated`
+  remains the first deterministic death for older callers. Add every new
+  runner-emitted submission event to `diagnostics/submissions.py`.
+- Non-canonical placement scoring (US-182): keep PLACEMENT OpenSkill writes on
+  the sibling `placement_ratings` / `placement_rating_events` tables keyed by
+  `rating_context_id`; do not accept a `league_id` or touch canonical
+  `Rating` / `RatingEvent`. Resolve only an explicit non-canonical PLACEMENT
+  context for the game's ruleset, rank the winner's terminal group first, and
+  tie every other terminal group for second.
+- Submission diagnostics vocabulary (US-181): keep timeout/invalid-rate
+  denominators in one read-side constant set (`diagnostics/submissions.py`) and
+  include every runner-emitted structured submission event plus failure events.
+  When adding a role event such as `TrackSubmitted`, update that vocabulary so
+  gauntlet, league, and model diagnostics keep the same denominator across
+  rulesets and ladders.
+- Mirror-paired canonical ratings (US-180): persist paired benchmark legs as
+  distinct `games` rows sharing `pair_id`, with `pair_leg=0` using roster order
+  and `pair_leg=1` using the mirrored roster while preserving the same
+  `game_seed`. Runner scheduling must compute `agent_builds_by_seat` per game,
+  not per gauntlet. Pair rating should canonicalize by `(game_seed, pair_leg,
+  game_id)` and apply both legs in one transaction; a completed-pair recovery
+  pass after gauntlet execution should be idempotent so close-finishing legs
+  cannot leave an unrated pair.
+- Variance-gated active roles (US-178): implement deterministic mechanics in
+  pure NAR first, but keep canonical inclusion behind a pure numeric gate
+  module with explicit sample and variance thresholds. Until the gate has the
+  required measured mirror-pair sample, built-in canonical rulesets should stay
+  role-free and future rulesets can conditionally include the role by reading
+  that gate. Limited-use active roles should spend shots from hidden
+  post-resolution event payload fields, not from submission events.
+- Limited-use NAR actions (US-177): if an active night role has a per-game
+  shot cap, do not spend it from the submission event because the runner folds
+  submissions before phase resolution. Emit the successful spend on a hidden
+  post-resolution event (`NightResolved.clean_spent_actor_ids`) and fold that
+  field in the reducer, while omitting empty fields from runner event bodies to
+  preserve legacy corpus hashes.
+- Role-gated active NAR roles (US-176): keep action eligibility enforced in
+  both `legal_actions_for` and the NAR target validator; runner-submitted raw
+  intents must not let arbitrary actors use future active night actions. New
+  dedicated canonical rulesets should register through `get_ruleset` and
+  `BUILTIN_RULESET_IDS`, while preserving existing legacy corpus hashes unless
+  the older ruleset payload itself intentionally changes.
+- Passive investigation falsifiers (US-175): keep the role passive at the NAR
+  finding seam (`core/engine/resolvers/nar.py::_finding_for`) so both the legacy
+  Detective helper and full night resolver share the same structured feedback.
+  If the role still participates in the factional kill, add it to the narrow
+  factional-kill role set in `legal_actions_for` rather than granting broad
+  Mafia-faction kill actions to future active scum roles.
+- Generalized terminal policy substrate (US-215): `core/engine/win_conditions.py` owns the ordered `WinCondition` policy tuple. Existing two-faction rulesets should declare `WIN_CONDITIONS = canonical_two_faction_win_conditions()` so `TOWN` / `MAFIA` / `DRAW` payloads and hashes stay byte-stable. Non-canonical rulesets can add `TARGET_FACTIONS_ELIMINATED`, `FACTION_PARITY` with `blocked_by_alive_factions`, `SOLO_LAST_ALIVE`, and `ALT_TRIGGER` policies, but canonical ratings remain gated separately on exact `TOWN|MAFIA|DRAW` winners. Store future alt-win facts as pure state triggers, not by parsing chat.
+- Structured night-action vocabulary is a three-layer contract (US-214): add the public `ActionType`, the matrix `NightActionKind`/`ResolutionMatrixRow`, and the runner/event-log submission event together. `legal_actions_for` remains the only producer of per-seat action availability, while `action_requires_target(...)` is the shared target-validation helper for runner coercion, the human adapter, and the human POST channel. Global `Role` enum membership is now future-ready; code that needs the roles in a concrete ruleset must iterate that ruleset's `ROLE_COUNTS`, not `for role in Role`.
+- NAR matrix as the only night-interaction seam (US-174): add future night roles by adding a `NightActionKind` + `ResolutionMatrixRow` in `core/engine/resolvers/nar.py`, then translating structured submissions into `NightActionIntent`s. Keep the old `mafia_kill` / `doctor_protect` / `detective` modules as compatibility wrappers only; runner-facing `resolve_night` should route through `resolve_current_night`. Pinned rules: roleblock-vs-roleblock applies both blocks, a roleblocked sole factional killer does not get an automatic backup carry, blocked active actions do not record visits, and investigations of targets killed that night still resolve if the investigator survives.
+- Draw-safe canonical OpenSkill updates (US-173): canonical `DRAW` outcomes still run through the equal-rank OpenSkill path to shrink sigma, but the persisted `mu` is frozen at the pre-draw value for every scope row. This prevents a day-cap/draw meta from farming `mu`; any conservative-score movement after a draw is only uncertainty shrinkage. Per-role sample diagnostics should stay read-side over `game_seats` and exact `Role` values, while Town/Mafia Elo diagnostics come from existing `FACTION` scope rows.
+- Canonical ruleset purity is a pure-core contract (US-172): `core/rulesets/canonicality.py` is the single validator for CANONICAL_TEAM eligibility. A canonical ruleset must explicitly declare no `ALT_WIN_CONDITIONS`, `SOLO_FACTIONS`, `FACTION_MUTATION_ALLOWED`, or `KINGMAKING_OBJECTIVE`; the validator enumerates alive Town/Mafia count states through `check_win` and requires ranked outcomes exactly `{TOWN, MAFIA}` with `DRAW` mapping to equal team ranks. Keep OpenSkill rank mapping wired through `canonical_team_ranks_for_outcome(...)` so draw/tie semantics cannot drift from the gate.
+- Rating contexts compose with, not replace, the League.kind firewall (US-171): keep canonical OpenSkill writes on the existing `Rating` / `RatingEvent` reach path (`League.kind == SCIENTIFIC` plus the runner/rating-service fail-closed chokepoints), and use `rating_context_id` only as additive metadata on those rows. Resolve a CANONICAL_TEAM context by checking BOTH the ruleset declaration (`RATING_CONTEXT_KIND == CANONICAL_TEAM` and `IS_CANONICAL`) and the persisted `rating_contexts` row (`is_canonical=True`); any missing/unknown/non-canonical context returns no writes. Non-canonical contexts get sibling tables (`placement_*`, `solo_rate_*`) and must never touch the sacred canonical tables.
 - Retryable security-ledger claims need explicit failure classification (US-213): when a durable single-use claim is committed before a downstream exchange, default failures should remain terminal/burned, and only explicitly transient infrastructure failures should release the claim in a separate committed transaction. Carry both an `error_class` and `transient` flag on the domain error, map live network/5xx/provider-temporary errors to transient, keep `invalid_grant` terminal, and regression-test retry success after transient release plus replay rejection after terminal failure.
 - Validate committed event re-seals before recovery side effects (US-212): in crash-recovery paths that mirror a durable `StoredEvent` into long-lived memory, compute `compute_event_hash(event.prev_event_hash, event.body)` and compare it to the committed `event.event_hash` before mutating auxiliary in-memory state such as mux dispatch tables or appending to `EventLog`. Keep the later append/hash assertion as a guard, but the primary corrupt-row rejection must be pre-mutation so the error path leaves memory untouched.
 - Post-commit recovery must distinguish memory lag from identity desync (US-211): a force-sync path may repair a known in-memory mirror that lagged after a durable commit, but it must not invent a new identity key. For takeover recovery, expose a mux membership predicate (`has_seat`) and reject unknown seats with `TakeoverApplyRecoveryError` before `force_swap_seat`, then regression-test both the unknown-seat desync and the known-seat US-206 resync path.
@@ -28,6 +176,7 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 - Race-safe presence upsert (US-192): `db/repositories/human_seat_presence.py` `record_heartbeat` / `mark_disconnected` no longer read-then-insert (which raced two concurrent first heartbeats into both INSERTing and the second violating `uq_human_seat_presence` -> 500). Both now route through `_upsert_presence(...)`, a dialect-aware `INSERT ... ON CONFLICT (game_id, public_player_id) DO UPDATE` (pg + sqlite branches, same shape as the chat sidecar counter). KEY gotchas for a Core upsert vs ORM insert: (1) ORM column defaults (`id=uuid4`, `updated_at=onupdate`) do NOT fire on a Core `insert()`, so supply EVERY column explicitly in `.values()`; (2) a Core upsert bypasses the ORM identity map, so any instance already loaded for that key is stale — `get(...)` then `session.expire(existing)` then re-`get(...)` so the returned ORM row reflects what was written. `mark_disconnected` uses a `_KEEP` sentinel (None is a real value) to NOT touch `last_seen_at` on UPDATE (preserve the last live heartbeat for grace-window measurement) but set it None on INSERT — matching the pre-existing semantics. Concurrency test pattern: file-based sqlite engine + `create_session_factory`, an `asyncio.Event` barrier, N tasks each in their OWN `session_factory()` + `session.begin()`, `asyncio.gather` and assert no IntegrityError + exactly one coherent row. SQLite round-trips tz-aware datetimes as naive, so compare via a `_naive()` helper.
 - Atomic $-budget caps as reservation slots + releasable admission slots (US-190): the per-user/day inference-$ cap AND the global cost breaker are no longer TOCTOU SELECT-sum-vs-threshold reads. They are enforced as finite discrete slots in `human_inference_reservations` (migration 0044): budget is divided into `floor(budget / padrino_human_admission_inference_reserve_usd)` slots; already-charged spend implicitly consumes the lowest slots (`ceil(spent/reserve)`, rounded UP = fail-closed); each admission claims ONE slot atomically via `INSERT ... begin_nested() + IntegrityError-retry` on `uq_human_inference_reservation_slot (scope_key, reservation_day, slot_index)`. `scope_key` is `principal_id.hex` (per-user) or the literal `"GLOBAL"` (breaker) — NO FK, so the global scope needs no sentinel principal row and stays portable across SQLite + Postgres. N concurrent admits can never exceed the slot count, so they cannot overshoot the $ ceiling. `admit_human(...)` claims GLOBAL then per-user inference slots then the count slot; on ANY later short-circuit it DELETEs the reservation rows already claimed in this call (`_rollback_reservations`) so a denial leaks no held budget. KEY slot-allocator invariant for ALL three slot tables (count + both inference): a RELEASED slot frees its CAP budget but KEEPS its physical `slot_index` (a re-claim must pick a FRESH index or it collides on the unique constraint forever). So `_next_free_index(implicit_used, physical)` = lowest int in neither `range(implicit_used)` nor the set of ALL physical indices (released included); the cap is checked separately as `implicit_used + len(live_unreleased) >= cap`. The index may grow above `cap` over a day — fine, the constraint only needs distinctness. `admit_human` returns claimed slot ids on `HumanAdmitDecision {count_slot_id, inference_reservation_ids}`; the lobby route calls `bind_admission_slots(session, decision, lobby_id=, lobby_member_id=)` after creating the lobby/member, and `release_admission_for_lobby` (idle auto-cancel) / `release_admission_for_member` (kick + stale eviction) set `released_at` so an ABANDONED action no longer permanently burns a day-cap slot (caps count actual games/joins, not attempts). An in-request validation failure is already self-healing because `get_session` rolls the whole txn back. Existing equality assertions on an ALLOWED `admit_human` result must switch to `.allowed`/`.reason` (the decision now carries non-default slot ids); DENIED-result equalities still hold (slot ids default None/()).
 - Shared human seat authorization (US-170): action/chat/observation/turing shells all consume `api.human_seat_auth.resolve_human_game_seat(...)` for the `GameSeat.occupant_principal_id == principal_id` check and pass their local `wrong_seat` detail through it. Keep future seat-scoped human routes on this helper so auth hardening cannot drift across channels.
+
 - Production-wiring invariant tests (US-169): for human-lane end-to-end gates, drive the real `runner.human_lane._default_human_game_executor(...)` / `_run_one_human_game(...)` path with preseeded `HumanActionSubmission` rows and deterministic AI adapters. Pair AST guards over `runner/human_lane.py` with DB-backed timing/hydration/reveal assertions, then do quick local mutation checks so each acceptance assertion is proven to fail when its production wiring regresses. Avoid ultra-low `0.01s` deadlines in DB-backed human-lane tests on shared in-memory SQLite; cancellation during persistence can corrupt the StaticPool connection, so prefer `>=0.2s` or fake-clock seams.
 - Snapshot-backed human request state (US-168): `runner.human_state_cache.resolve_current_human_state(...)` is the request-path resolver for action/chat/observation. The human runtime row now has nullable `state_cache` (migration `0042`) containing a versioned folded `GameState` plus ref-only `StoredEvent` envelopes and `{sequence_head,event_hash_head}`. Request paths trust it only after `game_events[sequence_head].event_hash` matches, then read/fold only `events_repo.list_events_after(..., after_sequence=sequence_head)`; invalid/missing caches fall back to verified full replay. `EventLog.from_stored(...)` reconstructs a trusted cached prefix without rehashing it; suffix rows are still hash-checked as they append. Never put raw human chat in the cache: released human chat remains `text="" + content_ref` in cached envelopes, with raw/cleaned text only in holds/sidecars.
 - Crash-consistent paired event persistence (US-189): when a human-lane DB mutation has a paired hash-chain event (seat takeover -> `SeatTakenOver`; chat release -> `content_ref` message), co-commit the `game_events` row in the SAME `session.begin()` as the seat/sidecar/hold write so the DB never gets ahead of the chain (hard rule 4). Use `events_repo.append_event(session, ...)` from the in-memory `StoredEvent` (`stored.sequence`/`prev_event_hash`/`event_hash`). The outer loop's `game_runner._persist_pending_event_rows(persistence, event_log, log_before)` (called by the `persist_pending_events` closure) is idempotent WITHOUT a max-sequence threshold: it reads `events_repo.persisted_sequences_from(session, game_id, from_sequence=log_before)` (the EXACT set of already-committed sequences in the batch) and skips ONLY those. A max-threshold skip is WRONG here: `run_tick` appends `ActionTimedOut` / `OutputInvalid` failure events to the in-memory log at LOWER sequences (persisted nowhere else but this loop), then a chat-release / takeover co-commits its own row at a HIGHER sequence in the SAME tick — so a `sequence <= max_persisted` skip silently drops the lower un-persisted failure rows and a rehydrate from `game_events` reconstructs a divergent state (hard rule 4 violation). Test the invariant two ways: (1) drive only the mutation (skipping the loop) then rehydrate from `game_events` alone (`replay_state_from_rows`) asserting provenance/sequence consistency; (2) build a mixed batch (failure events at seq 0,1 NOT co-committed + a co-committed row pre-persisted at seq 2) and assert `_persist_pending_event_rows` leaves EVERY event_log sequence with a matching `game_events` row and no duplicates.
@@ -87,6 +236,449 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 - Disconnect grace + silent AI takeover (US-150): a dropped human gets a short reconnect grace window; on expiry a curated AI silently takes the seat so the game continues, invisibly in anonymous mode. TWO modules, no schema change, no new deps. (1) PURE `core/disconnect.py` (data-in/data-out with an INJECTED `now` — never reads a clock): `SeatPresence{public_player_id, connected, disconnected_at}` + `is_within_grace(presence, *, now, grace_seconds)` (connected -> always within; disconnected within window -> reconnectable; a disconnected seat with NO drop instant treated as just-dropped) + `seats_past_grace(presences, *, now, grace_seconds) -> [seat_id]` (the disconnected seats whose window expired, in input order — a reconnect BEFORE expiry flips `connected=True` so the seat is never listed: "reconnect returns the seat") + `project_presence_for_viewer(presences, *, viewer_seat_id, identity_mode) -> [{seat_id, connected}]` (the IDENTITY-BLIND presence frame: in ANONYMOUS mode — the fail-closed default via `observation_privacy.is_anonymous`, so None coerces anonymous — it carries ONLY the viewer's OWN seat; other seats' presence/reconnecting state is NEVER exposed because an AI never disconnects, so any per-seat presence signal would out a human; TRANSPARENT may show all; each entry is `{seat_id, connected}` ONLY — never a drop timestamp or human/AI marker). `core/disconnect.py` imports `datetime` for pure grace ARITHMETIC (timedelta only) — add it to `tests/core/test_purity.py::ALLOWED_FORBIDDEN_IMPORTS` ("disconnect.py": frozenset({"datetime"})) EXACTLY like `scheduling/__init__.py`; the `test_allowed_datetime_modules_make_no_wallclock_calls` guard then enforces no `.now()/.utcnow()/.today()` (the module uses `value.replace(tzinfo=UTC)` for the SQLite-naive coercion — `replace` is not a wall-clock attr). (2) IMPURE `runner/disconnect_takeover.py::take_over_seat(*, mux, event_log, state, seat_id, replacement_adapter, replacement_agent_build_ref, reason="disconnect_grace_expired") -> TakeoverResult{event, replaced_adapter}`: REUSES US-139's `SeatMultiplexAdapter.swap_seat(seat, adapter)` (rebinds the dispatch table between ticks, returns the replaced human adapter, KeyError on an unknown seat — a takeover replaces an existing occupant) + US-122's `SeatTakenOver` event appended to the hash-chained `EventLog` with `day`/`phase` read from `state.current_phase` (pure logical values via `core.observations.format_phase_id` — NO wall clock/random in the payload). The takeover is REVEAL-ONLY: `SeatTakenOver` is SYSTEM-visibility so it NEVER lands on a PUBLIC/live frame (no mid-game leak); it surfaces only at the endgame reveal where `reducer.compute_seat_provenance(typed_events)` derives HUMAN_THEN_AI for the seat (requires the seat marked seat_kind=HUMAN in RolesAssigned, i.e. the US-149 launch handoff). New setting `padrino_human_reconnect_grace_seconds: float = 90.0` (wall-clock value consumed only in the impure runner; the pure decision reads it as plain data). Test `tests/runner/test_disconnect_takeover.py` (12): pure grace decisions (connected always within, recent-within/old-past, seats_past_grace lists only expired, reconnect-returns-seat, naive-timestamp coercion); identity-blind projection (anonymous shows only viewer's own seat, None fails closed, other-seat reconnecting never exposed, transparent shows all); runner orchestration reuses the US-139 `_TakeoverMux` + `_FakeClock` + `make_town_win_script`: a HUMAN seat is taken over mid-DAY_1_VOTE (swap on the real mux, `seats_past_grace` decides), the game still reaches TOWN, no PUBLIC frame carries SeatTakenOver, the committed log (incl. the appended SeatTakenOver) replays bit-for-bit, and `take_over_seat` on a hand-built HUMAN-marked RolesAssigned+state yields a SYSTEM-visibility pure-data event + HUMAN_THEN_AI provenance + KeyError on an unknown seat.
 
 ---
+
+## 2026-06-21T22:31 PDT - US-222
+- Moved non-canonical PLACEMENT rating writes out of the terminal
+  `GameTerminated` transaction so the terminal event and `COMPLETED` status are
+  committed before best-effort experimental scoring runs.
+- Added terminal-path validation that skips/logs PLACEMENT scoring when a
+  terminal winner is neither `DRAW` nor one of the assigned seat factions.
+- Added placement gauntlet intake validation in both `create_gauntlet` and
+  `POST /gauntlets`, using deterministic clone role assignment to reject
+  duplicate builds that would occupy multiple placement outcome factions.
+- Added regression tests for duplicate-build placement scoring failure,
+  non-faction placement winners, scheduler intake rejection, and route 422
+  rejection.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/game_runner.py`,
+  `src/padrino/gauntlets/scheduler.py`,
+  `src/padrino/api/routes/gauntlets.py`,
+  `tests/runner/test_rating_integration.py`,
+  `tests/gauntlets/test_scheduler.py`, `tests/api/test_gauntlet_routes.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED/green
+  `uv run pytest tests/runner/test_rating_integration.py::test_placement_duplicate_build_failure_does_not_rollback_terminal_finalization tests/runner/test_rating_integration.py::test_placement_non_faction_winner_skips_scoring_after_finalizing_game tests/gauntlets/test_scheduler.py::test_create_gauntlet_rejects_placement_duplicate_build_across_factions tests/api/test_gauntlet_routes.py::test_create_gauntlet_rejects_placement_duplicate_build_across_factions -q`;
+  adjacent
+  `uv run pytest tests/runner/test_rating_integration.py tests/ratings/test_openskill_service.py tests/gauntlets/test_scheduler.py tests/api/test_gauntlet_routes.py -q`
+  -> 56 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2469
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:47 PDT - US-219
+- Wired non-canonical PLACEMENT scoring into `game_runner` terminal persistence
+  with an `apply_placement` gate based on `declared_for_ruleset`, complete
+  build coverage, ranked execution, and no mirror-pair metadata.
+- Added runner integration coverage proving a terminal `sk12_v1` game writes
+  `placement_ratings` / `placement_rating_events` while writing zero scientific
+  `Rating` / `RatingEvent` rows.
+- Hardened placement OpenSkill updates so `DRAW` is a neutral sigma-only update
+  and a single agent build cannot be credited in multiple outcome groups.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/ratings/test_openskill_service.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED placement draw / shared-build tests and
+  focused RED `sk12_v1` runner placement integration; focused GREEN same
+  tests; adjacent
+  `uv run pytest tests/ratings/test_openskill_service.py tests/runner/test_rating_integration.py tests/runner/test_jester_solo_rate_integration.py -q`
+  -> 22 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2462
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:30 PDT - US-217
+- Added `tests/integration/test_canonical_byte_stability.py`, a runner-level
+  golden fixture suite for `mini7_v1` and `bench10_v1` with two seeds each.
+  Every fixture scripts real night actions: mafia factional kills, Doctor
+  protects, and Detective investigations of every mafia seat before the town
+  eliminates the mafia.
+- Each fixture now pins terminal result/reason, eliminated-player sequence,
+  event count, final event hash, and event-hash-chain digest, and verifies
+  both `replay_event_log` and reducer replay reproduce the original log/state.
+- Renamed
+  `test_builtin_two_faction_policy_matches_legacy_results_and_hashes` to
+  `test_builtin_two_faction_policy_evaluator_matches_legacy_faction_count_results`
+  and documented that it guards only the faction-count win evaluator.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/integration/test_canonical_byte_stability.py`,
+  `tests/core/test_win_conditions.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED placeholder-golden fixture; focused GREEN
+  `uv run pytest tests/integration/test_canonical_byte_stability.py
+  tests/core/test_win_conditions.py::test_builtin_two_faction_policy_evaluator_matches_legacy_faction_count_results
+  -q`; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
+  2457 passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:23 PDT - US-216
+- Reverted `bench10_v1` to its byte-stable canonical roster:
+  3 Mafia Goons, 1 Detective, 1 Doctor, and 5 Villagers. Removed Godfather
+  from bench10 role-family and faction maps while preserving the Wave-10
+  canonical rating-context fields and win-condition declaration.
+- Restored bench10 NAR corpus pins to the genuine pre-US-175 hashes:
+  final event `c241612e044bbfa75e346e61f7da3d6e31176f95ac95d32eb92d971770b0aa5f`
+  and chain digest
+  `918b471f1048def56fb8ee4d6333ae00e0fb72364c2768d8294cacc76343ac71`.
+- Expanded the corpus guard so every built-in `IS_CANONICAL` ruleset has a
+  pinned fixture, while `deception13_v1` keeps Godfather and remains
+  canonical-pure.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/rulesets/bench10_v1.py`,
+  `tests/core/test_bench10_constants.py`,
+  `tests/core/test_role_assignment.py`,
+  `tests/integration/test_nar_regression_corpus.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED for bench10 roster/hash drift; focused GREEN
+  suite; `uv run pytest tests/core/test_deception13_constants.py
+  tests/core/test_rating_context_rulesets.py::test_builtin_canonical_rulesets_are_canonical_pure`;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
+  2452 passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T20:49 PDT - US-187b
+- Added `Role.NINJA` and `ninja13_v1`, a canonical 13-seat two-faction ruleset
+  with a Ninja, Mafia Roleblocker, Mafia Goon, Detective, Doctor, Tracker,
+  Watcher, and 6 Villagers.
+- Kept Ninja on the existing structured `MAFIA_KILL` action path and added a
+  pure NAR role-based visit suppression rule for Ninja factional kills only.
+  Tracker/Watcher now observe no Ninja kill visit while still observing
+  roleblock visits from the same night.
+- Registered `ninja13_v1` through `get_ruleset` / `BUILTIN_RULESET_IDS` and
+  mapped it to the bundled `bench10_v1` prompt family.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/enums.py`,
+  `src/padrino/core/engine/legal_actions.py`,
+  `src/padrino/core/engine/resolvers/nar.py`,
+  `src/padrino/core/rulesets/__init__.py`,
+  `src/padrino/core/rulesets/ninja13_v1.py`,
+  `src/padrino/llm/prompts/__init__.py`,
+  `tests/core/test_ninja13_constants.py`,
+  `tests/core/test_night_action_resolution_matrix.py`,
+  `tests/core/test_legal_actions.py`, `tests/core/test_role_assignment.py`,
+  `tests/core/test_rating_context_rulesets.py`,
+  `tests/llm/test_prompt_resolution.py`, `tests/runner/test_game_runner.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for missing `ninja13_v1`;
+  focused GREEN US-187b suite; adjacent NAR/legal-actions/role-assignment/
+  rating-context/runner/prompt suites; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2438 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T20:38 PDT - US-187
+- Added `visit12_v1`, a canonical 12-seat two-faction ruleset with 2 Mafia
+  Goons, 1 Mafia Roleblocker, Detective, Doctor, Tracker, Watcher, and 5
+  Villagers.
+- Registered the ruleset through `get_ruleset` / `BUILTIN_RULESET_IDS` and
+  mapped it to the bundled `bench10_v1` prompt family.
+- Pinned Tracker/Watcher visit-graph behavior through NAR and runner tests:
+  roleblock visits are visible to Tracker/Watcher, blocked target actions do
+  not create visits, and emitted feedback carries only public player ids.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/rulesets/visit12_v1.py`,
+  `src/padrino/core/rulesets/__init__.py`,
+  `src/padrino/llm/prompts/__init__.py`,
+  `tests/core/test_visit12_constants.py`,
+  `tests/core/test_legal_actions.py`,
+  `tests/core/test_night_action_resolution_matrix.py`,
+  `tests/core/test_rating_context_rulesets.py`,
+  `tests/core/test_role_assignment.py`,
+  `tests/llm/test_prompt_resolution.py`, `tests/runner/test_game_runner.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for missing `visit12_v1`;
+  focused GREEN US-187 suite; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2420 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T20:31 PDT - US-186
+- Added separated public rating-card arrays to `/public/leaderboard`:
+  `canonical_cards` for scientific canonical contexts and `experimental_cards`
+  for PLACEMENT / SOLO_RATE contexts. Legacy filtered `entries` remain
+  canonical-only for existing callers; the all-context response returns no
+  merged card list.
+- The read model ranks cards only inside their exact context/ruleset/scope
+  group and labels under-sampled cards as provisional with `rank=None`.
+- Updated the SvelteKit leaderboard page to render Ranked Canonical and
+  Experimental Contexts as separate card sections, and updated the e2e mock to
+  assert no legacy merged table is shown.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/public.py`,
+  `src/padrino/ratings/public_leaderboard.py`,
+  `tests/api/test_public_routes.py`, `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/routes/leaderboard/+page.svelte`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED API contract test; focused public route suite;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2403
+  passed / 47 skipped / 10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 22
+  passed / 3 skipped. Browser smoke fallback also verified one canonical card,
+  one experimental card, and no legacy merged table.
+
+## 2026-06-21T20:15 PDT - US-185
+- Added `jester8_v1`, a non-canonical SOLO_RATE ruleset with one Jester whose
+  deterministic alt-win fires when the Jester is eliminated by a structured day
+  vote. Executioner and Survivor remain deferred.
+- Added `Role.JESTER` / `Faction.JESTER`, registered the ruleset through
+  `get_ruleset` / `BUILTIN_RULESET_IDS`, and mapped it to the existing bundled
+  prompt families so bootstrap stays complete without new runtime deps.
+- The reducer now folds the Jester alt-win trigger from `PlayerEliminated`
+  events, and the runner writes the terminal Jester role attempt to
+  `solo_rate_ratings` / `solo_rate_rating_events` while canonical and
+  placement tables remain untouched.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/enums.py`,
+  `src/padrino/core/engine/reducer.py`,
+  `src/padrino/core/rulesets/__init__.py`,
+  `src/padrino/core/rulesets/jester8_v1.py`,
+  `src/padrino/llm/prompts/__init__.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/core/test_legal_actions.py`,
+  `tests/core/test_rating_context_rulesets.py`,
+  `tests/core/test_role_assignment.py`, `tests/core/test_win_conditions.py`,
+  `tests/runner/test_jester_solo_rate_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for missing `jester8_v1`;
+  focused GREEN story suite; adjacent role-assignment/legal-actions/bootstrap/
+  segregation/SOLO_RATE suites; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2402 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T19:55 PDT - US-183
+- Added `sk12_v1`, a 12-seat Town vs Mafia vs Serial Killer ruleset with a
+  non-canonical PLACEMENT context and explicit three-faction terminal policy.
+- Added Serial Killer role/action/event support through legal actions, NAR,
+  runner submission events, and transcript/diagnostic vocabularies. NAR now
+  carries deterministic multi-kill output via `eliminated_player_ids` while
+  keeping legacy single-death fields byte-stable for existing games.
+- Pinned acceptance coverage for SK solo-last-alive, Mafia parity blocked while
+  SK is alive, `get_ruleset` registration, canonical introspection rejection,
+  SK night kill block/protect behavior, placement rating of a Serial Killer
+  outcome, and zero canonical rating writes for `sk12_v1`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/rulesets/sk12_v1.py`,
+  `src/padrino/core/rulesets/__init__.py`, `src/padrino/core/enums.py`,
+  `src/padrino/core/engine/events.py`,
+  `src/padrino/core/engine/legal_actions.py`,
+  `src/padrino/core/engine/reducer.py`,
+  `src/padrino/core/engine/resolvers/nar.py`,
+  `src/padrino/runner/game_runner.py`,
+  `src/padrino/diagnostics/submissions.py`,
+  `src/padrino/gauntlets/evaluation.py`,
+  `src/padrino/api/routes/games.py`, `src/padrino/ratings/evaluator.py`,
+  `src/padrino/llm/prompts/__init__.py`,
+  `src/padrino/core/spectator_projection.py`,
+  `tests/core/test_win_conditions.py`, `tests/core/test_legal_actions.py`,
+  `tests/core/test_night_action_resolution_matrix.py`,
+  `tests/core/test_rating_context_rulesets.py`, `tests/core/test_events.py`,
+  `tests/ratings/test_openskill_service.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for missing `sk12_v1`; focused
+  GREEN story suite (161 passed); adjacent event/runner/diagnostics suites;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2389
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T19:22 PDT - US-180
+- Added mirror-paired gauntlet creation with deterministic `pair_id` derivation,
+  shared per-pair `game_seed`, and two persisted game legs (`pair_leg=0/1`).
+- Runner scheduling now computes `agent_builds_by_seat` per child game so
+  paired leg 1 mirrors roster placement while keeping the same role layout.
+- Canonical OpenSkill updates can now rate a completed mirror pair in persisted
+  canonical order, and the runner/scheduler use an idempotent completed-pair
+  pass so pair legs are consumed together rather than as independent games.
+- Pinned tests for identical `assign_roles` output across paired legs,
+  transposed model placement, order-independent pair rating, and provisional
+  per-faction/per-role sample visibility from paired games.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/games.py`,
+  `src/padrino/db/migrations/versions/0048_game_mirror_pair_metadata.py`,
+  `src/padrino/gauntlets/scheduler.py`,
+  `src/padrino/ratings/openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `src/padrino/runner/scheduler.py`,
+  `tests/gauntlets/test_paired_scheduler.py`,
+  `tests/ratings/test_openskill_service.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused US-180 suite; adjacent scheduler/rating/
+  leaderboard/migration suite (39 passed); `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2372 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T16:40 PDT - US-179
+- Added `deception13_v1` as a canonical 13-player, two-faction ruleset:
+  4 Mafia (Godfather, Roleblocker, one-shot Janitor, Goon) and 9 Town
+  (Detective, Doctor, 7 Villagers).
+- Registered the ruleset through `get_ruleset` and `BUILTIN_RULESET_IDS`, and
+  mapped its canonical prompt loading to the existing bench10 prompt pack so
+  bootstrap can seed canonical role-family prompts for the new ruleset.
+- Pinned acceptance coverage for exact role counts, vanilla-town majority,
+  canonical-team declaration, US-172 canonicality introspection, seeded role
+  assignment, and the byte-stable night action space for the composed roles.
+- Balance note: Town:Scum is 9:4 (30.8% scum). Power roles are 5/13 seats
+  (38.5%: Godfather, Roleblocker, Janitor, Detective, Doctor), keeping power
+  roles below a seat majority and vanilla Town at 7/13. Framer remains excluded
+  because the current US-178 variance gate has 0 mirror-paired games and fails
+  with `insufficient_mirror_pairs`, so no unmeasured frame-target RNG variance
+  is admitted into this canonical ladder.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/rulesets/deception13_v1.py`,
+  `src/padrino/core/rulesets/__init__.py`,
+  `src/padrino/llm/prompts/__init__.py`,
+  `tests/core/test_deception13_constants.py`,
+  `tests/core/test_rating_context_rulesets.py`,
+  `tests/core/test_role_assignment.py`, `tests/core/test_legal_actions.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused US-179 suite; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2368 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T16:33 PDT - US-178
+- Implemented Framer as a deterministic one-shot NAR active mark. A resolved
+  `FRAME` marks the target for that night's investigation tier, makes Detective
+  feedback read `MAFIA`, and spends the Framer shot only from
+  `NightResolved.frame_spent_actor_ids`.
+- Pinned Framer x Godfather precedence in the NAR matrix: the active frame mark
+  overrides Godfather's passive innocent read, while a roleblocked Framer
+  creates no mark and spends no shot.
+- Added a pure canonical-admission variance gate with the story's numeric
+  thresholds: at least 200 mirror-paired games and frame-target RNG variance
+  share <= 15%. Current built-in canonical rulesets remain Framer-free because
+  the US-180 mirror-pair measurement does not exist yet.
+- Preserved identity-blind surfaces: investigation feedback remains structured
+  public-player-id data only; no chat parsing or model/provider/build identity
+  is involved.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/engine/events.py`,
+  `src/padrino/core/engine/legal_actions.py`,
+  `src/padrino/core/engine/reducer.py`,
+  `src/padrino/core/engine/resolvers/nar.py`,
+  `src/padrino/core/engine/state.py`,
+  `src/padrino/core/rulesets/framer_variance_gate.py`,
+  `src/padrino/runner/game_runner.py`, `tests/core/test_framer_variance_gate.py`,
+  `tests/core/test_legal_actions.py`,
+  `tests/core/test_night_action_resolution_matrix.py`,
+  `tests/core/test_reducer.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused Framer/legal/reducer/variance suite; adjacent
+  purity/event/replay/runner/NAR corpus suite (118 passed);
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2353
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T16:26 PDT - US-177
+- Implemented Janitor clean as a one-successful-shot NAR death-reveal action.
+  NAR now role-gates future active roles, validates Janitor shot availability,
+  suppresses the death reveal for successful cleans, and returns the cleaner id
+  that spent the shot.
+- Added replayable shot accounting through `NightResolved.cleaned_deaths` /
+  `clean_spent_actor_ids` and the pure reducer. The runner omits those fields
+  when empty, preserving existing no-Janitor event bodies and the NAR regression
+  corpus.
+- Cleaned night deaths now emit `PlayerEliminated` payloads with only
+  `public_player_id` and `cause`; the true role/faction remains in internal
+  assignment/state and is disclosed through the terminal endgame reveal.
+- Added the exact final-clean leak guard: a resumed night kill cleaned by a
+  Janitor immediately triggers Mafia parity, while anonymous and transparent
+  spectator projections plus player observations carry no public role/faction
+  leak before the terminal reveal.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/engine/events.py`,
+  `src/padrino/core/engine/legal_actions.py`,
+  `src/padrino/core/engine/reducer.py`,
+  `src/padrino/core/engine/resolvers/nar.py`,
+  `src/padrino/core/engine/state.py`, `src/padrino/runner/game_runner.py`,
+  `tests/core/test_events.py`, `tests/core/test_legal_actions.py`,
+  `tests/core/test_night_action_resolution_matrix.py`,
+  `tests/core/test_reducer.py`,
+  `tests/runner/test_janitor_clean_leak_guard.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused red/green US-177 suite; adjacent core/runner
+  suites (224 passed); `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2340
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T16:15 PDT - US-176
+- Added dedicated canonical `roleblock10_v1`: 2 Mafia Goons, 1 Mafia
+  Roleblocker, 1 Detective, 1 Doctor, and 5 Villagers. `mini7_v1` stays
+  Roleblocker-free.
+- Roleblocker action denial now rides the NAR tier-1 matrix. `ROLEBLOCK`
+  nullifies active actions only, keeps passives intact, applies simultaneous
+  roleblock-vs-roleblock, and prevents a roleblocked sole factional killer from
+  getting an automatic backup carry.
+- Added deterministic structured blocked-actor feedback tests keyed only by
+  public player ids. No chat text or model/provider/build identity is involved.
+- Reused the existing `bench10_v1` prompt family for the new 10p ruleset,
+  registered built-in rulesets through `BUILTIN_RULESET_IDS`, and kept existing
+  mini7/bench10 corpus hashes stable.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/bootstrap.py`,
+  `src/padrino/core/engine/resolvers/nar.py`,
+  `src/padrino/core/rulesets/__init__.py`,
+  `src/padrino/core/rulesets/roleblock10_v1.py`,
+  `src/padrino/llm/prompts/__init__.py`,
+  `src/padrino/runner/game_runner.py`, `tests/core/test_legal_actions.py`,
+  `tests/core/test_night_action_resolution_matrix.py`,
+  `tests/core/test_night_resolution.py`,
+  `tests/core/test_rating_context_rulesets.py`,
+  `tests/core/test_role_assignment.py`,
+  `tests/core/test_roleblock10_constants.py`,
+  `tests/llm/test_prompt_resolution.py`,
+  `tests/ratings/test_segregation.py`, `tests/runner/test_game_runner.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2333
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T16:18 PDT - US-175
+- Added the first passive scum-skill role: `Role.GODFATHER`. `bench10_v1` now has
+  2 Mafia Goons + 1 Godfather + 1 Detective + 1 Doctor + 5 Villagers, while
+  `mini7_v1` explicitly remains Godfather-free.
+- Godfather investigation falsification is resolved at the NAR investigation
+  finding seam: investigations of the Godfather return structured `TOWN`
+  feedback keyed only by public player id, while ordinary Mafia Goons still read
+  `MAFIA`. The passive role still receives the normal factional kill vote via a
+  narrow factional-kill role set.
+- Variance diagnostic: in the bench10 roster, Detective guilty recall against
+  true Mafia is pinned at 2/3 (both Mafia Goons), with the 1/3 Godfather false
+  innocent and zero Town false positives in the deterministic diagnostic. This
+  documents that Godfather corrupts one result without making Detective pure
+  noise.
+- Added static Godfather sprite assets for each existing theme pack so
+  transparent/reveal sprite resolution remains total over shipped roles.
+- The bench10 NAR regression corpus golden hash moved intentionally because the
+  `RolesAssigned` payload changed; terminal result/reason and event count stayed
+  `DRAW` / `MAX_DAYS_REACHED` / 125.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/enums.py`,
+  `src/padrino/core/rulesets/bench10_v1.py`,
+  `src/padrino/core/engine/resolvers/nar.py`,
+  `src/padrino/core/engine/legal_actions.py`, `src/padrino/core/sprites.py`,
+  `src/padrino/assets/sprites/*/role_godfather.svg`,
+  `tests/core/test_bench10_constants.py`, `tests/core/test_mini7_constants.py`,
+  `tests/core/test_detective.py`, `tests/core/test_night_action_resolution_matrix.py`,
+  `tests/core/test_legal_actions.py`, `tests/core/test_role_assignment.py`,
+  `tests/integration/test_nar_regression_corpus.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused red/green core suite; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2316 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T15:41 PDT - US-214
+- Structured-action vocabulary keystone. Added `ActionType` members `ROLEBLOCK`, `FRAME`, `TRACK`, `WATCH`, `CLEAN`; future role enum identifiers; legal-action emission for those roles in `legal_actions_for`; shared `action_requires_target` validation; and runner coercion for known-but-illegal parsed actions while preserving phase-safe fallback `NOOP`/`ABSTAIN` behavior.
+- Extended the NAR matrix with `FRAME`, translated the new action types into `NightActionIntent`s, added deterministic track/watch visit-graph feedback, and introduced private typed submission events plus `NightFeedbackDelivered`. Observations now expose `role_feedback` as structured public-player-id-only rows; the runner emits only block/track/watch feedback through that channel.
+- Preserved current canonical surfaces: mini7/bench10 legal-action snapshots are byte-pinned, the NAR regression corpus remains hash-stable, sprite/prompt producers now iterate concrete ruleset roles (`ROLE_COUNTS`) instead of the future-ready global `Role` enum.
+- Files changed: `src/padrino/core/enums.py`, `src/padrino/core/engine/legal_actions.py`, `src/padrino/core/engine/resolvers/nar.py`, `src/padrino/core/engine/events.py`, `src/padrino/core/engine/reducer.py`, `src/padrino/core/observations.py`, `src/padrino/runner/tick.py`, `src/padrino/runner/game_runner.py`, `src/padrino/api/human_actions.py`, `src/padrino/llm/human_adapter.py`, `src/padrino/llm/prompts/__init__.py`, `src/padrino/core/sprites.py`, targeted tests, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2293 passed / 47 skipped / 10 deselected.
+- Thread URL: not provided in the Codex invocation.
 
 ## 2026-06-21T14:22 PDT - US-211
 - Closed the takeover recovery desync mask: `_resync_committed_takeover(...)` now checks `mux.has_seat(seat_id)` before any `force_swap_seat`, so a committed takeover for a seat absent from the dispatch table surfaces as `TakeoverApplyRecoveryError` instead of fabricating a new route.
@@ -1414,3 +2006,242 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Thread URL: n/a (local Ralph iteration).
 - Files changed: `src/padrino/api/oauth.py`, `src/padrino/api/routes/human.py`, `src/padrino/db/repositories/oauth_consumed_flows.py`, `tests/api/test_oauth_signin.py`, `ralph/prd.json`, `ralph/progress.txt`.
 - Gates (all GREEN): targeted RED `uv run pytest tests/api/test_oauth_signin.py::test_transient_exchange_failure_releases_flow_for_retry tests/api/test_oauth_signin.py::test_terminal_invalid_grant_keeps_flow_burned -q`; targeted GREEN durable/retry/terminal trio; `uv run pytest tests/api/test_oauth_signin.py -q` -> 35 passed; `uv run ruff check .`; `uv run ruff format --check .` (437 files already formatted); `uv run mypy src tests` (385 source files); `uv run pytest -m "not integration"` -> 2236 passed / 47 skipped / 10 deselected.
+## 2026-06-21T14:56 PDT - US-171
+- Added first-class rating contexts while preserving the existing scientific rating firewall. Built-in rulesets now declare `RATING_CONTEXT_KIND`, `IS_CANONICAL`, and a display label; canonical writes resolve a `CANONICAL_TEAM` context only for a `SCIENTIFIC` league and fail closed to no writes when the context/ruleset is missing or non-canonical.
+- Schema migration `0047` creates `rating_contexts`, dormant sibling tables for PLACEMENT and SOLO_RATE contexts, and additive nullable context metadata on `ratings` / `rating_events`. The backfill stamps existing mini7/bench10 scientific rows without re-rating; migration tests assert row counts and `mu` / `sigma` / `conservative_score` stay unchanged.
+- Extended segregation coverage so a non-canonical placement context writes zero rows to `Rating` / `RatingEvent`, and extended OpenSkill tests so canonical rating events carry ruleset id, context id, game seed, and team outcome metadata.
+- Thread: local Codex session (no external thread URL available).
+- Files changed: `src/padrino/core/enums.py`, `src/padrino/core/rulesets/__init__.py`, `src/padrino/core/rulesets/mini7_v1.py`, `src/padrino/core/rulesets/bench10_v1.py`, `src/padrino/db/models.py`, `src/padrino/db/migrations/versions/0047_rating_contexts.py`, `src/padrino/db/repositories/leagues.py`, `src/padrino/db/repositories/rating_contexts.py`, `src/padrino/db/repositories/ratings.py`, `src/padrino/ratings/openskill_service.py`, `tests/core/test_rating_context_rulesets.py`, `tests/db/test_dialect_portability.py`, `tests/db/test_migration_0047_rating_contexts.py`, `tests/db/test_migrations.py`, `tests/ratings/test_openskill_service.py`, `tests/ratings/test_segregation.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2243 passed / 47 skipped / 10 deselected. Note: the first full pytest run had one non-reproducible `test_human_game_full_spine_smoke` sidecar-count failure; the test passed in isolation, the adjacent-order replay passed, and the full suite rerun passed.
+
+## 2026-06-21T15:06 PDT - US-172
+- Added a pure canonicality validator in `core/rulesets/canonicality.py`. It introspects every canonical ruleset's declared role/faction space, rejects solo/alt-win/faction-mutation/kingmaking flags, enumerates alive Town/Mafia count states through `check_win`, and requires ranked outcomes exactly `{TOWN, MAFIA}` with `DRAW` mapping to equal team ranks.
+- Built-in canonical rulesets now explicitly declare the no-solo/no-alt-win/no-mutation flags, and `ratings/openskill_service.py` consumes `canonical_team_ranks_for_outcome(...)` for its OpenSkill ranks so draw/tie semantics are shared with the CI gate.
+- Extended the named gates: `tests/ratings/test_segregation.py` now asserts canonicality introspection, missing-context fail-closed behavior, and complete canonical rating metadata (`ruleset_id`, `rating_context_id`, build/model linkage, seed, team outcome); `tests/test_invariants_human_mp.py` includes the canonical ruleset purity assertion alongside anonymity/segregation.
+- Thread: local Codex session (no external thread URL available).
+- Files changed: `src/padrino/core/rulesets/canonicality.py`, `src/padrino/core/rulesets/__init__.py`, `src/padrino/core/rulesets/mini7_v1.py`, `src/padrino/core/rulesets/bench10_v1.py`, `src/padrino/ratings/openskill_service.py`, `tests/core/test_rating_context_rulesets.py`, `tests/ratings/test_segregation.py`, `tests/test_invariants_human_mp.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): `uv run ruff check .`; `uv run ruff format --check .` (442 files already formatted); `uv run mypy src tests` (389 source files); `uv run pytest -m "not integration"` -> 2254 passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T15:16 PDT - US-173
+- Preserved the deterministic MAX_DAYS -> DRAW terminal policy and added a canonical ruleset runner regression that repeats passive mini7_v1 and bench10_v1 day-cap games, asserting identical terminal payloads and event-hash chains.
+- Made canonical draw rating updates draw-safe: OpenSkill still receives equal ranks and shrinks sigma, but persisted `mu` is frozen at the pre-draw value for every GLOBAL and FACTION row, so repeated forced draws cannot create `mu` gain.
+- Added per-faction and exact-role diagnostics to model-visible surfaces: league leaderboard entries now expose `faction_breakdown` with Town/Mafia counts plus existing FACTION-scope Elo rows, and `role_breakdown` with exact-role sample counts; model rollups now carry exact-role sample counts too.
+- Thread: local Codex session (no external thread URL available).
+- Files changed: `src/padrino/api/routes/leagues.py`, `src/padrino/api/routes/public.py`, `src/padrino/leaderboards/service.py`, `src/padrino/ratings/model_rollup.py`, `src/padrino/ratings/openskill_service.py`, `tests/api/test_leaderboard.py`, `tests/ratings/test_model_rollup.py`, `tests/ratings/test_openskill_service.py`, `tests/runner/test_game_runner.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): `uv run ruff check .`; `uv run ruff format --check .` (442 files already formatted); `uv run mypy src tests` (389 source files); `uv run pytest -m "not integration"` -> 2257 passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T15:27 PDT - US-174
+- Replaced the ad-hoc night composer with a pure NAR matrix in `core/engine/resolvers/nar.py`. It declares the tier order, matrix rows for roleblock/redirect/factional kill/protect/investigate/track/watch/clean, deterministic visit recording, structured feedback, death reveal cleanup, and current-ruleset adapters.
+- The legacy `mafia_kill`, `doctor_protect`, `detective`, and `night` modules now delegate to the NAR matrix so existing imports and event payloads stay stable while future roles extend the matrix instead of branching through scattered resolvers.
+- Tests pin the required edge cases: mutual roleblocks both apply, a roleblocked sole factional killer fails without backup carry, blocked active actions do not visit, investigations still resolve on same-night killed targets, protection/investigation/block feedback is structured, and cleaned night deaths suppress reveal metadata. A Hypothesis property checks deterministic resolution over generated interaction mixes.
+- Added a mini7/bench10 regression corpus that pins event count, terminal result/reason, final hash head, and the ordered event-hash-chain digest for pre-refactor games.
+- Thread: local Codex session (no external thread URL available).
+- Files changed: `src/padrino/core/engine/resolvers/nar.py`, `src/padrino/core/engine/resolvers/night.py`, `src/padrino/core/engine/resolvers/mafia_kill.py`, `src/padrino/core/engine/resolvers/doctor_protect.py`, `src/padrino/core/engine/resolvers/detective.py`, `tests/core/test_night_action_resolution_matrix.py`, `tests/integration/test_nar_regression_corpus.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused `uv run pytest tests/core/test_night_action_resolution_matrix.py tests/core/test_night_resolution.py tests/core/test_mafia_kill.py tests/core/test_doctor_protect.py tests/core/test_detective.py tests/integration/test_nar_regression_corpus.py -q` -> 62 passed; `uv run ruff check .`; `uv run ruff format --check .` (445 files already formatted); `uv run mypy src tests` (392 source files); `uv run pytest -m "not integration"` -> 2271 passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T16:02 PDT - US-215
+- Generalized the pure win-condition substrate. `Faction` now includes `SERIAL_KILLER`; `GameState` carries pure `win_condition_triggers`; `WinCondition` / `WinConditionKind` evaluate ordered target-elimination, faction parity, solo-last-alive, alt-trigger, and day-cap policies. `GameTerminatedPayload.winner` is now a string so noncanonical outcomes can exist in the engine, while canonical rating writes still fail closed unless the winner is exactly `TOWN`, `MAFIA`, or `DRAW`.
+- Preserved canonical two-faction behavior by wiring `mini7_v1` and `bench10_v1` to `canonical_two_faction_win_conditions()`. Legacy ruleset stubs without `WIN_CONDITIONS` still fall back to the same canonical policy, so real-provider and older test stubs remain compatible.
+- Tests cover a 3-faction SK-style policy where a live solo faction blocks Mafia parity, a solo-last-alive win, an alt-win trigger, and mini7/bench10 comparisons against a legacy two-faction oracle with matching terminal event hash chains. The existing NAR runner corpus also stayed byte-stable (`mini7_town`, `bench10_draw` final hashes unchanged).
+- Thread: local Codex session (no external thread URL available).
+- Files changed: `src/padrino/core/enums.py`, `src/padrino/core/engine/events.py`, `src/padrino/core/engine/state.py`, `src/padrino/core/engine/win_conditions.py`, `src/padrino/core/rulesets/__init__.py`, `src/padrino/core/rulesets/mini7_v1.py`, `src/padrino/core/rulesets/bench10_v1.py`, `tests/core/test_win_conditions.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): targeted RED `uv run pytest tests/core/test_win_conditions.py` failed on missing `WinCondition`; targeted GREEN `uv run pytest tests/core/test_win_conditions.py tests/integration/test_nar_regression_corpus.py` -> 34 passed; `uv run ruff check .`; `uv run ruff format --check .` (445 files already formatted); `uv run mypy src tests` (392 source files); `uv run pytest -m "not integration"` -> 2311 passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T19:32 PDT - US-181
+- Consolidated invalid-action diagnostics around the existing pure
+  `coerce_to_safe_action` fallback: malformed, illegal, empty, timeout, and
+  exhausted structured actions still resolve deterministically to `ABSTAIN` in
+  day-vote phases and `NOOP` everywhere else, independent of reason.
+- Added shared submission diagnostic constants so gauntlet diagnostics and
+  league/model leaderboards count the same runner-emitted action/failure events,
+  including newer role submissions (`RoleblockSubmitted`, `FrameSubmitted`,
+  `TrackSubmitted`, `WatchSubmitted`, `CleanSubmitted`).
+- Surfaced model-level `timeout_rate` and `invalid_action_rate` on
+  `/public/models/leaderboard` and model detail entries; the model-rollup cache
+  tag now includes terminal submission-event diagnostics as well as rating
+  updates.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/diagnostics/__init__.py`,
+  `src/padrino/diagnostics/submissions.py`,
+  `src/padrino/api/routes/public.py`,
+  `src/padrino/core/agents/coercion.py`,
+  `src/padrino/gauntlets/completion.py`,
+  `src/padrino/leaderboards/service.py`,
+  `src/padrino/ratings/model_rollup.py`,
+  `tests/api/test_public_models.py`,
+  `tests/gauntlets/test_completion.py`, `tests/runner/test_tick.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused new/adjacent tests; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2374 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T19:40 PDT - US-182
+- Added a PLACEMENT OpenSkill update path for multi-outcome games. The service
+  resolves the game's explicit non-canonical PLACEMENT context, updates one
+  GLOBAL placement row per agent build, ranks the winning terminal group first,
+  and ties every other terminal group for second.
+- Kept the canonical firewall intact: placement scoring writes only to
+  `placement_ratings` / `placement_rating_events`, and the segregation gate now
+  proves the same placement-scored game leaves scientific `Rating` /
+  `RatingEvent` plus dormant human rating tables empty.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/placement_ratings.py`,
+  `src/padrino/ratings/openskill_service.py`,
+  `tests/ratings/test_openskill_service.py`,
+  `tests/ratings/test_segregation.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for the new placement service;
+  focused GREEN placement/segregation tests; adjacent rating/segregation/
+  migration/dialect suite -> 26 passed / 3 skipped; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2376 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T20:03 PDT - US-184
+- Added the SOLO_RATE sibling scoring service for alt-win roles: it resolves
+  only an explicit non-canonical `SOLO_RATE` context, records per-role
+  success/attempt counts, persists audit rows, and reports gated read-side
+  score cards with normal-approximate Beta posterior 95% credible intervals.
+- Kept the rating firewalls intact: SOLO_RATE updates write zero canonical
+  `Rating` / `RatingEvent` rows and zero PLACEMENT rows; the canonical and
+  placement update paths both fail closed for a SOLO_RATE ruleset.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/solo_rate_ratings.py`,
+  `src/padrino/ratings/solo_rate_service.py`,
+  `tests/ratings/test_solo_rate_service.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for the new SOLO_RATE service;
+  focused GREEN `tests/ratings/test_solo_rate_service.py`; adjacent
+  rating/segregation/migration/dialect suite -> 37 passed / 3 skipped;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2392
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T20:59 PDT - US-188
+- Added engine-stress utility roles to the core role vocabulary: Mayor, Commuter,
+  and Mason. Mayor votes now count with deterministic public weight metadata
+  (`voter_weights`, `total_vote_weight`, `hammer_threshold`) while preserving
+  existing unique-plurality day-vote semantics and omitting weight metadata from
+  legacy all-weight-one runner events.
+- Added a pure Mayor variance gate with the same 200 mirror-pair / 15% variance
+  thresholds used by the Framer gate; the current gate is disabled, and no
+  canonical built-in ruleset admits Mayor.
+- Implemented Commuter as a passive NAR target bounce: targeting a Commuter
+  produces `COMMUTER_UNTARGETABLE` private structured feedback, records no
+  visit/effect for the bounced action, and is allowlisted by the runner for
+  observation delivery.
+- Added Mason shared facts via the deterministic `mason_partners` observation
+  field, keyed only by public player ids and never derived from chat.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/enums.py`,
+  `src/padrino/core/engine/resolvers/day_vote.py`,
+  `src/padrino/core/engine/resolvers/nar.py`,
+  `src/padrino/core/engine/events.py`, `src/padrino/core/observations.py`,
+  `src/padrino/core/rulesets/mayor_variance_gate.py`,
+  `src/padrino/runner/game_runner.py`, `tests/core/test_utility_roles.py`,
+  `tests/runner/test_game_runner.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for the missing Mayor variance
+  gate; focused GREEN `tests/core/test_utility_roles.py` and
+  `tests/runner/test_game_runner.py`; adjacent core/privacy/rating/runner
+  suites; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2447
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:39 PDT - US-218
+- Suppressed Tracker/Watcher private visit-graph feedback when the observing
+  actor is killed in the same night, matching the existing Detective
+  same-night-death suppression rule.
+- Threaded `eliminated_player_ids` into `_resolve_visit_graph_feedback` and
+  skipped `TRACK_RESULT` / `WATCH_RESULT` emission for eliminated actors while
+  leaving visit recording, death resolution, and identity-blind public-player-id
+  payloads unchanged.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/engine/resolvers/nar.py`,
+  `tests/core/test_night_action_resolution_matrix.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_night_action_resolution_matrix.py::test_tracker_killed_same_night_feedback_suppressed tests/core/test_night_action_resolution_matrix.py::test_watcher_killed_same_night_feedback_suppressed -q`;
+  focused GREEN same command; full NAR matrix
+  `uv run pytest tests/core/test_night_action_resolution_matrix.py -q` -> 22
+  passed; adjacent
+  `uv run pytest tests/core/test_night_resolution.py tests/runner/test_game_runner.py -q`
+  -> 34 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2459
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:52 PDT - US-220
+- Added canonicality layer-2 negative coverage using a minimal ruleset that
+  passes the canonical-team layer-1 flags while monkeypatched `check_win`
+  produces either a non-canonical winner or an asymmetric ranked outcome set.
+- The new tests assert `CanonicalRulesetError` messages for both
+  `non-canonical terminal winners` and `ranked outcomes must be exactly`, so
+  the introspection branch cannot be silently bypassed.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/core/test_rating_context_rulesets.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/core/test_rating_context_rulesets.py -q` -> 12 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2464
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:58 PDT - US-221
+- Made migration `0047` seed and stamp canonical rating contexts from existing
+  persisted `SCIENTIFIC` league rulesets by resolving each through the ruleset
+  registry, so historical rows for a third canonical ruleset such as
+  `roleblock10_v1` get `rating_context_id` without a hardcoded allowlist.
+- Extended `tests/db/test_migration_0047_rating_contexts.py` to seed a third
+  canonical scientific ruleset before `0047`, assert upgrade stamping, and
+  round-trip downgrade to prove the additive columns and sibling tables are
+  removed while seeded `Rating` `mu` / `sigma` / `conservative_score` byte
+  strings stay unchanged.
+- Shared `EXPECTED_TABLES` from `tests/db/test_migrations.py` into
+  `tests/db/test_migrations_all_dialects.py`, covering `rating_contexts`,
+  `placement_ratings`, `placement_rating_events`, `solo_rate_ratings`, and
+  `solo_rate_rating_events` in the all-dialects migration smoke.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/migrations/versions/0047_rating_contexts.py`,
+  `tests/db/test_migration_0047_rating_contexts.py`,
+  `tests/db/test_migrations_all_dialects.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0047_rating_contexts.py -q` failed
+  before the migration fix on missing `roleblock10_v1`; focused GREEN
+  `uv run pytest tests/db/test_migration_0047_rating_contexts.py -q` -> 2
+  passed; `uv run pytest tests/db/test_migrations_all_dialects.py -q` -> 2
+  passed / 2 skipped (Docker unavailable for local Postgres);
+  `uv run pytest tests/db/test_migrations.py -q` -> 4 passed;
+  `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2465 passed / 47 skipped / 10
+  deselected.
+
+## 2026-06-21T22:40 PDT - US-223
+- Restored migration `0047` as a frozen historical snapshot: it no longer
+  imports live core code, seeds only the 0047-era `mini7_v1` / `bench10_v1`
+  canonical context literals, and uses frozen context IDs plus a frozen
+  timestamp for those seeded rows.
+- Documented in the migration that newly shipped canonical rulesets are
+  materialized by `rating_contexts.ensure_declared_context`; any future
+  historical backfill belongs in a new forward migration with its own frozen
+  literals.
+- Extended migration coverage so artificial pre-0047 rows for `roleblock10_v1`,
+  `sk12_v1`, and `jester8_v1` remain unstamped, while mini7/bench10 rows are
+  stamped without re-rating. Added a static 0047 no-core-import test and pinned
+  the exact mini7/bench10 display-label strings.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/migrations/versions/0047_rating_contexts.py`,
+  `tests/db/test_migration_0047_rating_contexts.py`,
+  `tests/core/test_rating_context_rulesets.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): targeted RED
+  `uv run pytest tests/db/test_migration_0047_rating_contexts.py tests/core/test_rating_context_rulesets.py::test_legacy_canonical_display_labels_pin_0047_snapshot -q`
+  -> 2 failed / 2 passed before the migration fix; targeted GREEN same command
+  -> 4 passed; adjacent
+  `uv run pytest tests/db/test_migration_0047_rating_contexts.py tests/db/test_migrations.py tests/db/test_migrations_all_dialects.py tests/core/test_rating_context_rulesets.py -q`
+  -> 22 passed / 2 skipped (Postgres skipped because Docker was unavailable);
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2471 passed / 47 skipped / 10
+  deselected.

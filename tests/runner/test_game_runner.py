@@ -18,11 +18,19 @@ from padrino.core.engine.actions import Action
 from padrino.core.engine.events import Event, EventAdapter
 from padrino.core.engine.replay import replay_event_log, replay_events
 from padrino.core.engine.role_assignment import assign_roles
+from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED
-from padrino.core.enums import ActionType, Faction, Role
-from padrino.core.rulesets import mini7_v1
+from padrino.core.enums import ActionType, Faction, PhaseKind, Role
+from padrino.core.rulesets import (
+    Ruleset,
+    bench10_v1,
+    mini7_v1,
+    ninja13_v1,
+    roleblock10_v1,
+    visit12_v1,
+)
 from padrino.llm.mock import DeterministicMockAdapter
-from padrino.runner.game_runner import GameConfig, GameOutcome, run_game
+from padrino.runner.game_runner import GameConfig, GameOutcome, _resolve_night_events, run_game
 from tests.conftest import (
     make_mafia_win_script,
     make_town_win_script,
@@ -49,6 +57,41 @@ def _adapter(script: Mapping[tuple[str, str], AgentResponse]) -> DeterministicMo
 
 def _config() -> GameConfig:
     return GameConfig(game_id="G-RUNNER", game_seed=_GAME_SEED, timeout_s=1.0)
+
+
+def _response(action_type: ActionType, target: str | None = None) -> AgentResponse:
+    return AgentResponse(
+        public_message=None,
+        private_message=None,
+        action=Action(type=action_type, target=target),
+        memory_update="",
+        rationale_summary=None,
+    )
+
+
+def _phase_ids_for(ruleset: Ruleset) -> tuple[str, ...]:
+    """All promptable phase ids for the current canonical phase skeleton."""
+    out: list[str] = ["NIGHT_0_MAFIA_INTRO"]
+    for day in range(1, ruleset.MAX_DAYS + 1):
+        for round_index in range(1, ruleset.DISCUSSION_ROUNDS_PER_DAY + 1):
+            out.append(f"DAY_{day}_DISCUSSION_ROUND_{round_index}")
+        out.append(f"DAY_{day}_VOTE")
+        out.append(f"NIGHT_{day}_MAFIA_DISCUSSION")
+        out.append(f"NIGHT_{day}_ACTIONS")
+    return tuple(out)
+
+
+async def _passive_draw_outcome(ruleset: Ruleset, *, seed: str, game_id: str) -> GameOutcome:
+    seats = assign_roles(seed, ruleset)
+    seat_ids = [seat.public_player_id for seat in seats]
+    script = make_villager_script(seat_ids, _phase_ids_for(ruleset))
+    config = GameConfig(
+        game_id=game_id,
+        game_seed=seed,
+        ruleset_id=ruleset.RULESET_ID,
+        timeout_s=1.0,
+    )
+    return await run_game(config, _adapter(script), ranked=False)
 
 
 def _typed_events(outcome: GameOutcome) -> list[Event]:
@@ -90,6 +133,293 @@ async def test_draw_scenario_terminates_at_max_days() -> None:
     assert bodies[-1]["event_type"] == "GameTerminated"
     assert bodies[-1]["payload"]["winner"] == "DRAW"
     assert bodies[-1]["payload"]["reason"] == REASON_MAX_DAYS_REACHED
+
+
+async def test_passive_day_cap_hash_chain_stable_for_canonical_rulesets() -> None:
+    for ruleset in (mini7_v1, bench10_v1, roleblock10_v1, visit12_v1, ninja13_v1):
+        ruleset_id = ruleset.RULESET_ID
+        first = await _passive_draw_outcome(
+            ruleset, seed=f"{ruleset_id}-day-cap", game_id=f"G-{ruleset_id}"
+        )
+        second = await _passive_draw_outcome(
+            ruleset, seed=f"{ruleset_id}-day-cap", game_id=f"G-{ruleset_id}"
+        )
+
+        first_bodies = [stored.body for stored in first.event_log.events]
+        second_bodies = [stored.body for stored in second.event_log.events]
+        assert first_bodies[-1]["payload"] == {
+            "winner": "DRAW",
+            "reason": REASON_MAX_DAYS_REACHED,
+        }
+        assert first.final_state.terminal_result == "DRAW"
+        assert first.final_state.terminal_reason == REASON_MAX_DAYS_REACHED
+        assert first_bodies[-1] == second_bodies[-1]
+        assert [event.event_hash for event in first.event_log.events] == [
+            event.event_hash for event in second.event_log.events
+        ]
+
+
+async def test_roleblock10_runner_blocks_detective_with_structured_feedback() -> None:
+    seed = "roleblock-runner-001"
+    seats = assign_roles(seed, roleblock10_v1)
+    seat_ids = [seat.public_player_id for seat in seats]
+    goons = [s.public_player_id for s in seats if s.role is Role.MAFIA_GOON]
+    roleblocker = next(s.public_player_id for s in seats if s.role is Role.MAFIA_ROLEBLOCKER)
+    detective = next(s.public_player_id for s in seats if s.role is Role.DETECTIVE)
+    target = next(
+        s.public_player_id for s in seats if s.faction is Faction.TOWN and s.role is Role.VILLAGER
+    )
+    phase_ids = _phase_ids_for(roleblock10_v1)
+    script = make_villager_script(seat_ids, phase_ids)
+    for goon in goons:
+        script[("NIGHT_1_ACTIONS", goon)] = _response(ActionType.MAFIA_KILL, target)
+    script[("NIGHT_1_ACTIONS", roleblocker)] = _response(ActionType.ROLEBLOCK, detective)
+    script[("NIGHT_1_ACTIONS", detective)] = _response(ActionType.INVESTIGATE, goons[0])
+
+    outcome = await run_game(
+        GameConfig(
+            game_id="G-ROLEBLOCK-RUNNER",
+            game_seed=seed,
+            ruleset_id=roleblock10_v1.RULESET_ID,
+            timeout_s=1.0,
+        ),
+        _adapter(script),
+        ranked=False,
+    )
+    bodies = [stored.body for stored in outcome.event_log.events]
+
+    assert any(
+        body["event_type"] == "RoleblockSubmitted"
+        and body["actor_player_id"] == roleblocker
+        and body["payload"] == {"target": detective}
+        for body in bodies
+    )
+    assert any(
+        body["event_type"] == "PlayerEliminated"
+        and body["phase"] == "NIGHT_1_ACTIONS"
+        and body["payload"]["public_player_id"] == target
+        for body in bodies
+    )
+    assert not any(
+        body["event_type"] == "DetectiveResultDelivered"
+        and body["phase"] == "NIGHT_1_ACTIONS"
+        and body["actor_player_id"] == detective
+        for body in bodies
+    )
+    feedback = [
+        body
+        for body in bodies
+        if body["event_type"] == "NightFeedbackDelivered" and body["actor_player_id"] == detective
+    ]
+    assert len(feedback) == 1
+    assert feedback[0]["phase"] == "NIGHT_1_ACTIONS"
+    assert feedback[0]["visibility"] == "PRIVATE"
+    assert feedback[0]["payload"] == {
+        "code": "ACTION_BLOCKED",
+        "target": goons[0],
+        "finding": None,
+        "visited_player_ids": (),
+        "visitor_player_ids": (),
+    }
+
+
+async def test_visit12_runner_delivers_track_watch_structured_feedback() -> None:
+    seed = "visit-runner-001"
+    seats = assign_roles(seed, visit12_v1)
+    seat_ids = [seat.public_player_id for seat in seats]
+    goons = [s.public_player_id for s in seats if s.role is Role.MAFIA_GOON]
+    roleblocker = next(s.public_player_id for s in seats if s.role is Role.MAFIA_ROLEBLOCKER)
+    detective = next(s.public_player_id for s in seats if s.role is Role.DETECTIVE)
+    tracker = next(s.public_player_id for s in seats if s.role is Role.TRACKER)
+    watcher = next(s.public_player_id for s in seats if s.role is Role.WATCHER)
+    kill_target = next(
+        s.public_player_id for s in seats if s.faction is Faction.TOWN and s.role is Role.VILLAGER
+    )
+    phase_ids = _phase_ids_for(visit12_v1)
+    script = make_villager_script(seat_ids, phase_ids)
+    for goon in goons:
+        script[("NIGHT_1_ACTIONS", goon)] = _response(ActionType.MAFIA_KILL, kill_target)
+    script[("NIGHT_1_ACTIONS", roleblocker)] = _response(ActionType.ROLEBLOCK, detective)
+    script[("NIGHT_1_ACTIONS", detective)] = _response(ActionType.INVESTIGATE, goons[0])
+    script[("NIGHT_1_ACTIONS", tracker)] = _response(ActionType.TRACK, roleblocker)
+    script[("NIGHT_1_ACTIONS", watcher)] = _response(ActionType.WATCH, detective)
+
+    outcome = await run_game(
+        GameConfig(
+            game_id="G-VISIT-RUNNER",
+            game_seed=seed,
+            ruleset_id=visit12_v1.RULESET_ID,
+            timeout_s=1.0,
+        ),
+        _adapter(script),
+        ranked=False,
+    )
+    bodies = [stored.body for stored in outcome.event_log.events]
+
+    assert any(
+        body["event_type"] == "TrackSubmitted"
+        and body["actor_player_id"] == tracker
+        and body["payload"] == {"target": roleblocker}
+        for body in bodies
+    )
+    assert any(
+        body["event_type"] == "WatchSubmitted"
+        and body["actor_player_id"] == watcher
+        and body["payload"] == {"target": detective}
+        for body in bodies
+    )
+    feedback = {
+        body["actor_player_id"]: body["payload"]
+        for body in bodies
+        if body["event_type"] == "NightFeedbackDelivered"
+        and body["actor_player_id"] in {tracker, watcher}
+    }
+    assert feedback == {
+        tracker: {
+            "code": "TRACK_RESULT",
+            "target": roleblocker,
+            "finding": None,
+            "visited_player_ids": (detective,),
+            "visitor_player_ids": (),
+        },
+        watcher: {
+            "code": "WATCH_RESULT",
+            "target": detective,
+            "finding": None,
+            "visited_player_ids": (),
+            "visitor_player_ids": (roleblocker,),
+        },
+    }
+
+
+async def test_ninja13_runner_suppresses_ninja_kill_visit_only() -> None:
+    seed = "ninja-runner-001"
+    seats = assign_roles(seed, ninja13_v1)
+    seat_ids = [seat.public_player_id for seat in seats]
+    ninja = next(s.public_player_id for s in seats if s.role is Role.NINJA)
+    roleblocker = next(s.public_player_id for s in seats if s.role is Role.MAFIA_ROLEBLOCKER)
+    detective = next(s.public_player_id for s in seats if s.role is Role.DETECTIVE)
+    tracker = next(s.public_player_id for s in seats if s.role is Role.TRACKER)
+    watcher = next(s.public_player_id for s in seats if s.role is Role.WATCHER)
+    kill_target = next(
+        s.public_player_id for s in seats if s.faction is Faction.TOWN and s.role is Role.VILLAGER
+    )
+    phase_ids = _phase_ids_for(ninja13_v1)
+    script = make_villager_script(seat_ids, phase_ids)
+    script[("NIGHT_1_ACTIONS", ninja)] = _response(ActionType.MAFIA_KILL, kill_target)
+    script[("NIGHT_1_ACTIONS", roleblocker)] = _response(ActionType.ROLEBLOCK, detective)
+    script[("NIGHT_1_ACTIONS", detective)] = _response(ActionType.INVESTIGATE, ninja)
+    script[("NIGHT_1_ACTIONS", tracker)] = _response(ActionType.TRACK, ninja)
+    script[("NIGHT_1_ACTIONS", watcher)] = _response(ActionType.WATCH, detective)
+
+    outcome = await run_game(
+        GameConfig(
+            game_id="G-NINJA-RUNNER",
+            game_seed=seed,
+            ruleset_id=ninja13_v1.RULESET_ID,
+            timeout_s=1.0,
+        ),
+        _adapter(script),
+        ranked=False,
+    )
+    bodies = [stored.body for stored in outcome.event_log.events]
+
+    assert any(
+        body["event_type"] == "PlayerEliminated"
+        and body["phase"] == "NIGHT_1_ACTIONS"
+        and body["payload"]["public_player_id"] == kill_target
+        for body in bodies
+    )
+    feedback = {
+        body["actor_player_id"]: body["payload"]
+        for body in bodies
+        if body["event_type"] == "NightFeedbackDelivered"
+        and body["actor_player_id"] in {tracker, watcher}
+    }
+    assert feedback == {
+        tracker: {
+            "code": "TRACK_RESULT",
+            "target": ninja,
+            "finding": None,
+            "visited_player_ids": (),
+            "visitor_player_ids": (),
+        },
+        watcher: {
+            "code": "WATCH_RESULT",
+            "target": detective,
+            "finding": None,
+            "visited_player_ids": (),
+            "visitor_player_ids": (roleblocker,),
+        },
+    }
+
+
+def test_commuter_bounce_feedback_is_emitted_for_observations() -> None:
+    state = GameState(
+        ruleset_id="utility-role-test",
+        game_id="G-COMMUTER-RUNNER",
+        game_seed="commuter-runner",
+        current_phase=Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0),
+        seats=(
+            Seat(
+                public_player_id="P01",
+                seat_index=0,
+                role=Role.MAFIA_GOON,
+                faction=Faction.MAFIA,
+                alive=True,
+            ),
+            Seat(
+                public_player_id="P02",
+                seat_index=1,
+                role=Role.MAFIA_GOON,
+                faction=Faction.MAFIA,
+                alive=True,
+            ),
+            Seat(
+                public_player_id="P03",
+                seat_index=2,
+                role=Role.COMMUTER,
+                faction=Faction.TOWN,
+                alive=True,
+            ),
+            Seat(
+                public_player_id="P04",
+                seat_index=3,
+                role=Role.DETECTIVE,
+                faction=Faction.TOWN,
+                alive=True,
+            ),
+        ),
+        day=1,
+    )
+
+    events = _resolve_night_events(
+        state,
+        {
+            "P01": _response(ActionType.MAFIA_KILL, "P03"),
+            "P02": _response(ActionType.MAFIA_KILL, "P03"),
+            "P04": _response(ActionType.INVESTIGATE, "P03"),
+        },
+        "NIGHT_1_ACTIONS",
+    )
+
+    assert events[0]["event_type"] == "NightResolved"
+    assert events[0]["payload"] == {
+        "eliminated": None,
+        "protected": None,
+        "mafia_kill_target": None,
+    }
+    feedback = [
+        event
+        for event in events
+        if event["event_type"] == "NightFeedbackDelivered"
+        and event["payload"]["code"] == "COMMUTER_UNTARGETABLE"
+    ]
+    assert [(event["actor_player_id"], event["payload"]["target"]) for event in feedback] == [
+        ("P01", "P03"),
+        ("P02", "P03"),
+        ("P04", "P03"),
+    ]
 
 
 # --- log shape & invariants -------------------------------------------------

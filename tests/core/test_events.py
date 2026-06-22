@@ -13,12 +13,16 @@ from padrino.core.engine.events import (
     EVENT_TYPES,
     ActionTimedOut,
     ActionTimedOutPayload,
+    CleanSubmitted,
+    CleanSubmittedPayload,
     DayVoteResolved,
     DayVoteResolvedPayload,
     DetectiveResultDelivered,
     DetectiveResultDeliveredPayload,
     Event,
     EventAdapter,
+    FrameSubmitted,
+    FrameSubmittedPayload,
     GameCreated,
     GameCreatedPayload,
     GameTerminated,
@@ -27,6 +31,8 @@ from padrino.core.engine.events import (
     InvestigateSubmittedPayload,
     MafiaKillVoteSubmitted,
     MafiaKillVoteSubmittedPayload,
+    NightFeedbackDelivered,
+    NightFeedbackDeliveredPayload,
     NightResolved,
     NightResolvedPayload,
     OutputInvalid,
@@ -45,6 +51,8 @@ from padrino.core.engine.events import (
     ProtectSubmittedPayload,
     PublicMessageSubmitted,
     PublicMessageSubmittedPayload,
+    RoleblockSubmitted,
+    RoleblockSubmittedPayload,
     RoleClaimed,
     RoleClaimedPayload,
     RolesAssigned,
@@ -52,8 +60,14 @@ from padrino.core.engine.events import (
     SeatAssignment,
     SeatTakenOver,
     SeatTakenOverPayload,
+    SerialKillSubmitted,
+    SerialKillSubmittedPayload,
+    TrackSubmitted,
+    TrackSubmittedPayload,
     VoteSubmitted,
     VoteSubmittedPayload,
+    WatchSubmitted,
+    WatchSubmittedPayload,
 )
 from padrino.core.enums import Faction, Role
 
@@ -138,6 +152,52 @@ def _all_events() -> list[Event]:
             phase="NIGHT_1_ACTIONS",
             actor_player_id="P04",
             payload=InvestigateSubmittedPayload(target="P01"),
+        ),
+        RoleblockSubmitted(
+            sequence=20,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P01",
+            payload=RoleblockSubmittedPayload(target="P04"),
+        ),
+        FrameSubmitted(
+            sequence=21,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P02",
+            payload=FrameSubmittedPayload(target="P05"),
+        ),
+        TrackSubmitted(
+            sequence=22,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P04",
+            payload=TrackSubmittedPayload(target="P01"),
+        ),
+        WatchSubmitted(
+            sequence=23,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P06",
+            payload=WatchSubmittedPayload(target="P05"),
+        ),
+        CleanSubmitted(
+            sequence=24,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P02",
+            payload=CleanSubmittedPayload(target="P05"),
+        ),
+        SerialKillSubmitted(
+            sequence=26,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P09",
+            payload=SerialKillSubmittedPayload(target="P01"),
+        ),
+        NightFeedbackDelivered(
+            sequence=25,
+            phase="NIGHT_1_ACTIONS",
+            actor_player_id="P04",
+            payload=NightFeedbackDeliveredPayload(
+                code="WATCH_RESULT",
+                target="P05",
+                visitor_player_ids=("P01", "P02"),
+            ),
         ),
         ActionTimedOut(
             sequence=9,
@@ -244,6 +304,13 @@ def test_event_types_catalog_covers_all_classes() -> None:
         "MafiaKillVoteSubmitted",
         "ProtectSubmitted",
         "InvestigateSubmitted",
+        "RoleblockSubmitted",
+        "FrameSubmitted",
+        "TrackSubmitted",
+        "WatchSubmitted",
+        "CleanSubmitted",
+        "SerialKillSubmitted",
+        "NightFeedbackDelivered",
         "ActionTimedOut",
         "OutputTruncated",
         "OutputInvalid",
@@ -273,6 +340,27 @@ def test_round_trip_through_canonical_json(event: Event) -> None:
 def test_every_event_class_has_a_round_trip_sample() -> None:
     sampled = {type(e).__name__ for e in _all_events()}
     assert sampled == set(EVENT_TYPES)
+
+
+def test_cleaned_player_eliminated_payload_may_omit_role_and_faction() -> None:
+    event = EventAdapter.validate_python(
+        {
+            "event_type": "PlayerEliminated",
+            "sequence": 99,
+            "phase": "NIGHT_1_ACTIONS",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {
+                "public_player_id": "P05",
+                "cause": "night_kill",
+            },
+        }
+    )
+
+    assert isinstance(event, PlayerEliminated)
+    assert event.payload.public_player_id == "P05"
+    assert event.payload.role is None
+    assert event.payload.faction is None
 
 
 def test_events_are_frozen() -> None:

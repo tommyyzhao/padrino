@@ -12,16 +12,36 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from padrino.core.enums import Faction, Role, RoleFamily
+from padrino.core.engine.win_conditions import WinCondition
+from padrino.core.enums import Faction, RatingContextKind, Role, RoleFamily
+
+BUILTIN_RULESET_IDS: tuple[str, ...] = (
+    "mini7_v1",
+    "bench10_v1",
+    "roleblock10_v1",
+    "deception13_v1",
+    "visit12_v1",
+    "ninja13_v1",
+    "sk12_v1",
+    "jester8_v1",
+)
 
 
 class Ruleset(Protocol):
     """Full structural contract for a ruleset module (e.g. ``mini7_v1``)."""
 
     RULESET_ID: str
+    RATING_CONTEXT_KIND: RatingContextKind
+    IS_CANONICAL: bool
+    RATING_CONTEXT_DISPLAY_LABEL: str
     PLAYER_COUNT: int
     ROLE_COUNTS: dict[Role, int]
     ROLE_FACTIONS: dict[Role, Faction]
+    WIN_CONDITIONS: tuple[WinCondition, ...]
+    ALT_WIN_CONDITIONS: tuple[str, ...]
+    SOLO_FACTIONS: tuple[str, ...]
+    FACTION_MUTATION_ALLOWED: bool
+    KINGMAKING_OBJECTIVE: bool
     DISCUSSION_ROUNDS_PER_DAY: int
     MAX_DAYS: int
     PUBLIC_MESSAGE_MAX_CHARS: int
@@ -46,5 +66,29 @@ def get_ruleset(ruleset_id: str) -> Ruleset:
         from padrino.core.rulesets import bench10_v1
 
         return bench10_v1
+    elif ruleset_id == "roleblock10_v1":
+        from padrino.core.rulesets import roleblock10_v1
+
+        return roleblock10_v1
+    elif ruleset_id == "deception13_v1":
+        from padrino.core.rulesets import deception13_v1
+
+        return deception13_v1
+    elif ruleset_id == "visit12_v1":
+        from padrino.core.rulesets import visit12_v1
+
+        return visit12_v1
+    elif ruleset_id == "ninja13_v1":
+        from padrino.core.rulesets import ninja13_v1
+
+        return ninja13_v1
+    elif ruleset_id == "sk12_v1":
+        from padrino.core.rulesets import sk12_v1
+
+        return sk12_v1
+    elif ruleset_id == "jester8_v1":
+        from padrino.core.rulesets import jester8_v1
+
+        return jester8_v1
     else:
         raise ValueError(f"Unknown ruleset_id: {ruleset_id!r}")

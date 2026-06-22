@@ -1,0 +1,729 @@
+"""Tests for the formal Night Action Resolution matrix."""
+
+from __future__ import annotations
+
+from hypothesis import given
+from hypothesis import strategies as st
+
+from padrino.core.engine.resolvers.nar import (
+    RESOLUTION_MATRIX,
+    TIER_ORDER,
+    MatrixEffect,
+    NarTier,
+    NightActionIntent,
+    NightActionKind,
+    resolve_night_actions,
+)
+from padrino.core.engine.state import GameState, Phase, Seat
+from padrino.core.enums import Faction, PhaseKind, Role
+
+
+def _seat(
+    pid: str,
+    idx: int,
+    role: Role,
+    faction: Faction,
+    *,
+    alive: bool = True,
+    last_protected_target: str | None = None,
+) -> Seat:
+    return Seat(
+        public_player_id=pid,
+        seat_index=idx,
+        role=role,
+        faction=faction,
+        alive=alive,
+        last_protected_target=last_protected_target,
+    )
+
+
+def _state() -> GameState:
+    return GameState(
+        ruleset_id="mini7_v1",
+        game_id="G-NAR",
+        game_seed="nar-seed",
+        current_phase=Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0),
+        seats=(
+            _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+            _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+            _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+            _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+            _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+            _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+            _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+        ),
+        day=1,
+    )
+
+
+def _intent(
+    actor: str,
+    kind: NightActionKind,
+    target: str | None,
+    *,
+    redirect_target: str | None = None,
+) -> NightActionIntent:
+    return NightActionIntent(
+        actor=actor,
+        kind=kind,
+        target=target,
+        redirect_target=redirect_target,
+    )
+
+
+def test_resolution_matrix_declares_tier_order_and_rows() -> None:
+    assert TIER_ORDER == (
+        NarTier.ROLEBLOCK,
+        NarTier.REDIRECT,
+        NarTier.KILL_PROTECT_VISIT,
+        NarTier.INVESTIGATION,
+        NarTier.DEATH_REVEAL,
+    )
+    assert set(RESOLUTION_MATRIX) == set(NightActionKind)
+    assert RESOLUTION_MATRIX[NightActionKind.ROLEBLOCK].tier is NarTier.ROLEBLOCK
+    assert RESOLUTION_MATRIX[NightActionKind.REDIRECT].tier is NarTier.REDIRECT
+    assert RESOLUTION_MATRIX[NightActionKind.FACTIONAL_KILL].tier is (NarTier.KILL_PROTECT_VISIT)
+    assert RESOLUTION_MATRIX[NightActionKind.PROTECT].protected is (MatrixEffect.PREVENTS_DEATH)
+    assert RESOLUTION_MATRIX[NightActionKind.INVESTIGATE].tier is NarTier.INVESTIGATION
+    assert RESOLUTION_MATRIX[NightActionKind.FRAME].tier is NarTier.INVESTIGATION
+    assert RESOLUTION_MATRIX[NightActionKind.TRACK].tier is NarTier.INVESTIGATION
+    assert RESOLUTION_MATRIX[NightActionKind.WATCH].tier is NarTier.INVESTIGATION
+    assert RESOLUTION_MATRIX[NightActionKind.CLEAN].tier is NarTier.DEATH_REVEAL
+    assert RESOLUTION_MATRIX[NightActionKind.SERIAL_KILL].tier is (NarTier.KILL_PROTECT_VISIT)
+
+
+def test_roleblock_vs_roleblock_both_blocks_apply() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.ROLEBLOCK, "P02"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P01"),
+        ),
+    )
+
+    assert result.blocked_actor_ids == ("P01", "P02")
+    assert {(v.actor, v.target, v.action_kind) for v in result.visits} == {
+        ("P01", "P02", NightActionKind.ROLEBLOCK),
+        ("P02", "P01", NightActionKind.ROLEBLOCK),
+    }
+
+
+def test_roleblocked_factional_killer_fails_without_backup_carry() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P01"),
+        ),
+    )
+
+    assert result.mafia_kill_target is None
+    assert result.eliminated is None
+    assert result.mafia_vote_tally == {}
+    assert result.feedback_by_code("ACTION_BLOCKED")[0].recipient == "P01"
+
+
+def test_blocked_action_does_not_count_as_visit_but_roleblock_does() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P02", NightActionKind.ROLEBLOCK, "P03"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P01"),
+        ),
+    )
+
+    assert result.blocked_actor_ids == ("P03",)
+    assert {(v.actor, v.target) for v in result.visits} == {("P02", "P03")}
+    assert result.detective_finding is None
+
+
+def test_roleblock_nullifies_active_action_but_not_godfather_passive() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.GODFATHER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P01"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P01"),
+        ),
+    )
+
+    assert result.blocked_actor_ids == ("P01",)
+    assert result.mafia_kill_target is None
+    assert result.eliminated is None
+    assert result.detective_finding == ("P01", "TOWN")
+    assert result.feedback_by_code("ACTION_BLOCKED")[0].recipient == "P01"
+
+
+def test_investigation_of_target_killed_same_night_still_returns_result() -> None:
+    result = resolve_night_actions(
+        _state(),
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P05"),
+        ),
+    )
+
+    assert result.mafia_kill_target == "P05"
+    assert result.eliminated == "P05"
+    assert result.detective_finding == ("P05", "TOWN")
+    assert result.feedback_by_code("INVESTIGATION_RESULT")[0].message == (
+        "Investigation result: P05 is TOWN."
+    )
+
+
+def test_godfather_investigation_falsifies_structured_feedback_only() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.GODFATHER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (_intent("P03", NightActionKind.INVESTIGATE, "P01"),),
+    )
+
+    feedback = result.feedback_by_code("INVESTIGATION_RESULT")[0]
+    assert result.detective_finding == ("P01", "TOWN")
+    assert result.investigation_outcomes["P03"].finding == "TOWN"
+    assert feedback.model_dump() == {
+        "recipient": "P03",
+        "code": "INVESTIGATION_RESULT",
+        "message": "Investigation result: P01 is TOWN.",
+        "target": "P01",
+        "finding": "TOWN",
+        "visited_player_ids": (),
+        "visitor_player_ids": (),
+    }
+
+
+def test_framed_town_target_reads_as_mafia() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.FRAMER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FRAME, "P05"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P05"),
+        ),
+    )
+
+    feedback = result.feedback_by_code("INVESTIGATION_RESULT")[0]
+    assert result.detective_finding == ("P05", "MAFIA")
+    assert result.investigation_outcomes["P03"].finding == "MAFIA"
+    assert result.framed_targets == ("P05",)
+    assert result.frame_spent_actor_ids == ("P01",)
+    assert feedback.model_dump() == {
+        "recipient": "P03",
+        "code": "INVESTIGATION_RESULT",
+        "message": "Investigation result: P05 is MAFIA.",
+        "target": "P05",
+        "finding": "MAFIA",
+        "visited_player_ids": (),
+        "visitor_player_ids": (),
+    }
+
+
+def test_roleblocked_framer_does_not_mark_or_spend() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.FRAMER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FRAME, "P05"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P01"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P05"),
+        ),
+    )
+
+    assert result.blocked_actor_ids == ("P01",)
+    assert result.detective_finding == ("P05", "TOWN")
+    assert result.framed_targets == ()
+    assert result.frame_spent_actor_ids == ()
+
+
+def test_frame_overrides_godfather_passive_investigation() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.FRAMER, Faction.MAFIA),
+                _seat("P02", 1, Role.GODFATHER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FRAME, "P02"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P02"),
+        ),
+    )
+
+    assert RESOLUTION_MATRIX[NightActionKind.FRAME].investigation is (
+        MatrixEffect.FALSIFIES_INVESTIGATION
+    )
+    assert result.detective_finding == ("P02", "MAFIA")
+    assert result.investigation_outcomes["P03"].finding == "MAFIA"
+
+
+def test_protection_feedback_is_structured_and_deterministic() -> None:
+    result = resolve_night_actions(
+        _state(),
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P04", NightActionKind.PROTECT, "P05"),
+        ),
+    )
+
+    assert result.protected == "P05"
+    assert result.eliminated is None
+    feedback = result.feedback_by_code("PROTECTION_SUCCESSFUL")
+    assert [(f.recipient, f.target, f.message) for f in feedback] == [
+        ("P04", "P05", "Your protection prevented a kill.")
+    ]
+
+
+def test_track_and_watch_feedback_use_public_player_ids_only() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.TRACKER, Faction.TOWN),
+                _seat("P04", 3, Role.WATCHER, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P03", NightActionKind.TRACK, "P01"),
+            _intent("P04", NightActionKind.WATCH, "P05"),
+        ),
+    )
+
+    track = result.feedback_by_code("TRACK_RESULT")[0]
+    watch = result.feedback_by_code("WATCH_RESULT")[0]
+    assert track.recipient == "P03"
+    assert track.target == "P01"
+    assert track.visited_player_ids == ("P05",)
+    assert track.visitor_player_ids == ()
+    assert watch.recipient == "P04"
+    assert watch.target == "P05"
+    assert watch.visitor_player_ids == ("P01",)
+    assert watch.visited_player_ids == ()
+
+
+def test_tracker_killed_same_night_feedback_suppressed() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.TRACKER, Faction.TOWN),
+                _seat("P04", 3, Role.WATCHER, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P03"),
+            _intent("P02", NightActionKind.FACTIONAL_KILL, "P03"),
+            _intent("P03", NightActionKind.TRACK, "P01"),
+        ),
+    )
+
+    assert result.eliminated == "P03"
+    assert result.feedback_by_code("TRACK_RESULT") == ()
+
+
+def test_watcher_killed_same_night_feedback_suppressed() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.TRACKER, Faction.TOWN),
+                _seat("P04", 3, Role.WATCHER, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P04"),
+            _intent("P02", NightActionKind.FACTIONAL_KILL, "P04"),
+            _intent("P04", NightActionKind.WATCH, "P05"),
+        ),
+    )
+
+    assert result.eliminated == "P04"
+    assert result.feedback_by_code("WATCH_RESULT") == ()
+
+
+def test_tracker_and_watcher_read_roleblock_visit_but_not_blocked_action() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.TRACKER, Faction.TOWN),
+                _seat("P05", 4, Role.WATCHER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P02", NightActionKind.ROLEBLOCK, "P03"),
+            _intent("P03", NightActionKind.INVESTIGATE, "P01"),
+            _intent("P04", NightActionKind.TRACK, "P02"),
+            _intent("P05", NightActionKind.WATCH, "P03"),
+        ),
+    )
+
+    assert {(visit.actor, visit.target, visit.blocked) for visit in result.visits} == {
+        ("P02", "P03", False),
+        ("P04", "P02", False),
+        ("P05", "P03", False),
+    }
+    assert result.blocked_actor_ids == ("P03",)
+    assert result.detective_finding is None
+    assert result.feedback_by_code("TRACK_RESULT")[0].visited_player_ids == ("P03",)
+    assert result.feedback_by_code("WATCH_RESULT")[0].visitor_player_ids == ("P02",)
+
+
+def test_ninja_factional_kill_suppresses_only_the_ninja_visit() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.NINJA, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.TRACKER, Faction.TOWN),
+                _seat("P04", 3, Role.WATCHER, Faction.TOWN),
+                _seat("P05", 4, Role.DETECTIVE, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.DOCTOR, Faction.TOWN),
+            )
+        }
+    )
+
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P06"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P05"),
+            _intent("P03", NightActionKind.TRACK, "P01"),
+            _intent("P04", NightActionKind.WATCH, "P05"),
+            _intent("P05", NightActionKind.INVESTIGATE, "P01"),
+        ),
+    )
+
+    assert result.eliminated == "P06"
+    assert result.blocked_actor_ids == ("P05",)
+    assert {(visit.actor, visit.target, visit.action_kind) for visit in result.visits} == {
+        ("P02", "P05", NightActionKind.ROLEBLOCK),
+        ("P03", "P01", NightActionKind.TRACK),
+        ("P04", "P05", NightActionKind.WATCH),
+    }
+    assert result.feedback_by_code("TRACK_RESULT")[0].visited_player_ids == ()
+    assert result.feedback_by_code("WATCH_RESULT")[0].visitor_player_ids == ("P02",)
+
+
+def test_cleaned_death_suppresses_death_reveal_only() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.JANITOR, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.CLEAN, "P05"),
+        ),
+    )
+
+    assert result.eliminated == "P05"
+    assert result.cleaned_deaths == ("P05",)
+    assert result.clean_spent_actor_ids == ("P02",)
+    assert [(r.public_player_id, r.role, r.faction, r.cleaned) for r in result.death_reveals] == [
+        ("P05", None, None, True)
+    ]
+
+
+def test_serial_killer_kill_resolves_through_matrix_independently_of_mafia_kill() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.SERIAL_KILLER, Faction.SERIAL_KILLER),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P03", NightActionKind.SERIAL_KILL, "P01"),
+        ),
+    )
+
+    assert result.mafia_kill_target == "P05"
+    assert result.serial_kill_target == "P01"
+    assert result.eliminated_player_ids == ("P01", "P05")
+    assert result.eliminated == "P01"
+    assert [(r.public_player_id, r.role, r.faction, r.cleaned) for r in result.death_reveals] == [
+        ("P01", Role.MAFIA_GOON, Faction.MAFIA, False),
+        ("P05", Role.VILLAGER, Faction.TOWN, False),
+    ]
+
+
+def test_serial_killer_kill_is_blockable_and_protectable() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.SERIAL_KILLER, Faction.SERIAL_KILLER),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+
+    blocked = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.ROLEBLOCK, "P03"),
+            _intent("P03", NightActionKind.SERIAL_KILL, "P05"),
+        ),
+    )
+    assert blocked.serial_kill_target is None
+    assert blocked.eliminated_player_ids == ()
+    assert blocked.feedback_by_code("ACTION_BLOCKED")[0].recipient == "P03"
+
+    protected = resolve_night_actions(
+        state,
+        (
+            _intent("P03", NightActionKind.SERIAL_KILL, "P05"),
+            _intent("P04", NightActionKind.PROTECT, "P05"),
+        ),
+    )
+    assert protected.serial_kill_target == "P05"
+    assert protected.eliminated_player_ids == ()
+    assert protected.feedback_by_code("PROTECTION_SUCCESSFUL")[0].target == "P05"
+
+
+def test_janitor_clean_is_one_successful_shot() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.JANITOR, Faction.MAFIA),
+                _seat("P03", 2, Role.DETECTIVE, Faction.TOWN),
+                _seat("P04", 3, Role.DOCTOR, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+
+    protected = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.CLEAN, "P05"),
+            _intent("P04", NightActionKind.PROTECT, "P05"),
+        ),
+    )
+    assert protected.eliminated is None
+    assert protected.cleaned_deaths == ()
+    assert protected.clean_spent_actor_ids == ()
+
+    spent_state = state.model_copy(
+        update={
+            "seats": (
+                state.seats[0],
+                state.seats[1].model_copy(update={"janitor_clean_shots_remaining": 0}),
+                *state.seats[2:],
+            )
+        }
+    )
+    after_spent = resolve_night_actions(
+        spent_state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.CLEAN, "P05"),
+        ),
+    )
+
+    assert after_spent.eliminated == "P05"
+    assert after_spent.cleaned_deaths == ()
+    assert after_spent.clean_spent_actor_ids == ()
+    assert [
+        (r.public_player_id, r.role, r.faction, r.cleaned) for r in after_spent.death_reveals
+    ] == [("P05", Role.VILLAGER, Faction.TOWN, False)]
+
+
+def test_non_janitor_clean_intent_is_ignored() -> None:
+    result = resolve_night_actions(
+        _state(),
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P02", NightActionKind.FACTIONAL_KILL, "P05"),
+            _intent("P06", NightActionKind.CLEAN, "P05"),
+        ),
+    )
+
+    assert result.eliminated == "P05"
+    assert result.cleaned_deaths == ()
+    assert result.clean_spent_actor_ids == ()
+    assert [(r.public_player_id, r.role, r.faction, r.cleaned) for r in result.death_reveals] == [
+        ("P05", Role.VILLAGER, Faction.TOWN, False)
+    ]
+
+
+_PID = st.sampled_from(("P01", "P02", "P03", "P04", "P05", "P06", "P07"))
+_KIND = st.sampled_from(tuple(NightActionKind))
+
+
+@given(
+    st.lists(
+        st.builds(
+            NightActionIntent,
+            actor=_PID,
+            kind=_KIND,
+            target=st.one_of(_PID, st.none()),
+            redirect_target=st.one_of(_PID, st.none()),
+        ),
+        max_size=12,
+    )
+)
+def test_matrix_resolution_is_deterministic_for_generated_interactions(
+    intents: list[NightActionIntent],
+) -> None:
+    first = resolve_night_actions(_state(), tuple(intents))
+    second = resolve_night_actions(_state(), tuple(intents))
+    assert second == first

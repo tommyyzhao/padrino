@@ -7,7 +7,15 @@ from collections import Counter
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import Seat
 from padrino.core.enums import Faction, Role
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import (
+    bench10_v1,
+    deception13_v1,
+    jester8_v1,
+    mini7_v1,
+    ninja13_v1,
+    roleblock10_v1,
+    visit12_v1,
+)
 
 
 def test_returns_seven_seats() -> None:
@@ -32,9 +40,88 @@ def test_role_counts_exact() -> None:
         seats = assign_roles(f"trial-{i}", mini7_v1)
         counts = Counter(s.role for s in seats)
         assert counts[Role.MAFIA_GOON] == 2
+        assert counts[Role.GODFATHER] == 0
         assert counts[Role.DETECTIVE] == 1
         assert counts[Role.DOCTOR] == 1
         assert counts[Role.VILLAGER] == 3
+
+
+def test_bench10_role_counts_preserve_three_goon_roster() -> None:
+    for i in range(50):
+        seats = assign_roles(f"bench-trial-{i}", bench10_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.MAFIA_GOON] == 3
+        assert counts[Role.GODFATHER] == 0
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.VILLAGER] == 5
+
+
+def test_roleblock10_role_counts_include_one_mafia_roleblocker() -> None:
+    for i in range(50):
+        seats = assign_roles(f"roleblock-trial-{i}", roleblock10_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.MAFIA_GOON] == 2
+        assert counts[Role.MAFIA_ROLEBLOCKER] == 1
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.VILLAGER] == 5
+
+
+def test_deception13_role_counts_include_vetted_scum_skills() -> None:
+    for i in range(50):
+        seats = assign_roles(f"deception-trial-{i}", deception13_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.GODFATHER] == 1
+        assert counts[Role.MAFIA_ROLEBLOCKER] == 1
+        assert counts[Role.JANITOR] == 1
+        assert counts[Role.MAFIA_GOON] == 1
+        assert counts[Role.FRAMER] == 0
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.VILLAGER] == 7
+
+
+def test_visit12_role_counts_include_tracker_and_watcher() -> None:
+    for i in range(50):
+        seats = assign_roles(f"visit-trial-{i}", visit12_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.MAFIA_GOON] == 2
+        assert counts[Role.MAFIA_ROLEBLOCKER] == 1
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.TRACKER] == 1
+        assert counts[Role.WATCHER] == 1
+        assert counts[Role.VILLAGER] == 5
+
+
+def test_ninja13_role_counts_include_one_ninja() -> None:
+    for i in range(50):
+        seats = assign_roles(f"ninja-trial-{i}", ninja13_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.NINJA] == 1
+        assert counts[Role.MAFIA_GOON] == 1
+        assert counts[Role.MAFIA_ROLEBLOCKER] == 1
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.TRACKER] == 1
+        assert counts[Role.WATCHER] == 1
+        assert counts[Role.VILLAGER] == 6
+        ninja = next(seat for seat in seats if seat.role is Role.NINJA)
+        assert ninja.faction is Faction.MAFIA
+
+
+def test_jester8_role_counts_include_one_jester() -> None:
+    for i in range(50):
+        seats = assign_roles(f"jester-trial-{i}", jester8_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.MAFIA_GOON] == 2
+        assert counts[Role.JESTER] == 1
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.VILLAGER] == 3
+        jester = next(seat for seat in seats if seat.role is Role.JESTER)
+        assert jester.faction is Faction.JESTER
 
 
 def test_public_player_ids_are_p01_through_p07() -> None:
@@ -64,7 +151,7 @@ def test_all_seats_alive_initially() -> None:
 def test_factions_match_roles() -> None:
     seats = assign_roles("factions", mini7_v1)
     for seat in seats:
-        if seat.role == Role.MAFIA_GOON:
+        if seat.role in {Role.MAFIA_GOON, Role.GODFATHER, Role.MAFIA_ROLEBLOCKER}:
             assert seat.faction == Faction.MAFIA
         else:
             assert seat.faction == Faction.TOWN

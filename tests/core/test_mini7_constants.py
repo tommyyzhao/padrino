@@ -13,19 +13,20 @@ def test_role_counts_sum_to_player_count() -> None:
 
 def test_role_counts_exact() -> None:
     assert mini7.ROLE_COUNTS[Role.MAFIA_GOON] == 2
+    assert Role.GODFATHER not in mini7.ROLE_COUNTS
     assert mini7.ROLE_COUNTS[Role.DETECTIVE] == 1
     assert mini7.ROLE_COUNTS[Role.DOCTOR] == 1
     assert mini7.ROLE_COUNTS[Role.VILLAGER] == 3
 
 
 def test_all_roles_have_a_family() -> None:
-    for role in Role:
+    for role in mini7.ROLE_COUNTS:
         family = role_family_for(role)
         assert isinstance(family, RoleFamily)
 
 
 def test_all_roles_have_a_faction() -> None:
-    for role in Role:
+    for role in mini7.ROLE_COUNTS:
         faction = faction_for(role)
         assert isinstance(faction, Faction)
 

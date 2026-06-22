@@ -18,9 +18,10 @@ per-faction (TOWN/MAFIA) scopes are aggregated independently. Per-faction
 games / wins / draws / losses come from ``game_seats`` joined to
 ``Game.terminal_result`` (filter on ``Game.status == 'COMPLETED'``).
 
-Cache is process-local and keyed on
-``(league_id, ruleset_id, max(ratings.updated_at))``. A new rating update
-bumps the tag so the next read naturally misses the cache and recomputes.
+Cache is process-local and keyed on the league/ruleset plus a tag derived from
+rating updates and terminal submission-event diagnostics. A new rating update
+or diagnostic event changes the tag so the next read naturally misses the cache
+and recomputes.
 ``reset_cache()`` is exported so tests can force a recompute.
 """
 
@@ -37,15 +38,21 @@ from typing import Final
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.core.enums import Faction
+from padrino.core.enums import Faction, Role
 from padrino.db.models import (
     AgentBuild,
     Game,
+    GameEvent,
     GameSeat,
     Gauntlet,
     ModelConfig,
     ModelProvider,
     Rating,
+)
+from padrino.diagnostics.submissions import (
+    INVALID_EVENT_TYPE,
+    SUBMISSION_EVENT_TYPES,
+    TIMEOUT_EVENT_TYPE,
 )
 from padrino.ratings.openskill_service import (
     INITIAL_MU,
@@ -73,6 +80,17 @@ class FactionAggregate:
 
 
 @dataclass(frozen=True, slots=True)
+class RoleAggregate:
+    """Exact-role sample-count diagnostic inside a model leaderboard entry."""
+
+    games: int
+    wins: int
+    draws: int
+    losses: int
+    win_rate: float
+
+
+@dataclass(frozen=True, slots=True)
 class ModelLeaderboardEntry:
     """One row in the per-model leaderboard.
 
@@ -93,8 +111,11 @@ class ModelLeaderboardEntry:
     wins: int
     draws: int
     losses: int
+    timeout_rate: float
+    invalid_action_rate: float
     town: FactionAggregate
     mafia: FactionAggregate
+    role_breakdown: dict[str, RoleAggregate]
     agent_build_count: int
     agent_build_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
 
@@ -163,6 +184,10 @@ class _ModelBucket:
     mafia_wins: int = 0
     mafia_draws: int = 0
     mafia_losses: int = 0
+    role_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    submissions: int = 0
+    timeouts: int = 0
+    invalids: int = 0
 
 
 def _aggregate_rating(samples: list[tuple[float, float, int]]) -> tuple[float, float]:
@@ -210,6 +235,21 @@ def _faction_aggregate(bucket: _ModelBucket, faction: str) -> FactionAggregate:
     )
 
 
+def _role_aggregates(bucket: _ModelBucket) -> dict[str, RoleAggregate]:
+    out: dict[str, RoleAggregate] = {}
+    for role, counts in sorted(bucket.role_counts.items()):
+        games = counts["games"]
+        wins = counts["wins"]
+        out[role] = RoleAggregate(
+            games=games,
+            wins=wins,
+            draws=counts["draws"],
+            losses=counts["losses"],
+            win_rate=(wins / games) if games else 0.0,
+        )
+    return out
+
+
 def _bucket_to_entry(bucket: _ModelBucket) -> ModelLeaderboardEntry:
     mu, sigma = _aggregate_rating(bucket.rating_samples.get(SCOPE_VALUE_GLOBAL, []))
     return ModelLeaderboardEntry(
@@ -225,8 +265,11 @@ def _bucket_to_entry(bucket: _ModelBucket) -> ModelLeaderboardEntry:
         wins=bucket.wins,
         draws=bucket.draws,
         losses=bucket.losses,
+        timeout_rate=(bucket.timeouts / bucket.submissions) if bucket.submissions else 0.0,
+        invalid_action_rate=(bucket.invalids / bucket.submissions) if bucket.submissions else 0.0,
         town=_faction_aggregate(bucket, Faction.TOWN.value),
         mafia=_faction_aggregate(bucket, Faction.MAFIA.value),
+        role_breakdown=_role_aggregates(bucket),
         agent_build_count=len(bucket.agent_build_ids),
         agent_build_ids=tuple(sorted(bucket.agent_build_ids, key=str)),
     )
@@ -243,10 +286,26 @@ def reset_cache() -> None:
 async def _cache_tag(
     session: AsyncSession,
     league_id: uuid.UUID,
+    ruleset_id: str,
 ) -> str:
     stmt = select(func.max(Rating.updated_at)).where(Rating.league_id == league_id)
     max_dt: datetime | None = (await session.execute(stmt)).scalar_one_or_none()
-    return max_dt.isoformat() if max_dt is not None else "empty"
+    events_stmt = (
+        select(func.max(GameEvent.created_at), func.count(GameEvent.id))
+        .select_from(GameEvent)
+        .join(Game, Game.id == GameEvent.game_id)
+        .join(Gauntlet, Gauntlet.id == Game.gauntlet_id)
+        .where(
+            Gauntlet.league_id == league_id,
+            Game.ruleset_id == ruleset_id,
+            Game.status == _COMPLETED_STATUS,
+            GameEvent.event_type.in_(SUBMISSION_EVENT_TYPES),
+        )
+    )
+    max_event_dt, event_count = (await session.execute(events_stmt)).one()
+    rating_part = max_dt.isoformat() if max_dt is not None else "empty"
+    event_part = max_event_dt.isoformat() if max_event_dt is not None else "empty"
+    return f"ratings:{rating_part};events:{event_part}:{int(event_count)}"
 
 
 async def _build_identity_map(
@@ -357,6 +416,90 @@ async def _seat_counters_per_build(
     return dict(out)
 
 
+async def _role_counters_per_build(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    ruleset_id: str,
+) -> dict[uuid.UUID, dict[str, dict[str, int]]]:
+    """Aggregate exact-role sample counts for terminal games in one league."""
+    stmt = (
+        select(
+            GameSeat.agent_build_id,
+            GameSeat.faction,
+            GameSeat.role,
+            Game.terminal_result,
+        )
+        .join(Game, Game.id == GameSeat.game_id)
+        .join(Gauntlet, Gauntlet.id == Game.gauntlet_id)
+        .where(
+            Gauntlet.league_id == league_id,
+            Game.ruleset_id == ruleset_id,
+            Game.status == _COMPLETED_STATUS,
+        )
+    )
+    out: dict[uuid.UUID, dict[str, dict[str, int]]] = {}
+    for ab_id, faction, role_value, terminal in (await session.execute(stmt)).all():
+        if ab_id is None:
+            continue
+        try:
+            role = Role(role_value)
+        except ValueError:
+            continue
+        ab_bucket = out.setdefault(ab_id, {})
+        role_bucket = ab_bucket.setdefault(
+            role.value, {"games": 0, "wins": 0, "draws": 0, "losses": 0}
+        )
+        role_bucket["games"] += 1
+        winner = terminal.get("winner") if isinstance(terminal, dict) else None
+        if winner == "DRAW":
+            role_bucket["draws"] += 1
+        elif winner == faction:
+            role_bucket["wins"] += 1
+        elif winner in {Faction.TOWN.value, Faction.MAFIA.value}:
+            role_bucket["losses"] += 1
+    return out
+
+
+async def _submission_metrics_per_build(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    ruleset_id: str,
+) -> dict[uuid.UUID, dict[str, int]]:
+    """Aggregate timeout and invalid-action attempts for terminal games."""
+
+    stmt = (
+        select(GameSeat.agent_build_id, GameEvent.event_type)
+        .select_from(GameEvent)
+        .join(Game, Game.id == GameEvent.game_id)
+        .join(Gauntlet, Gauntlet.id == Game.gauntlet_id)
+        .join(
+            GameSeat,
+            (GameSeat.game_id == GameEvent.game_id)
+            & (GameSeat.public_player_id == GameEvent.actor_player_id),
+        )
+        .where(
+            Gauntlet.league_id == league_id,
+            Game.ruleset_id == ruleset_id,
+            Game.status == _COMPLETED_STATUS,
+            GameEvent.event_type.in_(SUBMISSION_EVENT_TYPES),
+            GameSeat.agent_build_id.is_not(None),
+        )
+    )
+    out: dict[uuid.UUID, dict[str, int]] = defaultdict(
+        lambda: {"submissions": 0, "timeouts": 0, "invalids": 0}
+    )
+    for ab_id, event_type in (await session.execute(stmt)).all():
+        bucket = out[ab_id]
+        bucket["submissions"] += 1
+        if event_type == TIMEOUT_EVENT_TYPE:
+            bucket["timeouts"] += 1
+        elif event_type == INVALID_EVENT_TYPE:
+            bucket["invalids"] += 1
+    return dict(out)
+
+
 async def rollup_by_model(
     session: AsyncSession,
     league_id: uuid.UUID,
@@ -364,11 +507,11 @@ async def rollup_by_model(
 ) -> ModelRollup:
     """Aggregate per-(provider, model_name, model_version) leaderboard rows.
 
-    The result is cached on ``max(ratings.updated_at)`` for the league —
-    fresh writes naturally invalidate the cache. Pagination, scope checks
-    and HTTP shape live in the route layer.
+    The result is cached on a league/ruleset tag derived from ratings plus
+    terminal submission-event diagnostics. Pagination, scope checks and HTTP
+    shape live in the route layer.
     """
-    tag = await _cache_tag(session, league_id)
+    tag = await _cache_tag(session, league_id, ruleset_id)
     cache_key = (league_id, ruleset_id, tag)
     cached = _CACHE.get(cache_key)
     if cached is not None:
@@ -384,7 +527,15 @@ async def rollup_by_model(
     seat_counters = await _seat_counters_per_build(
         session, league_id=league_id, ruleset_id=ruleset_id
     )
-    extra_ids = set(seat_counters.keys()) - ab_ids
+    role_counters = await _role_counters_per_build(
+        session, league_id=league_id, ruleset_id=ruleset_id
+    )
+    submission_metrics = await _submission_metrics_per_build(
+        session, league_id=league_id, ruleset_id=ruleset_id
+    )
+    extra_ids = (
+        set(seat_counters.keys()) | set(role_counters.keys()) | set(submission_metrics.keys())
+    ) - ab_ids
     if extra_ids:
         identities.update(await _build_identity_map(session, extra_ids))
 
@@ -439,6 +590,27 @@ async def rollup_by_model(
         bucket.mafia_wins += counts["mafia_wins"]
         bucket.mafia_draws += counts["mafia_draws"]
         bucket.mafia_losses += counts["mafia_losses"]
+
+    for ab_id, role_counts in role_counters.items():
+        bucket = _bucket_for(ab_id)
+        if bucket is None:
+            continue
+        for role, counts in role_counts.items():
+            bucket_counts = bucket.role_counts.setdefault(
+                role, {"games": 0, "wins": 0, "draws": 0, "losses": 0}
+            )
+            bucket_counts["games"] += counts["games"]
+            bucket_counts["wins"] += counts["wins"]
+            bucket_counts["draws"] += counts["draws"]
+            bucket_counts["losses"] += counts["losses"]
+
+    for ab_id, metrics in submission_metrics.items():
+        bucket = _bucket_for(ab_id)
+        if bucket is None:
+            continue
+        bucket.submissions += metrics["submissions"]
+        bucket.timeouts += metrics["timeouts"]
+        bucket.invalids += metrics["invalids"]
 
     entries = sorted(
         (_bucket_to_entry(b) for b in buckets.values()),
@@ -548,6 +720,15 @@ def entry_to_response(entry: ModelLeaderboardEntry) -> dict[str, object]:
             "losses": f.losses,
         }
 
+    def _role_dict(r: RoleAggregate) -> Mapping[str, float | int]:
+        return {
+            "games": r.games,
+            "wins": r.wins,
+            "draws": r.draws,
+            "losses": r.losses,
+            "win_rate": r.win_rate,
+        }
+
     return {
         "model_key": entry.model_key,
         "display_name": entry.display_name,
@@ -561,8 +742,13 @@ def entry_to_response(entry: ModelLeaderboardEntry) -> dict[str, object]:
         "wins": entry.wins,
         "draws": entry.draws,
         "losses": entry.losses,
+        "timeout_rate": entry.timeout_rate,
+        "invalid_action_rate": entry.invalid_action_rate,
         "town": _faction_dict(entry.town),
         "mafia": _faction_dict(entry.mafia),
+        "role_breakdown": {
+            role: _role_dict(aggregate) for role, aggregate in entry.role_breakdown.items()
+        },
         "agent_build_count": entry.agent_build_count,
     }
 
@@ -574,6 +760,7 @@ __all__ = [
     "ModelDetail",
     "ModelLeaderboardEntry",
     "ModelRollup",
+    "RoleAggregate",
     "detail_for_model",
     "entry_to_response",
     "model_key_for",

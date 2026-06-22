@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import LeagueKind
 from padrino.db.models import League
+from padrino.db.repositories import rating_contexts
 
 HUMANS_INCLUDED_LEAGUE_NAME = "Humans-Included League"
 
@@ -25,6 +26,8 @@ async def create(
     obj = League(name=name, ruleset_id=ruleset_id, ranked=ranked, kind=kind.value)
     session.add(obj)
     await session.flush()
+    if kind is LeagueKind.SCIENTIFIC:
+        await rating_contexts.ensure_declared_context(session, ruleset_id=ruleset_id)
     return obj
 
 

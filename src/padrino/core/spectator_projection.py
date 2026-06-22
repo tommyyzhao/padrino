@@ -6,11 +6,11 @@ the doctor protected, detective findings, or private mafia chat. The
 deterministic engine encodes that hidden information in three places
 (see :mod:`padrino.core.engine.events`):
 
-* **PRIVATE** events — private mafia chat, the mafia kill vote, the doctor
-  protect, the detective investigation, and the detective result.
+* **PRIVATE** events — private mafia chat, night action submissions, and night
+  feedback.
 * **SYSTEM** events — ``RolesAssigned`` carries every seat's ``role`` +
-  ``faction``; ``NightResolved`` carries the mafia kill target + doctor
-  protection *before* the public elimination is announced.
+  ``faction``; ``NightResolved`` carries night kill targets + doctor protection
+  *before* the public elimination is announced.
 * the ``role`` / ``faction`` keys baked into the otherwise-**PUBLIC**
   ``PlayerEliminated`` payload.
 
