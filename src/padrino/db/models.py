@@ -3,8 +3,8 @@
 Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``agent_builds``, ``leagues``, ``gauntlets``, ``gauntlet_roster_slots``,
 ``games``, ``game_seats``, ``game_events``, ``llm_calls``,
-``rating_contexts``, ``ratings``, ``rating_events``, the dormant human-lane
-siblings ``human_rating`` / ``human_rating_event`` (Wave 9, US-125), the
+``rating_contexts``, ``ratings``, ``rating_events``, the ranked human-lane
+siblings ``human_rating`` / ``human_rating_event``, the
 non-canonical context sibling rating tables, and the browser-human identity
 layer ``principals`` / ``human_sessions`` (Wave 9, US-127), plus human-lane
 cost admission slots.
@@ -129,7 +129,7 @@ class League(Base):
     ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
     ranked: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # Discriminator (Wave 9): SCIENTIFIC owns the sacred Rating tables;
-    # HUMANS_INCLUDED is the dormant casual human lane. Server-defaults to
+    # HUMANS_INCLUDED owns the segregated human-rating sibling tables. Defaults to
     # SCIENTIFIC so every existing league row is byte-identical after upgrade.
     kind: Mapped[str] = mapped_column(
         String, nullable=False, default="SCIENTIFIC", server_default="SCIENTIFIC"
@@ -684,13 +684,12 @@ class SoloRateRatingEvent(Base):
 
 
 class HumanRating(Base):
-    """Dormant sibling of :class:`Rating` for the humans-included league (US-125).
+    """Sibling of :class:`Rating` for the ranked humans-included league.
 
     Mirrors the scientific ``ratings`` row shape but is keyed by
-    ``human_player_id`` (a human principal reference) instead of an agent build,
-    and is NEVER written in v1 (casual). It exists so future activation of human
-    ELO is a flag-flip, not a migration. Writing a human-lane game touches
-    neither this table nor the scientific ``ratings`` table in v1.
+    ``human_player_id`` (a human principal reference) instead of an agent build.
+    Ranked human-lane games may write this table; casual games still write
+    neither this table nor the scientific ``ratings`` table.
     """
 
     __tablename__ = "human_rating"
@@ -720,10 +719,10 @@ class HumanRating(Base):
 
 
 class HumanRatingEvent(Base):
-    """Dormant sibling of :class:`RatingEvent` for the humans-included league (US-125).
+    """Sibling of :class:`RatingEvent` for ranked humans-included games.
 
     Mirrors the scientific ``rating_events`` audit-row shape but is keyed by
-    ``human_player_id`` instead of an agent build. NEVER written in v1.
+    ``human_player_id`` instead of an agent build.
     """
 
     __tablename__ = "human_rating_event"
@@ -837,9 +836,9 @@ class HumanPlayerStats(Base):
     Materialized by
     :func:`padrino.analytics.deterministic.compute_participant_stats` rolled up
     across every COMPLETED human-lane game (a seat the principal occupied) of the
-    ruleset.  This is the casual humans-included surface only: it is NEVER written
-    for scientific-league (AI-only) games, and there is NO leaderboard or ELO in
-    v1 (hard rule 8 — the dormant ``human_rating`` table stays empty).
+    ruleset.  This is the casual humans-included stats surface only: it is NEVER
+    written for scientific-league (AI-only) games and is separate from ranked
+    human ELO in ``human_rating``.
 
     Counts (not floats) are persisted so re-running a recompute is idempotent
     under the ``(ruleset_id, principal_id)`` unique constraint and so rates are

@@ -3,17 +3,26 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked human ELO writer (US-234b): keep the Humans-Included writer separate
+  from `ratings/openskill_service.py`. The terminal path first checks runtime
+  `ranked`, a bound `league_id`, `League.kind == HUMANS_INCLUDED`, and
+  `League.ranked is True`; only then does it call
+  `ratings/human_openskill_service.update_human_ratings_for_game`. That service
+  writes only `HumanRating` / `HumanRatingEvent` with `GLOBAL/global` scope this
+  wave. AI seats participate as transient initial OpenSkill ratings so mixed
+  human+AI games can move human principals without inserting AI rows into the
+  human sibling table. Scientific ratings still fail closed through
+  `_should_apply_ratings` and incomplete human-seat `agent_builds`.
 - Ranked Humans-Included flag plumbing (US-234a): the Humans-Included league is
   now unique by `(ruleset_id, ranked)` via Alembic `0049`, so casual and ranked
   lobbies for the same ruleset bind distinct `League` rows. Lobby create owns
   the opt-in `ranked` flag; the human lane resolves ranked state from the
   launched `Lobby.game_id -> League` binding, stores it on `GamePersistence`,
   and passes it into `drive_game_loop`. Missing/non-HUMANS_INCLUDED bindings
-  fail closed to `ranked=False`/`league_id=None`. Until US-234b adds the human
-  writer, human seats still keep scientific ratings closed by incomplete
-  `agent_builds`, so ranked human terminal games write zero scientific and zero
-  human-rating rows. `0049` is consumed; future hot-path-index migration story
-  US-239 must use `0050`.
+  fail closed to `ranked=False`/`league_id=None`. Human seats still keep
+  scientific ratings closed by incomplete `agent_builds`; ranked human ELO now
+  writes through the separate US-234b sibling-table path. `0049` is consumed;
+  future hot-path-index migration story US-239 must use `0050`.
 - Human restart-resume tests (US-233): validate the single-host worker path by
   rehydrating from `game_events` with `rehydrate_active_human_games()`, then
   resuming through `run_human_lane` / the default human executor at the existing
@@ -2655,3 +2664,42 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   deselected; `pnpm -C web/dashboard lint`;
   `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26
   passed / 3 skipped.
+
+## 2026-06-22T16:33 PDT - US-234b
+- Activated the ranked Humans-Included ELO writer on a separate sibling-table
+  path. `runner/game_runner.py` now reaches it only for terminal games where the
+  runtime ranked flag is true and the persisted league is
+  `HUMANS_INCLUDED` + ranked; scientific/casual paths remain fail-closed.
+- Added `db/repositories/human_ratings.py` and
+  `ratings/human_openskill_service.py`. The writer persists only
+  `HumanRating` / `HumanRatingEvent` rows keyed by principal string and only in
+  `GLOBAL/global` scope. AI seats are transient initial OpenSkill ratings, so
+  mixed games move human principals without inserting AI rows into the sibling
+  table.
+- Extended regression coverage: service-level tests prove ranked human writes
+  human rows and zero scientific rows, fail-closed tests cover casual,
+  scientific, and missing-league cases, the real terminal segregation test now
+  expects ranked human rows, and the scientific runner rating integration test
+  asserts zero human rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/analytics/human_stats.py`,
+  `src/padrino/api/routes/lobbies.py`, `src/padrino/core/enums.py`,
+  `src/padrino/db/models.py`, `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/db/repositories/leagues.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/ratings/test_human_ranked_elo.py`,
+  `tests/ratings/test_segregation.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py -q` failed on missing
+  `padrino.ratings.human_openskill_service`; focused RED
+  `uv run pytest tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_writes_human_rating_rows_only -q`
+  failed with `(0, 0, 0, 0)` counts before the writer hook; focused GREEN
+  `uv run pytest tests/ratings/test_human_ranked_elo.py tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_writes_human_rating_rows_only tests/ratings/test_segregation.py::test_human_lane_game_writes_zero_rating_rows tests/ratings/test_segregation.py::test_human_seat_fails_closed_even_if_ranked_true tests/runner/test_rating_integration.py::test_town_win_updates_town_up_mafia_down -q`
+  -> 6 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2512 passed / 48 skipped / 10
+  deselected. Frontend gates not run; US-234b is backend-only and did not touch
+  `web/dashboard`.

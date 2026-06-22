@@ -211,7 +211,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Tables exist since 0025 (HumanRating/HumanRatingEvent), dormant. Reuse the _should_apply_ratings fail-closed pattern but on a SEPARATE human reach path keyed by League.kind==HUMANS_INCLUDED AND ranked, firing from the terminal-outcome path. GLOBAL-scope only this wave (matches the sibling-table heritage; US-236 reads it back).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-235",

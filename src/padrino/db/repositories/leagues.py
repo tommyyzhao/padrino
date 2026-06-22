@@ -41,7 +41,7 @@ async def get_or_create_humans_included(
 
     The humans-included league is discriminated by ``kind=HUMANS_INCLUDED`` so
     scientific vs human leagues are queryable. Human games reference it; it is
-    the home of the dormant ``human_rating`` schema and NEVER writes a
+    the home of the segregated ``human_rating`` schema and NEVER writes a
     scientific rating row.
     """
 

@@ -117,8 +117,7 @@ class LobbyCreate(BaseModel):
     #: seat count (player_count - 1, the host's own HUMAN seat).
     prepick_agent_build_ids: list[uuid.UUID] = Field(default_factory=list)
     #: Opt in to the segregated Humans-Included ranked lane. Default remains
-    #: casual/unrated; the human ELO writer is intentionally still dormant in
-    #: US-234a.
+    #: casual/unrated.
     ranked: bool = False
 
 

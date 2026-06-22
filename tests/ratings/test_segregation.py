@@ -1,22 +1,20 @@
-"""US-125: human-lane games are SEGREGATED from the scientific benchmark ELO.
+"""Human-lane games are SEGREGATED from the scientific benchmark ELO.
 
 A human game must NEVER touch the sacred scientific ``ratings`` / ``rating_events``
-tables, and the dormant sibling ``human_rating`` / ``human_rating_event`` tables
-must exist but stay empty in v1 (casual). This module proves all three by driving
-a real game to terminal on the humans-included league and asserting ZERO rows
-land anywhere ratings could be written.
+tables. Casual human games still write no rating rows, while ranked
+Humans-Included games write only the sibling ``human_rating`` /
+``human_rating_event`` tables.
 
-Two complementary proofs:
+Complementary proofs:
 
 * The casual humans-included path (``ranked=False``) writes nothing.
-* The ranked humans-included flag reaches the terminal path, but until the
-  separate human ELO writer ships it still writes nothing.
+* The ranked humans-included path writes human-rating rows and zero scientific
+  rows.
 * A HUMAN seat (a seat with no ``agent_build_id``) makes
   ``_should_apply_ratings`` fail closed, so the scientific tables stay empty.
 
-It also asserts the discriminator + dormant-schema shape: the single
-``Humans-Included League`` row is ``ranked=False`` / ``kind=HUMANS_INCLUDED`` and
-is queryable apart from scientific leagues, and the sibling tables exist.
+It also asserts the discriminator shape: the ``Humans-Included League`` rows are
+queryable apart from scientific leagues, and the sibling tables exist.
 """
 
 from __future__ import annotations
@@ -35,6 +33,7 @@ from padrino.core.rulesets.canonicality import (
 )
 from padrino.db.models import (
     AgentBuild,
+    GameSeat,
     HumanRating,
     HumanRatingEvent,
     League,
@@ -50,6 +49,7 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     games as games_repo,
 )
+from padrino.db.repositories import human_principals as human_principals_repo
 from padrino.db.repositories import (
     leagues as leagues_repo,
 )
@@ -149,6 +149,28 @@ async def _seed_human_lane_game(
             game_seed=_GAME_SEED,
             status="RUNNING",
         )
+        for seat in assign_roles(_GAME_SEED, mini7_v1):
+            occupant_principal_id: uuid.UUID | None = None
+            if seat.public_player_id in human_seat_ids:
+                principal = await human_principals_repo.create_principal(
+                    session,
+                    kind=human_principals_repo.PRINCIPAL_KIND_GUEST,
+                    display_name=None,
+                )
+                occupant_principal_id = principal.id
+            session.add(
+                GameSeat(
+                    game_id=game.id,
+                    public_player_id=seat.public_player_id,
+                    seat_index=seat.seat_index,
+                    agent_build_id=builds.get(seat.public_player_id),
+                    seat_kind="HUMAN" if occupant_principal_id is not None else "AI",
+                    occupant_principal_id=occupant_principal_id,
+                    role=seat.role.value,
+                    faction=seat.faction.value,
+                    alive=True,
+                )
+            )
         league_id = league.id
         game_id = game.id
     return league_id, game_id, builds
@@ -328,10 +350,10 @@ async def test_human_lane_game_writes_zero_rating_rows(
     assert counts == (0, 0, 0, 0)
 
 
-async def test_ranked_humans_included_terminal_game_writes_zero_rating_rows(
+async def test_ranked_humans_included_terminal_game_writes_human_rating_rows_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A completed ranked human-lane game still writes no ratings in US-234a."""
+    """A completed ranked human-lane game writes only human-rating rows."""
     mafia, town, doctor, detective = _split_factions()
     script = make_town_win_script(
         mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
@@ -365,7 +387,16 @@ async def test_ranked_humans_included_terminal_game_writes_zero_rating_rows(
     assert league.ranked is True
 
     counts = await _count_all_rating_rows(session_factory)
-    assert counts == (0, 0, 0, 0)
+    assert counts == (0, 0, 2, 2)
+
+    async with session_factory() as session:
+        human_rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+
+    assert {row.scope_type for row in human_rows} == {"GLOBAL"}
+    assert {row.scope_value for row in human_rows} == {"global"}
+    assert {event.scope_type for event in human_events} == {"GLOBAL"}
+    assert {event.scope_value for event in human_events} == {"global"}
 
 
 async def test_human_seat_fails_closed_even_if_ranked_true(
