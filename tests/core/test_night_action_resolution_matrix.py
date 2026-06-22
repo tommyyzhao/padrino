@@ -408,6 +408,60 @@ def test_track_and_watch_feedback_use_public_player_ids_only() -> None:
     assert watch.visited_player_ids == ()
 
 
+def test_tracker_killed_same_night_feedback_suppressed() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.TRACKER, Faction.TOWN),
+                _seat("P04", 3, Role.WATCHER, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P03"),
+            _intent("P02", NightActionKind.FACTIONAL_KILL, "P03"),
+            _intent("P03", NightActionKind.TRACK, "P01"),
+        ),
+    )
+
+    assert result.eliminated == "P03"
+    assert result.feedback_by_code("TRACK_RESULT") == ()
+
+
+def test_watcher_killed_same_night_feedback_suppressed() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_GOON, Faction.MAFIA),
+                _seat("P03", 2, Role.TRACKER, Faction.TOWN),
+                _seat("P04", 3, Role.WATCHER, Faction.TOWN),
+                _seat("P05", 4, Role.VILLAGER, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.VILLAGER, Faction.TOWN),
+            )
+        }
+    )
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P04"),
+            _intent("P02", NightActionKind.FACTIONAL_KILL, "P04"),
+            _intent("P04", NightActionKind.WATCH, "P05"),
+        ),
+    )
+
+    assert result.eliminated == "P04"
+    assert result.feedback_by_code("WATCH_RESULT") == ()
+
+
 def test_tracker_and_watcher_read_roleblock_visit_but_not_blocked_action() -> None:
     state = _state().model_copy(
         update={

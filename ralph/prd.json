@@ -441,7 +441,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: nar.py:719-759/762-800/907, game_runner.py:88-89/844-861, enums.py:28-29 (TRACKER/WATCHER), visit12_v1/ninja13_v1 seat them.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-219",

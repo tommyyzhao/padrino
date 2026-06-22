@@ -763,10 +763,14 @@ def _resolve_visit_graph_feedback(
     state: GameState,
     intents: Sequence[NightActionIntent],
     visits: Sequence[VisitRecord],
+    eliminated_player_ids: tuple[str, ...],
 ) -> tuple[NightFeedback, ...]:
     feedback: list[NightFeedback] = []
+    eliminated = set(eliminated_player_ids)
     for intent in _tier_intents(intents, NightActionKind.TRACK):
         assert intent.target is not None
+        if intent.actor in eliminated:
+            continue
         visited = {
             visit.target
             for visit in visits
@@ -783,6 +787,8 @@ def _resolve_visit_graph_feedback(
         )
     for intent in _tier_intents(intents, NightActionKind.WATCH):
         assert intent.target is not None
+        if intent.actor in eliminated:
+            continue
         visitors = {
             visit.actor
             for visit in visits
@@ -904,7 +910,14 @@ def resolve_night_actions(
         framed_targets,
     )
     feedback.extend(investigation_feedback)
-    feedback.extend(_resolve_visit_graph_feedback(state, active_intents, visits))
+    feedback.extend(
+        _resolve_visit_graph_feedback(
+            state,
+            active_intents,
+            visits,
+            eliminated_player_ids,
+        )
+    )
 
     cleaned_deaths, clean_spent_actor_ids = _resolve_cleaned_deaths(
         state, active_intents, eliminated_player_ids

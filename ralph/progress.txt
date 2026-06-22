@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Same-night-death feedback suppression (US-218): when a night role produces
+  private resolved-state feedback, pass `eliminated_player_ids` into that
+  feedback path and skip recipients killed that night. Apply this consistently
+  for investigation-style feedback and visit-graph reads so dead observers do
+  not receive post-death private state.
 - Canonical full-game byte-stability (US-217): protect sacred ladders with
   runner-level golden fixtures that exercise structured night actions, not by
   asserting on NAR internals. For `mini7_v1` / `bench10_v1`, use seeded
@@ -2060,4 +2065,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `tests/runner/test_game_runner.py`; adjacent core/privacy/rating/runner
   suites; `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2447
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:39 PDT - US-218
+- Suppressed Tracker/Watcher private visit-graph feedback when the observing
+  actor is killed in the same night, matching the existing Detective
+  same-night-death suppression rule.
+- Threaded `eliminated_player_ids` into `_resolve_visit_graph_feedback` and
+  skipped `TRACK_RESULT` / `WATCH_RESULT` emission for eliminated actors while
+  leaving visit recording, death resolution, and identity-blind public-player-id
+  payloads unchanged.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/engine/resolvers/nar.py`,
+  `tests/core/test_night_action_resolution_matrix.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_night_action_resolution_matrix.py::test_tracker_killed_same_night_feedback_suppressed tests/core/test_night_action_resolution_matrix.py::test_watcher_killed_same_night_feedback_suppressed -q`;
+  focused GREEN same command; full NAR matrix
+  `uv run pytest tests/core/test_night_action_resolution_matrix.py -q` -> 22
+  passed; adjacent
+  `uv run pytest tests/core/test_night_resolution.py tests/runner/test_game_runner.py -q`
+  -> 34 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2459
   passed / 47 skipped / 10 deselected.
