@@ -227,7 +227,7 @@ class PublicLeaderboardEntryResponse(BaseModel):
 
 class PublicRatingCardResponse(BaseModel):
     card_id: str
-    section: Literal["canonical", "experimental"]
+    section: Literal["canonical", "experimental", "humans_included"]
     section_label: str
     context_kind: str
     context_label: str
@@ -266,6 +266,7 @@ class PublicLeaderboardResponse(BaseModel):
     entries: list[PublicLeaderboardEntryResponse]
     canonical_cards: list[PublicRatingCardResponse]
     experimental_cards: list[PublicRatingCardResponse]
+    human_cards: list[PublicRatingCardResponse]
     next_cursor: str | None = None
     total_estimate: int
 
@@ -337,6 +338,9 @@ async def public_leaderboard(
         experimental_cards=[
             PublicRatingCardResponse(**card_to_response(card))
             for card in leaderboard.experimental_cards
+        ],
+        human_cards=[
+            PublicRatingCardResponse(**card_to_response(card)) for card in leaderboard.human_cards
         ],
         next_cursor=next_cursor,
         total_estimate=len(entries),

@@ -127,7 +127,7 @@ export interface PublicLeaderboardEntryResponse {
 
 export interface PublicRatingCardResponse {
   card_id: string;
-  section: 'canonical' | 'experimental';
+  section: 'canonical' | 'experimental' | 'humans_included';
   section_label: string;
   context_kind: string;
   context_label: string;
@@ -166,6 +166,7 @@ export interface PublicLeaderboardResponse {
   entries: PublicLeaderboardEntryResponse[];
   canonical_cards: PublicRatingCardResponse[];
   experimental_cards: PublicRatingCardResponse[];
+  human_cards: PublicRatingCardResponse[];
   next_cursor: string | null;
   total_estimate: number;
 }

@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Humans-Included leaderboard cards (US-236): expose ranked human ELO as a
+  separate top-level `human_cards` read-side bucket, never inside
+  `canonical_cards` or `experimental_cards`. Source it only from
+  `HumanRating` rows joined through `League.kind == HUMANS_INCLUDED` and
+  `League.ranked is True`, limited this wave to `GLOBAL/global`. Card
+  `entity_id` is a hash of `human_player_id`; the raw `human_player_id` is never
+  serialized, and the dashboard passes `humanCards` as its own section input.
 - Ranked human ELO writer (US-234b): keep the Humans-Included writer separate
   from `ratings/openskill_service.py`. The terminal path first checks runtime
   `ranked`, a bound `league_id`, `League.kind == HUMANS_INCLUDED`, and
@@ -2721,3 +2728,37 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2512
   passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T16:51 PDT - US-236
+- Added `/public/leaderboard` `human_cards`, sourced only from ranked
+  Humans-Included `HumanRating` rows at `GLOBAL/global`. These cards carry their
+  own `section="humans_included"`, context label, ranks, and provisional flags,
+  and remain separate from scientific canonical / PLACEMENT / SOLO_RATE cards.
+- Rendered a distinct Humans-Included League section on the dashboard
+  leaderboard. The Svelte section splitter now accepts `humanCards` separately,
+  and the hermetic Playwright fixture asserts the section is present and
+  visually separated from canonical and experimental sections.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `src/padrino/api/routes/public.py`, `tests/api/test_public_routes.py`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.svelte`,
+  `web/dashboard/src/lib/leaderboard/sections.ts`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.test.ts`,
+  `web/dashboard/src/routes/leaderboard/+page.svelte`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_public_routes.py::test_leaderboard_returns_ranked_humans_included_cards_from_human_rating_only -q`
+  failed on missing `human_cards`; focused RED
+  `pnpm -C web/dashboard exec vitest run src/lib/leaderboard/LeaderboardSections.test.ts`
+  failed on missing `humanCards`; focused GREEN same commands -> 1 passed /
+  2 passed; focused GREEN `uv run pytest tests/api/test_public_routes.py -q`
+  -> 18 passed; focused GREEN
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/leaderboard.spec.ts --project=chromium`
+  -> 2 passed / 1 skipped; full gates `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2513 passed / 48 skipped /
+  10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` ->
+  26 passed / 3 skipped; extra `pnpm -C web/dashboard test` -> 54 passed.

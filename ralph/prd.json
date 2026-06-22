@@ -250,7 +250,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "This is the user's chosen ranked product surface. Depends on the P0 multi-context surface (US-229) and the P2 writer (US-234b). Reads back US-234b's GLOBAL-scope human_rating rows (GLOBAL-only this wave). Keep the human ladder its own hard-walled section.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-237",

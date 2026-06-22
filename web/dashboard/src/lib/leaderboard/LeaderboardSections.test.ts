@@ -67,4 +67,37 @@ describe('LeaderboardSections', () => {
       'card-scum'
     ]);
   });
+
+  it('keeps Humans-Included cards in their own section input', () => {
+    const canonical = ratingCard({
+      card_id: 'card-canonical',
+      section: 'canonical',
+      context_kind: 'CANONICAL_TEAM'
+    });
+    const experimental = ratingCard({
+      card_id: 'card-placement',
+      section: 'experimental',
+      context_kind: 'PLACEMENT'
+    });
+    const human = ratingCard({
+      card_id: 'card-human',
+      section: 'humans_included',
+      section_label: 'Humans-Included League',
+      context_kind: 'HUMANS_INCLUDED',
+      context_label: 'Humans-Included mini7_v1 ranked',
+      display_name: 'Human Ace',
+      model_provider: 'human',
+      model_name: 'human_player',
+      prompt_version: 'humans-included',
+      metric_label: 'Human ELO'
+    });
+
+    const sections = splitLeaderboardCards([canonical], [experimental], [human]);
+
+    expect(sections.canonicalGlobalCards.map((card) => card.card_id)).toEqual([
+      'card-canonical'
+    ]);
+    expect(sections.placementCards.map((card) => card.card_id)).toEqual(['card-placement']);
+    expect(sections.humanCards.map((card) => card.card_id)).toEqual(['card-human']);
+  });
 });

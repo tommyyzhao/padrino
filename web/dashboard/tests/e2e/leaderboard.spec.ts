@@ -157,6 +157,29 @@ const LEADERBOARD = {
       credible_interval_high: 0.49
     })
   ],
+  human_cards: [
+    card({
+      card_id: 'card-human-ace',
+      section: 'humans_included',
+      section_label: 'Humans-Included League',
+      context_kind: 'HUMANS_INCLUDED',
+      context_label: 'Humans-Included mini7_v1 ranked',
+      ruleset_id: 'mini7_v1',
+      entity_id: 'entity-human-ace',
+      display_name: 'Human Ace',
+      model_provider: 'human',
+      model_name: 'human_player',
+      prompt_version: 'humans-included',
+      metric_label: 'Human ELO',
+      score: 28.0,
+      rank: 1,
+      sample_count: 12,
+      games: 12,
+      mu: 34.0,
+      sigma: 2.0,
+      conservative_score: 28.0
+    })
+  ],
   next_cursor: null,
   total_estimate: 0
 };
@@ -210,6 +233,7 @@ async function expectLeaderboardSections(page: Page) {
   await expect(page.getByTestId('leaderboard-canonical-section')).toBeVisible();
   await expect(page.getByTestId('leaderboard-canonical-global-subsection')).toBeVisible();
   await expect(page.getByTestId('leaderboard-canonical-faction-subsection')).toBeVisible();
+  await expect(page.getByTestId('leaderboard-humans-included-section')).toBeVisible();
   await expect(page.getByTestId('leaderboard-placement-section')).toBeVisible();
   await expect(page.getByTestId('leaderboard-solo-rate-section')).toBeVisible();
 }
@@ -232,12 +256,16 @@ test.describe('leaderboard', () => {
     const placementCards = page.locator(
       '[data-testid="leaderboard-card"][data-subsection="placement"]'
     );
+    const humanCards = page.locator(
+      '[data-testid="leaderboard-card"][data-subsection="humans-included"]'
+    );
     const soloRateCards = page.locator(
       '[data-testid="leaderboard-card"][data-subsection="solo-rate"]'
     );
 
     await expect(globalCards).toHaveCount(2);
     await expect(factionCards).toHaveCount(2);
+    await expect(humanCards).toHaveCount(1);
     await expect(placementCards).toHaveCount(1);
     await expect(soloRateCards).toHaveCount(1);
     await expect(globalCards.first().getByTestId('leaderboard-card-rank')).toHaveText('#1');
@@ -251,6 +279,8 @@ test.describe('leaderboard', () => {
       'Faction: Scum'
     );
     await expect(placementCards.first().getByTestId('leaderboard-card-rank')).toHaveText('#1');
+    await expect(humanCards.first()).toContainText('Human ELO');
+    await expect(humanCards.first().getByTestId('leaderboard-card-name')).toHaveText('Human Ace');
     await expect(soloRateCards.first()).toContainText('CI 35-49%');
     await expect(page.getByTestId('leaderboard-card-provisional').first()).toContainText(
       'Under-sampled'

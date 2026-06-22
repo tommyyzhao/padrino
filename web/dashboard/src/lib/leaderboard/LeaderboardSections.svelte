@@ -6,11 +6,12 @@
   interface Props {
     canonicalCards: PublicRatingCardResponse[];
     experimentalCards: PublicRatingCardResponse[];
+    humanCards?: PublicRatingCardResponse[];
   }
 
-  let { canonicalCards, experimentalCards }: Props = $props();
+  let { canonicalCards, experimentalCards, humanCards = [] }: Props = $props();
 
-  let sections = $derived(splitLeaderboardCards(canonicalCards, experimentalCards));
+  let sections = $derived(splitLeaderboardCards(canonicalCards, experimentalCards, humanCards));
 </script>
 
 <section class="space-y-5" data-testid="leaderboard-canonical-section">
@@ -88,6 +89,27 @@
           </div>
         </section>
       {/if}
+    </div>
+  {/if}
+</section>
+
+<section class="space-y-3" data-testid="leaderboard-humans-included-section">
+  <div class="flex items-center justify-between gap-3">
+    <h2 class="text-lg font-semibold">Humans-Included League</h2>
+    <span class="text-xs uppercase tracking-wider text-muted-foreground">Ranked human</span>
+  </div>
+  {#if sections.humanCards.length === 0}
+    <p class="text-sm text-muted-foreground" data-testid="leaderboard-humans-included-empty">
+      No Humans-Included cards yet.
+    </p>
+  {:else}
+    <div
+      class="grid gap-3 md:grid-cols-2 xl:grid-cols-3"
+      data-testid="leaderboard-humans-included-grid"
+    >
+      {#each sections.humanCards as card (card.card_id)}
+        <LeaderboardCard card={card} subsection="humans-included" />
+      {/each}
     </div>
   {/if}
 </section>
