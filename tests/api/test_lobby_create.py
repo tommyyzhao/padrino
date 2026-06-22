@@ -147,6 +147,20 @@ async def test_create_lobby_bench10_composition(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_lobby_accepts_wave10_ruleset_from_registry(client: AsyncClient) -> None:
+    token = await _guest_token(client)
+    resp = await client.post(
+        "/lobbies",
+        json={"ruleset_id": "roleblock10_v1"},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["ruleset_id"] == "roleblock10_v1"
+    assert body["composition"] == {"human_count": 1, "ai_count": 9, "total": 10}
+
+
+@pytest.mark.asyncio
 async def test_create_lobby_with_theme_pack(client: AsyncClient) -> None:
     token = await _guest_token(client)
     resp = await client.post(

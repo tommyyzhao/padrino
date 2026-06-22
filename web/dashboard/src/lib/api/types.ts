@@ -212,6 +212,18 @@ export interface PublicLadderResponse {
   total_estimate: number;
 }
 
+export interface PublicRulesetEntry {
+  ruleset_id: string;
+  label: string;
+  player_count: number;
+  rating_context_kind: string;
+  is_canonical: boolean;
+}
+
+export interface PublicRulesetsResponse {
+  items: PublicRulesetEntry[];
+}
+
 export interface VotingAccuracyAnalytics {
   total_votes: number;
   accurate_votes: number;

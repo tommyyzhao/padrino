@@ -99,6 +99,27 @@ describe('PadrinoClient', () => {
     expect(parsed.pathname).toBe('/public/gauntlets/g1/report');
   });
 
+  it('reads public ruleset metadata for selectors', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        items: [
+          {
+            ruleset_id: 'roleblock10_v1',
+            label: 'Roleblock 10 canonical team',
+            player_count: 10,
+            rating_context_kind: 'CANONICAL_TEAM',
+            is_canonical: true
+          }
+        ]
+      })
+    );
+    const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
+    const response = await client.publicRulesets();
+    expect(response.items[0]?.ruleset_id).toBe('roleblock10_v1');
+    const parsed = new URL(fetchImpl.mock.calls[0][0]);
+    expect(parsed.pathname).toBe('/public/rulesets');
+  });
+
   it('getGauntletReport hits the admin-scoped endpoint', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ gauntlet_id: 'g1' }));
     const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });

@@ -56,6 +56,7 @@ from padrino.api.pagination import (
 from padrino.api.reveal import build_endgame_reveal
 from padrino.core.observation_privacy import FORBIDDEN_PAYLOAD_KEYS
 from padrino.core.reveal import EndgameReveal
+from padrino.core.rulesets import BUILTIN_RULESET_IDS, get_ruleset
 from padrino.core.spectator_projection import project_events_for_spectator
 from padrino.db.models import (
     AgentBuild,
@@ -267,6 +268,41 @@ class PublicLeaderboardResponse(BaseModel):
     experimental_cards: list[PublicRatingCardResponse]
     next_cursor: str | None = None
     total_estimate: int
+
+
+class PublicRulesetEntry(BaseModel):
+    ruleset_id: str
+    label: str
+    player_count: int
+    rating_context_kind: str
+    is_canonical: bool
+
+
+class PublicRulesetsResponse(BaseModel):
+    items: list[PublicRulesetEntry]
+
+
+@router.get(
+    "/public/rulesets",
+    response_model=PublicRulesetsResponse,
+)
+async def public_rulesets(
+    _ctx: ApiKeyContext = Depends(require_public_read),
+) -> PublicRulesetsResponse:
+    """Return selectable built-in rulesets with display metadata."""
+    items: list[PublicRulesetEntry] = []
+    for ruleset_id in BUILTIN_RULESET_IDS:
+        ruleset = get_ruleset(ruleset_id)
+        items.append(
+            PublicRulesetEntry(
+                ruleset_id=ruleset.RULESET_ID,
+                label=ruleset.RATING_CONTEXT_DISPLAY_LABEL,
+                player_count=ruleset.PLAYER_COUNT,
+                rating_context_kind=ruleset.RATING_CONTEXT_KIND.value,
+                is_canonical=ruleset.IS_CANONICAL,
+            )
+        )
+    return PublicRulesetsResponse(items=items)
 
 
 @router.get(

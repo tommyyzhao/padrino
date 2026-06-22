@@ -4,12 +4,17 @@
   // per-seat human/AI disclosure (anonymity, AGENTS.md rule 7).
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
+  import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import Button from '$lib/components/Button.svelte';
   import { padrino } from '$lib/clientStore.svelte';
+  import type { PublicRulesetEntry } from '$lib/api/types';
 
   // ---- create form state
-  let rulesetId = $state<'mini7_v1' | 'bench10_v1'>('mini7_v1');
+  let rulesetId = $state('mini7_v1');
+  let rulesets = $state<PublicRulesetEntry[]>([]);
+  let rulesetsLoading = $state(true);
+  let rulesetsError = $state<string | null>(null);
   let identityMode = $state<'ANONYMOUS' | 'TRANSPARENT'>('ANONYMOUS');
   let themePackId = $state('');
   // Bot fill mode: 'autofill' (curated auto-fill) vs 'prepick' (host pre-picks).
@@ -24,6 +29,23 @@
   let inviteToken = $state($page.url.searchParams.get('invite') ?? '');
   let joining = $state(false);
   let joinError = $state<string | null>(null);
+
+  async function loadRulesets(): Promise<void> {
+    rulesetsLoading = true;
+    rulesetsError = null;
+    try {
+      const response = await padrino.client.publicRulesets();
+      rulesets = response.items;
+      if (rulesets.length > 0 && !rulesets.some((r) => r.ruleset_id === rulesetId)) {
+        rulesetId = rulesets[0].ruleset_id;
+      }
+    } catch (e) {
+      rulesets = [];
+      rulesetsError = (e as Error).message;
+    } finally {
+      rulesetsLoading = false;
+    }
+  }
 
   async function ensureGuest(): Promise<void> {
     // A guest principal + http-only session cookie is required before any
@@ -73,6 +95,10 @@
       joining = false;
     }
   }
+
+  onMount(() => {
+    void loadRulesets();
+  });
 </script>
 
 <div class="mb-4">
@@ -98,11 +124,23 @@
           class="rounded border border-border bg-background px-2 py-1 text-sm"
           data-testid="lobby-create-ruleset"
           bind:value={rulesetId}
+          disabled={rulesetsLoading || rulesets.length === 0}
         >
-          <option value="mini7_v1">mini7_v1 (7 players)</option>
-          <option value="bench10_v1">bench10_v1 (10 players)</option>
+          {#if rulesetsLoading}
+            <option value={rulesetId}>Loading rulesets…</option>
+          {:else}
+            {#each rulesets as ruleset (ruleset.ruleset_id)}
+              <option value={ruleset.ruleset_id}>
+                {ruleset.label} ({ruleset.player_count} players)
+              </option>
+            {/each}
+          {/if}
         </select>
       </label>
+
+      {#if rulesetsError}
+        <p class="text-xs text-red-500" data-testid="lobby-rulesets-error">{rulesetsError}</p>
+      {/if}
 
       <label class="flex flex-col gap-1 text-xs">
         <span class="font-medium">Identity mode</span>
@@ -153,7 +191,7 @@
         Stakes: <span class="font-semibold">CASUAL</span>
       </p>
 
-      <Button type="submit" testid="lobby-create-submit" disabled={creating}>
+      <Button type="submit" testid="lobby-create-submit" disabled={creating || rulesets.length === 0}>
         {creating ? 'Creating…' : 'Create lobby'}
       </Button>
 

@@ -113,6 +113,22 @@ const LOBBY_ID = 'cccc0003-0003-0003-0003-cccccccccccc';
 const INVITE_TOKEN = 'invite-abc123';
 const HOST_PRINCIPAL = 'pppp1111-1111-1111-1111-pppppppppppp';
 const GUEST_PRINCIPAL = 'gggg2222-2222-2222-2222-gggggggggggg';
+const RULESET_OPTIONS = [
+  {
+    ruleset_id: 'mini7_v1',
+    label: 'Mini 7 canonical team',
+    player_count: 7,
+    rating_context_kind: 'CANONICAL_TEAM',
+    is_canonical: true
+  },
+  {
+    ruleset_id: 'roleblock10_v1',
+    label: 'Roleblock 10 canonical team',
+    player_count: 10,
+    rating_context_kind: 'CANONICAL_TEAM',
+    is_canonical: true
+  }
+];
 
 function lobbySummary(status = 'OPEN') {
   return {
@@ -145,6 +161,18 @@ function lobbyRoster(guestReady: boolean) {
 }
 
 test.describe('lobby UI (US-154)', () => {
+  async function routeRulesets(page: import('@playwright/test').Page) {
+    await page.route('**/public/rulesets', async (route) => {
+      const t = route.request().resourceType();
+      if (t !== 'fetch' && t !== 'xhr') return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: RULESET_OPTIONS })
+      });
+    });
+  }
+
   test('guest joins from an invite link, accepts consent, and readies up', async ({ page }) => {
     let consented = false;
     let guestReady = false;
@@ -153,6 +181,8 @@ test.describe('lobby UI (US-154)', () => {
       const t = route.request().resourceType();
       return t === 'fetch' || t === 'xhr';
     };
+
+    await routeRulesets(page);
 
     // Guest quickplay: minting a guest principal (no signup).
     await page.route('**/human/guest', async (route) => {
@@ -264,9 +294,17 @@ test.describe('lobby UI (US-154)', () => {
   });
 
   test('create form shows ruleset, identity mode, and CASUAL stakes', async ({ page }) => {
+    await routeRulesets(page);
     await page.goto('/lobby');
     await expect(page.getByTestId('lobby-create-form')).toBeVisible();
-    await expect(page.getByTestId('lobby-create-ruleset')).toBeVisible();
+    const rulesetSelect = page.getByTestId('lobby-create-ruleset');
+    await expect(rulesetSelect).toBeVisible();
+    await expect(rulesetSelect.locator('option')).toHaveCount(2);
+    await expect(rulesetSelect.locator('option[value="roleblock10_v1"]')).toHaveText(
+      'Roleblock 10 canonical team (10 players)'
+    );
+    await rulesetSelect.selectOption('roleblock10_v1');
+    await expect(rulesetSelect).toHaveValue('roleblock10_v1');
     await expect(page.getByTestId('lobby-create-identity-mode')).toBeVisible();
     await expect(page.getByTestId('lobby-create-stakes')).toContainText('CASUAL');
   });

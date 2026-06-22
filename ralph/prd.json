@@ -55,7 +55,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Source of truth = core/rulesets/__init__.py get_ruleset/BUILTIN_RULESET_IDS. Do not hardcode rulesets in routes/lobby (hard rule 5). Check whether a ruleset-list endpoint already exists before adding one.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-227",

@@ -1,7 +1,7 @@
 """Private friend lobby create/configure routes (US-147).
 
 A host creates a private lobby and configures the human-multiplayer game it will
-launch: the ruleset/size (``mini7_v1`` / ``bench10_v1``), the per-game
+launch: the ruleset/size, the per-game
 ``identity_mode`` (default ANONYMOUS), a static ``theme_pack_id``, the bot
 pre-pick (a list of human-eligible model ``agent_build`` ids) vs curated
 auto-fill, and stakes pinned ``CASUAL``. ``GET /lobbies/{id}`` returns a
@@ -18,7 +18,6 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -41,7 +40,7 @@ from padrino.api.lobby_presence import (
 from padrino.api.lobby_state import stream_lobby_state
 from padrino.core.composition import CompositionSummary, composition_summary
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStakes, LobbyStatus
-from padrino.core.rulesets import get_ruleset
+from padrino.core.rulesets import Ruleset, get_ruleset
 from padrino.db.models import Lobby
 from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
@@ -109,7 +108,7 @@ class LobbyCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    ruleset_id: Literal["mini7_v1", "bench10_v1"]
+    ruleset_id: str = Field(min_length=1)
     identity_mode: IdentityMode = IdentityMode.ANONYMOUS
     theme_pack_id: str | None = Field(default=None, max_length=64)
     #: Pre-picked human-eligible model agent_build ids assigned to AI seats, in
@@ -136,6 +135,16 @@ class LobbySummary(BaseModel):
     composition: CompositionSummary
 
 
+def _ruleset_or_422(ruleset_id: str) -> Ruleset:
+    try:
+        return get_ruleset(ruleset_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="unknown_ruleset",
+        ) from exc
+
+
 @router.post("/lobbies", response_model=LobbySummary, status_code=status.HTTP_201_CREATED)
 async def create_lobby(
     body: LobbyCreate,
@@ -156,7 +165,7 @@ async def create_lobby(
     admission = await _enforce_admission(
         request, session, principal_id=ctx.principal_id, action=ACTION_CREATE
     )
-    ruleset = get_ruleset(body.ruleset_id)
+    ruleset = _ruleset_or_422(body.ruleset_id)
     player_count: int = ruleset.PLAYER_COUNT
     ai_seat_count = player_count - 1
 

@@ -166,7 +166,12 @@ async def test_health_probes_work_in_surface_only(
 async def test_public_index_routes_work_in_surface_only(
     surface_only_client: AsyncClient,
 ) -> None:
-    for path in ("/public/live", "/public/recent", "/public/ladder?ruleset_id=mini7_v1"):
+    for path in (
+        "/public/live",
+        "/public/recent",
+        "/public/rulesets",
+        "/public/ladder?ruleset_id=mini7_v1",
+    ):
         r = await surface_only_client.get(path)
         assert r.status_code == 200, f"{path} returned {r.status_code}"
 

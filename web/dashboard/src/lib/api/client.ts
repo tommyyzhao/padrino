@@ -25,6 +25,7 @@ import type {
   PublicModelAnalyticsResponse,
   PublicModelLeaderboardResponse,
   PublicRecentIndexResponse,
+  PublicRulesetsResponse,
   SeatGuess,
   TuringGuessResult
 } from './types';
@@ -206,6 +207,10 @@ export class PadrinoClient {
     cursor?: string | null;
   }): Promise<PublicLadderResponse> {
     return this.request('/public/ladder', params);
+  }
+
+  publicRulesets(): Promise<PublicRulesetsResponse> {
+    return this.request('/public/rulesets');
   }
 
   publicGameAnalytics(gameId: string): Promise<PublicGameAnalyticsResponse> {

@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ruleset selector metadata (US-226): public/dashboard ruleset pickers should
+  consume `GET /public/rulesets` via `PadrinoClient.publicRulesets()`. The
+  endpoint iterates `BUILTIN_RULESET_IDS` and resolves each with `get_ruleset`
+  for `RULESET_ID`, `PLAYER_COUNT`, `RATING_CONTEXT_DISPLAY_LABEL`,
+  `RATING_CONTEXT_KIND`, and `IS_CANONICAL`; do not duplicate route- or
+  component-level ruleset lists.
 - Spectator watch NAR outcomes (US-225): render public night deaths only from
   the projected PUBLIC `PlayerEliminated.payload.public_player_id` /
   `payload.cause`; `actor_player_id` is normally `None` for resolved
@@ -2325,3 +2331,42 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed / 47 skipped / 10 deselected; `pnpm -C web/dashboard lint`;
   `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 24
   passed / 3 skipped.
+
+## 2026-06-22T15:02 PDT - US-226
+- Added `GET /public/rulesets`, sourced from
+  `BUILTIN_RULESET_IDS` + `get_ruleset`, returning selectable ruleset ids with
+  label, player count, rating context kind, and canonicality metadata.
+- Relaxed lobby creation from the old `mini7_v1` / `bench10_v1` request
+  `Literal` to dynamic registry validation, preserving 422 behavior for unknown
+  rulesets and allowing Wave-10 lobby creation.
+- Updated the dashboard API client/types and the lobby create selector to load
+  server-provided ruleset metadata; Playwright now asserts a Wave-10 ruleset is
+  selectable while the existing lobby anonymity checks still run.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/public.py`,
+  `src/padrino/api/routes/lobbies.py`, `tests/api/test_public_rulesets.py`,
+  `tests/api/test_lobby_create.py`, `tests/api/test_public_surface_only.py`,
+  `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/routes/lobby/+page.svelte`,
+  `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_public_rulesets.py tests/api/test_lobby_create.py::test_create_lobby_rejects_unknown_ruleset`
+  failed on missing `/public/rulesets`; focused RED
+  `pnpm -C web/dashboard exec vitest run src/lib/api/client.test.ts` failed on
+  missing `publicRulesets`; focused GREEN
+  `uv run pytest tests/api/test_public_rulesets.py tests/api/test_lobby_create.py::test_create_lobby_rejects_unknown_ruleset tests/api/test_lobby_create.py::test_create_lobby_accepts_wave10_ruleset_from_registry`
+  -> 3 passed; focused GREEN
+  `pnpm -C web/dashboard exec vitest run src/lib/api/client.test.ts` -> 21
+  passed; focused GREEN
+  `pnpm -C web/dashboard exec playwright test tests/e2e/lobby.spec.ts --project=chromium`
+  -> 4 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2480
+  passed / 47 skipped / 10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 24
+  passed / 3 skipped.
+- Extra in-app Browser smoke was attempted after starting a temporary preview
+  server, but the Browser runtime failed during setup before exposing a usable
+  tab; the required Playwright e2e suite covered the changed lobby selector.
