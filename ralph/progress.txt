@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Server-driven play actions (US-224): the human play UI must treat
+  `SeatObservationFrame.legal_actions.allowed_action_types` as the action
+  universe. For night actions, select the server-provided targeted non-vote
+  action and render a generic label from the action string; do not enumerate
+  role/action ids in the Svelte route or `playSurface` helper.
 - Frozen migration snapshots (US-223): historical migrations must not import
   live core/ruleset declarations. Seed and backfill only frozen literal rows
   that existed at the migration's ship point; newer rulesets should be
@@ -2245,3 +2250,38 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2471 passed / 47 skipped / 10
   deselected.
+
+## 2026-06-22T14:45 PDT - US-224
+- Moved the play surface's night-action selection into generic
+  `playSurface.nightActionType`, sourced from the streamed
+  `legal_actions.allowed_action_types` / `legal_targets` snapshot instead of
+  the old vanilla `MAFIA_KILL` / `PROTECT` / `INVESTIGATE` list.
+- Rendered the server-provided action label in the night panel and submit
+  button, so NAR actions such as `ROLEBLOCK` are visible and POST the same
+  structured action type back to `/human/games/{id}/actions`.
+- Added Vitest coverage for all currently server-emitted NAR night actions
+  (`ROLEBLOCK`, `FRAME`, `TRACK`, `WATCH`, `CLEAN`, `SERIAL_KILL`), a backend
+  observation SSE contract assertion for `allowed_action_types`, and a
+  Playwright fixture proving `ROLEBLOCK` renders with its legal targets and
+  submits correctly.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/playSurface.ts`,
+  `web/dashboard/src/lib/api/playSurface.test.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`,
+  `tests/api/test_seat_observation_stream.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- playSurface` failed on the old hardcoded
+  helper; focused GREEN same command -> 51 passed; focused
+  `uv run pytest tests/api/test_seat_observation_stream.py::test_seat_sees_own_observation_legal_actions_and_deadline -q`
+  -> 1 passed; focused
+  `pnpm -C web/dashboard test:e2e -g "server-driven NAR night action"` -> 1
+  passed; `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`;
+  `pnpm -C web/dashboard test:e2e` -> 23 passed / 3 skipped;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2471
+  passed / 47 skipped / 10 deselected.
+- Extra in-app Browser smoke was attempted after starting a temporary dev
+  server, but the Browser plugin setup failed before exposing a usable tab; the
+  required Playwright e2e suite covered the changed play surface.

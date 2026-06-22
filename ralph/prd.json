@@ -19,7 +19,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Pure frontend wiring; the server contract (legal_actions_for + the SSE observation frame) is already correct. Single source of truth = core/engine/legal_actions.legal_actions_for. Real human-MP bug: NAR-role seats forced to time out.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-225",

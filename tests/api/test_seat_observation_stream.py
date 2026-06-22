@@ -284,6 +284,8 @@ async def test_seat_sees_own_observation_legal_actions_and_deadline(
     assert obs["you"]["player_id"] == _HUMAN_SEAT
     # Legal actions for the phase are present.
     assert "legal_actions" in obs
+    assert obs["legal_actions"]["allowed_action_types"] == ["VOTE", "ABSTAIN"]
+    assert _HUMAN_SEAT not in obs["legal_actions"]["legal_targets"]
     assert obs["phase"] == _PHASE
 
     # The deadline frame carries the persisted wall-clock deadline (transport

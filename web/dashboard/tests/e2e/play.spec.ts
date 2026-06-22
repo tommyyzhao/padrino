@@ -20,8 +20,10 @@ import { expect, test } from '@playwright/test';
 // human-vs-AI / model-identity markers — there are none before the reveal.
 
 const GAME_ID = 'dddd0004-0004-0004-0004-dddddddddddd';
+const NAR_GAME_ID = 'eeee0004-0004-0004-0004-eeeeeeeeeeee';
 const SEAT_ME = 'p1seataa-0000-0000-0000-000000000001';
 const SEAT_OTHER = 'p2seatbb-0000-0000-0000-000000000002';
+const SEAT_THIRD = 'p3seatcc-0000-0000-0000-000000000003';
 
 function mkFrame(
   seq: number,
@@ -69,8 +71,8 @@ const OBSERVATION_FRAMES = [
   { type: 'phase_deadline', phase: 'DAY_1_VOTE', deadline_at: '2099-01-01T00:02:00Z' }
 ];
 
-function observationSseBody(): string {
-  return OBSERVATION_FRAMES.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('');
+function observationSseBody(frames: Record<string, unknown>[] = OBSERVATION_FRAMES): string {
+  return frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('');
 }
 
 test.describe('play surface (US-155)', () => {
@@ -209,5 +211,108 @@ test.describe('play surface (US-155)', () => {
     expect(shellHtml).not.toContain('agent_build');
     expect(shellHtml).not.toContain('controller_type');
     expect(shellHtml).not.toContain('takeover');
+  });
+
+  test('server-driven NAR night action: presents ROLEBLOCK and submits its target', async ({
+    page
+  }) => {
+    let actionPayload: Record<string, unknown> | null = null;
+
+    const isApi = (route: import('@playwright/test').Route) => {
+      const t = route.request().resourceType();
+      return t === 'fetch' || t === 'xhr';
+    };
+
+    await page.route(`**/public/games/${NAR_GAME_ID}/composition`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          game_id: NAR_GAME_ID,
+          ruleset_id: 'roleblock10_v1',
+          composition: { human_count: 1, ai_count: 9, total: 10 }
+        })
+      });
+    });
+
+    let firstLive = true;
+    await page.route(`**/public/games/${NAR_GAME_ID}/live*`, async (route) => {
+      if (firstLive) {
+        firstLive = false;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: buildSseBody([
+            mkFrame(1, 'PhaseStarted', 'NIGHT_1_ACTIONS', null, {}),
+            mkFrame(2, 'PublicMessageSubmitted', 'DAY_1_DISCUSSION_ROUND_1', SEAT_OTHER, {
+              text: 'public setup'
+            })
+          ])
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    const narObservationFrames = [
+      {
+        type: 'observation',
+        phase: 'NIGHT_1_ACTIONS',
+        you: { player_id: SEAT_ME, alive: true },
+        alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
+        legal_actions: {
+          allowed_action_types: ['ROLEBLOCK'],
+          legal_targets: [SEAT_OTHER, SEAT_THIRD]
+        }
+      },
+      { type: 'phase_deadline', phase: 'NIGHT_1_ACTIONS', deadline_at: '2099-01-01T00:02:00Z' }
+    ];
+
+    let firstObs = true;
+    await page.route(`**/human/games/${NAR_GAME_ID}/observation/stream*`, async (route) => {
+      if (firstObs) {
+        firstObs = false;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: observationSseBody(narObservationFrames)
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    await page.route(`**/human/games/${NAR_GAME_ID}/actions`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      actionPayload = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          accepted: true,
+          public_player_id: SEAT_ME,
+          phase: 'NIGHT_1_ACTIONS',
+          action_type: 'ROLEBLOCK',
+          target: SEAT_THIRD,
+          idempotent_replay: false
+        })
+      });
+    });
+
+    await page.goto(`/play/${NAR_GAME_ID}`);
+    await expect(page.getByTestId('play-night-panel')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('play-night-action-type')).toContainText('Roleblock');
+
+    await page.getByTestId('play-night-target').selectOption(SEAT_THIRD);
+    await page.getByTestId('play-night-submit').click();
+    await expect(page.getByTestId('play-action-note')).toContainText('Roleblock submitted', {
+      timeout: 15_000
+    });
+
+    expect(actionPayload).not.toBeNull();
+    expect(actionPayload?.['action']).toMatchObject({ type: 'ROLEBLOCK', target: SEAT_THIRD });
   });
 });
