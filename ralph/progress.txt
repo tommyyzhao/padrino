@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Multi-context public presentation (US-186): keep public rating cards as a
+  read-side contract, not a write path. Query canonical cards only through the
+  scientific `Rating` rows with a canonical `RatingContext`; query
+  experimental cards only from the sibling `placement_ratings` /
+  `solo_rate_ratings` tables. Return `canonical_cards` and
+  `experimental_cards` as separate arrays, assign ranks only within exact
+  `(context_kind, ruleset_id, scope_type, scope_value, metric)` groups, and
+  set provisional cards' `rank` to `None` even if their raw score is higher.
 - SOLO_RATE alt-win roles (US-185): model the objective as a pure
   `ALT_TRIGGER` win condition on a non-canonical ruleset, fold the trigger from
   structured mechanical events (Jester: `PlayerEliminated` with `role=JESTER`
@@ -160,6 +168,33 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 - Disconnect grace + silent AI takeover (US-150): a dropped human gets a short reconnect grace window; on expiry a curated AI silently takes the seat so the game continues, invisibly in anonymous mode. TWO modules, no schema change, no new deps. (1) PURE `core/disconnect.py` (data-in/data-out with an INJECTED `now` — never reads a clock): `SeatPresence{public_player_id, connected, disconnected_at}` + `is_within_grace(presence, *, now, grace_seconds)` (connected -> always within; disconnected within window -> reconnectable; a disconnected seat with NO drop instant treated as just-dropped) + `seats_past_grace(presences, *, now, grace_seconds) -> [seat_id]` (the disconnected seats whose window expired, in input order — a reconnect BEFORE expiry flips `connected=True` so the seat is never listed: "reconnect returns the seat") + `project_presence_for_viewer(presences, *, viewer_seat_id, identity_mode) -> [{seat_id, connected}]` (the IDENTITY-BLIND presence frame: in ANONYMOUS mode — the fail-closed default via `observation_privacy.is_anonymous`, so None coerces anonymous — it carries ONLY the viewer's OWN seat; other seats' presence/reconnecting state is NEVER exposed because an AI never disconnects, so any per-seat presence signal would out a human; TRANSPARENT may show all; each entry is `{seat_id, connected}` ONLY — never a drop timestamp or human/AI marker). `core/disconnect.py` imports `datetime` for pure grace ARITHMETIC (timedelta only) — add it to `tests/core/test_purity.py::ALLOWED_FORBIDDEN_IMPORTS` ("disconnect.py": frozenset({"datetime"})) EXACTLY like `scheduling/__init__.py`; the `test_allowed_datetime_modules_make_no_wallclock_calls` guard then enforces no `.now()/.utcnow()/.today()` (the module uses `value.replace(tzinfo=UTC)` for the SQLite-naive coercion — `replace` is not a wall-clock attr). (2) IMPURE `runner/disconnect_takeover.py::take_over_seat(*, mux, event_log, state, seat_id, replacement_adapter, replacement_agent_build_ref, reason="disconnect_grace_expired") -> TakeoverResult{event, replaced_adapter}`: REUSES US-139's `SeatMultiplexAdapter.swap_seat(seat, adapter)` (rebinds the dispatch table between ticks, returns the replaced human adapter, KeyError on an unknown seat — a takeover replaces an existing occupant) + US-122's `SeatTakenOver` event appended to the hash-chained `EventLog` with `day`/`phase` read from `state.current_phase` (pure logical values via `core.observations.format_phase_id` — NO wall clock/random in the payload). The takeover is REVEAL-ONLY: `SeatTakenOver` is SYSTEM-visibility so it NEVER lands on a PUBLIC/live frame (no mid-game leak); it surfaces only at the endgame reveal where `reducer.compute_seat_provenance(typed_events)` derives HUMAN_THEN_AI for the seat (requires the seat marked seat_kind=HUMAN in RolesAssigned, i.e. the US-149 launch handoff). New setting `padrino_human_reconnect_grace_seconds: float = 90.0` (wall-clock value consumed only in the impure runner; the pure decision reads it as plain data). Test `tests/runner/test_disconnect_takeover.py` (12): pure grace decisions (connected always within, recent-within/old-past, seats_past_grace lists only expired, reconnect-returns-seat, naive-timestamp coercion); identity-blind projection (anonymous shows only viewer's own seat, None fails closed, other-seat reconnecting never exposed, transparent shows all); runner orchestration reuses the US-139 `_TakeoverMux` + `_FakeClock` + `make_town_win_script`: a HUMAN seat is taken over mid-DAY_1_VOTE (swap on the real mux, `seats_past_grace` decides), the game still reaches TOWN, no PUBLIC frame carries SeatTakenOver, the committed log (incl. the appended SeatTakenOver) replays bit-for-bit, and `take_over_seat` on a hand-built HUMAN-marked RolesAssigned+state yields a SYSTEM-visibility pure-data event + HUMAN_THEN_AI provenance + KeyError on an unknown seat.
 
 ---
+
+## 2026-06-21T20:31 PDT - US-186
+- Added separated public rating-card arrays to `/public/leaderboard`:
+  `canonical_cards` for scientific canonical contexts and `experimental_cards`
+  for PLACEMENT / SOLO_RATE contexts. Legacy filtered `entries` remain
+  canonical-only for existing callers; the all-context response returns no
+  merged card list.
+- The read model ranks cards only inside their exact context/ruleset/scope
+  group and labels under-sampled cards as provisional with `rank=None`.
+- Updated the SvelteKit leaderboard page to render Ranked Canonical and
+  Experimental Contexts as separate card sections, and updated the e2e mock to
+  assert no legacy merged table is shown.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/public.py`,
+  `src/padrino/ratings/public_leaderboard.py`,
+  `tests/api/test_public_routes.py`, `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/routes/leaderboard/+page.svelte`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED API contract test; focused public route suite;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2403
+  passed / 47 skipped / 10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 22
+  passed / 3 skipped. Browser smoke fallback also verified one canonical card,
+  one experimental card, and no legacy merged table.
 
 ## 2026-06-21T20:15 PDT - US-185
 - Added `jester8_v1`, a non-canonical SOLO_RATE ruleset with one Jester whose

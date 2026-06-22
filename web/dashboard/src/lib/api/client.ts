@@ -164,7 +164,7 @@ export class PadrinoClient {
   // ---- public (unauthenticated when padrino_public_leaderboard_anonymous=True)
 
   publicLeaderboard(params: {
-    ruleset_id: string;
+    ruleset_id?: string | null;
     gauntlet_id?: string | null;
     limit?: number;
     cursor?: string | null;

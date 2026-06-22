@@ -125,12 +125,47 @@ export interface PublicLeaderboardEntryResponse {
   conservative_score: number;
 }
 
-export interface PublicLeaderboardResponse {
+export interface PublicRatingCardResponse {
+  card_id: string;
+  section: 'canonical' | 'experimental';
+  section_label: string;
+  context_kind: string;
+  context_label: string;
   ruleset_id: string;
+  entity_id: string;
+  display_name: string;
+  model_provider: string;
+  model_name: string;
+  model_version: string | null;
+  prompt_version: string;
+  scope_type: string;
+  scope_value: string;
+  metric: 'openskill_conservative' | 'solo_success_rate';
+  metric_label: string;
+  score: number;
+  rank: number | null;
+  provisional: boolean;
+  provisional_reason: string | null;
+  sample_count: number;
+  games: number | null;
+  attempts: number | null;
+  successes: number | null;
+  mu: number | null;
+  sigma: number | null;
+  conservative_score: number | null;
+  mean_success_rate: number | null;
+  credible_interval_low: number | null;
+  credible_interval_high: number | null;
+}
+
+export interface PublicLeaderboardResponse {
+  ruleset_id: string | null;
   gauntlet_id: string | null;
   rating_model: string;
   cache_tag: string;
   entries: PublicLeaderboardEntryResponse[];
+  canonical_cards: PublicRatingCardResponse[];
+  experimental_cards: PublicRatingCardResponse[];
   next_cursor: string | null;
   total_estimate: number;
 }

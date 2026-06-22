@@ -285,7 +285,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration') and the frontend pnpm lint/check/test:e2e gates pass."
       ],
       "notes": "CORRECTED: the frontend EXISTS (web/dashboard, first-class since Wave 7) and ratings/public_leaderboard.py exists. Both reviewers: 'same model may have multiple cards, not one merged number'; 'never sort all of these together'; presentation must scream 'separate context.'",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-187",
