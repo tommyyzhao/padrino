@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import socket
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -52,6 +54,7 @@ from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_action_submissions as human_actions_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
+from padrino.db.repositories import scheduler_heartbeats as worker_heartbeats_repo
 from padrino.economics.human_cost_governance import global_breaker_open, human_eligible_pool
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
@@ -59,6 +62,7 @@ from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
+from padrino.observability.events import EVENT_HUMAN_LANE_WORKER_HEARTBEAT
 from padrino.runner.disconnect_takeover import apply_takeover, build_takeover_event
 from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, drive_game_loop
 from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
@@ -92,6 +96,32 @@ AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
 HumanChatRelease = Callable[[str, float, EventLog, Sequence[StoredEvent]], Awaitable[None]]
 BeforeTakeoverRevalidate = Callable[[], Awaitable[None]]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def default_human_lane_worker_id() -> str:
+    """Return the reserved human-lane worker id ``"human-lane:<host>:<pid>"``."""
+    return worker_heartbeats_repo.human_lane_worker_id(f"{socket.gethostname()}:{os.getpid()}")
+
+
+async def _write_worker_heartbeat(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    worker_id: str,
+) -> None:
+    async with session_factory() as session, session.begin():
+        await worker_heartbeats_repo.upsert(
+            session,
+            worker_id=worker_heartbeats_repo.human_lane_worker_id(worker_id),
+            beat_at=_utcnow(),
+        )
+    _logger.info(
+        EVENT_HUMAN_LANE_WORKER_HEARTBEAT,
+        worker_id=worker_heartbeats_repo.human_lane_worker_id(worker_id),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1092,6 +1122,7 @@ async def run_human_lane(
     semaphore: asyncio.Semaphore | None = None,
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
     settings: Settings | None = None,
+    worker_id: str | None = None,
 ) -> None:
     """Drain human-lane games until ``stop_event`` is set.
 
@@ -1114,6 +1145,7 @@ async def run_human_lane(
 
     sem = semaphore or asyncio.Semaphore(concurrency)
     cfg = settings or get_settings()
+    wid = worker_id or default_human_lane_worker_id()
     use_default_executor = game_executor is None
     executor = game_executor or _default_human_game_executor(
         cfg,
@@ -1128,6 +1160,7 @@ async def run_human_lane(
 
     try:
         while not stop_event.is_set():
+            await _write_worker_heartbeat(session_factory, worker_id=wid)
             async with session_factory() as session:
                 candidates = await list_human_lane_games(session)
 
@@ -1183,6 +1216,7 @@ __all__ = [
     "HumanGameExecutor",
     "HumanLaneAdmission",
     "build_human_lane_adapter",
+    "default_human_lane_worker_id",
     "human_lane_admission",
     "list_human_lane_games",
     "run_human_lane",

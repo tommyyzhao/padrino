@@ -123,7 +123,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Entry point: cli.py 'human-lane' command -> runner/human_lane.run_human_lane(session_factory, concurrency, stop_event). No Redis (hard rule). Single-host only. Confirm/add a healthz route alongside the existing /healthz and /healthz/scheduler.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-231",

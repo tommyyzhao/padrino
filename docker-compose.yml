@@ -3,14 +3,16 @@
 # Topology (US-119 — "website public, everything else private"):
 #   edge network     : public-api + dashboard. These are the ONLY edge-facing
 #                      services; a reverse-proxy / CDN terminates TLS in front.
-#   internal network : postgres, api, scheduler, public-api. The full api,
-#                      scheduler, and Postgres have NO published host ports and
-#                      are never reachable from the internet.
+#   internal network : postgres, api, scheduler, human-lane, public-api. The
+#                      full api, scheduler, human-lane worker, and Postgres have
+#                      NO published host ports and are never reachable from the
+#                      internet.
 #
 # Services:
 #   - postgres   : the canonical first-class database target (US-057). Internal.
 #   - bootstrap  : one-shot init container running `padrino bootstrap` against
-#                  postgres; api/public-api/scheduler wait for it to exit 0.
+#                  postgres; api/public-api/scheduler/human-lane wait for it to
+#                  exit 0.
 #   - api        : `padrino serve` (full surface: admin, ingest, gauntlets...).
 #                  INTERNAL ONLY — no published port.
 #   - public-api : `padrino serve` with PADRINO_PUBLIC_SURFACE_ONLY=true. Mounts
@@ -18,12 +20,15 @@
 #   - scheduler  : `padrino scheduler` with `/healthz/scheduler` readiness probe
 #                  (US-060 — queries the api service over the internal network).
 #                  INTERNAL ONLY.
+#   - human-lane : `padrino human-lane` with `/healthz/human-lane` liveness
+#                  probe (US-230 — queries the api service over the internal
+#                  network). INTERNAL ONLY.
 #   - dashboard  : SvelteKit spectator dashboard (US-069/US-109/US-111) built
 #                  against the public-api URL; edge-facing on port 5173.
 #
-# The same image (built once) serves api / public-api / scheduler; the only
-# difference is the argv / env passed to the `padrino` entrypoint. The dashboard
-# has its own image built from `web/dashboard/`.
+# The same image (built once) serves api / public-api / scheduler / human-lane;
+# the only difference is the argv / env passed to the `padrino` entrypoint. The
+# dashboard has its own image built from `web/dashboard/`.
 #
 # Wave 7 (public live league) env vars — see docs/deployment/v2-public.md:
 #   DEEPINFRA_API_KEY           guard model key (Llama-Guard-3-8B on DeepInfra)
@@ -45,6 +50,7 @@ x-padrino-env: &padrino-env
   PADRINO_BROADCAST_CADENCE_CHAT_MS: ${PADRINO_BROADCAST_CADENCE_CHAT_MS:-2500}
   PADRINO_RAW_PAYLOAD_TTL_DAYS: ${PADRINO_RAW_PAYLOAD_TTL_DAYS:-30}
   PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS: ${PADRINO_NON_BROADCASTABLE_GAME_TTL_DAYS:-7}
+  PADRINO_HUMAN_LANE_MAX_CONCURRENT: ${PADRINO_HUMAN_LANE_MAX_CONCURRENT:-5}
   # Wave 8: operational alerting (US-113). Set to a Slack/Discord webhook URL at
   # deploy time; unset = structured-log-only (no-op transport).
   PADRINO_ALERT_WEBHOOK_URL: ${PADRINO_ALERT_WEBHOOK_URL:-}
@@ -186,6 +192,39 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  human-lane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PADRINO_IMAGE:-padrino:dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    environment:
+      <<: *padrino-env
+    command: ["human-lane"]
+    # US-230: human multiplayer is a single-host worker lane, internal-only and
+    # isolated from the benchmark scheduler's concurrency cap.
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,sys,urllib.request as u; r=u.urlopen('http://api:8000/healthz/human-lane', timeout=3); sys.exit(0 if r.status==200 and json.load(r).get('status')=='ok' else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
   dashboard:
     build:
       context: ./web/dashboard
@@ -211,7 +250,8 @@ networks:
   # and terminates TLS. Nothing private is reachable from here.
   edge:
     driver: bridge
-  # Internal: postgres, api, scheduler, public-api. Not published to the host.
+  # Internal: postgres, api, scheduler, human-lane, public-api. Not published to
+  # the host.
   internal:
     driver: bridge
     internal: false

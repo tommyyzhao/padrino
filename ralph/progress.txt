@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Single-host worker liveness (US-230): for a new internal worker lane, prefer
+  the existing DB-backed heartbeat ledger with a reserved worker-id prefix
+  (`human-lane:`) over a new migration when the next Alembic revision is already
+  allocated. Health routes must filter prefixes both ways so one lane's
+  heartbeat cannot satisfy another lane's liveness probe. YAML-only compose
+  shape guards that must run in the default suite should live outside
+  `tests/docker/`, because that directory is auto-skipped as docker-keyworded.
 - Multi-context leaderboard UI (US-229): treat `/public/leaderboard`
   `canonical_cards` / `experimental_cards` as already separated read-side
   contracts, then split canonical presentation ONLY by `scope_type`
@@ -2464,3 +2471,33 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2482 passed / 47 skipped / 10
   deselected.
+
+## 2026-06-22T16:06 PDT - US-230
+- Added the `human-lane` service to `docker-compose.yml`, reusing the Padrino
+  image and running `padrino human-lane` against Postgres. It depends on
+  Postgres healthy, bootstrap completed successfully, and the internal API
+  healthy; it publishes no host port, stays only on the `internal` network, and
+  uses the same restart policy as the scheduler.
+- Added `/healthz/human-lane`, backed by a `human-lane:`-prefixed worker
+  heartbeat written by `run_human_lane` each poll tick. Scheduler health now
+  filters those lane-prefixed rows out, so a human-lane worker cannot make
+  `/healthz/scheduler` look healthy.
+- The human lane is now part of the runnable single-host compose stack. This is
+  still a single-host worker, not a distributed worker; no Redis, lease service,
+  or multi-host coordination was added.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `docker-compose.yml`, `src/padrino/api/routes/health.py`,
+  `src/padrino/db/repositories/scheduler_heartbeats.py`,
+  `src/padrino/observability/events.py`, `src/padrino/runner/human_lane.py`,
+  `tests/api/test_healthz_human_lane.py`, `tests/test_human_lane_compose.py`,
+  `tests/docker/test_compose_v2.py`, `tests/runner/test_human_lane_isolation.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_healthz_human_lane.py -q` failed on missing
+  route / unfiltered scheduler health; focused RED
+  `uv run pytest tests/runner/test_human_lane_isolation.py::test_human_lane_worker_heartbeat_is_written_each_tick -q`
+  failed on missing `worker_id` seam; focused GREEN
+  `uv run pytest tests/test_human_lane_compose.py tests/api/test_healthz_human_lane.py tests/runner/test_human_lane_isolation.py::test_human_lane_worker_heartbeat_is_written_each_tick -q`
+  -> 7 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2491
+  passed / 48 skipped / 10 deselected.
