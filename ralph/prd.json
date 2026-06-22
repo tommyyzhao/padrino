@@ -210,7 +210,7 @@
         "All backend gates pass."
       ],
       "notes": "Codex: 'invalid action handling must be deterministic and scored consistently.' Reframed as consolidation of the in-tree coerce_to_safe_action chokepoint.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-182",

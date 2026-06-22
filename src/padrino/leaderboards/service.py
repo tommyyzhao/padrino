@@ -31,6 +31,12 @@ from padrino.db.models import (
     PromptVersion,
     Rating,
 )
+from padrino.diagnostics.submissions import (
+    INVALID_EVENT_TYPE,
+    PUBLIC_MESSAGE_EVENT_TYPE,
+    SUBMISSION_EVENT_TYPES,
+    TIMEOUT_EVENT_TYPE,
+)
 from padrino.gauntlets.completion import (
     PROVISIONAL_MAFIA_GAMES,
     PROVISIONAL_TOTAL_GAMES,
@@ -47,23 +53,6 @@ from padrino.ratings.openskill_service import (
 RATING_MODEL: Final[str] = "openskill_plackett_luce_v1"
 
 _TERMINATED_EVENT_TYPE: Final[str] = "GameTerminated"
-_PUBLIC_MESSAGE_EVENT_TYPE: Final[str] = "PublicMessageSubmitted"
-_TIMEOUT_EVENT_TYPE: Final[str] = "ActionTimedOut"
-_INVALID_EVENT_TYPE: Final[str] = "OutputInvalid"
-
-_SUBMISSION_EVENT_TYPES: Final[frozenset[str]] = frozenset(
-    {
-        "PublicMessageSubmitted",
-        "PrivateMessageSubmitted",
-        "VoteSubmitted",
-        "MafiaKillVoteSubmitted",
-        "ProtectSubmitted",
-        "InvestigateSubmitted",
-        "ActionTimedOut",
-        "OutputInvalid",
-        "OutputTruncated",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +187,7 @@ async def _events_for_games(
         return []
     stmt = select(GameEvent).where(
         GameEvent.game_id.in_(ids),
-        GameEvent.event_type.in_(_SUBMISSION_EVENT_TYPES),
+        GameEvent.event_type.in_(SUBMISSION_EVENT_TYPES),
     )
     return list((await session.execute(stmt)).scalars().all())
 
@@ -370,11 +359,11 @@ def _per_ab_event_metrics(
             },
         )
         bucket["submissions"] += 1
-        if event.event_type == _TIMEOUT_EVENT_TYPE:
+        if event.event_type == TIMEOUT_EVENT_TYPE:
             bucket["timeouts"] += 1
-        elif event.event_type == _INVALID_EVENT_TYPE:
+        elif event.event_type == INVALID_EVENT_TYPE:
             bucket["invalids"] += 1
-        if event.event_type == _PUBLIC_MESSAGE_EVENT_TYPE and isinstance(event.payload, dict):
+        if event.event_type == PUBLIC_MESSAGE_EVENT_TYPE and isinstance(event.payload, dict):
             text = event.payload.get("text")
             if isinstance(text, str):
                 bucket["pm_count"] += 1

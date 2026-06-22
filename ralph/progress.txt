@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Submission diagnostics vocabulary (US-181): keep timeout/invalid-rate
+  denominators in one read-side constant set (`diagnostics/submissions.py`) and
+  include every runner-emitted structured submission event plus failure events.
+  When adding a role event such as `TrackSubmitted`, update that vocabulary so
+  gauntlet, league, and model diagnostics keep the same denominator across
+  rulesets and ladders.
 - Mirror-paired canonical ratings (US-180): persist paired benchmark legs as
   distinct `games` rows sharing `pair_id`, with `pair_leg=0` using roster order
   and `pair_leg=1` using the mirrored roster while preserving the same
@@ -1690,3 +1696,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Thread: local Codex session (no external thread URL available).
 - Files changed: `src/padrino/core/enums.py`, `src/padrino/core/engine/events.py`, `src/padrino/core/engine/state.py`, `src/padrino/core/engine/win_conditions.py`, `src/padrino/core/rulesets/__init__.py`, `src/padrino/core/rulesets/mini7_v1.py`, `src/padrino/core/rulesets/bench10_v1.py`, `tests/core/test_win_conditions.py`, `ralph/prd.json`, `ralph/progress.txt`.
 - Gates (all GREEN): targeted RED `uv run pytest tests/core/test_win_conditions.py` failed on missing `WinCondition`; targeted GREEN `uv run pytest tests/core/test_win_conditions.py tests/integration/test_nar_regression_corpus.py` -> 34 passed; `uv run ruff check .`; `uv run ruff format --check .` (445 files already formatted); `uv run mypy src tests` (392 source files); `uv run pytest -m "not integration"` -> 2311 passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T19:32 PDT - US-181
+- Consolidated invalid-action diagnostics around the existing pure
+  `coerce_to_safe_action` fallback: malformed, illegal, empty, timeout, and
+  exhausted structured actions still resolve deterministically to `ABSTAIN` in
+  day-vote phases and `NOOP` everywhere else, independent of reason.
+- Added shared submission diagnostic constants so gauntlet diagnostics and
+  league/model leaderboards count the same runner-emitted action/failure events,
+  including newer role submissions (`RoleblockSubmitted`, `FrameSubmitted`,
+  `TrackSubmitted`, `WatchSubmitted`, `CleanSubmitted`).
+- Surfaced model-level `timeout_rate` and `invalid_action_rate` on
+  `/public/models/leaderboard` and model detail entries; the model-rollup cache
+  tag now includes terminal submission-event diagnostics as well as rating
+  updates.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/diagnostics/__init__.py`,
+  `src/padrino/diagnostics/submissions.py`,
+  `src/padrino/api/routes/public.py`,
+  `src/padrino/core/agents/coercion.py`,
+  `src/padrino/gauntlets/completion.py`,
+  `src/padrino/leaderboards/service.py`,
+  `src/padrino/ratings/model_rollup.py`,
+  `tests/api/test_public_models.py`,
+  `tests/gauntlets/test_completion.py`, `tests/runner/test_tick.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused new/adjacent tests; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2374 passed / 47 skipped /
+  10 deselected.

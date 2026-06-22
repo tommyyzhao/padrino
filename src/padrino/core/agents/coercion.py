@@ -1,8 +1,9 @@
 """Schema-failure coercion to engine-safe actions and responses.
 
-When an agent response fails to parse, fails schema validation, or times out,
-the runner needs a deterministic, engine-legal fallback so a broken model can
-never crash a game. This module exposes two pure helpers:
+When an agent response fails to parse, fails schema validation, submits an
+illegal/empty structured action, or times out, the runner needs a deterministic,
+engine-legal fallback so a broken model can never crash a game. This module
+exposes two pure helpers:
 
 - :func:`coerce_to_safe_action` returns ``ABSTAIN`` during the day vote phase
   and ``NOOP`` everywhere else.
@@ -11,7 +12,8 @@ never crash a game. This module exposes two pure helpers:
 
 The ``error_reason`` argument is accepted for caller convenience (and so the
 runner can log a single string through both helpers) but does not influence
-the returned action — coercion is a function of the phase alone.
+the returned action — coercion is a function of the phase alone and is shared
+across roles, rulesets, and ladders.
 
 Pure core: no DB / LLM / clock / network / random imports.
 """

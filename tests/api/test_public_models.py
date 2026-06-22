@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
@@ -23,14 +25,18 @@ from padrino.api.auth import (
     RateLimiter,
     generate_raw_key,
 )
+from padrino.core.engine.hashing import GENESIS_HASH, compute_event_hash
 from padrino.core.enums import Faction
 from padrino.core.rulesets import mini7_v1
-from padrino.db.models import Rating
+from padrino.db.models import Game, Rating
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
 from padrino.db.repositories import (
     api_keys as api_keys_repo,
+)
+from padrino.db.repositories import (
+    events as events_repo,
 )
 from padrino.db.repositories import (
     games as games_repo,
@@ -99,6 +105,32 @@ async def anonymous_client(
 
 def _auth(raw: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {raw}"}
+
+
+async def _append_chained_events(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    bodies: list[dict[str, Any]],
+) -> None:
+    prev = GENESIS_HASH
+    for sequence, body in enumerate(bodies):
+        sealed = dict(body)
+        sealed["sequence"] = sequence
+        event_hash = compute_event_hash(prev, sealed)
+        await events_repo.append_event(
+            session,
+            game_id=game_id,
+            sequence=sequence,
+            event_type=str(sealed["event_type"]),
+            phase=str(sealed["phase"]),
+            visibility=str(sealed["visibility"]),
+            actor_player_id=sealed.get("actor_player_id"),
+            payload=dict(sealed.get("payload", {})),
+            prev_event_hash=prev,
+            event_hash=event_hash,
+        )
+        prev = event_hash
 
 
 async def _seed_spectator_key(
@@ -277,6 +309,70 @@ async def test_leaderboard_sorted_and_aggregates_by_model(
     assert weak["agent_build_count"] == 1
     assert weak["town"]["games"] == 5
     assert weak["town"]["wins"] == 5
+
+
+async def test_leaderboard_surfaces_invalid_action_rate_by_model(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    raw = await _seed_spectator_key(session_factory)
+    league_id, key_strong, key_weak = await _seed_two_models_one_league(session_factory)
+
+    async with session_factory() as session, session.begin():
+        game = (await session.execute(select(Game))).scalars().one()
+        await _append_chained_events(
+            session,
+            game_id=game.id,
+            bodies=[
+                {
+                    "event_type": "RoleblockSubmitted",
+                    "phase": "NIGHT_1_ACTIONS",
+                    "visibility": "PRIVATE",
+                    "actor_player_id": "P01",
+                    "payload": {"target": "P03"},
+                },
+                {
+                    "event_type": "OutputInvalid",
+                    "phase": "NIGHT_1_ACTIONS",
+                    "visibility": "SYSTEM",
+                    "actor_player_id": "P02",
+                    "payload": {
+                        "reason": "ILLEGAL_ACTION",
+                        "validation_errors": ["PROTECT is illegal in NIGHT_1_ACTIONS"],
+                    },
+                },
+                {
+                    "event_type": "VoteSubmitted",
+                    "phase": "DAY_1_VOTE",
+                    "visibility": "PUBLIC",
+                    "actor_player_id": "P03",
+                    "payload": {"target": "P01", "is_abstain": False},
+                },
+                {
+                    "event_type": "ActionTimedOut",
+                    "phase": "DAY_1_VOTE",
+                    "visibility": "SYSTEM",
+                    "actor_player_id": "P04",
+                    "payload": {"expected_action_type": "VOTE", "defaulted_to": "ABSTAIN"},
+                },
+            ],
+        )
+
+    response = await client.get(
+        "/public/models/leaderboard",
+        params={"ruleset_id": _RULESET, "league_id": str(league_id)},
+        headers=_auth(raw),
+    )
+    assert response.status_code == 200, response.text
+    by_model = {entry["model_key"]: entry for entry in response.json()["entries"]}
+
+    strong = by_model[key_strong]
+    assert strong["invalid_action_rate"] == pytest.approx(1 / 2)
+    assert strong["timeout_rate"] == 0.0
+
+    weak = by_model[key_weak]
+    assert weak["invalid_action_rate"] == 0.0
+    assert weak["timeout_rate"] == pytest.approx(1 / 2)
 
 
 async def test_leaderboard_cursor_pagination_stable(
