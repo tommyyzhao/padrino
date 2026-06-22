@@ -485,6 +485,37 @@
       ],
       "notes": "Evidence: 0047_rating_contexts.py:29-32/256/281/313-331, test_migrations_all_dialects.py:28-48, test_migration_0047_rating_contexts.py. Fail-closed/coverage hardening; no canonical correctness change.",
       "passes": true
+    },
+    {
+      "id": "US-222",
+      "title": "Placement rating failures must never wedge terminal finalization (+ winner validation + intake guard)",
+      "priority": 222,
+      "dependencies": [],
+      "description": "WAVE-10 ROUND-3 REVIEW HIGH (CONFIRMED) + related MEDIUM. US-219 wired placement scoring INTO the GameTerminated transaction: game_runner.py:433 opens `async with session.begin()`, writes the terminal event (443) + flips status COMPLETED (444), then at 496-501 calls update_placement_ratings_for_game. Two placement-side raises now abort that transaction and leave the game permanently stuck RUNNING (terminal event + COMPLETED flip roll back together; every retry re-raises): (1) CONFIRMED - _apply_placement_scope_update raises ValueError when one agent_build maps to seats in two different factions (a shared-build / self-play placement roster; openskill_service.py:366-371). Rosters have NO build-uniqueness validation (gauntlets/scheduler.py create_gauntlet, api/routes/gauntlets.py), so this is reachable. (2) LATENT - _placement_groups_for raises ValueError when the winner is not a faction value present in seat_groups nor the DRAW sentinel (openskill_service.py:342); a future non-canonical PLACEMENT ruleset with an ALT_TRIGGER/non-faction winner would wedge. The canonical path (_apply_scope_update) tolerates duplicate-build-across-factions without raising - so this is a placement-only regression. Isolated to the NEW experimental placement feature; canonical ladders unaffected.",
+      "acceptanceCriteria": [
+        "A placement-rating failure can NEVER roll back the terminal GameTerminated event or the COMPLETED status flip: build/validate the PlacementGameResult BEFORE the terminal writes, OR run update_placement_ratings_for_game OUTSIDE the GameTerminated begin() block, OR wrap it so any exception is logged and swallowed AFTER the game is finalized. Game completion + event_hash-chain integrity must be independent of placement-rating outcomes.",
+        "The placement gate skips (logged) rather than raising in the terminal path when the terminal_result is neither the DRAW sentinel nor a faction value present among the seats (covers the future non-faction-winner case).",
+        "Defense-in-depth: gauntlet intake (create_gauntlet / POST /gauntlets) rejects with 422 a non-canonical PLACEMENT roster whose duplicate builds would land in seats of different factions, so the ill-defined case is caught at creation.",
+        "Tests: (a) a placement gauntlet with the same build across two factions runs to terminal -> game is COMPLETED (NOT stuck RUNNING), terminal event persisted, placement scoring skipped/handled with no double-count, and ZERO scientific Rating/RatingEvent writes (firewall holds); (b) a placement ruleset whose winner is a non-faction string finalizes the game without raising in the terminal txn; (c) intake rejects the shared-build-across-factions placement roster.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Evidence: game_runner.py:364-381/403-409/433/443-451/496-501, openskill_service.py:342/366-371, gauntlets/scheduler.py:74-76, api/routes/gauntlets.py:126-168. The load-bearing fix is making the terminal write resilient to a ratings-side guard; the dedup raise itself is defensible (a build can't be both winner and loser of one Plackett-Luce update) - it just must not happen inside the terminal transaction.",
+      "passes": false
+    },
+    {
+      "id": "US-223",
+      "title": "Restore migration 0047 frozen-snapshot (no live-core import)",
+      "priority": 223,
+      "dependencies": [],
+      "description": "WAVE-10 ROUND-3 REVIEW MEDIUM (+ related LOW). US-221 made migration 0047 import LIVE core code (`from padrino.core.rulesets import get_ruleset`, `from padrino.core.enums import RatingContextKind`) and seed canonical contexts (display_label/kind/is_canonical) from the CURRENT ruleset module attributes (0047:24-25/103-153). It is the ONLY migration that imports core, breaking the frozen-snapshot invariant: re-running 0047 produces output dependent on whatever the ruleset modules say at run-time (a future label or IS_CANONICAL edit retroactively changes what 0047 seeds/stamps). It is byte-stable today (live labels equal the old literals) but is a determinism/maintainability hazard. NOTE: the data-driven backfill only matters for rulesets that have PRE-EXISTING Rating rows before 0047 ran - only mini7_v1/bench10_v1 do; the new wave-10 canonical rulesets (roleblock10/visit12/deception13/ninja13) ship WITH the migration (no pre-existing rows) and get their context at runtime via ensure_declared_context, so they need no backfill.",
+      "acceptanceCriteria": [
+        "Migration 0047 no longer imports live core code; the canonical contexts it seeds + the rows it stamps are FROZEN LITERALS snapshotting the 0047-era state (mini7_v1, bench10_v1 with their exact display labels), so re-running 0047 is deterministic regardless of future ruleset edits.",
+        "Newly-shipped canonical rulesets are handled WITHOUT migration-time live-core coupling: rely on the runtime ensure_declared_context path (no pre-existing rows to backfill); document this. (If a future ruleset ever needs historical-row backfill, that is a new forward migration with its own frozen literals.)",
+        "A test pins the EXACT RATING_CONTEXT_DISPLAY_LABEL strings for mini7_v1/bench10_v1 (so a future label edit is caught) and asserts a PLACEMENT/SOLO_RATE ruleset can never cause 0047 to stamp scientific Rating rows; the existing 0047 upgrade-byte-stability and downgrade round-trip tests still pass.",
+        "All backend gates pass (including test_migrations_all_dialects)."
+      ],
+      "notes": "Evidence: 0047_rating_contexts.py:24-25/103-153/266-320, repositories/rating_contexts.py (runtime ensure_declared_context). Migrations must be frozen historical artifacts - never import mutable core. The round-1 'data-driven backfill' ask was over-scoped for v1 (only mini7/bench10 have pre-existing rows); frozen literals are correct and restore determinism.",
+      "passes": false
     }
   ]
 }
