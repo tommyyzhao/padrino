@@ -72,6 +72,11 @@ from padrino.ratings.openskill_service import (
     update_ratings_for_completed_pair,
     update_ratings_for_game,
 )
+from padrino.ratings.solo_rate_service import (
+    SoloRateAttempt,
+    SoloRateGameResult,
+    update_solo_rate_ratings_for_game,
+)
 from padrino.runner.tick import run_tick
 
 _logger = structlog.get_logger("padrino.runner")
@@ -339,6 +344,39 @@ def _should_apply_ratings(
     return all(s.public_player_id in persistence.agent_builds for s in state.seats)
 
 
+def _should_apply_solo_rate(
+    persistence: GamePersistence,
+    ranked: bool,
+    state: GameState,
+) -> bool:
+    if not ranked or not persistence.agent_builds:
+        return False
+    if state.terminal_result is None:
+        return False
+    if not any(s.role is Role.JESTER for s in state.seats):
+        return False
+    return all(s.public_player_id in persistence.agent_builds for s in state.seats)
+
+
+def _solo_rate_result_for(state: GameState, game_id: uuid.UUID) -> SoloRateGameResult | None:
+    jester_attempts = tuple(
+        SoloRateAttempt(
+            public_player_id=seat.public_player_id,
+            role=Role.JESTER.value,
+            succeeded=state.terminal_result == "JESTER",
+        )
+        for seat in state.seats
+        if seat.role is Role.JESTER
+    )
+    if not jester_attempts:
+        return None
+    return SoloRateGameResult(
+        game_id=game_id,
+        outcome_label="JESTER_LYNCH_BAIT",
+        attempts=jester_attempts,
+    )
+
+
 async def _persist_terminated_event(
     persistence: GamePersistence,
     stored: StoredEvent,
@@ -354,6 +392,7 @@ async def _persist_terminated_event(
     audit row so partial failures roll back together.
     """
     apply_ratings = _should_apply_ratings(persistence, ranked, state)
+    apply_solo_rate = _should_apply_solo_rate(persistence, ranked, state)
     terminal_result_payload: dict[str, Any] = {
         "winner": state.terminal_result,
         "reason": state.terminal_reason,
@@ -412,6 +451,14 @@ async def _persist_terminated_event(
                     league_id=str(persistence.league_id),
                     winner=winner,
                     seats=rated_seat_count,
+                )
+        if apply_solo_rate:
+            solo_result = _solo_rate_result_for(state, persistence.game_id)
+            if solo_result is not None:
+                await update_solo_rate_ratings_for_game(
+                    session,
+                    game_result=solo_result,
+                    agent_builds_by_seat=persistence.agent_builds,
                 )
 
 

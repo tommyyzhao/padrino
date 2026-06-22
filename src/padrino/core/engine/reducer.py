@@ -53,6 +53,9 @@ from padrino.core.engine.state import (
 )
 from padrino.core.enums import PhaseKind, Role
 
+JESTER_DAY_VOTED_OUT_TRIGGER = "JESTER_DAY_VOTED_OUT"
+_DAY_VOTE_CAUSES = frozenset({"day_vote", "DAY_VOTE"})
+
 # Event classes that are recorded in the log but do not mutate mechanical
 # state. Chat events are part of this set per the chat-vs-action firewall.
 _RECORDED_ONLY: tuple[type[Event], ...] = (
@@ -134,6 +137,18 @@ def _spend_framer_frame_shots(state: GameState, actor_ids: tuple[str, ...]) -> G
     return state.model_copy(update={"seats": tuple(seats)})
 
 
+def _add_win_condition_trigger(state: GameState, trigger: str) -> GameState:
+    if trigger in state.win_condition_triggers:
+        return state
+    return state.model_copy(
+        update={"win_condition_triggers": (*state.win_condition_triggers, trigger)}
+    )
+
+
+def _jester_day_vote_triggered(event: PlayerEliminated) -> bool:
+    return event.payload.role is Role.JESTER and event.payload.cause in _DAY_VOTE_CAUSES
+
+
 def apply_event(state: GameState, event: Event) -> GameState:
     """Return the next :class:`GameState` after applying ``event``.
 
@@ -168,11 +183,14 @@ def apply_event(state: GameState, event: Event) -> GameState:
         )
         return state.model_copy(update={"current_phase": new_phase, "day": event.payload.day})
     if isinstance(event, PlayerEliminated):
-        return _update_seat(
+        state = _update_seat(
             state,
             event.payload.public_player_id,
             {"alive": False, "death_phase": event.phase},
         )
+        if _jester_day_vote_triggered(event):
+            return _add_win_condition_trigger(state, JESTER_DAY_VOTED_OUT_TRIGGER)
+        return state
     if isinstance(event, DetectiveResultDelivered):
         queued = QueuedInspection(target=event.payload.target, finding=event.payload.finding)
         return _update_seat(state, event.actor_player_id, {"queued_inspection_result": queued})

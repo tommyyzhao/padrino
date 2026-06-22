@@ -8,6 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.events import (
+    PlayerEliminated,
+    PlayerEliminatedPayload,
+)
+from padrino.core.engine.reducer import apply_event
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import (
     REASON_ALL_MAFIA_ELIMINATED,
@@ -19,7 +24,7 @@ from padrino.core.engine.win_conditions import (
     check_win,
 )
 from padrino.core.enums import Faction, PhaseKind, Role
-from padrino.core.rulesets import bench10_v1, mini7_v1, sk12_v1
+from padrino.core.rulesets import bench10_v1, jester8_v1, mini7_v1, sk12_v1
 
 
 class _HasMaxDays(Protocol):
@@ -184,6 +189,23 @@ def _sk12_seats(
     return tuple(seats)
 
 
+def _jester8_seats() -> tuple[Seat, ...]:
+    """Build a deterministic jester8 setup with one Jester."""
+    template = [
+        (Role.MAFIA_GOON, Faction.MAFIA),
+        (Role.MAFIA_GOON, Faction.MAFIA),
+        (Role.JESTER, Faction.JESTER),
+        (Role.DETECTIVE, Faction.TOWN),
+        (Role.DOCTOR, Faction.TOWN),
+        (Role.VILLAGER, Faction.TOWN),
+        (Role.VILLAGER, Faction.TOWN),
+        (Role.VILLAGER, Faction.TOWN),
+    ]
+    return tuple(
+        _seat(f"P{idx + 1:02d}", idx, role, faction) for idx, (role, faction) in enumerate(template)
+    )
+
+
 def test_last_mafia_eliminated_returns_town_win() -> None:
     seats = _full_mini7_seats(mafia_alive=0, town_alive=4)
     result = check_win(_state(seats, day=2), mini7_v1)
@@ -221,6 +243,50 @@ def test_two_mafia_versus_five_town_initial_state_returns_none() -> None:
     seats = _full_mini7_seats(mafia_alive=2, town_alive=5)
     result = check_win(_state(seats, day=1), mini7_v1)
     assert result is None
+
+
+def test_jester_day_vote_elimination_triggers_alt_win_after_replay() -> None:
+    state = _state(_jester8_seats(), day=1)
+    event = PlayerEliminated(
+        sequence=1,
+        phase="DAY_1_VOTE",
+        actor_player_id=None,
+        payload=PlayerEliminatedPayload(
+            public_player_id="P03",
+            role=Role.JESTER,
+            faction=Faction.JESTER,
+            cause="day_vote",
+        ),
+    )
+
+    replayed = apply_event(state, event)
+    result = check_win(replayed, jester8_v1)
+
+    assert replayed.win_condition_triggers == (jester8_v1.JESTER_DAY_VOTED_OUT_TRIGGER,)
+    assert result == WinResult(
+        winner=jester8_v1.JESTER_WINNER,
+        reason=jester8_v1.REASON_JESTER_DAY_VOTED_OUT,
+    )
+
+
+def test_jester_night_death_does_not_trigger_alt_win() -> None:
+    state = _state(_jester8_seats(), day=1)
+    event = PlayerEliminated(
+        sequence=1,
+        phase="NIGHT_1_ACTIONS",
+        actor_player_id=None,
+        payload=PlayerEliminatedPayload(
+            public_player_id="P03",
+            role=Role.JESTER,
+            faction=Faction.JESTER,
+            cause="night_kill",
+        ),
+    )
+
+    replayed = apply_event(state, event)
+
+    assert replayed.win_condition_triggers == ()
+    assert check_win(replayed, jester8_v1) is None
 
 
 def test_sk_ruleset_does_not_reuse_two_faction_mafia_parity_while_sk_alive() -> None:

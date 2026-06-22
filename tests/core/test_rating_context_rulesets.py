@@ -10,6 +10,7 @@ from padrino.core.rulesets import (
     bench10_v1,
     deception13_v1,
     get_ruleset,
+    jester8_v1,
     mini7_v1,
     roleblock10_v1,
     sk12_v1,
@@ -56,9 +57,26 @@ def test_sk12_ruleset_declares_noncanonical_placement_context() -> None:
     assert ruleset.ROLE_FACTIONS[Role.SERIAL_KILLER] is Faction.SERIAL_KILLER
 
 
+def test_jester8_ruleset_declares_noncanonical_solo_rate_context() -> None:
+    ruleset = get_ruleset(jester8_v1.RULESET_ID)
+
+    assert ruleset.RATING_CONTEXT_KIND is RatingContextKind.SOLO_RATE
+    assert ruleset.IS_CANONICAL is False
+    assert ruleset.RATING_CONTEXT_DISPLAY_LABEL
+    assert ruleset.ALT_WIN_CONDITIONS == (jester8_v1.JESTER_DAY_VOTED_OUT_TRIGGER,)
+    assert ruleset.SOLO_FACTIONS == ("JESTER",)
+    assert ruleset.ROLE_COUNTS[Role.JESTER] == 1
+    assert ruleset.ROLE_FACTIONS[Role.JESTER] is Faction.JESTER
+
+
 def test_sk12_ruleset_fails_canonical_introspection() -> None:
     with pytest.raises(CanonicalRulesetError, match="does not declare CANONICAL_TEAM"):
         assert_ruleset_canonical_pure(sk12_v1)
+
+
+def test_jester8_ruleset_fails_canonical_introspection() -> None:
+    with pytest.raises(CanonicalRulesetError, match="does not declare CANONICAL_TEAM"):
+        assert_ruleset_canonical_pure(jester8_v1)
 
 
 def test_draw_is_a_tie_between_canonical_teams() -> None:

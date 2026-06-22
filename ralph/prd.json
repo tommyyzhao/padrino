@@ -270,7 +270,7 @@
         "All backend gates pass."
       ],
       "notes": "Directly answers the product question: Jester IS benchmark-worthy - as a standalone lynch-bait success rate, never inside Town-vs-Mafia ELO. Executioner/Survivor moved to a follow-up story. Built on the US-215 alt-win substrate.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-186",

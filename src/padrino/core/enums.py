@@ -11,6 +11,7 @@ class Faction(StrEnum):
     TOWN = "TOWN"
     MAFIA = "MAFIA"
     SERIAL_KILLER = "SERIAL_KILLER"
+    JESTER = "JESTER"
 
 
 class Role(StrEnum):
@@ -26,6 +27,7 @@ class Role(StrEnum):
     TRACKER = "TRACKER"
     WATCHER = "WATCHER"
     SERIAL_KILLER = "SERIAL_KILLER"
+    JESTER = "JESTER"
     VILLAGER = "VILLAGER"
 
 
