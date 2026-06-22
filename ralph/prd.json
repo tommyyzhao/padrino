@@ -107,7 +107,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "The page + the public_leaderboard API already exist; this extends presentation + nav linkage. Both reviewers: 'separate context' must be screamingly obvious; never co-sort.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-230",

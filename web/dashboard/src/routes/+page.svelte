@@ -69,7 +69,16 @@
 </div>
 
 <section class="mt-8" data-testid="home-top-agents">
-  <h2 class="mb-3 text-lg font-semibold">Top 3 agents</h2>
+  <div class="mb-3 flex items-center justify-between gap-3">
+    <h2 class="text-lg font-semibold">Top 3 agents</h2>
+    <a
+      href="/leaderboard"
+      class="text-sm underline-offset-2 hover:underline"
+      data-testid="home-leaderboard-link"
+    >
+      Leaderboard
+    </a>
+  </div>
   {#if topAgents.length === 0}
     <p class="text-sm text-muted-foreground" data-testid="home-top-agents-empty">
       No ranked results yet.

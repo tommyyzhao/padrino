@@ -1,16 +1,47 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { expectIdentityBlind } from './helpers/identityBlind';
 
-// US-070 / US-111 / US-118 / US-186: the leaderboard is a
+// US-070 / US-111 / US-118 / US-186 / US-229: the leaderboard is a
 // public-surface-only page sourced exclusively from `/public/leaderboard`.
-// US-186 separates canonical cards from experimental context cards so the UI
-// never presents one cross-context ranking.
-//
-// US-118 (flake burn-down): the spec is now HERMETIC. It no longer depends on
-// the smoke harness having a verified ingested game in the federated rollup
-// (post-US-112 the public leaderboard excludes unverified ingests, so the
-// presence of rows is state-dependent). `/public/leaderboard` is intercepted
-// via `page.route` with deterministic seeded entries so rows always render.
+// The spec is hermetic and intercepts public fetches so navigation from the
+// home page does not depend on smoke-harness data.
+
+const BASE_CARD = {
+  card_id: 'card-default',
+  section: 'canonical',
+  section_label: 'Ranked canonical',
+  context_kind: 'CANONICAL_TEAM',
+  context_label: 'Bench 10 canonical team',
+  ruleset_id: 'bench10_v1',
+  entity_id: 'entity-default',
+  display_name: 'Default',
+  model_provider: 'mock',
+  model_name: 'mock-model',
+  model_version: null,
+  prompt_version: 'v1',
+  scope_type: 'GLOBAL',
+  scope_value: 'global',
+  metric: 'openskill_conservative',
+  metric_label: 'Canonical ELO',
+  score: 31.2,
+  rank: 1,
+  provisional: false,
+  provisional_reason: null,
+  sample_count: 12,
+  games: 12,
+  attempts: null,
+  successes: null,
+  mu: 37.5,
+  sigma: 2.1,
+  conservative_score: 31.2,
+  mean_success_rate: null,
+  credible_interval_low: null,
+  credible_interval_high: null
+};
+
+function card(overrides: Record<string, unknown>) {
+  return { ...BASE_CARD, ...overrides };
+}
 
 const LEADERBOARD = {
   ruleset_id: null,
@@ -19,73 +50,65 @@ const LEADERBOARD = {
   cache_tag: 'seed-tag',
   entries: [],
   canonical_cards: [
-    {
+    card({
       card_id: 'card-canonical-alpha',
-      section: 'canonical',
-      section_label: 'Ranked canonical',
-      context_kind: 'CANONICAL_TEAM',
-      context_label: 'Bench 10 canonical team',
-      ruleset_id: 'bench10_v1',
       entity_id: 'entity-alpha',
       display_name: 'Alpha',
-      model_provider: 'mock',
       model_name: 'mock-a',
-      model_version: null,
-      prompt_version: 'v1',
-      scope_type: 'GLOBAL',
-      scope_value: 'global',
-      metric: 'openskill_conservative',
-      metric_label: 'Canonical ELO',
       score: 31.2,
       rank: 1,
-      provisional: false,
-      provisional_reason: null,
       sample_count: 12,
       games: 12,
-      attempts: null,
-      successes: null,
       mu: 37.5,
       sigma: 2.1,
-      conservative_score: 31.2,
-      mean_success_rate: null,
-      credible_interval_low: null,
-      credible_interval_high: null
-    },
-    {
+      conservative_score: 31.2
+    }),
+    card({
       card_id: 'card-canonical-bravo',
-      section: 'canonical',
-      section_label: 'Ranked canonical',
-      context_kind: 'CANONICAL_TEAM',
-      context_label: 'Bench 10 canonical team',
-      ruleset_id: 'bench10_v1',
       entity_id: 'entity-bravo',
       display_name: 'Bravo',
-      model_provider: 'mock',
       model_name: 'mock-b',
-      model_version: null,
-      prompt_version: 'v1',
-      scope_type: 'GLOBAL',
-      scope_value: 'global',
-      metric: 'openskill_conservative',
-      metric_label: 'Canonical ELO',
       score: 40.0,
       rank: null,
       provisional: true,
       provisional_reason: 'Requires at least 10 games in this context; current sample is 2',
       sample_count: 2,
       games: 2,
-      attempts: null,
-      successes: null,
       mu: 43.0,
       sigma: 1.0,
-      conservative_score: 40.0,
-      mean_success_rate: null,
-      credible_interval_low: null,
-      credible_interval_high: null
-    }
+      conservative_score: 40.0
+    }),
+    card({
+      card_id: 'card-faction-town',
+      entity_id: 'entity-atlas-town',
+      display_name: 'Atlas',
+      scope_type: 'FACTION',
+      scope_value: 'TOWN',
+      score: 28.8,
+      rank: 1,
+      sample_count: 18,
+      games: 18,
+      mu: 34.2,
+      sigma: 1.8,
+      conservative_score: 28.8
+    }),
+    card({
+      card_id: 'card-faction-scum',
+      entity_id: 'entity-atlas-scum',
+      display_name: 'Atlas',
+      scope_type: 'FACTION',
+      scope_value: 'MAFIA',
+      score: 27.1,
+      rank: 1,
+      sample_count: 9,
+      games: 9,
+      mu: 33.1,
+      sigma: 2.0,
+      conservative_score: 27.1
+    })
   ],
   experimental_cards: [
-    {
+    card({
       card_id: 'card-placement',
       section: 'experimental',
       section_label: 'Experimental context',
@@ -94,30 +117,17 @@ const LEADERBOARD = {
       ruleset_id: 'sk12_v1',
       entity_id: 'entity-charlie',
       display_name: 'Charlie',
-      model_provider: 'mock',
       model_name: 'mock-c',
-      model_version: null,
-      prompt_version: 'v1',
-      scope_type: 'GLOBAL',
-      scope_value: 'global',
-      metric: 'openskill_conservative',
       metric_label: 'Placement rating',
       score: 24.8,
       rank: 1,
-      provisional: false,
-      provisional_reason: null,
       sample_count: 14,
       games: 14,
-      attempts: null,
-      successes: null,
       mu: 39.5,
       sigma: 4.9,
-      conservative_score: 24.8,
-      mean_success_rate: null,
-      credible_interval_low: null,
-      credible_interval_high: null
-    },
-    {
+      conservative_score: 24.8
+    }),
+    card({
       card_id: 'card-solo',
       section: 'experimental',
       section_label: 'Experimental context',
@@ -126,10 +136,7 @@ const LEADERBOARD = {
       ruleset_id: 'jester8_v1',
       entity_id: 'entity-delta',
       display_name: 'Delta',
-      model_provider: 'mock',
       model_name: 'mock-d',
-      model_version: null,
-      prompt_version: 'v1',
       scope_type: 'ROLE',
       scope_value: 'JESTER',
       metric: 'solo_success_rate',
@@ -148,56 +155,124 @@ const LEADERBOARD = {
       mean_success_rate: 0.42,
       credible_interval_low: 0.35,
       credible_interval_high: 0.49
-    }
+    })
   ],
   next_cursor: null,
   total_estimate: 0
 };
 
-function mockLeaderboard(page: import('@playwright/test').Page) {
-  return page.route('**/public/leaderboard*', async (route) => {
-    if (route.request().resourceType() === 'fetch' || route.request().resourceType() === 'xhr') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(LEADERBOARD)
-      });
-    } else {
-      await route.continue();
-    }
+async function fulfillJson(route: Route, body: unknown) {
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(body)
   });
 }
 
+function mockPublicSurfaces(page: Page) {
+  return page.route('**/public/**', async (route) => {
+    const request = route.request();
+    if (request.resourceType() !== 'fetch' && request.resourceType() !== 'xhr') {
+      await route.continue();
+      return;
+    }
+
+    const url = new URL(request.url());
+    if (url.pathname === '/public/leaderboard') {
+      await fulfillJson(route, LEADERBOARD);
+      return;
+    }
+    if (url.pathname === '/public/live') {
+      await fulfillJson(route, { items: [], total: 0 });
+      return;
+    }
+    if (url.pathname === '/public/recent') {
+      await fulfillJson(route, { items: [], next_cursor: null, total_estimate: 0 });
+      return;
+    }
+    if (url.pathname === '/public/ladder') {
+      await fulfillJson(route, {
+        ruleset_id: 'mini7_v1',
+        entries: [],
+        next_cursor: null,
+        total_estimate: 0
+      });
+      return;
+    }
+
+    await route.continue();
+  });
+}
+
+async function expectLeaderboardSections(page: Page) {
+  await expect(page.getByTestId('leaderboard-title')).toBeVisible();
+  await expect(page.getByTestId('leaderboard-loading')).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByTestId('leaderboard-canonical-section')).toBeVisible();
+  await expect(page.getByTestId('leaderboard-canonical-global-subsection')).toBeVisible();
+  await expect(page.getByTestId('leaderboard-canonical-faction-subsection')).toBeVisible();
+  await expect(page.getByTestId('leaderboard-placement-section')).toBeVisible();
+  await expect(page.getByTestId('leaderboard-solo-rate-section')).toBeVisible();
+}
+
 test.describe('leaderboard', () => {
-  test('renders canonical and experimental cards without a merged ranking', async ({ page }) => {
-    await mockLeaderboard(page);
+  test('renders canonical, faction, placement, and solo-rate cards without a merged ranking', async ({
+    page
+  }) => {
+    await mockPublicSurfaces(page);
     await page.goto('/leaderboard');
 
-    await expect(page.getByTestId('leaderboard-title')).toBeVisible();
-    await expect(page.getByTestId('leaderboard-loading')).toHaveCount(0, { timeout: 30_000 });
+    await expectLeaderboardSections(page);
 
-    await expect(page.getByTestId('leaderboard-canonical-section')).toBeVisible();
-    await expect(page.getByTestId('leaderboard-experimental-section')).toBeVisible();
-
-    const canonicalCards = page.locator('[data-testid="leaderboard-card"][data-section="canonical"]');
-    const experimentalCards = page.locator(
-      '[data-testid="leaderboard-card"][data-section="experimental"]'
+    const globalCards = page.locator(
+      '[data-testid="leaderboard-card"][data-subsection="canonical-global"]'
     );
-    await expect(canonicalCards).toHaveCount(2);
-    await expect(experimentalCards).toHaveCount(2);
-    await expect(canonicalCards.first().getByTestId('leaderboard-card-rank')).toHaveText('#1');
-    await expect(canonicalCards.nth(1).getByTestId('leaderboard-card-rank')).toHaveText(
+    const factionCards = page.locator(
+      '[data-testid="leaderboard-card"][data-subsection="canonical-faction"]'
+    );
+    const placementCards = page.locator(
+      '[data-testid="leaderboard-card"][data-subsection="placement"]'
+    );
+    const soloRateCards = page.locator(
+      '[data-testid="leaderboard-card"][data-subsection="solo-rate"]'
+    );
+
+    await expect(globalCards).toHaveCount(2);
+    await expect(factionCards).toHaveCount(2);
+    await expect(placementCards).toHaveCount(1);
+    await expect(soloRateCards).toHaveCount(1);
+    await expect(globalCards.first().getByTestId('leaderboard-card-rank')).toHaveText('#1');
+    await expect(globalCards.nth(1).getByTestId('leaderboard-card-rank')).toHaveText(
       'Provisional'
     );
-    await expect(experimentalCards.filter({ hasText: 'Jester 8 lynch-bait' })).toContainText(
-      'CI 35-49%'
+    await expect(factionCards.first().getByTestId('leaderboard-card-scope')).toHaveText(
+      'Faction: Town'
+    );
+    await expect(factionCards.nth(1).getByTestId('leaderboard-card-scope')).toHaveText(
+      'Faction: Scum'
+    );
+    await expect(placementCards.first().getByTestId('leaderboard-card-rank')).toHaveText('#1');
+    await expect(soloRateCards.first()).toContainText('CI 35-49%');
+    await expect(page.getByTestId('leaderboard-card-provisional').first()).toContainText(
+      'Under-sampled'
     );
     await expectIdentityBlind(page.locator('body'));
   });
 
+  test('is reachable from the home page and the main nav', async ({ page }) => {
+    await mockPublicSurfaces(page);
+    await page.goto('/');
+
+    await page.getByTestId('home-leaderboard-link').click();
+    await expectLeaderboardSections(page);
+
+    await page.goto('/');
+    await page.getByTestId('nav-leaderboard').click();
+    await expectLeaderboardSections(page);
+  });
+
   test('matches the leaderboard visual snapshot', async ({ page }) => {
     test.skip(!process.env.PADRINO_E2E_VISUAL, 'visual regression opt-in only');
-    await mockLeaderboard(page);
+    await mockPublicSurfaces(page);
     await page.goto('/leaderboard');
     await expect(page.getByTestId('leaderboard-loading')).toHaveCount(0, { timeout: 30_000 });
     await expect(page).toHaveScreenshot('leaderboard.png', {

@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Multi-context leaderboard UI (US-229): treat `/public/leaderboard`
+  `canonical_cards` / `experimental_cards` as already separated read-side
+  contracts, then split canonical presentation ONLY by `scope_type`
+  (`GLOBAL` vs `FACTION`) and experimental presentation ONLY by
+  `context_kind` (`PLACEMENT` vs `SOLO_RATE`). Never infer faction sections
+  from display names/context labels, and never co-sort cards across those
+  rendered groups. Hermetic dashboard specs that navigate from home should
+  intercept every `/public/*` fetch the route can trigger.
 - Public leaderboard context cards (US-228): canonical cards intentionally
   include only the `GLOBAL/global` row plus every persisted `FACTION` scope for
   a CANONICAL_TEAM `RatingContext`; placement and solo cards stay in sibling
@@ -2425,3 +2433,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed; `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2482
   passed / 47 skipped / 10 deselected.
+
+## 2026-06-22T15:34 PDT - US-229
+- Surfaced `/leaderboard` in the main nav and from the home page, then split
+  leaderboard presentation into separate canonical/global, canonical/FACTION,
+  PLACEMENT, and SOLO_RATE sections without cross-context co-sorting.
+- Added a reusable leaderboard section/card component pair plus a pure
+  `splitLeaderboardCards` helper. The unit test proves FACTION grouping uses
+  `scope_type` rather than display-name text; Playwright proves the rendered
+  subsections, provisional under-sampled label, identity-blind body, and
+  home/nav navigation path.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/leaderboard/LeaderboardCard.svelte`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.svelte`,
+  `web/dashboard/src/lib/leaderboard/sections.ts`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.test.ts`,
+  `web/dashboard/src/routes/+layout.svelte`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/leaderboard/+page.svelte`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- LeaderboardSections` failed on missing
+  `LeaderboardSections.svelte`; focused GREEN same command -> 53 passed;
+  focused GREEN `pnpm -C web/dashboard test:e2e -- -g leaderboard` -> 2
+  passed / 1 skipped; `pnpm -C web/dashboard test` -> 53 passed;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard lint` (solo rerun
+  after a parallel Vite timestamp-file race); `pnpm -C web/dashboard test:e2e`
+  -> 25 passed / 3 skipped; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2482 passed / 47 skipped / 10
+  deselected.
