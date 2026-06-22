@@ -67,7 +67,11 @@ from padrino.observability.events import (
 from padrino.observability.metrics import record_game_completed
 from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
-from padrino.ratings.openskill_service import GameResult, update_ratings_for_game
+from padrino.ratings.openskill_service import (
+    GameResult,
+    update_ratings_for_completed_pair,
+    update_ratings_for_game,
+)
 from padrino.runner.tick import run_tick
 
 _logger = structlog.get_logger("padrino.runner")
@@ -375,27 +379,40 @@ async def _persist_terminated_event(
         )
         if apply_ratings:
             assert persistence.league_id is not None
-            winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
-            seat_factions: dict[str, Faction] = {s.public_player_id: s.faction for s in state.seats}
-            agent_builds_by_seat: dict[str, uuid.UUID] = {
-                sid: persistence.agent_builds[sid] for sid in seat_factions
-            }
-            await update_ratings_for_game(
-                session,
-                league_id=persistence.league_id,
-                game_result=GameResult(
-                    game_id=persistence.game_id,
+            if game is not None and game.pair_id is not None:
+                rating_events = await update_ratings_for_completed_pair(
+                    session,
+                    league_id=persistence.league_id,
+                    pair_id=game.pair_id,
+                )
+                rated_seat_count = len(persistence.agent_builds)
+                winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
+            else:
+                winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
+                seat_factions: dict[str, Faction] = {
+                    s.public_player_id: s.faction for s in state.seats
+                }
+                agent_builds_by_seat: dict[str, uuid.UUID] = {
+                    sid: persistence.agent_builds[sid] for sid in seat_factions
+                }
+                rating_events = await update_ratings_for_game(
+                    session,
+                    league_id=persistence.league_id,
+                    game_result=GameResult(
+                        game_id=persistence.game_id,
+                        winner=winner,
+                        seat_factions=seat_factions,
+                    ),
+                    agent_builds_by_seat=agent_builds_by_seat,
+                )
+                rated_seat_count = len(agent_builds_by_seat)
+            if rating_events:
+                _logger.info(
+                    EVENT_RATING_UPDATED,
+                    league_id=str(persistence.league_id),
                     winner=winner,
-                    seat_factions=seat_factions,
-                ),
-                agent_builds_by_seat=agent_builds_by_seat,
-            )
-            _logger.info(
-                EVENT_RATING_UPDATED,
-                league_id=str(persistence.league_id),
-                winner=winner,
-                seats=len(agent_builds_by_seat),
-            )
+                    seats=rated_seat_count,
+                )
 
 
 def _request_prompt_hash(observation: Observation) -> str:

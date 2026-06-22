@@ -16,17 +16,18 @@ leaderboard reads do not need to recompute it.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from openskill.models import PlackettLuce
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction
 from padrino.core.rulesets.canonicality import canonical_team_ranks_for_outcome
-from padrino.db.models import Game, RatingContext, RatingEvent
+from padrino.db.models import Game, GameSeat, RatingContext, RatingEvent
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.db.repositories import ratings as ratings_repo
 
@@ -49,6 +50,16 @@ class GameResult:
     game_id: uuid.UUID
     winner: Literal["TOWN", "MAFIA", "DRAW"]
     seat_factions: Mapping[str, Faction]
+
+
+@dataclass(frozen=True, slots=True)
+class PairedGameResult:
+    """One leg of a mirror-paired rating update."""
+
+    game_id: uuid.UUID
+    winner: Literal["TOWN", "MAFIA", "DRAW"]
+    seat_factions: Mapping[str, Faction]
+    agent_builds_by_seat: Mapping[str, uuid.UUID]
 
 
 def _ranks_for(winner: Literal["TOWN", "MAFIA", "DRAW"]) -> tuple[int, int]:
@@ -315,6 +326,149 @@ async def update_ratings_for_game(
     return events
 
 
+def _pair_sort_key(game: Game) -> tuple[str, int, str]:
+    leg = game.pair_leg if game.pair_leg is not None else 0
+    return (game.game_seed, leg, str(game.id))
+
+
+async def _ordered_pair_results(
+    session: AsyncSession,
+    game_results: Sequence[PairedGameResult],
+) -> list[PairedGameResult]:
+    if len(game_results) != 2:
+        raise ValueError(f"mirror pair rating requires exactly 2 legs, got {len(game_results)}")
+    ids = [result.game_id for result in game_results]
+    rows = (await session.execute(select(Game).where(Game.id.in_(ids)))).scalars().all()
+    by_id = {row.id: row for row in rows}
+    if set(by_id) != set(ids):
+        missing = sorted(str(game_id) for game_id in set(ids) - set(by_id))
+        raise ValueError(f"unknown paired game id(s): {missing}")
+    return sorted(game_results, key=lambda result: _pair_sort_key(by_id[result.game_id]))
+
+
+async def update_ratings_for_mirror_pair(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    game_results: Sequence[PairedGameResult],
+    now: datetime | None = None,
+) -> list[RatingEvent]:
+    """Apply both legs of a mirror pair in persisted canonical order.
+
+    Plackett-Luce updates are sequential, so this function canonicalizes leg
+    order using ``(game_seed, pair_leg, game_id)`` before applying the two
+    ordinary game updates inside the caller's transaction. Passing the same two
+    legs in any input order therefore yields byte-identical rating rows.
+    """
+    ordered = await _ordered_pair_results(session, game_results)
+    _now = now if now is not None else datetime.now(UTC)
+    events: list[RatingEvent] = []
+    for result in ordered:
+        events.extend(
+            await update_ratings_for_game(
+                session,
+                league_id=league_id,
+                game_result=GameResult(
+                    game_id=result.game_id,
+                    winner=result.winner,
+                    seat_factions=result.seat_factions,
+                ),
+                agent_builds_by_seat=result.agent_builds_by_seat,
+                now=_now,
+            )
+        )
+    return events
+
+
+def _winner_from_game(game: Game) -> Literal["TOWN", "MAFIA", "DRAW"] | None:
+    payload = game.terminal_result if isinstance(game.terminal_result, dict) else {}
+    winner = payload.get("winner")
+    if winner in {"TOWN", "MAFIA", "DRAW"}:
+        return cast(Literal["TOWN", "MAFIA", "DRAW"], winner)
+    return None
+
+
+async def _existing_rating_event_for_games(
+    session: AsyncSession,
+    game_ids: Sequence[uuid.UUID],
+) -> bool:
+    row = (
+        await session.execute(
+            select(RatingEvent.id).where(RatingEvent.game_id.in_(game_ids)).limit(1)
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
+async def update_ratings_for_completed_pair(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    pair_id: uuid.UUID,
+    now: datetime | None = None,
+) -> list[RatingEvent]:
+    """Rate a completed mirror pair from persisted game/seat rows.
+
+    Returns an empty list until both legs are completed, if the pair has already
+    produced rating events, or if the pair is not fully AI-attributed.
+    """
+    games = list(
+        (
+            await session.execute(
+                select(Game).where(Game.pair_id == pair_id).order_by(Game.pair_leg, Game.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(games) != 2 or any(game.status != "COMPLETED" for game in games):
+        return []
+    game_ids = [game.id for game in games]
+    if await _existing_rating_event_for_games(session, game_ids):
+        return []
+
+    seats = list(
+        (
+            await session.execute(
+                select(GameSeat).where(GameSeat.game_id.in_(game_ids)).order_by(GameSeat.seat_index)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    seats_by_game: dict[uuid.UUID, list[GameSeat]] = {game_id: [] for game_id in game_ids}
+    for seat in seats:
+        seats_by_game.setdefault(seat.game_id, []).append(seat)
+
+    pair_results: list[PairedGameResult] = []
+    for game in games:
+        winner = _winner_from_game(game)
+        game_seats = seats_by_game.get(game.id, [])
+        if (
+            winner is None
+            or not game_seats
+            or any(seat.agent_build_id is None for seat in game_seats)
+        ):
+            return []
+        pair_results.append(
+            PairedGameResult(
+                game_id=game.id,
+                winner=winner,
+                seat_factions={seat.public_player_id: Faction(seat.faction) for seat in game_seats},
+                agent_builds_by_seat={
+                    seat.public_player_id: cast(uuid.UUID, seat.agent_build_id)
+                    for seat in game_seats
+                },
+            )
+        )
+    return await update_ratings_for_mirror_pair(
+        session,
+        league_id=league_id,
+        game_results=pair_results,
+        now=now,
+    )
+
+
 __all__ = [
     "INITIAL_MU",
     "INITIAL_SIGMA",
@@ -322,5 +476,8 @@ __all__ = [
     "SCOPE_GLOBAL",
     "SCOPE_VALUE_GLOBAL",
     "GameResult",
+    "PairedGameResult",
+    "update_ratings_for_completed_pair",
     "update_ratings_for_game",
+    "update_ratings_for_mirror_pair",
 ]

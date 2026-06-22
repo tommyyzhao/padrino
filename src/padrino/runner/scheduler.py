@@ -22,14 +22,16 @@ import contextlib
 import os
 import socket
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.db.models import Game, GauntletRosterSlot
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
@@ -44,6 +46,7 @@ from padrino.observability.events import (
     EVENT_SCHEDULER_WORKER_HEARTBEAT,
 )
 from padrino.observability.metrics import scheduler_inflight_gauntlets
+from padrino.ratings.openskill_service import update_ratings_for_completed_pair
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
 
 _logger = structlog.get_logger("padrino.scheduler")
@@ -91,29 +94,54 @@ class SchedulerOptions:
     stale_factor: float = DEFAULT_STALE_FACTOR
 
 
+@dataclass(frozen=True, slots=True)
+class _ScheduledGame:
+    game_id: uuid.UUID
+    agent_builds_by_seat: dict[str, uuid.UUID]
+
+
 async def _gauntlet_context(
     session_factory: async_sessionmaker[AsyncSession],
     gauntlet_id: uuid.UUID,
-) -> tuple[str, dict[str, uuid.UUID], uuid.UUID, list[uuid.UUID]] | None:
-    """Return ``(gauntlet_seed, agent_builds_by_seat, league_id, child_game_ids)``.
+) -> tuple[str, uuid.UUID, list[_ScheduledGame]] | None:
+    """Return ``(gauntlet_seed, league_id, child_games)``.
 
-    ``agent_builds_by_seat`` maps ``P{slot+1:02d}`` → roster's agent_build_id,
-    matching the convention used by ``demo_gauntlet`` and the role assignment
-    in ``padrino.core.engine.role_assignment``. ``child_game_ids`` is the
-    deterministic list of child game UUIDs ordered by id (matches creation
-    order in the API route).
+    Each child carries its own ``agent_builds_by_seat`` mapping. Unpaired games
+    use the roster order. Mirror-paired games use the persisted ``pair_leg``:
+    leg 0 keeps roster order and leg 1 reverses it while keeping the same
+    ``game_seed`` / role layout.
     """
     async with session_factory() as session:
         gauntlet = await gauntlets_repo.get(session, gauntlet_id)
         if gauntlet is None:
             return None
         slots = await gauntlets_repo.list_roster_slots(session, gauntlet_id)
-        agent_builds_by_seat = {
-            f"P{slot.slot_index + 1:02d}": slot.agent_build_id for slot in slots
-        }
         games = await games_repo.list_by_gauntlet(session, gauntlet_id)
-        child_ids = [g.id for g in games if g.status != "COMPLETED"]
-        return (gauntlet.gauntlet_seed, agent_builds_by_seat, gauntlet.league_id, child_ids)
+        child_games = [
+            _ScheduledGame(
+                game_id=g.id,
+                agent_builds_by_seat=agent_builds_by_seat_for_game(slots, g),
+            )
+            for g in games
+            if g.status != "COMPLETED"
+        ]
+        return (gauntlet.gauntlet_seed, gauntlet.league_id, child_games)
+
+
+def agent_builds_by_seat_for_game(
+    roster_slots: Sequence[GauntletRosterSlot],
+    game: Game,
+) -> dict[str, uuid.UUID]:
+    """Return the agent-build seat map for ``game``.
+
+    The mapping convention is ``P{seat_index+1:02d}`` -> agent build id.
+    ``pair_leg=1`` mirrors placement by reversing the roster while preserving
+    seat ids and therefore preserving the board RNG / role layout.
+    """
+    ordered = sorted(roster_slots, key=lambda slot: slot.slot_index)
+    if game.pair_id is not None and game.pair_leg == 1:
+        ordered = list(reversed(ordered))
+    return {f"P{i + 1:02d}": slot.agent_build_id for i, slot in enumerate(ordered)}
 
 
 async def _run_one_game(
@@ -198,12 +226,12 @@ async def _drive_gauntlet(
     ctx = await _gauntlet_context(session_factory, gauntlet_id)
     if ctx is None:
         return
-    gauntlet_seed, agent_builds_by_seat, league_id, child_game_ids = ctx
+    gauntlet_seed, league_id, child_games = ctx
 
     _logger.info(
         EVENT_SCHEDULER_GAUNTLET_STARTED,
         gauntlet_id=str(gauntlet_id),
-        games=len(child_game_ids),
+        games=len(child_games),
         gauntlet_seed=gauntlet_seed,
     )
     scheduler_inflight_gauntlets.inc()
@@ -220,7 +248,7 @@ async def _drive_gauntlet(
         ),
         name=f"scheduler-heartbeat-{gauntlet_id}",
     )
-    ranked = bool(agent_builds_by_seat)
+    ranked = any(child.agent_builds_by_seat for child in child_games)
 
     try:
         await asyncio.gather(
@@ -228,21 +256,27 @@ async def _drive_gauntlet(
                 _run_one_game(
                     session_factory,
                     gauntlet_id=gauntlet_id,
-                    game_id=gid,
-                    agent_builds_by_seat=agent_builds_by_seat,
+                    game_id=child.game_id,
+                    agent_builds_by_seat=child.agent_builds_by_seat,
                     league_id=league_id,
                     semaphore=semaphore,
                     adapter_factory=adapter_factory,
                     game_executor=game_executor,
                     ranked=ranked,
                 )
-                for gid in child_game_ids
+                for child in child_games
             )
         )
     finally:
         hb_stop.set()
         await hb_task
         scheduler_inflight_gauntlets.dec()
+
+    await _rate_completed_pairs_for_gauntlet(
+        session_factory,
+        gauntlet_id=gauntlet_id,
+        league_id=league_id,
+    )
 
     completed_at = clock()
     async with session_factory() as session, session.begin():
@@ -251,8 +285,36 @@ async def _drive_gauntlet(
     _logger.info(
         EVENT_SCHEDULER_GAUNTLET_COMPLETED,
         gauntlet_id=str(gauntlet_id),
-        games=len(child_game_ids),
+        games=len(child_games),
     )
+
+
+async def _rate_completed_pairs_for_gauntlet(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    gauntlet_id: uuid.UUID,
+    league_id: uuid.UUID,
+) -> None:
+    async with session_factory() as session, session.begin():
+        pair_ids = list(
+            (
+                await session.execute(
+                    select(Game.pair_id)
+                    .where(Game.gauntlet_id == gauntlet_id, Game.pair_id.is_not(None))
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for pair_id in pair_ids:
+            if pair_id is None:
+                continue
+            await update_ratings_for_completed_pair(
+                session,
+                league_id=league_id,
+                pair_id=pair_id,
+            )
 
 
 async def _recover_stale_running(
@@ -387,6 +449,7 @@ __all__ = [
     "SchedulerOptions",
     "Sleeper",
     "TickHook",
+    "agent_builds_by_seat_for_game",
     "default_worker_id",
     "run_scheduler",
 ]

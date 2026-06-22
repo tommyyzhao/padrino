@@ -19,9 +19,13 @@ async def create(
     game_seed: str,
     status: str = "CREATED",
     gauntlet_id: uuid.UUID | None = None,
+    pair_id: uuid.UUID | None = None,
+    pair_leg: int | None = None,
 ) -> Game:
     obj = Game(
         gauntlet_id=gauntlet_id,
+        pair_id=pair_id,
+        pair_leg=pair_leg,
         ruleset_id=ruleset_id,
         game_seed=game_seed,
         status=status,

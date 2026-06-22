@@ -171,11 +171,14 @@ class GauntletRosterSlot(Base):
 
 class Game(Base):
     __tablename__ = "games"
+    __table_args__ = (Index("ix_games_pair_id", "pair_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     gauntlet_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("gauntlets.id"), nullable=True
     )
+    pair_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    pair_leg: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
     game_seed: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)

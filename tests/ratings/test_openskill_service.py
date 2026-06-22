@@ -23,7 +23,9 @@ from padrino.ratings.openskill_service import (
     INITIAL_MU,
     INITIAL_SIGMA,
     GameResult,
+    PairedGameResult,
     update_ratings_for_game,
+    update_ratings_for_mirror_pair,
 )
 
 
@@ -108,6 +110,15 @@ async def _fetch_ratings(
         stmt = select(Rating).where(Rating.league_id == league_id)
         rows = (await session.execute(stmt)).scalars().all()
     return {(r.agent_build_id, r.scope_type, r.scope_value): r for r in rows}
+
+
+def _rating_snapshot(
+    ratings_by_key: dict[tuple[uuid.UUID, str, str], Rating],
+) -> dict[tuple[uuid.UUID, str, str], tuple[float, float, int]]:
+    return {
+        key: (float(row.mu), float(row.sigma), int(row.games))
+        for key, row in ratings_by_key.items()
+    }
 
 
 async def test_town_win_winner_mu_up_loser_mu_down(
@@ -225,6 +236,70 @@ async def test_missing_rating_context_fails_closed_without_canonical_write(
         event_count = (await session.execute(select(RatingEvent))).scalars().all()
     assert rating_count == []
     assert event_count == []
+
+
+async def test_mirror_pair_rating_is_order_independent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league, builds, _unused_game = await _seed(session_factory, hash_prefix="pair-order")
+    seat_factions, leg0_builds = _seven_seat_layout(builds)
+    leg1_builds = {f"P{i + 1:02d}": builds[6 - i].id for i in range(7)}
+    pair_id = uuid.uuid4()
+    async with session_factory() as session, session.begin():
+        leg0 = await games.create(
+            session,
+            ruleset_id="mini7_v1",
+            game_seed="pair-order-seed",
+            status="COMPLETED",
+            pair_id=pair_id,
+            pair_leg=0,
+        )
+        leg1 = await games.create(
+            session,
+            ruleset_id="mini7_v1",
+            game_seed="pair-order-seed",
+            status="COMPLETED",
+            pair_id=pair_id,
+            pair_leg=1,
+        )
+
+    first_input = [
+        PairedGameResult(
+            game_id=leg1.id,
+            winner="MAFIA",
+            seat_factions=seat_factions,
+            agent_builds_by_seat=leg1_builds,
+        ),
+        PairedGameResult(
+            game_id=leg0.id,
+            winner="TOWN",
+            seat_factions=seat_factions,
+            agent_builds_by_seat=leg0_builds,
+        ),
+    ]
+    canonical_input = [first_input[1], first_input[0]]
+
+    async with session_factory() as session, session.begin():
+        await update_ratings_for_mirror_pair(
+            session,
+            league_id=league.id,
+            game_results=first_input,
+        )
+    first_snapshot = _rating_snapshot(await _fetch_ratings(session_factory, league.id))
+
+    async with session_factory() as session, session.begin():
+        await session.execute(delete(RatingEvent))
+        await session.execute(delete(Rating))
+
+    async with session_factory() as session, session.begin():
+        await update_ratings_for_mirror_pair(
+            session,
+            league_id=league.id,
+            game_results=canonical_input,
+        )
+    second_snapshot = _rating_snapshot(await _fetch_ratings(session_factory, league.id))
+
+    assert first_snapshot == second_snapshot
 
 
 async def test_mafia_win_winner_mu_up_loser_mu_down(

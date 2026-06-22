@@ -196,7 +196,7 @@
         "All backend gates pass."
       ],
       "notes": "Gemini's 'Duplicate Bridge Solution' (CRITICAL) + Codex's seat/role-confounding warning. This is a high-leverage rating-quality win unique to a deterministic engine. Same-seed-shared-layout + swapped-roster is the only correct mirror given role_assignment is seeded by sha256(b'roles'+game_seed).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-181",

@@ -31,6 +31,7 @@ _logger = structlog.get_logger("padrino.gauntlets")
 
 MIN_CLONE_COUNT: Final[int] = 1
 MAX_CLONE_COUNT: Final[int] = 100
+MAX_PAIR_COUNT: Final[int] = MAX_CLONE_COUNT // 2
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,14 @@ class GauntletCreated:
 def derive_game_seed(gauntlet_seed: str, index: int) -> str:
     """Return ``sha256_hex(b'game' + gauntlet_seed + index_be4)`` for game ``index``."""
     return hashlib.sha256(b"game" + gauntlet_seed.encode() + index.to_bytes(4, "big")).hexdigest()
+
+
+def derive_pair_id(gauntlet_seed: str, index: int) -> uuid.UUID:
+    """Return a deterministic UUID for mirror pair ``index``."""
+    digest = hashlib.sha256(
+        b"pair" + gauntlet_seed.encode("utf-8") + index.to_bytes(4, "big")
+    ).digest()
+    return uuid.UUID(bytes=digest[:16])
 
 
 async def create_gauntlet(
@@ -109,4 +118,81 @@ async def create_gauntlet(
     return GauntletCreated(gauntlet_id=gauntlet.id, game_ids=tuple(game_ids))
 
 
-__all__ = ["MAX_CLONE_COUNT", "MIN_CLONE_COUNT", "GauntletCreated", "create_gauntlet"]
+async def create_paired_gauntlet(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    ruleset_id: str,
+    prompt_version_id: uuid.UUID,
+    pair_count: int,
+    gauntlet_seed: str,
+    roster: list[uuid.UUID],
+) -> GauntletCreated:
+    """Create a gauntlet whose child games are deterministic mirror pairs.
+
+    Each pair persists two distinct ``games`` rows that share one
+    ``game_seed`` and ``pair_id``. ``pair_leg=0`` uses the roster's seat order;
+    ``pair_leg=1`` is interpreted by the runner scheduler as the mirrored seat
+    order. The stored ``clone_count`` remains the number of child game rows.
+    """
+    ruleset = get_ruleset(ruleset_id)
+    if len(roster) != ruleset.PLAYER_COUNT:
+        raise ValueError(
+            f"roster must have exactly {ruleset.PLAYER_COUNT} entries, got {len(roster)}"
+        )
+    if not (MIN_CLONE_COUNT <= pair_count <= MAX_PAIR_COUNT):
+        raise ValueError(
+            f"pair_count must be in [{MIN_CLONE_COUNT}, {MAX_PAIR_COUNT}], got {pair_count}"
+        )
+
+    from padrino.db.repositories import games as games_repo
+
+    clone_count = pair_count * 2
+    async with session.begin():
+        gauntlet = await gauntlets_repo.create(
+            session,
+            league_id=league_id,
+            ruleset_id=ruleset_id,
+            prompt_version_id=prompt_version_id,
+            clone_count=clone_count,
+            gauntlet_seed=gauntlet_seed,
+            ranked=True,
+        )
+        for slot_index, agent_build_id in enumerate(roster):
+            await gauntlets_repo.add_roster_slot(session, gauntlet.id, slot_index, agent_build_id)
+        game_ids: list[uuid.UUID] = []
+        for pair_index in range(pair_count):
+            pair_id = derive_pair_id(gauntlet_seed, pair_index)
+            game_seed = derive_game_seed(gauntlet_seed, pair_index)
+            for pair_leg in (0, 1):
+                game = await games_repo.create(
+                    session,
+                    ruleset_id=ruleset_id,
+                    game_seed=game_seed,
+                    gauntlet_id=gauntlet.id,
+                    pair_id=pair_id,
+                    pair_leg=pair_leg,
+                )
+                game_ids.append(game.id)
+
+    _logger.info(
+        EVENT_GAUNTLET_CREATED,
+        gauntlet_id=str(gauntlet.id),
+        league_id=str(league_id),
+        ruleset_id=ruleset_id,
+        clone_count=clone_count,
+        games=[str(gid) for gid in game_ids],
+    )
+    return GauntletCreated(gauntlet_id=gauntlet.id, game_ids=tuple(game_ids))
+
+
+__all__ = [
+    "MAX_CLONE_COUNT",
+    "MAX_PAIR_COUNT",
+    "MIN_CLONE_COUNT",
+    "GauntletCreated",
+    "create_gauntlet",
+    "create_paired_gauntlet",
+    "derive_game_seed",
+    "derive_pair_id",
+]
