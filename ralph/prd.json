@@ -172,7 +172,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Validate, do NOT build leasing. Sites: runner/human_durability.rehydrate_active_human_games, human_game_runtime table, runner/human_lane reconnect-grace (padrino_human_reconnect_grace_seconds). Depends on US-230 so the worker that does the resume is the one in the compose stack.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-234a",

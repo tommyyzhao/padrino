@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human restart-resume tests (US-233): validate the single-host worker path by
+  rehydrating from `game_events` with `rehydrate_active_human_games()`, then
+  resuming through `run_human_lane` / the default human executor at the existing
+  event-log head. In tests that run a real resumed game on the shared in-memory
+  SQLite engine, avoid a tight human-lane heartbeat poll loop; wait on an
+  executor-side event and use a long `poll_interval_s` so heartbeat writes do
+  not contend with event persistence on the StaticPool connection.
 - LLM cost fallback persist seam (US-232): keep
   `llm/litellm_adapter._extract_cost` response-local and returning only
   LiteLLM `_hidden_params.response_cost` or `None`. Carry the actual attempted
@@ -2558,4 +2565,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest tests/runner/test_llm_call_cost_persistence.py tests/llm/test_litellm_adapter.py -q`
   -> 34 passed; `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2502
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T16:03 PDT - US-233
+- Added an explicit single-host restart-resume regression for a human-lane game
+  stopped mid-`DAY_1_VOTE`: the test calls
+  `rehydrate_active_human_games()`, resumes through `run_human_lane`, verifies
+  the persisted phase/deadline, asserts the resumed tail chains from the
+  previous head, and checks replayed terminal state equals the live game row.
+- The regression asserts idempotent rehydration of the in-progress phase:
+  `DAY_1_VOTE` has exactly one `PhaseStarted`, one `DayVoteResolved`, one
+  `PhaseResolved`, and one vote submission per seat after resume.
+- Single-host scope note: the human lane needs no distributed lease in this
+  design. The worker heartbeat is a health signal, not a lease; reconnect-grace
+  presence (`padrino_human_reconnect_grace_seconds`) is the only seat/game
+  liveness mechanism, and distributed leasing / multi-host coordination remains
+  explicitly out of scope.
+- Test learning: a tight `run_human_lane(..., poll_interval_s=0.01)` heartbeat
+  loop can contend with a real resumed game on the shared in-memory SQLite
+  StaticPool and produce artificial persistence gaps. For restart-resume tests,
+  wait on the executor and keep the poll interval long.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/runner/test_human_runtime_snapshots.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/runner/test_human_runtime_snapshots.py -q` -> 4 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2503
   passed / 48 skipped / 10 deselected.

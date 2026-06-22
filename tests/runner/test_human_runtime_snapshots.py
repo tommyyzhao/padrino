@@ -38,7 +38,7 @@ from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume
-from padrino.runner.human_durability import rehydrate_active_human_games
+from padrino.runner.human_durability import rehydrate_active_human_games, replay_state_from_rows
 from padrino.runner.human_lane import _default_human_game_executor, run_human_lane
 from padrino.settings import Settings
 from tests.conftest import make_villager_script, mini7_phase_ids
@@ -377,3 +377,87 @@ async def test_human_lane_rehydrates_running_games_on_startup(
     assert resume.deadline_at == _DEADLINE
     assert resume.buffer_snapshot == buffer
     assert resume.event_log.head_hash == expected.event_log.head_hash
+
+
+async def test_worker_restart_resume_keeps_hash_chain_and_phase_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Simulate a single-host human worker restart in the middle of a phase."""
+    game_id = await _seed_running_vote_phase(session_factory)
+    prefix_rows = await _event_rows(session_factory, game_id)
+
+    # Fresh worker startup explicitly rebuilds state from the durable rows.
+    rehydrated = await rehydrate_active_human_games(session_factory)
+    assert len(rehydrated) == 1
+    resume = rehydrated[0]
+    assert resume.game_id == game_id
+    assert resume.phase == _VOTE_PHASE
+    assert resume.deadline_at == _DEADLINE
+    assert resume.event_log.head_hash == prefix_rows[-1].event_hash
+
+    settings = _fast_settings()
+    default_executor = _default_human_game_executor(settings)
+    finished = asyncio.Event()
+
+    async def executor(
+        config: GameConfig, persistence: GamePersistence, adapter: LlmAdapter
+    ) -> None:
+        await default_executor(config, persistence, adapter)
+        finished.set()
+
+    stop = asyncio.Event()
+    lane = asyncio.create_task(
+        run_human_lane(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_draw_adapter,
+            game_executor=executor,
+            poll_interval_s=60.0,
+            settings=settings,
+            worker_id="restart-resume-test",
+        )
+    )
+    try:
+        await asyncio.wait_for(finished.wait(), timeout=5.0)
+    finally:
+        stop.set()
+        await lane
+
+    rows = await _event_rows(session_factory, game_id)
+    assert len(rows) > len(prefix_rows)
+    sequences = [row.sequence for row in rows]
+    missing = [seq for seq in range(max(sequences) + 1) if seq not in set(sequences)]
+    first_missing = missing[0] if missing else None
+    gap_context = [
+        (row.sequence, row.event_type, row.phase)
+        for row in rows
+        if first_missing is not None and first_missing - 3 <= row.sequence <= first_missing + 3
+    ]
+    assert sequences == list(range(len(rows))), (missing, gap_context)
+    assert [row.event_hash for row in rows[: len(prefix_rows)]] == [
+        row.event_hash for row in prefix_rows
+    ]
+
+    resumed_tail = rows[len(prefix_rows) :]
+    assert resumed_tail[0].prev_event_hash == prefix_rows[-1].event_hash
+
+    replayed_state, replayed_log = replay_state_from_rows(rows)
+    async with session_factory() as session:
+        game = await session.get(Game, game_id)
+    assert game is not None
+    assert game.status == "COMPLETED"
+    assert isinstance(game.terminal_result, dict)
+    assert game.terminal_result["winner"] == replayed_state.terminal_result
+    assert game.event_hash_head == replayed_log.head_hash
+
+    assert sum(row.event_type == "PhaseStarted" and row.phase == _VOTE_PHASE for row in rows) == 1
+    assert (
+        sum(row.event_type == "DayVoteResolved" and row.phase == _VOTE_PHASE for row in rows) == 1
+    )
+    assert sum(row.event_type == "PhaseResolved" and row.phase == _VOTE_PHASE for row in rows) == 1
+    assert (
+        sum(row.event_type == "VoteSubmitted" and row.phase == _VOTE_PHASE for row in rows)
+        == mini7_v1.PLAYER_COUNT
+    )
+    assert await rehydrate_active_human_games(session_factory) == []
