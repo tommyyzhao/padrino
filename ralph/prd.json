@@ -88,7 +88,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Backend read-aggregation only - this ADDS a new FACTION-scope query (public_leaderboard.py references FACTION only via the imported constant today; both card queries pin SCOPE_GLOBAL/SCOPE_VALUE_GLOBAL at L607-608, L662-663). Sites: ratings/public_leaderboard.py _canonical_cards/_placement_cards (GLOBAL-only today) + api/routes/public.py PublicLeaderboardResponse. Feeds the frontend leaderboard (US-229).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-229",

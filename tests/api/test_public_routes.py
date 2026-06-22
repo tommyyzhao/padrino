@@ -28,7 +28,7 @@ from padrino.api.auth import (
     generate_raw_key,
 )
 from padrino.api.routes.public import PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS
-from padrino.core.enums import RatingContextKind
+from padrino.core.enums import Faction, RatingContextKind
 from padrino.db.models import AgentBuild, PlacementRating, Rating, SoloRateRating
 from padrino.db.repositories import (
     agent_builds,
@@ -44,6 +44,7 @@ from padrino.db.repositories import (
     ingested_games as ingested_games_repo,
 )
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
+from padrino.ratings.openskill_service import SCOPE_FACTION, SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL
 from padrino.ratings.public_leaderboard import RATING_MODEL, reset_cache
 from padrino.settings import get_settings
 
@@ -301,8 +302,8 @@ async def _seed_context_card_rows(
                     ruleset_id="mini7_v1",
                     rating_context_id=canonical_context.id,
                     agent_build_id=canonical_ranked.id,
-                    scope_type="GLOBAL",
-                    scope_value="global",
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
                     mu=31.2,
                     sigma=2.1,
                     conservative_score=24.9,
@@ -312,9 +313,33 @@ async def _seed_context_card_rows(
                     league_id=canonical_league.id,
                     ruleset_id="mini7_v1",
                     rating_context_id=canonical_context.id,
+                    agent_build_id=canonical_ranked.id,
+                    scope_type=SCOPE_FACTION,
+                    scope_value=Faction.TOWN.value,
+                    mu=29.0,
+                    sigma=2.0,
+                    conservative_score=23.0,
+                    games=12,
+                ),
+                Rating(
+                    league_id=canonical_league.id,
+                    ruleset_id="mini7_v1",
+                    rating_context_id=canonical_context.id,
+                    agent_build_id=canonical_ranked.id,
+                    scope_type=SCOPE_FACTION,
+                    scope_value=Faction.MAFIA.value,
+                    mu=28.0,
+                    sigma=2.5,
+                    conservative_score=20.5,
+                    games=12,
+                ),
+                Rating(
+                    league_id=canonical_league.id,
+                    ruleset_id="mini7_v1",
+                    rating_context_id=canonical_context.id,
                     agent_build_id=canonical_provisional.id,
-                    scope_type="GLOBAL",
-                    scope_value="global",
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
                     mu=50.0,
                     sigma=1.0,
                     conservative_score=47.0,
@@ -431,12 +456,22 @@ async def test_leaderboard_returns_separated_context_cards_without_cross_sort(
     assert {card["section_label"] for card in experimental} == {"Experimental context"}
     assert {card["context_kind"] for card in experimental} == {"PLACEMENT", "SOLO_RATE"}
 
-    canonical_ranked = next(card for card in canonical if card["display_name"] == "Atlas ranked")
-    canonical_provisional = next(
-        card for card in canonical if card["display_name"] == "Atlas provisional"
-    )
+    canonical_by_scope = {
+        (card["display_name"], card["scope_type"], card["scope_value"]): card for card in canonical
+    }
+    assert {
+        ("Atlas ranked", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL),
+        ("Atlas ranked", SCOPE_FACTION, Faction.TOWN.value),
+        ("Atlas ranked", SCOPE_FACTION, Faction.MAFIA.value),
+    } <= set(canonical_by_scope)
+    canonical_ranked = canonical_by_scope[("Atlas ranked", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL)]
+    canonical_provisional = canonical_by_scope[
+        ("Atlas provisional", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL)
+    ]
     assert canonical_ranked["rank"] == 1
     assert canonical_ranked["provisional"] is False
+    assert canonical_by_scope[("Atlas ranked", SCOPE_FACTION, Faction.TOWN.value)]["rank"] == 1
+    assert canonical_by_scope[("Atlas ranked", SCOPE_FACTION, Faction.MAFIA.value)]["rank"] == 1
     assert canonical_provisional["rank"] is None
     assert canonical_provisional["provisional"] is True
     assert canonical_provisional["conservative_score"] > canonical_ranked["conservative_score"]

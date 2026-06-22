@@ -26,7 +26,7 @@ from datetime import datetime
 from typing import Any, Final, Literal
 
 from openskill.models import PlackettLuce
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import LeagueKind, RatingContextKind
@@ -45,6 +45,7 @@ from padrino.db.models import (
 from padrino.ratings.openskill_service import (
     INITIAL_MU,
     INITIAL_SIGMA,
+    SCOPE_FACTION,
     SCOPE_GLOBAL,
     SCOPE_VALUE_GLOBAL,
 )
@@ -604,8 +605,13 @@ async def _canonical_cards(
             RatingContext.kind == RatingContextKind.CANONICAL_TEAM.value,
             RatingContext.is_canonical.is_(True),
             Rating.ruleset_id == RatingContext.ruleset_id,
-            Rating.scope_type == SCOPE_GLOBAL,
-            Rating.scope_value == SCOPE_VALUE_GLOBAL,
+            or_(
+                and_(
+                    Rating.scope_type == SCOPE_GLOBAL,
+                    Rating.scope_value == SCOPE_VALUE_GLOBAL,
+                ),
+                Rating.scope_type == SCOPE_FACTION,
+            ),
         )
     )
     if ruleset_id is not None:

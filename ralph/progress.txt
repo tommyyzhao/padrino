@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Public leaderboard context cards (US-228): canonical cards intentionally
+  include only the `GLOBAL/global` row plus every persisted `FACTION` scope for
+  a CANONICAL_TEAM `RatingContext`; placement and solo cards stay in sibling
+  experimental tables. Rank grouping must keep `scope_type/scope_value` in the
+  group key so GLOBAL, TOWN, MAFIA, and any future faction cards never share
+  rank space.
 - Model rollup factions (US-227): `ratings/model_rollup.py` now treats
   persisted `Rating.scope_type == FACTION` `scope_value`s as data and exposes
   the primary aggregate as `ModelLeaderboardEntry.factions`. Keep `town` /
@@ -2397,5 +2403,25 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   focused GREEN
   `uv run pytest tests/api/test_public_models.py -q` -> 14 passed;
   `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2482
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-22T15:20 PDT - US-228
+- Surfaced canonical FACTION-scope rating rows as public leaderboard cards by
+  broadening `_canonical_cards` from `GLOBAL/global` only to `GLOBAL/global`
+  plus every persisted `FACTION` scope for canonical scientific rating rows.
+- Extended the public leaderboard route regression fixture to seed
+  `GLOBAL/global`, `FACTION/TOWN`, and `FACTION/MAFIA` rows for one model and
+  assert the API returns three separate canonical cards with independent ranks,
+  while PLACEMENT and SOLO_RATE remain experimental cards.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `tests/api/test_public_routes.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_public_routes.py::test_leaderboard_returns_separated_context_cards_without_cross_sort -q`
+  failed on missing FACTION cards; focused GREEN same command -> 1 passed;
+  focused GREEN `uv run pytest tests/api/test_public_routes.py -q` -> 17
+  passed; `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2482
   passed / 47 skipped / 10 deselected.
