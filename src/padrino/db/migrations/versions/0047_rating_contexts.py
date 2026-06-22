@@ -1,9 +1,17 @@
-"""RatingContext substrate and additive canonical markers (US-171).
+"""RatingContext substrate and additive canonical markers (US-171, US-223).
 
 Adds first-class rating contexts keyed only by ``(ruleset_id, kind)``. The
 existing scientific ``ratings`` / ``rating_events`` tables remain reached by
 ``League.kind`` plus the runner's fail-closed rating chokepoint; the new
 ``rating_context_id`` columns are additive markers, not a competing write path.
+
+This migration is a frozen historical snapshot. It seeds/backfills only the two
+canonical rulesets that had historical scientific rating rows when 0047 shipped:
+``mini7_v1`` and ``bench10_v1``. Built-in rulesets introduced with or after this
+revision are materialized at runtime through
+``padrino.db.repositories.rating_contexts.ensure_declared_context``. If a future
+ruleset ever needs a historical backfill, add a new forward migration with its
+own frozen literals instead of importing live core declarations here.
 
 Revision ID: 0047
 Revises: 0046
@@ -21,13 +29,26 @@ from typing import Any
 import sqlalchemy as sa
 from alembic import op
 
-from padrino.core.enums import RatingContextKind
-from padrino.core.rulesets import get_ruleset
-
 revision: str = "0047"
 down_revision: str | None = "0046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+_FROZEN_0047_CREATED_AT = datetime(2026, 6, 21, tzinfo=UTC)
+_FROZEN_0047_CANONICAL_CONTEXTS: dict[str, dict[str, Any]] = {
+    "mini7_v1": {
+        "id": uuid.UUID("04700000-0000-4000-8000-000000000007"),
+        "kind": "CANONICAL_TEAM",
+        "is_canonical": True,
+        "display_label": "Mini 7 canonical team",
+    },
+    "bench10_v1": {
+        "id": uuid.UUID("04700000-0000-4000-8000-000000000010"),
+        "kind": "CANONICAL_TEAM",
+        "is_canonical": True,
+        "display_label": "Bench 10 canonical team",
+    },
+}
 
 
 def _uuid_param(value: uuid.UUID) -> str:
@@ -100,20 +121,6 @@ def upgrade() -> None:
     _stamp_existing_canonical_rows()
 
 
-def _declared_canonical_context(ruleset_id: str) -> tuple[str, str] | None:
-    try:
-        ruleset = get_ruleset(ruleset_id)
-    except ValueError:
-        return None
-
-    kind = getattr(ruleset, "RATING_CONTEXT_KIND", None)
-    is_canonical = bool(getattr(ruleset, "IS_CANONICAL", False))
-    display_label = str(getattr(ruleset, "RATING_CONTEXT_DISPLAY_LABEL", "")).strip()
-    if kind is not RatingContextKind.CANONICAL_TEAM or not is_canonical or not display_label:
-        return None
-    return kind.value, display_label
-
-
 def _seed_existing_scientific_canonical_contexts() -> None:
     bind = op.get_bind()
     ruleset_rows = bind.execute(
@@ -121,21 +128,19 @@ def _seed_existing_scientific_canonical_contexts() -> None:
             "SELECT DISTINCT ruleset_id FROM leagues WHERE kind = 'SCIENTIFIC' ORDER BY ruleset_id"
         )
     ).all()
+    present_ruleset_ids = {str(row.ruleset_id) for row in ruleset_rows}
     rows = []
-    now = datetime.now(UTC)
-    for row in ruleset_rows:
-        declared = _declared_canonical_context(str(row.ruleset_id))
-        if declared is None:
+    for ruleset_id, context in _FROZEN_0047_CANONICAL_CONTEXTS.items():
+        if ruleset_id not in present_ruleset_ids:
             continue
-        kind, display_label = declared
         rows.append(
             {
-                "id": uuid.uuid4(),
-                "kind": kind,
-                "ruleset_id": row.ruleset_id,
-                "is_canonical": True,
-                "display_label": display_label,
-                "created_at": now,
+                "id": context["id"],
+                "kind": context["kind"],
+                "ruleset_id": ruleset_id,
+                "is_canonical": context["is_canonical"],
+                "display_label": context["display_label"],
+                "created_at": _FROZEN_0047_CREATED_AT,
             }
         )
     if not rows:

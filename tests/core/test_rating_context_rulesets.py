@@ -57,6 +57,11 @@ def test_builtin_rulesets_declare_canonical_team_context() -> None:
         assert ruleset.RATING_CONTEXT_DISPLAY_LABEL
 
 
+def test_legacy_canonical_display_labels_pin_0047_snapshot() -> None:
+    assert mini7_v1.RATING_CONTEXT_DISPLAY_LABEL == "Mini 7 canonical team"
+    assert bench10_v1.RATING_CONTEXT_DISPLAY_LABEL == "Bench 10 canonical team"
+
+
 def test_builtin_canonical_rulesets_are_canonical_pure() -> None:
     for ruleset_id in (
         mini7_v1.RULESET_ID,

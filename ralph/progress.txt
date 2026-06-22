@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Frozen migration snapshots (US-223): historical migrations must not import
+  live core/ruleset declarations. Seed and backfill only frozen literal rows
+  that existed at the migration's ship point; newer rulesets should be
+  materialized by the runtime `ensure_declared_context` path unless a future
+  forward migration adds its own frozen historical backfill.
 - Placement terminal resilience (US-222): keep experimental PLACEMENT rating
   writes outside the `GameTerminated` event/status transaction, and let the
   direct rating service remain strict for malformed Plackett-Luce inputs. The
@@ -2211,4 +2216,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2465 passed / 47 skipped / 10
+  deselected.
+
+## 2026-06-21T22:40 PDT - US-223
+- Restored migration `0047` as a frozen historical snapshot: it no longer
+  imports live core code, seeds only the 0047-era `mini7_v1` / `bench10_v1`
+  canonical context literals, and uses frozen context IDs plus a frozen
+  timestamp for those seeded rows.
+- Documented in the migration that newly shipped canonical rulesets are
+  materialized by `rating_contexts.ensure_declared_context`; any future
+  historical backfill belongs in a new forward migration with its own frozen
+  literals.
+- Extended migration coverage so artificial pre-0047 rows for `roleblock10_v1`,
+  `sk12_v1`, and `jester8_v1` remain unstamped, while mini7/bench10 rows are
+  stamped without re-rating. Added a static 0047 no-core-import test and pinned
+  the exact mini7/bench10 display-label strings.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/migrations/versions/0047_rating_contexts.py`,
+  `tests/db/test_migration_0047_rating_contexts.py`,
+  `tests/core/test_rating_context_rulesets.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): targeted RED
+  `uv run pytest tests/db/test_migration_0047_rating_contexts.py tests/core/test_rating_context_rulesets.py::test_legacy_canonical_display_labels_pin_0047_snapshot -q`
+  -> 2 failed / 2 passed before the migration fix; targeted GREEN same command
+  -> 4 passed; adjacent
+  `uv run pytest tests/db/test_migration_0047_rating_contexts.py tests/db/test_migrations.py tests/db/test_migrations_all_dialects.py tests/core/test_rating_context_rulesets.py -q`
+  -> 22 passed / 2 skipped (Postgres skipped because Docker was unavailable);
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2471 passed / 47 skipped / 10
   deselected.

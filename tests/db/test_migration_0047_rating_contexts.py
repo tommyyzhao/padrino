@@ -37,10 +37,17 @@ def _sync_url(url: str) -> str:
     return url.replace("sqlite+aiosqlite://", "sqlite://", 1)
 
 
-CANONICAL_FIXTURE_RULESETS: tuple[tuple[str, str], ...] = (
-    ("mini7_v1", "TOWN"),
-    ("bench10_v1", "MAFIA"),
-    ("roleblock10_v1", "TOWN"),
+FROZEN_0047_CONTEXT_LABELS: dict[str, str] = {
+    "mini7_v1": "Mini 7 canonical team",
+    "bench10_v1": "Bench 10 canonical team",
+}
+
+RATING_FIXTURE_RULESETS: tuple[tuple[str, str, bool], ...] = (
+    ("mini7_v1", "TOWN", True),
+    ("bench10_v1", "MAFIA", True),
+    ("roleblock10_v1", "TOWN", False),
+    ("sk12_v1", "SERIAL_KILLER", False),
+    ("jester8_v1", "JESTER", False),
 )
 
 
@@ -98,7 +105,7 @@ def _seed_pre_0047_ratings(url: str) -> dict[str, object]:
                 },
             )
 
-            for ruleset_id, winner in CANONICAL_FIXTURE_RULESETS:
+            for ruleset_id, winner, should_stamp in RATING_FIXTURE_RULESETS:
                 league_id = uuid.uuid4().hex
                 game_id = uuid.uuid4().hex
                 global_rating_id = uuid.uuid4().hex
@@ -174,10 +181,20 @@ def _seed_pre_0047_ratings(url: str) -> dict[str, object]:
                 events = seeded["events"]
                 assert isinstance(ratings, dict)
                 assert isinstance(events, dict)
-                ratings[global_rating_id] = (ruleset_id, 25.5, 7.5, 3.0, 4)
-                ratings[faction_rating_id] = (ruleset_id, 26.5, 6.5, 7.0, 5)
-                events[global_event_id] = (ruleset_id, f"{ruleset_id}-seed", winner)
-                events[faction_event_id] = (ruleset_id, f"{ruleset_id}-seed", winner)
+                ratings[global_rating_id] = (ruleset_id, 25.5, 7.5, 3.0, 4, should_stamp)
+                ratings[faction_rating_id] = (ruleset_id, 26.5, 6.5, 7.0, 5, should_stamp)
+                events[global_event_id] = (
+                    ruleset_id,
+                    f"{ruleset_id}-seed",
+                    winner,
+                    should_stamp,
+                )
+                events[faction_event_id] = (
+                    ruleset_id,
+                    f"{ruleset_id}-seed",
+                    winner,
+                    should_stamp,
+                )
     finally:
         engine.dispose()
     return seeded
@@ -207,7 +224,14 @@ def _rating_numeric_bytes(url: str) -> list[tuple[str, str, str, str]]:
         engine.dispose()
 
 
-def test_0047_stamps_existing_scientific_ratings_without_rerating(
+def test_0047_migration_is_frozen_and_does_not_import_live_core() -> None:
+    src = (REPO_ROOT / "src/padrino/db/migrations/versions/0047_rating_contexts.py").read_text()
+
+    assert "from padrino.core" not in src
+    assert "import padrino.core" not in src
+
+
+def test_0047_stamps_only_frozen_legacy_scientific_ratings_without_rerating(
     sqlite_db_url: str,
 ) -> None:
     cfg = _alembic_config()
@@ -221,14 +245,16 @@ def test_0047_stamps_existing_scientific_ratings_without_rerating(
         with engine.connect() as conn:
             contexts = conn.execute(
                 text(
-                    "SELECT id, ruleset_id, kind, is_canonical FROM rating_contexts "
+                    "SELECT id, ruleset_id, kind, is_canonical, display_label "
+                    "FROM rating_contexts "
                     "WHERE kind = 'CANONICAL_TEAM'"
                 )
             ).all()
             context_by_ruleset = {row.ruleset_id: row for row in contexts}
-            expected_rulesets = {ruleset_id for ruleset_id, _winner in CANONICAL_FIXTURE_RULESETS}
-            assert set(context_by_ruleset) >= expected_rulesets
+            assert set(context_by_ruleset) == set(FROZEN_0047_CONTEXT_LABELS)
             assert all(bool(row.is_canonical) for row in context_by_ruleset.values())
+            for ruleset_id, display_label in FROZEN_0047_CONTEXT_LABELS.items():
+                assert context_by_ruleset[ruleset_id].display_label == display_label
 
             rating_rows = conn.execute(
                 text(
@@ -240,9 +266,15 @@ def test_0047_stamps_existing_scientific_ratings_without_rerating(
             assert isinstance(seeded_ratings, dict)
             assert len(rating_rows) == len(seeded_ratings)
             for row in rating_rows:
-                ruleset_id, mu, sigma, conservative_score, games = seeded_ratings[str(row.id)]
-                assert row.ruleset_id == ruleset_id
-                assert str(row.rating_context_id) == str(context_by_ruleset[ruleset_id].id)
+                ruleset_id, mu, sigma, conservative_score, games, should_stamp = seeded_ratings[
+                    str(row.id)
+                ]
+                if should_stamp:
+                    assert row.ruleset_id == ruleset_id
+                    assert str(row.rating_context_id) == str(context_by_ruleset[ruleset_id].id)
+                else:
+                    assert row.ruleset_id is None
+                    assert row.rating_context_id is None
                 assert row.mu == pytest.approx(mu)
                 assert row.sigma == pytest.approx(sigma)
                 assert row.conservative_score == pytest.approx(conservative_score)
@@ -258,11 +290,17 @@ def test_0047_stamps_existing_scientific_ratings_without_rerating(
             assert isinstance(seeded_events, dict)
             assert len(event_rows) == len(seeded_events)
             for row in event_rows:
-                ruleset_id, game_seed, team_outcome = seeded_events[str(row.id)]
-                assert row.ruleset_id == ruleset_id
-                assert str(row.rating_context_id) == str(context_by_ruleset[ruleset_id].id)
-                assert row.game_seed == game_seed
-                assert row.team_outcome == team_outcome
+                ruleset_id, game_seed, team_outcome, should_stamp = seeded_events[str(row.id)]
+                if should_stamp:
+                    assert row.ruleset_id == ruleset_id
+                    assert str(row.rating_context_id) == str(context_by_ruleset[ruleset_id].id)
+                    assert row.game_seed == game_seed
+                    assert row.team_outcome == team_outcome
+                else:
+                    assert row.ruleset_id is None
+                    assert row.rating_context_id is None
+                    assert row.game_seed is None
+                    assert row.team_outcome is None
     finally:
         engine.dispose()
 

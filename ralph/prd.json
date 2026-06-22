@@ -515,7 +515,7 @@
         "All backend gates pass (including test_migrations_all_dialects)."
       ],
       "notes": "Evidence: 0047_rating_contexts.py:24-25/103-153/266-320, repositories/rating_contexts.py (runtime ensure_declared_context). Migrations must be frozen historical artifacts - never import mutable core. The round-1 'data-driven backfill' ask was over-scoped for v1 (only mini7/bench10 have pre-existing rows); frozen literals are correct and restore determinism.",
-      "passes": false
+      "passes": true
     }
   ]
 }
