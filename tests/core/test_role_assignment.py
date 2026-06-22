@@ -12,6 +12,7 @@ from padrino.core.rulesets import (
     deception13_v1,
     jester8_v1,
     mini7_v1,
+    ninja13_v1,
     roleblock10_v1,
     visit12_v1,
 )
@@ -92,6 +93,22 @@ def test_visit12_role_counts_include_tracker_and_watcher() -> None:
         assert counts[Role.TRACKER] == 1
         assert counts[Role.WATCHER] == 1
         assert counts[Role.VILLAGER] == 5
+
+
+def test_ninja13_role_counts_include_one_ninja() -> None:
+    for i in range(50):
+        seats = assign_roles(f"ninja-trial-{i}", ninja13_v1)
+        counts = Counter(s.role for s in seats)
+        assert counts[Role.NINJA] == 1
+        assert counts[Role.MAFIA_GOON] == 1
+        assert counts[Role.MAFIA_ROLEBLOCKER] == 1
+        assert counts[Role.DETECTIVE] == 1
+        assert counts[Role.DOCTOR] == 1
+        assert counts[Role.TRACKER] == 1
+        assert counts[Role.WATCHER] == 1
+        assert counts[Role.VILLAGER] == 6
+        ninja = next(seat for seat in seats if seat.role is Role.NINJA)
+        assert ninja.faction is Faction.MAFIA
 
 
 def test_jester8_role_counts_include_one_jester() -> None:

@@ -18,6 +18,7 @@ class Role(StrEnum):
     """Specific role assigned to a seat."""
 
     MAFIA_GOON = "MAFIA_GOON"
+    NINJA = "NINJA"
     GODFATHER = "GODFATHER"
     MAFIA_ROLEBLOCKER = "MAFIA_ROLEBLOCKER"
     FRAMER = "FRAMER"

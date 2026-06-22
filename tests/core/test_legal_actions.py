@@ -13,6 +13,7 @@ from padrino.core.rulesets import (
     deception13_v1,
     jester8_v1,
     mini7_v1,
+    ninja13_v1,
     roleblock10_v1,
     sk12_v1,
     visit12_v1,
@@ -279,6 +280,15 @@ def test_night_actions_emit_new_active_role_actions(
     assert legal.legal_targets == ["P01", "P02", "P03", "P04", "P05", "P06", "P07"]
 
 
+def test_night_actions_ninja_uses_factional_kill_targets() -> None:
+    actor = _seat("P08", 7, Role.NINJA, Faction.MAFIA)
+    seats = (*SEATS, actor)
+    phase = Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0)
+    legal = legal_actions_for(_state(phase, seats), actor)
+    assert legal.allowed_action_types == [ActionType.MAFIA_KILL]
+    assert legal.legal_targets == ["P03", "P04", "P05", "P06", "P07"]
+
+
 def test_spent_janitor_has_no_clean_action() -> None:
     actor = _seat("P08", 7, Role.JANITOR, Faction.MAFIA).model_copy(
         update={"janitor_clean_shots_remaining": 0}
@@ -363,6 +373,9 @@ def _canonical_seats(ruleset_id: str) -> tuple[Seat, ...]:
     elif ruleset_id == visit12_v1.RULESET_ID:
         role_counts = visit12_v1.ROLE_COUNTS
         role_factions = visit12_v1.ROLE_FACTIONS
+    elif ruleset_id == ninja13_v1.RULESET_ID:
+        role_counts = ninja13_v1.ROLE_COUNTS
+        role_factions = ninja13_v1.ROLE_FACTIONS
     elif ruleset_id == sk12_v1.RULESET_ID:
         role_counts = sk12_v1.ROLE_COUNTS
         role_factions = sk12_v1.ROLE_FACTIONS
@@ -407,6 +420,10 @@ def _canonical_seats(ruleset_id: str) -> tuple[Seat, ...]:
         (
             visit12_v1.RULESET_ID,
             '{"P01":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10","P11","P12"]},"P02":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10","P11","P12"]},"P03":{"allowed_action_types":["ROLEBLOCK"],"legal_targets":["P01","P02","P04","P05","P06","P07","P08","P09","P10","P11","P12"]},"P04":{"allowed_action_types":["INVESTIGATE"],"legal_targets":["P01","P02","P03","P05","P06","P07","P08","P09","P10","P11","P12"]},"P05":{"allowed_action_types":["PROTECT"],"legal_targets":["P01","P02","P03","P04","P05","P06","P07","P08","P09","P10","P11","P12"]},"P06":{"allowed_action_types":["TRACK"],"legal_targets":["P01","P02","P03","P04","P05","P07","P08","P09","P10","P11","P12"]},"P07":{"allowed_action_types":["WATCH"],"legal_targets":["P01","P02","P03","P04","P05","P06","P08","P09","P10","P11","P12"]},"P08":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P09":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P10":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P11":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P12":{"allowed_action_types":["NOOP"],"legal_targets":[]}}',
+        ),
+        (
+            ninja13_v1.RULESET_ID,
+            '{"P01":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P02":{"allowed_action_types":["MAFIA_KILL"],"legal_targets":["P04","P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P03":{"allowed_action_types":["ROLEBLOCK"],"legal_targets":["P01","P02","P04","P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P04":{"allowed_action_types":["INVESTIGATE"],"legal_targets":["P01","P02","P03","P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P05":{"allowed_action_types":["PROTECT"],"legal_targets":["P01","P02","P03","P04","P05","P06","P07","P08","P09","P10","P11","P12","P13"]},"P06":{"allowed_action_types":["TRACK"],"legal_targets":["P01","P02","P03","P04","P05","P07","P08","P09","P10","P11","P12","P13"]},"P07":{"allowed_action_types":["WATCH"],"legal_targets":["P01","P02","P03","P04","P05","P06","P08","P09","P10","P11","P12","P13"]},"P08":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P09":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P10":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P11":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P12":{"allowed_action_types":["NOOP"],"legal_targets":[]},"P13":{"allowed_action_types":["NOOP"],"legal_targets":[]}}',
         ),
         (
             sk12_v1.RULESET_ID,

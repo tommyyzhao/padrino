@@ -56,7 +56,7 @@ _FUTURE_NIGHT_ROLE_ACTIONS: dict[Role, ActionType] = {
     Role.JANITOR: ActionType.CLEAN,
     Role.SERIAL_KILLER: ActionType.SERIAL_KILL,
 }
-_FACTIONAL_KILL_ROLES = frozenset({Role.MAFIA_GOON, Role.GODFATHER})
+_FACTIONAL_KILL_ROLES = frozenset({Role.MAFIA_GOON, Role.NINJA, Role.GODFATHER})
 
 
 def action_requires_target(action_type: ActionType) -> bool:

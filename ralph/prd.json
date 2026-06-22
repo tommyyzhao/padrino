@@ -316,7 +316,7 @@
         "All backend gates pass."
       ],
       "notes": "Ninja only matters once Tracker/Watcher exist; split from US-187 so the visit-recording read tier ships and is tested before the suppression counter.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-188",

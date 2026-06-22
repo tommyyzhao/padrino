@@ -471,7 +471,17 @@ def _blocked_feedback(intent: NightActionIntent) -> NightFeedback:
     )
 
 
+def _suppresses_visit(state: GameState, intent: NightActionIntent) -> bool:
+    actor = state.seat_by_public_id(intent.actor)
+    return (
+        actor is not None
+        and actor.role is Role.NINJA
+        and intent.kind is NightActionKind.FACTIONAL_KILL
+    )
+
+
 def _record_visit(
+    state: GameState,
     visits: list[VisitRecord],
     intent: NightActionIntent,
     *,
@@ -481,6 +491,8 @@ def _record_visit(
     row = RESOLUTION_MATRIX[intent.kind]
     visit_target = target if target is not None else intent.target
     if visit_target is None:
+        return
+    if _suppresses_visit(state, intent):
         return
     if row.records_visit and (not blocked or row.records_visit_when_blocked):
         visits.append(
@@ -507,11 +519,12 @@ def _apply_roleblocks(
 ) -> tuple[str, ...]:
     blocked = {intent.target for intent in _tier_intents(intents, NightActionKind.ROLEBLOCK)}
     for intent in _tier_intents(intents, NightActionKind.ROLEBLOCK):
-        _record_visit(visits, intent)
+        _record_visit(state, visits, intent)
     return _sort_ids(state, {pid for pid in blocked if pid is not None})
 
 
 def _apply_redirects(
+    state: GameState,
     intents: Sequence[NightActionIntent],
     blocked_actor_ids: tuple[str, ...],
     visits: list[VisitRecord],
@@ -522,12 +535,12 @@ def _apply_redirects(
     for intent in _tier_intents(intents, NightActionKind.REDIRECT):
         if intent.actor in blocked:
             feedback.append(_blocked_feedback(intent))
-            _record_visit(visits, intent, blocked=True)
+            _record_visit(state, visits, intent, blocked=True)
             continue
         assert intent.target is not None
         assert intent.redirect_target is not None
         redirects.setdefault(intent.target, intent.redirect_target)
-        _record_visit(visits, intent)
+        _record_visit(state, visits, intent)
     return redirects
 
 
@@ -557,7 +570,7 @@ def _active_intents_after_blocks_and_redirects(
         row = RESOLUTION_MATRIX[intent.kind]
         if intent.actor in blocked and row.blocked is MatrixEffect.NULLIFIES_ACTION:
             feedback.append(_blocked_feedback(intent))
-            _record_visit(visits, intent, blocked=True)
+            _record_visit(state, visits, intent, blocked=True)
             continue
 
         retargeted = _retarget_if_redirected(intent, redirects)
@@ -570,7 +583,7 @@ def _active_intents_after_blocks_and_redirects(
             retargeted.redirect_target,
         ):
             continue
-        _record_visit(visits, retargeted)
+        _record_visit(state, visits, retargeted)
         active.append(retargeted)
     return tuple(active)
 
@@ -823,7 +836,7 @@ def resolve_night_actions(
     feedback: list[NightFeedback] = []
 
     blocked_actor_ids = _apply_roleblocks(state, valid_intents, visits)
-    redirects = _apply_redirects(valid_intents, blocked_actor_ids, visits, feedback)
+    redirects = _apply_redirects(state, valid_intents, blocked_actor_ids, visits, feedback)
     active_intents = _active_intents_after_blocks_and_redirects(
         state,
         valid_intents,

@@ -12,6 +12,7 @@ from padrino.core.rulesets import (
     get_ruleset,
     jester8_v1,
     mini7_v1,
+    ninja13_v1,
     roleblock10_v1,
     sk12_v1,
     visit12_v1,
@@ -30,6 +31,7 @@ def test_builtin_rulesets_declare_canonical_team_context() -> None:
         roleblock10_v1.RULESET_ID,
         deception13_v1.RULESET_ID,
         visit12_v1.RULESET_ID,
+        ninja13_v1.RULESET_ID,
     ):
         ruleset = get_ruleset(ruleset_id)
 
@@ -45,6 +47,7 @@ def test_builtin_canonical_rulesets_are_canonical_pure() -> None:
         roleblock10_v1.RULESET_ID,
         deception13_v1.RULESET_ID,
         visit12_v1.RULESET_ID,
+        ninja13_v1.RULESET_ID,
     ):
         assert_ruleset_canonical_pure(get_ruleset(ruleset_id))
 

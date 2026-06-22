@@ -21,6 +21,7 @@ BUILTIN_RULESET_IDS: tuple[str, ...] = (
     "roleblock10_v1",
     "deception13_v1",
     "visit12_v1",
+    "ninja13_v1",
     "sk12_v1",
     "jester8_v1",
 )
@@ -77,6 +78,10 @@ def get_ruleset(ruleset_id: str) -> Ruleset:
         from padrino.core.rulesets import visit12_v1
 
         return visit12_v1
+    elif ruleset_id == "ninja13_v1":
+        from padrino.core.rulesets import ninja13_v1
+
+        return ninja13_v1
     elif ruleset_id == "sk12_v1":
         from padrino.core.rulesets import sk12_v1
 

@@ -443,6 +443,43 @@ def test_tracker_and_watcher_read_roleblock_visit_but_not_blocked_action() -> No
     assert result.feedback_by_code("WATCH_RESULT")[0].visitor_player_ids == ("P02",)
 
 
+def test_ninja_factional_kill_suppresses_only_the_ninja_visit() -> None:
+    state = _state().model_copy(
+        update={
+            "seats": (
+                _seat("P01", 0, Role.NINJA, Faction.MAFIA),
+                _seat("P02", 1, Role.MAFIA_ROLEBLOCKER, Faction.MAFIA),
+                _seat("P03", 2, Role.TRACKER, Faction.TOWN),
+                _seat("P04", 3, Role.WATCHER, Faction.TOWN),
+                _seat("P05", 4, Role.DETECTIVE, Faction.TOWN),
+                _seat("P06", 5, Role.VILLAGER, Faction.TOWN),
+                _seat("P07", 6, Role.DOCTOR, Faction.TOWN),
+            )
+        }
+    )
+
+    result = resolve_night_actions(
+        state,
+        (
+            _intent("P01", NightActionKind.FACTIONAL_KILL, "P06"),
+            _intent("P02", NightActionKind.ROLEBLOCK, "P05"),
+            _intent("P03", NightActionKind.TRACK, "P01"),
+            _intent("P04", NightActionKind.WATCH, "P05"),
+            _intent("P05", NightActionKind.INVESTIGATE, "P01"),
+        ),
+    )
+
+    assert result.eliminated == "P06"
+    assert result.blocked_actor_ids == ("P05",)
+    assert {(visit.actor, visit.target, visit.action_kind) for visit in result.visits} == {
+        ("P02", "P05", NightActionKind.ROLEBLOCK),
+        ("P03", "P01", NightActionKind.TRACK),
+        ("P04", "P05", NightActionKind.WATCH),
+    }
+    assert result.feedback_by_code("TRACK_RESULT")[0].visited_player_ids == ()
+    assert result.feedback_by_code("WATCH_RESULT")[0].visitor_player_ids == ("P02",)
+
+
 def test_cleaned_death_suppresses_death_reveal_only() -> None:
     state = _state().model_copy(
         update={

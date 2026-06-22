@@ -27,7 +27,7 @@ from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role, RoleFamily
 from padrino.core.observations import build_observation
-from padrino.core.rulesets import mini7_v1, roleblock10_v1, visit12_v1
+from padrino.core.rulesets import mini7_v1, ninja13_v1, roleblock10_v1, visit12_v1
 from padrino.llm.adapter import AgentBuild, RoutingPolicy
 from padrino.llm.litellm_adapter import DEFAULT_SYSTEM_PROMPT, LiteLlmAdapter
 from padrino.llm.prompts import (
@@ -169,6 +169,19 @@ def test_visit12_uses_investigative_prompts_for_tracker_and_watcher() -> None:
     ).system_prompt
     assert prompts[Role.TRACKER] == expected_prompt
     assert prompts[Role.WATCHER] == expected_prompt
+
+
+def test_ninja13_uses_deceptive_prompt_for_ninja() -> None:
+    prompts = canonical_prompts_by_role(ninja13_v1.RULESET_ID)
+
+    assert set(prompts) == set(ninja13_v1.ROLE_COUNTS)
+    assert (
+        prompts[Role.NINJA]
+        == load_canonical(
+            ninja13_v1.RULESET_ID,
+            RoleFamily.DECEPTIVE,
+        ).system_prompt
+    )
 
 
 @pytest.mark.parametrize(
