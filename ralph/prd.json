@@ -500,7 +500,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Evidence: game_runner.py:364-381/403-409/433/443-451/496-501, openskill_service.py:342/366-371, gauntlets/scheduler.py:74-76, api/routes/gauntlets.py:126-168. The load-bearing fix is making the terminal write resilient to a ratings-side guard; the dedup raise itself is defensible (a build can't be both winner and loser of one Plackett-Luce update) - it just must not happen inside the terminal transaction.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-223",

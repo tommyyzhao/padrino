@@ -23,8 +23,11 @@ from typing import Final
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.core.engine.role_assignment import assign_roles
+from padrino.core.enums import RatingContextKind
 from padrino.core.rulesets import get_ruleset
 from padrino.db.repositories import gauntlets as gauntlets_repo
+from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.observability.events import EVENT_GAUNTLET_CREATED
 
 _logger = structlog.get_logger("padrino.gauntlets")
@@ -53,6 +56,39 @@ def derive_pair_id(gauntlet_seed: str, index: int) -> uuid.UUID:
     return uuid.UUID(bytes=digest[:16])
 
 
+def validate_placement_roster_faction_uniqueness(
+    *,
+    ruleset_id: str,
+    gauntlet_seed: str,
+    clone_count: int,
+    roster: list[uuid.UUID],
+) -> None:
+    """Reject placement rosters that put one build in multiple factions per game."""
+    declared = rating_contexts_repo.declared_for_ruleset(ruleset_id)
+    if declared is None:
+        return
+    if declared.kind is not RatingContextKind.PLACEMENT or declared.is_canonical:
+        return
+
+    ruleset = get_ruleset(ruleset_id)
+    for game_index in range(clone_count):
+        game_seed = derive_game_seed(gauntlet_seed, game_index)
+        faction_by_build: dict[uuid.UUID, str] = {}
+        for seat in assign_roles(game_seed, ruleset):
+            agent_build_id = roster[seat.seat_index]
+            faction = seat.faction.value
+            existing = faction_by_build.get(agent_build_id)
+            if existing is None:
+                faction_by_build[agent_build_id] = faction
+                continue
+            if existing != faction:
+                raise ValueError(
+                    "placement roster assigns agent_build_id "
+                    f"{agent_build_id} to multiple factions in clone {game_index}: "
+                    f"{existing!r} and {faction!r}"
+                )
+
+
 async def create_gauntlet(
     session: AsyncSession,
     *,
@@ -79,6 +115,12 @@ async def create_gauntlet(
         raise ValueError(
             f"clone_count must be in [{MIN_CLONE_COUNT}, {MAX_CLONE_COUNT}], got {clone_count}"
         )
+    validate_placement_roster_faction_uniqueness(
+        ruleset_id=ruleset_id,
+        gauntlet_seed=gauntlet_seed,
+        clone_count=clone_count,
+        roster=roster,
+    )
 
     # Local imports avoid module-load-order coupling between the scheduler and
     # the games repo (which would otherwise import in a different order than
@@ -195,4 +237,5 @@ __all__ = [
     "create_paired_gauntlet",
     "derive_game_seed",
     "derive_pair_id",
+    "validate_placement_roster_faction_uniqueness",
 ]

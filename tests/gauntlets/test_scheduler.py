@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets import mini7_v1, sk12_v1
 from padrino.db.models import Game, Gauntlet, GauntletRosterSlot
 from padrino.db.repositories import (
     agent_builds,
@@ -30,6 +30,7 @@ async def _seed_world(
     session: AsyncSession,
     *,
     roster_size: int = mini7_v1.PLAYER_COUNT,
+    ruleset_id: str = mini7_v1.RULESET_ID,
 ) -> tuple[uuid.UUID, uuid.UUID, list[uuid.UUID]]:
     provider = await providers.create(session, name="cerebras", auth_secret_ref="CEREBRAS_API_KEY")
     mc = await model_configs.create(
@@ -43,14 +44,14 @@ async def _seed_world(
     )
     pv = await prompt_versions.create(
         session,
-        ruleset_id=mini7_v1.RULESET_ID,
+        ruleset_id=ruleset_id,
         version="v1",
         system_prompt="sys",
         developer_prompt="dev",
         response_schema={"type": "object"},
         prompt_hash=f"ph-{uuid.uuid4().hex}",
     )
-    league = await leagues.create(session, name="L", ruleset_id=mini7_v1.RULESET_ID, ranked=True)
+    league = await leagues.create(session, name="L", ruleset_id=ruleset_id, ranked=True)
     roster: list[uuid.UUID] = []
     for i in range(roster_size):
         ab = await agent_builds.create(
@@ -253,6 +254,39 @@ async def test_create_gauntlet_rejects_out_of_range_clone_count(
                 gauntlet_seed="clone-bounds",
                 roster=roster,
             )
+
+
+async def test_create_gauntlet_rejects_placement_duplicate_build_across_factions(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league_id, pv_id, roster = await _seed_world(
+            session,
+            roster_size=sk12_v1.PLAYER_COUNT,
+            ruleset_id=sk12_v1.RULESET_ID,
+        )
+
+    bad_roster = [roster[0] for _ in roster]
+
+    async with session_factory() as session:
+        with pytest.raises(ValueError, match=r"placement roster.*multiple factions"):
+            await create_gauntlet(
+                session,
+                league_id=league_id,
+                ruleset_id=sk12_v1.RULESET_ID,
+                prompt_version_id=pv_id,
+                clone_count=1,
+                gauntlet_seed="sk12-placement-shared-build",
+                roster=bad_roster,
+            )
+
+    async with session_factory() as session:
+        rows = (
+            (await session.execute(select(Gauntlet).where(Gauntlet.league_id == league_id)))
+            .scalars()
+            .all()
+        )
+    assert rows == []
 
 
 @pytest.mark.parametrize("good_count", [1, 50, 100])

@@ -22,11 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
-from padrino.core.engine.event_log import StoredEvent
+from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import ActionType, Faction, Role
+from padrino.core.engine.state import GameState, Phase
+from padrino.core.enums import ActionType, Faction, PhaseKind, Role
 from padrino.core.rulesets import mini7_v1, sk12_v1
-from padrino.db.models import PlacementRating, PlacementRatingEvent, Rating, RatingEvent
+from padrino.db.models import GameEvent, PlacementRating, PlacementRatingEvent, Rating, RatingEvent
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -353,6 +354,154 @@ async def test_sk12_terminal_game_writes_placement_ratings_not_scientific_rating
     assert len(placement_events) == sk12_v1.PLAYER_COUNT
     assert {event.team_outcome for event in placement_events} == {Faction.TOWN.value}
     assert {event.agent_build_id for event in placement_events} == set(builds_by_seat.values())
+
+
+async def test_placement_duplicate_build_failure_does_not_rollback_terminal_finalization(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_seed = "seed-sk12-placement-runner-shared-build"
+    seats = assign_roles(game_seed, sk12_v1)
+    seat_ids = [seat.public_player_id for seat in seats]
+    mafia_ids = [seat.public_player_id for seat in seats if seat.faction is Faction.MAFIA]
+    serial_killer_id = next(
+        seat.public_player_id for seat in seats if seat.faction is Faction.SERIAL_KILLER
+    )
+    town_seat = next(seat.public_player_id for seat in seats if seat.faction is Faction.TOWN)
+    mafia_seat = mafia_ids[0]
+    script = _sk12_town_win_script(
+        seat_ids=seat_ids,
+        mafia_ids=mafia_ids,
+        serial_killer_id=serial_killer_id,
+    )
+    league_id, game_id, builds_by_seat = await _seed_sk12_placement_setup(
+        session_factory,
+        game_seed=game_seed,
+        hash_prefix="sk12-runner-placement-shared-build",
+    )
+    builds_by_seat[mafia_seat] = builds_by_seat[town_seat]
+
+    outcome = await run_game(
+        GameConfig(
+            game_id="G-SK12-PLACEMENT-SHARED-BUILD",
+            game_seed=game_seed,
+            ruleset_id=sk12_v1.RULESET_ID,
+            timeout_s=1.0,
+        ),
+        DeterministicMockAdapter(script),
+        ranked=True,
+        persistence=GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds=builds_by_seat,
+            league_id=league_id,
+        ),
+    )
+
+    assert outcome.final_state.terminal_result == Faction.TOWN.value
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+        terminal_events = (
+            (
+                await session.execute(
+                    select(GameEvent).where(
+                        GameEvent.game_id == game_id,
+                        GameEvent.event_type == "GameTerminated",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        scientific_rows = (await session.execute(select(Rating))).scalars().all()
+        scientific_events = (await session.execute(select(RatingEvent))).scalars().all()
+        placement_rows = (await session.execute(select(PlacementRating))).scalars().all()
+        placement_events = (await session.execute(select(PlacementRatingEvent))).scalars().all()
+
+    assert game is not None
+    assert game.status == "COMPLETED"
+    assert game.terminal_result is not None
+    assert game.terminal_result["winner"] == Faction.TOWN.value
+    assert len(terminal_events) == 1
+    assert terminal_events[0].event_hash == game.event_hash_head
+    assert scientific_rows == []
+    assert scientific_events == []
+    assert placement_rows == []
+    assert placement_events == []
+
+
+async def test_placement_non_faction_winner_skips_scoring_after_finalizing_game(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_seed = "seed-sk12-placement-runner-non-faction-winner"
+    league_id, game_id, builds_by_seat = await _seed_sk12_placement_setup(
+        session_factory,
+        game_seed=game_seed,
+        hash_prefix="sk12-runner-placement-non-faction-winner",
+    )
+    state = GameState(
+        ruleset_id=sk12_v1.RULESET_ID,
+        game_id="G-SK12-PLACEMENT-NON-FACTION-WINNER",
+        game_seed=game_seed,
+        current_phase=Phase(kind=PhaseKind.TERMINAL, day=1, round=0),
+        seats=tuple(assign_roles(game_seed, sk12_v1)),
+        day=1,
+        terminal_result="JESTER",
+        terminal_reason="ALT_TRIGGER",
+    )
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "sequence": 0,
+            "event_type": "GameTerminated",
+            "phase": "DAY_1_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "JESTER", "reason": "ALT_TRIGGER"},
+        }
+    )
+
+    await _persist_terminated_event(
+        GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds=builds_by_seat,
+            league_id=league_id,
+        ),
+        stored,
+        state,
+        ranked=True,
+        day_terminated=1,
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+        terminal_events = (
+            (
+                await session.execute(
+                    select(GameEvent).where(
+                        GameEvent.game_id == game_id,
+                        GameEvent.event_type == "GameTerminated",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        placement_rows = (await session.execute(select(PlacementRating))).scalars().all()
+        placement_events = (await session.execute(select(PlacementRatingEvent))).scalars().all()
+
+    assert game is not None
+    assert game.status == "COMPLETED"
+    assert game.terminal_result == {
+        "winner": "JESTER",
+        "reason": "ALT_TRIGGER",
+        "day_terminated": 1,
+    }
+    assert len(terminal_events) == 1
+    assert terminal_events[0].event_hash == game.event_hash_head
+    assert placement_rows == []
+    assert placement_events == []
 
 
 async def test_unranked_game_skips_rating_updates(

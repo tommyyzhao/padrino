@@ -69,6 +69,7 @@ from padrino.observability.metrics import record_game_completed
 from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
 from padrino.ratings.openskill_service import (
+    PLACEMENT_DRAW,
     GameResult,
     PlacementGameResult,
     update_placement_ratings_for_game,
@@ -400,13 +401,53 @@ def _solo_rate_result_for(state: GameState, game_id: uuid.UUID) -> SoloRateGameR
     )
 
 
-def _placement_result_for(state: GameState, game_id: uuid.UUID) -> PlacementGameResult:
+def _placement_result_for(state: GameState, game_id: uuid.UUID) -> PlacementGameResult | None:
     assert state.terminal_result is not None
+    seat_groups = {seat.public_player_id: seat.faction.value for seat in state.seats}
+    groups = set(seat_groups.values())
+    if state.terminal_result != PLACEMENT_DRAW and state.terminal_result not in groups:
+        _logger.warning(
+            "placement.rating.skipped",
+            game_id=str(game_id),
+            winner=state.terminal_result,
+            reason="winner_not_in_seat_groups",
+            seat_groups=sorted(groups),
+        )
+        return None
     return PlacementGameResult(
         game_id=game_id,
         winner=state.terminal_result,
-        seat_groups={seat.public_player_id: seat.faction.value for seat in state.seats},
+        seat_groups=seat_groups,
     )
+
+
+async def _apply_placement_after_finalization(
+    persistence: GamePersistence,
+    game_result: PlacementGameResult,
+) -> None:
+    """Best-effort placement scoring after terminal state is durable."""
+    try:
+        async with persistence.session_factory() as session, session.begin():
+            events = await update_placement_ratings_for_game(
+                session,
+                game_result=game_result,
+                agent_builds_by_seat=persistence.agent_builds,
+            )
+    except Exception:
+        _logger.exception(
+            "placement.rating.skipped",
+            game_id=str(persistence.game_id),
+            winner=game_result.winner,
+            reason="placement_rating_failed",
+        )
+        return
+    if events:
+        _logger.info(
+            "placement.rating.updated",
+            game_id=str(persistence.game_id),
+            winner=game_result.winner,
+            events=len(events),
+        )
 
 
 async def _persist_terminated_event(
@@ -416,15 +457,10 @@ async def _persist_terminated_event(
     ranked: bool,
     day_terminated: int,
 ) -> None:
-    """Persist the ``GameTerminated`` row, game-row finalize, and ratings atomically.
-
-    Inside one ``session.begin()`` we write the terminal event row, flip
-    ``Game.status='COMPLETED'`` with ``Game.terminal_result`` = ``{winner,
-    reason, day_terminated}``, and (when applicable) every rating update +
-    audit row so partial failures roll back together.
-    """
+    """Persist the ``GameTerminated`` row, game-row finalize, and ratings."""
     apply_ratings = _should_apply_ratings(persistence, ranked, state)
     apply_solo_rate = _should_apply_solo_rate(persistence, ranked, state)
+    placement_result: PlacementGameResult | None = None
     terminal_result_payload: dict[str, Any] = {
         "winner": state.terminal_result,
         "reason": state.terminal_reason,
@@ -433,6 +469,8 @@ async def _persist_terminated_event(
     async with persistence.session_factory() as session, session.begin():
         game = await games_repo.get(session, persistence.game_id)
         apply_placement = _should_apply_placement(persistence, ranked, state, game)
+        if apply_placement:
+            placement_result = _placement_result_for(state, persistence.game_id)
         if game is not None and game.status == STATUS_COMPLETED:
             _logger.info(
                 "Game already terminated and completed; skipping rating application and status updates.",
@@ -493,12 +531,8 @@ async def _persist_terminated_event(
                     game_result=solo_result,
                     agent_builds_by_seat=persistence.agent_builds,
                 )
-        if apply_placement:
-            await update_placement_ratings_for_game(
-                session,
-                game_result=_placement_result_for(state, persistence.game_id),
-                agent_builds_by_seat=persistence.agent_builds,
-            )
+    if placement_result is not None:
+        await _apply_placement_after_finalization(persistence, placement_result)
 
 
 def _request_prompt_hash(observation: Observation) -> str:
