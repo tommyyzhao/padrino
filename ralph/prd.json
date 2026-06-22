@@ -410,7 +410,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Root cause: US-175 AC said 'Belongs only in 10p+ canonical setups' which was misread as the EXISTING bench10_v1 instead of the NEW deception13_v1. Sacred existing canonical ladders (mini7_v1/bench10_v1) must never have their roster mutated; new roles go in new ruleset_ids.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-217",

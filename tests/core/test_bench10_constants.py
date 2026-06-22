@@ -12,8 +12,12 @@ def test_role_counts_sum_to_player_count() -> None:
 
 
 def test_role_counts_exact() -> None:
-    assert bench10.ROLE_COUNTS[Role.MAFIA_GOON] == 2
-    assert bench10.ROLE_COUNTS[Role.GODFATHER] == 1
+    assert bench10.ROLE_COUNTS == {
+        Role.MAFIA_GOON: 3,
+        Role.DETECTIVE: 1,
+        Role.DOCTOR: 1,
+        Role.VILLAGER: 5,
+    }
     assert bench10.ROLE_COUNTS[Role.DETECTIVE] == 1
     assert bench10.ROLE_COUNTS[Role.DOCTOR] == 1
     assert bench10.ROLE_COUNTS[Role.VILLAGER] == 5
@@ -33,7 +37,7 @@ def test_all_roles_have_a_faction() -> None:
 
 def test_role_family_assignments() -> None:
     assert role_family_for(Role.MAFIA_GOON) == RoleFamily.DECEPTIVE
-    assert role_family_for(Role.GODFATHER) == RoleFamily.DECEPTIVE
+    assert Role.GODFATHER not in bench10.ROLE_COUNTS
     assert role_family_for(Role.DETECTIVE) == RoleFamily.INVESTIGATIVE
     assert role_family_for(Role.DOCTOR) == RoleFamily.PROTECTIVE
     assert role_family_for(Role.VILLAGER) == RoleFamily.VANILLA_TOWN
@@ -41,7 +45,7 @@ def test_role_family_assignments() -> None:
 
 def test_faction_assignments() -> None:
     assert faction_for(Role.MAFIA_GOON) == Faction.MAFIA
-    assert faction_for(Role.GODFATHER) == Faction.MAFIA
+    assert Role.GODFATHER not in bench10.ROLE_FACTIONS
     assert faction_for(Role.DETECTIVE) == Faction.TOWN
     assert faction_for(Role.DOCTOR) == Faction.TOWN
     assert faction_for(Role.VILLAGER) == Faction.TOWN

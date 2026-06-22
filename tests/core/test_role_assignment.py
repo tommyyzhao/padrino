@@ -46,12 +46,12 @@ def test_role_counts_exact() -> None:
         assert counts[Role.VILLAGER] == 3
 
 
-def test_bench10_role_counts_include_one_godfather() -> None:
+def test_bench10_role_counts_preserve_three_goon_roster() -> None:
     for i in range(50):
         seats = assign_roles(f"bench-trial-{i}", bench10_v1)
         counts = Counter(s.role for s in seats)
-        assert counts[Role.MAFIA_GOON] == 2
-        assert counts[Role.GODFATHER] == 1
+        assert counts[Role.MAFIA_GOON] == 3
+        assert counts[Role.GODFATHER] == 0
         assert counts[Role.DETECTIVE] == 1
         assert counts[Role.DOCTOR] == 1
         assert counts[Role.VILLAGER] == 5

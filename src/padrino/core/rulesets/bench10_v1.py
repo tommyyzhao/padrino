@@ -1,7 +1,7 @@
 """bench10_v1 ruleset constants and helpers (Wave 6).
 
-Ruleset: 10 players, 2 Mafia Goons, 1 Godfather, 1 Detective, 1 Doctor,
-5 Villagers. MAX_DAYS=5.
+Ruleset: 10 players, 3 Mafia Goons, 1 Detective, 1 Doctor, 5 Villagers.
+MAX_DAYS=5.
 """
 
 from __future__ import annotations
@@ -18,8 +18,7 @@ RATING_CONTEXT_DISPLAY_LABEL: Final[str] = "Bench 10 canonical team"
 PLAYER_COUNT: Final[int] = 10
 
 ROLE_COUNTS: Final[dict[Role, int]] = {
-    Role.MAFIA_GOON: 2,
-    Role.GODFATHER: 1,
+    Role.MAFIA_GOON: 3,
     Role.DETECTIVE: 1,
     Role.DOCTOR: 1,
     Role.VILLAGER: 5,
@@ -37,7 +36,6 @@ TOP_P: Final[float] = 1.0
 
 _ROLE_FAMILY: Final[dict[Role, RoleFamily]] = {
     Role.MAFIA_GOON: RoleFamily.DECEPTIVE,
-    Role.GODFATHER: RoleFamily.DECEPTIVE,
     Role.DETECTIVE: RoleFamily.INVESTIGATIVE,
     Role.DOCTOR: RoleFamily.PROTECTIVE,
     Role.VILLAGER: RoleFamily.VANILLA_TOWN,
@@ -45,7 +43,6 @@ _ROLE_FAMILY: Final[dict[Role, RoleFamily]] = {
 
 ROLE_FACTIONS: Final[dict[Role, Faction]] = {
     Role.MAFIA_GOON: Faction.MAFIA,
-    Role.GODFATHER: Faction.MAFIA,
     Role.DETECTIVE: Faction.TOWN,
     Role.DOCTOR: Faction.TOWN,
     Role.VILLAGER: Faction.TOWN,
