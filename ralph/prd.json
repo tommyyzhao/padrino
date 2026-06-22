@@ -230,7 +230,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Builds directly on US-234b's writer. Existing helpers: _count_all_rating_rows returns the 4-tuple (ratings, rating_events, human_ratings, human_rating_events) at test_segregation.py:155-169; a ranked scientific league test already exists at ~L214. Extend the single-source gate, do not rewrite it.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-236",

@@ -318,7 +318,7 @@ async def test_humans_included_league_is_scoped_by_ruleset(
     assert bench.kind == LeagueKind.HUMANS_INCLUDED.value
 
 
-async def test_human_lane_game_writes_zero_rating_rows(
+async def test_casual_human_lane_game_writes_zero_rating_rows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """A completed casual human-lane game writes ZERO rows to any rating table."""
@@ -341,7 +341,7 @@ async def test_human_lane_game_writes_zero_rating_rows(
     outcome = await run_game(
         GameConfig(game_id="G-SEG", game_seed=_GAME_SEED, timeout_s=1.0),
         DeterministicMockAdapter(script),
-        ranked=False,  # human lane is ALWAYS casual.
+        ranked=False,
         persistence=persistence,
     )
     assert outcome.final_state.terminal_result == "TOWN"
@@ -589,7 +589,7 @@ async def test_missing_canonical_context_writes_zero_scientific_rows(
 async def test_canonical_rating_events_carry_required_metadata(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Canonical audit rows are complete enough to prove context purity."""
+    """A scientific ranked game writes only scientific rating rows."""
     league_id, game_id, builds = await _seed_scientific_all_ai_game(
         session_factory, hash_prefix="canonical-event-metadata"
     )
@@ -639,3 +639,6 @@ async def test_canonical_rating_events_carry_required_metadata(
     assert build_rows
     assert all(row.model_config_id is not None for row in build_rows)
     assert all(row.prompt_version_id is not None for row in build_rows)
+
+    counts = await _count_all_rating_rows(session_factory)
+    assert counts == (mini7_v1.PLAYER_COUNT * 2, mini7_v1.PLAYER_COUNT * 2, 0, 0)

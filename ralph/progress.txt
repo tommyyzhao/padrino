@@ -2703,3 +2703,21 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2512 passed / 48 skipped / 10
   deselected. Frontend gates not run; US-234b is backend-only and did not touch
   `web/dashboard`.
+
+## 2026-06-22T16:38 PDT - US-235
+- Extended the in-tree segregation CI gate around the existing four-table
+  `_count_all_rating_rows` helper: the ranked Humans-Included terminal path
+  still proves zero scientific rows plus human sibling rows, the casual
+  human-lane path is explicitly named as casual and stays fully dormant, and
+  the scientific canonical test now asserts scientific rows are present while
+  `HumanRating` / `HumanRatingEvent` remain zero.
+- This was test-only; the ranked human writer behavior was already present
+  from US-234b.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/ratings/test_segregation.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/ratings/test_segregation.py -q` -> 9 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2512
+  passed / 48 skipped / 10 deselected.
