@@ -25,6 +25,7 @@ class Role(StrEnum):
     DOCTOR = "DOCTOR"
     TRACKER = "TRACKER"
     WATCHER = "WATCHER"
+    SERIAL_KILLER = "SERIAL_KILLER"
     VILLAGER = "VILLAGER"
 
 
@@ -51,6 +52,7 @@ class ActionType(StrEnum):
     TRACK = "TRACK"
     WATCH = "WATCH"
     CLEAN = "CLEAN"
+    SERIAL_KILL = "SERIAL_KILL"
 
 
 class SeatKind(StrEnum):

@@ -44,6 +44,7 @@ TARGETED_ACTION_TYPES = frozenset(
         ActionType.TRACK,
         ActionType.WATCH,
         ActionType.CLEAN,
+        ActionType.SERIAL_KILL,
     }
 )
 
@@ -53,6 +54,7 @@ _FUTURE_NIGHT_ROLE_ACTIONS: dict[Role, ActionType] = {
     Role.TRACKER: ActionType.TRACK,
     Role.WATCHER: ActionType.WATCH,
     Role.JANITOR: ActionType.CLEAN,
+    Role.SERIAL_KILLER: ActionType.SERIAL_KILL,
 }
 _FACTIONAL_KILL_ROLES = frozenset({Role.MAFIA_GOON, Role.GODFATHER})
 

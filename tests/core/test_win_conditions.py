@@ -19,7 +19,7 @@ from padrino.core.engine.win_conditions import (
     check_win,
 )
 from padrino.core.enums import Faction, PhaseKind, Role
-from padrino.core.rulesets import bench10_v1, mini7_v1
+from padrino.core.rulesets import bench10_v1, mini7_v1, sk12_v1
 
 
 class _HasMaxDays(Protocol):
@@ -156,6 +156,34 @@ def _full_bench10_seats(
     return tuple(seats)
 
 
+def _sk12_seats(
+    *,
+    mafia_alive: int = 3,
+    town_alive: int = 8,
+    sk_alive: int = 1,
+) -> tuple[Seat, ...]:
+    """Build a 12-seat SK setup with the requested alive counts."""
+    seats: list[Seat] = []
+    template = [
+        *[(Role.MAFIA_GOON, Faction.MAFIA)] * 3,
+        (Role.SERIAL_KILLER, Faction.SERIAL_KILLER),
+        (Role.DETECTIVE, Faction.TOWN),
+        (Role.DOCTOR, Faction.TOWN),
+        *[(Role.VILLAGER, Faction.TOWN)] * 6,
+    ]
+    remaining = {
+        Faction.MAFIA: mafia_alive,
+        Faction.TOWN: town_alive,
+        Faction.SERIAL_KILLER: sk_alive,
+    }
+    for idx, (role, faction) in enumerate(template):
+        alive = remaining[faction] > 0
+        if alive:
+            remaining[faction] -= 1
+        seats.append(_seat(f"P{idx + 1:02d}", idx, role, faction, alive=alive))
+    return tuple(seats)
+
+
 def test_last_mafia_eliminated_returns_town_win() -> None:
     seats = _full_mini7_seats(mafia_alive=0, town_alive=4)
     result = check_win(_state(seats, day=2), mini7_v1)
@@ -193,6 +221,20 @@ def test_two_mafia_versus_five_town_initial_state_returns_none() -> None:
     seats = _full_mini7_seats(mafia_alive=2, town_alive=5)
     result = check_win(_state(seats, day=1), mini7_v1)
     assert result is None
+
+
+def test_sk_ruleset_does_not_reuse_two_faction_mafia_parity_while_sk_alive() -> None:
+    seats = _sk12_seats(mafia_alive=2, town_alive=2, sk_alive=1)
+    result = check_win(_state(seats, day=3), sk12_v1)
+
+    assert result is None
+
+
+def test_sk_ruleset_serial_killer_wins_when_last_alive() -> None:
+    seats = _sk12_seats(mafia_alive=0, town_alive=0, sk_alive=1)
+    result = check_win(_state(seats, day=4), sk12_v1)
+
+    assert result == WinResult(winner="SERIAL_KILLER", reason="SOLO_LAST_ALIVE")
 
 
 def test_max_days_reached_with_no_winner_returns_draw() -> None:

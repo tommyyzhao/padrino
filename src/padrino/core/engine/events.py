@@ -115,6 +115,10 @@ class CleanSubmittedPayload(_FrozenModel):
     target: str | None
 
 
+class SerialKillSubmittedPayload(_FrozenModel):
+    target: str | None
+
+
 class NightFeedbackDeliveredPayload(_FrozenModel):
     code: str
     target: str | None = None
@@ -148,6 +152,8 @@ class NightResolvedPayload(_FrozenModel):
     eliminated: str | None
     protected: str | None
     mafia_kill_target: str | None
+    eliminated_player_ids: tuple[str, ...] = ()
+    serial_kill_target: str | None = None
     cleaned_deaths: tuple[str, ...] = ()
     clean_spent_actor_ids: tuple[str, ...] = ()
     framed_targets: tuple[str, ...] = ()
@@ -326,6 +332,15 @@ class CleanSubmitted(_FrozenModel):
     payload: CleanSubmittedPayload
 
 
+class SerialKillSubmitted(_FrozenModel):
+    event_type: Literal["SerialKillSubmitted"] = "SerialKillSubmitted"
+    sequence: int
+    phase: str
+    visibility: Literal["PRIVATE"] = "PRIVATE"
+    actor_player_id: str
+    payload: SerialKillSubmittedPayload
+
+
 class NightFeedbackDelivered(_FrozenModel):
     event_type: Literal["NightFeedbackDelivered"] = "NightFeedbackDelivered"
     sequence: int
@@ -453,6 +468,7 @@ Event = Annotated[
     | TrackSubmitted
     | WatchSubmitted
     | CleanSubmitted
+    | SerialKillSubmitted
     | NightFeedbackDelivered
     | ActionTimedOut
     | OutputTruncated
@@ -485,6 +501,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "TrackSubmitted",
     "WatchSubmitted",
     "CleanSubmitted",
+    "SerialKillSubmitted",
     "NightFeedbackDelivered",
     "ActionTimedOut",
     "OutputTruncated",
@@ -551,6 +568,8 @@ __all__ = [
     "SeatAssignment",
     "SeatTakenOver",
     "SeatTakenOverPayload",
+    "SerialKillSubmitted",
+    "SerialKillSubmittedPayload",
     "TrackSubmitted",
     "TrackSubmittedPayload",
     "Visibility",

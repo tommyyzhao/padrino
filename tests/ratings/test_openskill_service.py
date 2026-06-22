@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.enums import Faction, RatingContextKind
+from padrino.core.rulesets import sk12_v1
 from padrino.db.models import (
     AgentBuild,
     Game,
@@ -341,6 +342,96 @@ async def test_placement_context_rates_winner_first_and_rest_tied(
     )
 
 
+async def test_sk12_placement_context_rates_serial_killer_outcome_without_canonical_writes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        provider = await providers.create(
+            session, name="cerebras", auth_secret_ref="CEREBRAS_API_KEY"
+        )
+        mc = await model_configs.create(
+            session,
+            provider_id=provider.id,
+            model_name="glm-4.7",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        builds: list[AgentBuild] = []
+        for i in range(sk12_v1.PLAYER_COUNT):
+            pv = await prompt_versions.create(
+                session,
+                ruleset_id=sk12_v1.RULESET_ID,
+                version=f"sk{i + 1}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"sk12-placement-{i}",
+            )
+            builds.append(
+                await agent_builds.create(
+                    session,
+                    display_name=f"sk12-build-{i}",
+                    model_config_id=mc.id,
+                    prompt_version_id=pv.id,
+                    adapter_version="2026.05",
+                    inference_params={"temperature": 0.7},
+                    active=True,
+                )
+            )
+        game = await games.create(
+            session,
+            ruleset_id=sk12_v1.RULESET_ID,
+            game_seed="sk12-placement-seed",
+            status="COMPLETED",
+        )
+        context = await rating_contexts_repo.ensure_declared_context(
+            session, ruleset_id=sk12_v1.RULESET_ID
+        )
+
+    assert context is not None
+    assert context.kind == RatingContextKind.PLACEMENT.value
+    assert context.is_canonical is False
+
+    groups_by_seat = {
+        f"P{i + 1:02d}": ("MAFIA" if i < 3 else "SERIAL_KILLER" if i == 3 else "TOWN")
+        for i in range(sk12_v1.PLAYER_COUNT)
+    }
+    builds_by_seat = {f"P{i + 1:02d}": builds[i].id for i in range(sk12_v1.PLAYER_COUNT)}
+
+    async with session_factory() as session, session.begin():
+        events = await update_placement_ratings_for_game(
+            session,
+            game_result=PlacementGameResult(
+                game_id=game.id,
+                winner="SERIAL_KILLER",
+                seat_groups=groups_by_seat,
+            ),
+            agent_builds_by_seat=builds_by_seat,
+        )
+
+    assert len(events) == sk12_v1.PLAYER_COUNT
+    async with session_factory() as session:
+        placement_rows = (await session.execute(select(PlacementRating))).scalars().all()
+        placement_events = (await session.execute(select(PlacementRatingEvent))).scalars().all()
+        canonical_rows = (await session.execute(select(Rating))).scalars().all()
+        canonical_events = (await session.execute(select(RatingEvent))).scalars().all()
+
+    assert len(placement_rows) == sk12_v1.PLAYER_COUNT
+    assert len(placement_events) == sk12_v1.PLAYER_COUNT
+    assert canonical_rows == []
+    assert canonical_events == []
+    assert {row.rating_context_id for row in placement_rows} == {context.id}
+    assert {event.team_outcome for event in placement_events} == {"SERIAL_KILLER"}
+    by_build = {row.agent_build_id: row for row in placement_rows}
+    sk_row = by_build[builds_by_seat["P04"]]
+    assert sk_row.mu > INITIAL_MU
+    assert all(
+        row.mu < sk_row.mu for row in placement_rows if row.agent_build_id != sk_row.agent_build_id
+    )
+
+
 async def test_placement_context_requires_non_canonical_context_row(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -376,6 +467,40 @@ async def test_placement_context_requires_non_canonical_context_row(
         canonical_events = (await session.execute(select(RatingEvent))).scalars().all()
     assert placement_rows == []
     assert placement_events == []
+    assert canonical_rows == []
+    assert canonical_events == []
+
+
+async def test_sk12_ruleset_never_enters_canonical_rating_path(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league = await leagues.create(
+            session, name="sk12", ruleset_id=sk12_v1.RULESET_ID, ranked=True
+        )
+        game = await games.create(
+            session,
+            ruleset_id=sk12_v1.RULESET_ID,
+            game_seed="sk12-canonical-skip",
+            status="COMPLETED",
+        )
+
+    async with session_factory() as session, session.begin():
+        events = await update_ratings_for_game(
+            session,
+            league_id=league.id,
+            game_result=GameResult(
+                game_id=game.id,
+                winner="TOWN",
+                seat_factions={"P01": Faction.TOWN, "P02": Faction.MAFIA},
+            ),
+            agent_builds_by_seat={},
+        )
+
+    assert events == []
+    async with session_factory() as session:
+        canonical_rows = (await session.execute(select(Rating))).scalars().all()
+        canonical_events = (await session.execute(select(RatingEvent))).scalars().all()
     assert canonical_rows == []
     assert canonical_events == []
 

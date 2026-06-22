@@ -29,6 +29,7 @@ SUBMISSION_EVENT_TYPES: Final[frozenset[str]] = frozenset(
         "TrackSubmitted",
         "WatchSubmitted",
         "CleanSubmitted",
+        "SerialKillSubmitted",
         TIMEOUT_EVENT_TYPE,
         INVALID_EVENT_TYPE,
         TRUNCATED_EVENT_TYPE,

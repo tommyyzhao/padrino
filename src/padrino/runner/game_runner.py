@@ -666,6 +666,16 @@ def _submission_events_for(
                     "payload": {"target": action.target},
                 }
             )
+        elif action.type is ActionType.SERIAL_KILL:
+            events.append(
+                {
+                    "event_type": "SerialKillSubmitted",
+                    "phase": phase_id,
+                    "visibility": "PRIVATE",
+                    "actor_player_id": seat_id,
+                    "payload": {"target": action.target},
+                }
+            )
 
     return events
 
@@ -728,6 +738,11 @@ def _resolve_night_events(
     if night.framed_targets:
         night_payload["framed_targets"] = night.framed_targets
         night_payload["frame_spent_actor_ids"] = night.frame_spent_actor_ids
+    if night.serial_kill_target is not None:
+        night_payload["serial_kill_target"] = night.serial_kill_target
+        night_payload["eliminated_player_ids"] = night.eliminated_player_ids
+    elif len(night.eliminated_player_ids) > 1:
+        night_payload["eliminated_player_ids"] = night.eliminated_player_ids
     events: list[dict[str, Any]] = [
         {
             "event_type": "NightResolved",
@@ -737,13 +752,9 @@ def _resolve_night_events(
             "payload": night_payload,
         }
     ]
-    if night.eliminated is not None:
+    for eliminated in night.eliminated_player_ids:
         death_reveal = next(
-            (
-                reveal
-                for reveal in night.death_reveals
-                if reveal.public_player_id == night.eliminated
-            ),
+            (reveal for reveal in night.death_reveals if reveal.public_player_id == eliminated),
             None,
         )
         if death_reveal is not None:

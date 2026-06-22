@@ -12,6 +12,7 @@ from padrino.core.rulesets import (
     get_ruleset,
     mini7_v1,
     roleblock10_v1,
+    sk12_v1,
 )
 from padrino.core.rulesets.canonicality import (
     CanonicalRulesetError,
@@ -42,6 +43,22 @@ def test_builtin_canonical_rulesets_are_canonical_pure() -> None:
         deception13_v1.RULESET_ID,
     ):
         assert_ruleset_canonical_pure(get_ruleset(ruleset_id))
+
+
+def test_sk12_ruleset_declares_noncanonical_placement_context() -> None:
+    ruleset = get_ruleset(sk12_v1.RULESET_ID)
+
+    assert ruleset.RATING_CONTEXT_KIND is RatingContextKind.PLACEMENT
+    assert ruleset.IS_CANONICAL is False
+    assert ruleset.RATING_CONTEXT_DISPLAY_LABEL
+    assert ruleset.SOLO_FACTIONS == ("SERIAL_KILLER",)
+    assert ruleset.ROLE_COUNTS[Role.SERIAL_KILLER] == 1
+    assert ruleset.ROLE_FACTIONS[Role.SERIAL_KILLER] is Faction.SERIAL_KILLER
+
+
+def test_sk12_ruleset_fails_canonical_introspection() -> None:
+    with pytest.raises(CanonicalRulesetError, match="does not declare CANONICAL_TEAM"):
+        assert_ruleset_canonical_pure(sk12_v1)
 
 
 def test_draw_is_a_tie_between_canonical_teams() -> None:

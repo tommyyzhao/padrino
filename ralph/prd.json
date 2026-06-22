@@ -240,7 +240,7 @@
         "All backend gates pass."
       ],
       "notes": "Gemini: native multi-team placement is the right model; keep larger setups to dampen its swing. Built on the US-215 generalized win-condition substrate.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-184",

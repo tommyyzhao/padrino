@@ -101,6 +101,9 @@ def build_transcripts(events: list[Any], seats: list[GameSeat]) -> str:
         elif etype == "InvestigateSubmitted":
             target = pld.get("target")
             lines.append(f"[{phase}] (Detective Investigate) {actor} targeted {target}")
+        elif etype == "SerialKillSubmitted":
+            target = pld.get("target")
+            lines.append(f"[{phase}] (Serial Kill) {actor} targeted {target}")
         elif etype == "DetectiveResultDelivered":
             target = pld.get("target")
             finding = pld.get("finding")

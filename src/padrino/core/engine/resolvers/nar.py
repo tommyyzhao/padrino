@@ -83,6 +83,7 @@ class NightActionKind(StrEnum):
     TRACK = "TRACK"
     WATCH = "WATCH"
     CLEAN = "CLEAN"
+    SERIAL_KILL = "SERIAL_KILL"
 
 
 class MatrixEffect(StrEnum):
@@ -234,6 +235,19 @@ RESOLUTION_MATRIX: dict[NightActionKind, ResolutionMatrixRow] = {
         records_visit=True,
         records_visit_when_blocked=False,
     ),
+    NightActionKind.SERIAL_KILL: ResolutionMatrixRow(
+        action_kind=NightActionKind.SERIAL_KILL,
+        tier=NarTier.KILL_PROTECT_VISIT,
+        blocked=MatrixEffect.NULLIFIES_ACTION,
+        protected=MatrixEffect.PREVENTS_DEATH,
+        killed=MatrixEffect.UNAFFECTED,
+        redirected=MatrixEffect.RETARGETS_ACTION,
+        watched_tracked=MatrixEffect.RECORDS_VISIT,
+        cleaned=MatrixEffect.UNAFFECTED,
+        investigation=MatrixEffect.UNAFFECTED,
+        records_visit=True,
+        records_visit_when_blocked=False,
+    ),
 }
 
 
@@ -322,6 +336,9 @@ class MatrixNightResolution(BaseModel):
     protected: str | None
     detective_finding: tuple[str, Literal["MAFIA", "TOWN"]] | None
     mafia_kill_target: str | None
+    eliminated_player_ids: tuple[str, ...] = ()
+    serial_kill_target: str | None = None
+    serial_kill_reason: str = REASON_ALL_INVALID
     mafia_vote_tally: dict[str, int] = Field(default_factory=dict)
     mafia_kill_reason: str = REASON_ALL_INVALID
     blocked_actor_ids: tuple[str, ...] = ()
@@ -419,6 +436,8 @@ def _valid_target_for_kind(
             and target_id != actor.public_player_id
             and janitor_clean_shots_remaining(actor) > 0
         )
+    if kind is NightActionKind.SERIAL_KILL:
+        return actor.role is Role.SERIAL_KILLER and target_id != actor.public_player_id
     return False
 
 
@@ -592,22 +611,54 @@ def _resolve_mafia_kill(
     return None, vote_tally, REASON_TIE
 
 
+def _resolve_serial_kill(
+    intents: Sequence[NightActionIntent],
+) -> tuple[str | None, str]:
+    tally = Counter(
+        intent.target
+        for intent in _tier_intents(intents, NightActionKind.SERIAL_KILL)
+        if intent.target is not None
+    )
+    if not tally:
+        return None, REASON_ALL_INVALID
+
+    top_count = max(tally.values())
+    winners = [pid for pid, count in tally.items() if count == top_count]
+    if len(winners) == 1:
+        return winners[0], REASON_UNIQUE_PLURALITY
+    return None, REASON_TIE
+
+
+def _resolve_eliminated_ids(
+    state: GameState,
+    kill_targets: Sequence[str | None],
+    protected_targets: set[str],
+) -> tuple[str, ...]:
+    killed = {target for target in kill_targets if target is not None}
+    return _sort_ids(state, killed - protected_targets)
+
+
 def _protection_feedback(
     protect_intents: Sequence[NightActionIntent],
-    mafia_kill_target: str | None,
-    eliminated: str | None,
+    kill_targets: Sequence[str | None],
+    eliminated_player_ids: tuple[str, ...],
 ) -> tuple[NightFeedback, ...]:
-    if mafia_kill_target is None or eliminated is not None:
+    prevented = {
+        target
+        for target in kill_targets
+        if target is not None and target not in set(eliminated_player_ids)
+    }
+    if not prevented:
         return ()
     return tuple(
         NightFeedback(
             recipient=intent.actor,
             code="PROTECTION_SUCCESSFUL",
             message="Your protection prevented a kill.",
-            target=mafia_kill_target,
+            target=intent.target,
         )
         for intent in protect_intents
-        if intent.target == mafia_kill_target
+        if intent.target in prevented
     )
 
 
@@ -630,7 +681,7 @@ def _resolve_framed_targets(
 def _resolve_investigations(
     state: GameState,
     intents: Sequence[NightActionIntent],
-    eliminated: str | None,
+    eliminated_player_ids: tuple[str, ...],
     framed_targets: tuple[str, ...],
 ) -> tuple[
     tuple[str, Literal["MAFIA", "TOWN"]] | None,
@@ -641,6 +692,7 @@ def _resolve_investigations(
     outcomes: dict[str, InvestigationOutcome] = {}
     feedback: list[NightFeedback] = []
     framed = set(framed_targets)
+    eliminated = set(eliminated_player_ids)
     for intent in _tier_intents(intents, NightActionKind.INVESTIGATE):
         assert intent.target is not None
         target = state.seat_by_public_id(intent.target)
@@ -652,7 +704,7 @@ def _resolve_investigations(
             finding=finding,
             reason=REASON_RESOLVED,
         )
-        if eliminated == intent.actor:
+        if intent.actor in eliminated:
             continue
         feedback.append(
             NightFeedback(
@@ -713,39 +765,52 @@ def _resolve_visit_graph_feedback(
 def _resolve_cleaned_deaths(
     state: GameState,
     intents: Sequence[NightActionIntent],
-    eliminated: str | None,
+    eliminated_player_ids: tuple[str, ...],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    if eliminated is None:
+    if not eliminated_player_ids:
         return (), ()
+    eliminated = set(eliminated_player_ids)
+    cleaned_targets = {
+        intent.target
+        for intent in _tier_intents(intents, NightActionKind.CLEAN)
+        if intent.target in eliminated
+    }
     cleaner_ids = {
         intent.actor
         for intent in _tier_intents(intents, NightActionKind.CLEAN)
-        if intent.target == eliminated
+        if intent.target in eliminated
     }
     if not cleaner_ids:
         return (), ()
-    return (eliminated,), _sort_ids(state, cleaner_ids)
+    return (
+        _sort_ids(state, {target for target in cleaned_targets if target is not None}),
+        _sort_ids(state, cleaner_ids),
+    )
 
 
 def _death_reveals(
     state: GameState,
-    eliminated: str | None,
+    eliminated_player_ids: tuple[str, ...],
     cleaned_deaths: tuple[str, ...],
 ) -> tuple[DeathReveal, ...]:
-    if eliminated is None:
+    if not eliminated_player_ids:
         return ()
-    seat = state.seat_by_public_id(eliminated)
-    if seat is None:
-        return ()
-    cleaned = eliminated in set(cleaned_deaths)
-    return (
-        DeathReveal(
-            public_player_id=eliminated,
-            role=None if cleaned else seat.role,
-            faction=None if cleaned else seat.faction,
-            cleaned=cleaned,
-        ),
-    )
+    cleaned_set = set(cleaned_deaths)
+    reveals: list[DeathReveal] = []
+    for eliminated in eliminated_player_ids:
+        seat = state.seat_by_public_id(eliminated)
+        if seat is None:
+            continue
+        cleaned = eliminated in cleaned_set
+        reveals.append(
+            DeathReveal(
+                public_player_id=eliminated,
+                role=None if cleaned else seat.role,
+                faction=None if cleaned else seat.faction,
+                cleaned=cleaned,
+            )
+        )
+    return tuple(reveals)
 
 
 def resolve_night_actions(
@@ -770,16 +835,18 @@ def resolve_night_actions(
 
     protected, protected_targets, protect_outcomes = _resolve_protects(active_intents)
     mafia_kill_target, mafia_vote_tally, mafia_kill_reason = _resolve_mafia_kill(active_intents)
-    eliminated = (
-        mafia_kill_target
-        if mafia_kill_target is not None and mafia_kill_target not in protected_targets
-        else None
+    serial_kill_target, serial_kill_reason = _resolve_serial_kill(active_intents)
+    eliminated_player_ids = _resolve_eliminated_ids(
+        state,
+        (mafia_kill_target, serial_kill_target),
+        protected_targets,
     )
+    eliminated = eliminated_player_ids[0] if eliminated_player_ids else None
     feedback.extend(
         _protection_feedback(
             _tier_intents(active_intents, NightActionKind.PROTECT),
-            mafia_kill_target,
-            eliminated,
+            (mafia_kill_target, serial_kill_target),
+            eliminated_player_ids,
         )
     )
 
@@ -787,22 +854,25 @@ def resolve_night_actions(
     detective_finding, investigation_outcomes, investigation_feedback = _resolve_investigations(
         state,
         active_intents,
-        eliminated,
+        eliminated_player_ids,
         framed_targets,
     )
     feedback.extend(investigation_feedback)
     feedback.extend(_resolve_visit_graph_feedback(state, active_intents, visits))
 
     cleaned_deaths, clean_spent_actor_ids = _resolve_cleaned_deaths(
-        state, active_intents, eliminated
+        state, active_intents, eliminated_player_ids
     )
-    death_reveals = _death_reveals(state, eliminated, cleaned_deaths)
+    death_reveals = _death_reveals(state, eliminated_player_ids, cleaned_deaths)
 
     return MatrixNightResolution(
         eliminated=eliminated,
         protected=protected,
         detective_finding=detective_finding,
         mafia_kill_target=mafia_kill_target,
+        eliminated_player_ids=eliminated_player_ids,
+        serial_kill_target=serial_kill_target,
+        serial_kill_reason=serial_kill_reason,
         mafia_vote_tally=mafia_vote_tally,
         mafia_kill_reason=mafia_kill_reason,
         blocked_actor_ids=blocked_actor_ids,
@@ -862,6 +932,14 @@ def _intents_from_current_submissions(
         elif action.type is ActionType.CLEAN:
             intents.append(
                 NightActionIntent(actor=actor, kind=NightActionKind.CLEAN, target=action.target)
+            )
+        elif action.type is ActionType.SERIAL_KILL:
+            intents.append(
+                NightActionIntent(
+                    actor=actor,
+                    kind=NightActionKind.SERIAL_KILL,
+                    target=action.target,
+                )
             )
     return tuple(intents)
 
