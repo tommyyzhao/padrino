@@ -1,521 +1,375 @@
 {
   "project": "Padrino",
-  "branchName": "ralph/padrino-v10",
-  "description": "Wave 10 - Role Expansion & Multi-Context Scoring (DRAFT). Extends the scientific Mafia benchmark with deterministic scum-skill roles (deception/info-denial), a formal Night Action Resolution (NAR) tier system, and a multi-context rating architecture in which EVERY mode is SCORED but canonical 2-faction ELO ranking PURITY is firewalled and CI-enforced. GROUNDING (HEAD c209858, Alembic head 0046): Wave 9 + v9-fixes + v9-fixes-2 (US-121..209) are MERGED; this wave builds on the merged tree, not on unexecuted work. The single new migration is 0047 (linear after 0046). The existing segregation firewall is REUSED, not reimplemented: League.kind in {SCIENTIFIC, HUMANS_INCLUDED}, the fail-closed _should_apply_ratings chokepoint in runner/game_runner.py, the sibling human_rating tables, and Rating/RatingEvent keyed on league_id + scope_type/scope_value; the anonymity/segregation CI gate (tests/test_invariants_human_mp.py + tests/ratings/test_segregation.py) is IN-TREE and reused. The presentation surfaces ALREADY EXIST: the SvelteKit spectator frontend (web/dashboard) and src/padrino/ratings/public_leaderboard.py. This wave is about the core benchmark engine and multi-context scoring, with firewalled canonical purity, largely orthogonal to the human-multiplayer layer. Incorporates a 4-model review (Claude synthesis + mafiascum research agents + Codex gpt-5.5 + Antigravity Gemini-3.1-Pro). Guiding refinement from review: 'scored' must NOT mean 'same leaderboard' - each mode rates into its own context; canonical ladders stay narrow, boring, heavily tested. Now 21 stories including 2 prerequisite substrate stories (US-214 structured-action vocabulary, US-215 faction/win-condition generalization) and the US-187 -> US-187/US-187b Tracker+Watcher / Ninja split. DRAFT: not activated, not run.",
+  "branchName": "ralph/padrino-v11",
+  "description": "Wave 11 - 'Make Wave 9/10 Real' (DRAFT, not run). Padrino is backend-mature but product-surface-lagging: Wave 9 (human-MP, US-121..170), v9-fixes-2/3 (US-189..213), and Wave 10 (roles + NAR + multi-context rating, US-171..223) are all MERGED to main (HEAD 7e1dc45, Alembic head 0048). A holistic review found the engine grew far ahead of what is surfaced, runnable, or ranked. This wave is SINGLE-HOST and deliberately EXCLUDES campaign orchestration, multi-host/distributed workers, concurrent multi-gauntlet scheduling, and any large-scale cost-overhaul (there is no near-term benchmark campaign). Four phases. P0 (PRIMARY) - surface catch-up: drive the night-action UI from the SERVER's full legal-action set (the play surface hardcodes ['INVESTIGATE','PROTECT','MAFIA_KILL'] in web/dashboard/src/lib/api/playSurface.ts + src/routes/play/[gameId]/+page.svelte, forcing every NAR-role human seat to time out); render NAR resolution events in the spectator watch view (web/dashboard/src/routes/watch/[id]/+page.svelte renders only chat/vote/elimination/terminal today, NOT NightResolved/NightFeedbackDelivered) identity-blind; surface the multi-context leaderboard (canonical/PLACEMENT/SOLO_RATE cards already computed by ratings/public_leaderboard.py but the /leaderboard page is not linked in nav and FACTION cards are not shown); surface FACTION (Town vs Scum) ELO (persisted scope_type=FACTION but only GLOBAL is shown) and generalize the model rollup (model_rollup.py hardcodes Faction.TOWN/MAFIA); surface the six Wave-10 rulesets (deception13_v1, roleblock10_v1, visit12_v1, ninja13_v1, sk12_v1, jester8_v1) in the lobby (lobby/+page.svelte hardcodes only mini7_v1|bench10_v1). P1 - make the human lane RUNNABLE single-host: add a human-lane worker docker-compose service (compose has postgres/bootstrap/api/public-api/scheduler/dashboard only - no 'padrino human-lane' worker, so launched lobbies sit RUNNING forever) + a healthz probe; ops-size the placeholder caps/breakers (settings $50 global breaker padrino_human_global_lobby_cost_breaker_usd trips at real concurrency); fix per-call cost extraction for custom OpenAI-compatible endpoints (litellm_adapter._extract_cost reads _hidden_params['response_cost'] which is absent for Z.AI/Xiaomi so cost_usd is NULL - the price_turn_usd token fallback exists in economics but is not wired into the persist path); validate the existing single-host durable rehydration (runner/human_durability.rehydrate_active_human_games) is restart-resume sufficient (do NOT build distributed leasing). P2 - activate the ranked Humans-Included League (segregation-safe): a ranked-ELO writer for the HUMANS_INCLUDED league that PROVABLY never writes scientific Rating/RatingEvent (the human_rating sibling tables have been dormant since migration 0025 and human games are hardcoded ranked=False at human_lane.py:932; lobbies.py always uses get_or_create_humans_included which is ranked=False); extend tests/ratings/test_segregation.py to assert a RANKED human game writes ZERO scientific rows AND DOES write Humans-Included rows while a casual human game writes neither; surface human personal ELO + human/AI ladders on the multi-context leaderboard; address ranked integrity (out-of-band coaching guard + ranked anonymity timing-delay validation). P2 DEPENDS on P0 (human NAR-role play + leaderboard surface) and P1 (lane runnable). P3 - light single-host hardening (parallelizable): a real-action NAR golden corpus (tests/integration/test_nar_regression_corpus.py byte-pins the six rulesets ONLY as all-NOOP DRAW games via NoopMockAdapter, so tier-ordered kill/protect/roleblock/ninja/track/watch interactions have NO real-action golden) consolidating the drifting conftest script-builders; hot-path secondary indexes (game_events.game_id, llm_calls.(game_id, agent_build_id, event_id) + retention-scan columns) as one linear Alembic migration 0049 after head 0048; fix the non-isolating child-game gather in scheduler.py:254 (asyncio.gather with no return_exceptions aborts the whole gauntlet on one failure) + add a FAILED game status with a bounded single-host retry (no campaign abstraction); a single-host Postgres backup runbook + tested restore that re-verifies the hash-chain. Hard rules retained throughout: pure core (no wall-clock/unseeded-random/DB in core/), chat-firewall, identity-blind observations/spectator (FORBIDDEN_PAYLOAD_KEYS, counts-only composition, terminal-gated reveal), every event hash-chains, segregation (zero scientific writes for human games). DRAFT: refined to 21 stories (US-234 split into US-234a flag/plumbing + US-234b human-ranked-ELO writer). Not activated, not run.",
   "userStories": [
     {
-      "id": "US-171",
-      "title": "RatingContext abstraction + per-context rating tables (composes with League.kind firewall, fail-closed)",
-      "priority": 171,
+      "id": "US-224",
+      "title": "Server-driven night-action play surface (drop the hardcoded action list)",
+      "priority": 224,
       "dependencies": [],
-      "description": "Introduce a first-class RatingContext so every ruleset/mode maps to exactly one rating context, and ratings are written per-context. This is the substrate for 'every mode scored, canonical pure'. Context kinds: CANONICAL_TEAM (2-faction OpenSkill team rating), PLACEMENT (OpenSkill multi-team placement), SOLO_RATE (per-role success-rate metric). Crucially RatingContext COMPOSES WITH the existing League.kind firewall rather than introducing a parallel firewall: a CANONICAL_TEAM context binds ONLY a SCIENTIFIC league and the sacred Rating/RatingEvent rows are reached exactly as today (League.kind + the fail-closed _should_apply_ratings chokepoint in runner/game_runner.py); the new PLACEMENT/SOLO_RATE contexts live on NEW sibling tables (the same pattern as the existing human_rating sibling) and NEVER write to Rating/RatingEvent. Contexts are keyed on (ruleset_id, kind) only.",
+      "description": "The human play surface currently hardcodes the night-action universe in two places: web/dashboard/src/lib/api/playSurface.ts isNightActionPhase() tests ['MAFIA_KILL','PROTECT','INVESTIGATE'] and web/dashboard/src/routes/play/[gameId]/+page.svelte nightActionType() iterates ['INVESTIGATE','PROTECT','MAFIA_KILL']. The server already streams the full legal-action set per seat: the SSE observation frame (SeatObservationFrame) carries legal_actions.allowed_action_types (computed by core/engine/legal_actions.legal_actions_for, the single source of truth, which already emits ROLEBLOCK/FRAME/TRACK/WATCH/CLEAN per role/phase). NAR-role human seats (Godfather/Roleblocker/Janitor/Framer/Tracker/Watcher/Ninja/SK) currently cannot act and are forced to time out. Drive the night-action UI entirely from allowed_action_types/legal_targets - no hardcoded action list anywhere in the frontend. This fixes a real human-MP bug.",
       "acceptanceCriteria": [
-        "New RatingContext concept: a rating_contexts table (id, kind in {CANONICAL_TEAM, PLACEMENT, SOLO_RATE}, ruleset_id, is_canonical bool, display_label) keyed on (ruleset_id, kind) ONLY. It does NOT add a competing rating_context_id FK that bypasses League.kind; the sacred Rating/RatingEvent reach path stays League.kind + _should_apply_ratings exactly as in-tree.",
-        "CANONICAL_TEAM maps onto the existing SCIENTIFIC league: a canonical context may ONLY bind a SCIENTIFIC league, and the canonical backfill is a no-op marker (it stamps the existing rows, it does not create a new write path). PLACEMENT/SOLO_RATE contexts live on NEW sibling tables (mirroring the human_rating sibling pattern) and never write a row to Rating/RatingEvent.",
-        "Rulesets declare a canonical flag and a rating-context kind; get_ruleset exposes them. A ruleset with kind != CANONICAL_TEAM (or is_canonical=false) can NEVER resolve to a canonical context.",
-        "FAIL CLOSED: a game with a missing/unknown/None rating context is treated as UNRATED (written nowhere) - it NEVER defaults into a canonical ladder; this reuses the existing fail-closed _should_apply_ratings posture.",
-        "Canonical team rating writes carry: ruleset_id, rating_context_id (CANONICAL_TEAM marker on the SCIENTIFIC league), every participant's model/build id, the game seed, and the final 2-team outcome - with no change to the actual Rating/RatingEvent reach path.",
-        "Migration pinned as 0047 (linear after current head 0046). The backfill is strictly ADDITIVE: NO re-rating / no PlackettLuce re-run. BOTH existing scopes per ruleset (GLOBAL/global and FACTION/TOWN + FACTION/MAFIA) for mini7_v1 and bench10_v1 are stamped with the same CANONICAL_TEAM marker on the SCIENTIFIC league; a test asserts (mu, sigma, conservative_score) are byte-identical for every pre-existing row and row counts are unchanged.",
-        "Extend tests/ratings/test_segregation.py to re-assert the existing zero-canonical-write proofs post-migration (a non-canonical context writes zero rows to Rating/RatingEvent).",
+        "isNightActionPhase() and nightActionType() in playSurface.ts and play/[gameId]/+page.svelte no longer reference any hardcoded list of action types; the night-action determination derives from the server's legal_actions.allowed_action_types (the single source of truth) for the streamed observation frame. MAFIA_KILL, PROTECT, INVESTIGATE remain renderable and submittable exactly as today (still members of allowed_action_types) - the change is to source ALL action types from the server's allowed_action_types, NOT to delete the vanilla three when removing the hardcoded array.",
+        "All NAR night ActionTypes the server can emit (ROLEBLOCK, FRAME, TRACK, WATCH, CLEAN, SERIAL_KILL) are renderable and submittable when allowed_action_types contains them, with targets from legal_targets; a frontend test (vitest/unit on playSurface) drives an observation whose allowed_action_types contains a NAR action and asserts the surface offers it.",
+        "A contract test asserts the streamed SeatObservationFrame / observation SSE carries allowed_action_types so the server-driven UI has the data end-to-end.",
+        "An e2e test (web/dashboard/tests/e2e, alongside play.spec.ts) drives a play observation whose legal_actions contains a non-vanilla night action and asserts the play surface presents that action and its legal targets rather than timing out.",
+        "The existing anonymity assertions in play.spec.ts still pass (the rendered play-shell exposes no seat_kind/is_human/agent_build/controller_type/takeover); no identity marker is introduced by the new action rendering.",
+        "pnpm -C web/dashboard lint && check && test:e2e pass.",
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
-      "notes": "Generalizes the planned three rating contexts (scientific / humans-included / human-personal) into N contexts keyed by (ruleset_id, kind). REUSES, not reimplements, the in-tree segregation pattern (League.kind + _should_apply_ratings + the human_rating sibling tables). Contexts are keyed on (ruleset_id, kind) with no per-setup key.",
-      "passes": true
+      "notes": "Pure frontend wiring; the server contract (legal_actions_for + the SSE observation frame) is already correct. Single source of truth = core/engine/legal_actions.legal_actions_for. Real human-MP bug: NAR-role seats forced to time out.",
+      "passes": false
     },
     {
-      "id": "US-172",
-      "title": "Canonical-purity invariant + CI gate (introspect win-states, fail closed)",
-      "priority": 172,
-      "dependencies": [
-        "US-171"
-      ],
-      "description": "Make canonical ELO purity a CI-enforced invariant, the way anonymity/segregation are. A ruleset may be CANONICAL only if its win-state space is exactly two mutually-exclusive, collectively-exhaustive TEAM outcomes (Town win XOR Mafia win, plus a defined draw handled per US-173) with no faction mutation, no solo/third faction, no alt-win condition, and no kingmaking objective.",
-      "acceptanceCriteria": [
-        "A canonicality validator programmatically introspects every ruleset marked canonical and ASSERTS its win-state space is exactly {TOWN win, MAFIA win} as the only two RANKED outcomes, PLUS an optional DRAW that is a TIE between those two teams (equal OpenSkill rank), NOT a third winning party; the validator asserts no terminal winner outside {TOWN, MAFIA} and that DRAW maps to a tie. Any solo faction, conversion/mutation, or alt-win condition fails the assertion.",
-        "CI gate test (in tests/ratings/test_segregation.py and tests/test_invariants_human_mp.py) forbids ALL of: (a) any non-canonical-context game writing to canonical Rating/RatingEvent; (b) any rating event whose context is missing/None updating a canonical ladder; (c) any canonical ruleset that fails the two-MECE-outcomes introspection; (d) any canonical rating event missing ruleset_id/rating_context_id/model+build ids/seed/team-outcome; (e) any canonical observation leaking model/provider/build identity; (f) any core role using wall-clock/unseeded-random/DB/network/chat-derived mechanics.",
-        "The gate runs in the default pytest -m 'not integration' suite and fails if any rule is violated.",
-        "All backend gates pass."
-      ],
-      "notes": "Review (both Codex + Gemini): the canonical ladder must stay 'narrow, boring, heavily tested.' Unknown context => unrated, never canonical. There is no US-146-labeled suite; the concrete in-tree gates are tests/ratings/test_segregation.py and tests/test_invariants_human_mp.py.",
-      "passes": true
-    },
-    {
-      "id": "US-173",
-      "title": "Deterministic endgame + MAX_DAYS draw (build on existing) + per-faction (Town/Scum) diagnostics",
-      "priority": 173,
-      "dependencies": [
-        "US-171"
-      ],
-      "description": "MAX_DAYS already resolves to a DRAW in the merged tree (check_win returns WinResult(winner='DRAW', reason='MAX_DAYS_REACHED') when day > MAX_DAYS, and openskill _ranks_for handles DRAW as a tie). BUILD ON this rather than redefining it. Both reviewers flagged the day-cap as a rating hazard (draw compresses ELO; survive-to-win breeds a stall meta; mafia-wins-on-clock breeds random lynching). Preserve the existing deterministic terminal policy unchanged, make draw handling unconditional, pin that a model cannot farm score by forcing draws, and track per-faction + per-role diagnostics so a blended ELO doesn't hide faction asymmetry.",
-      "acceptanceCriteria": [
-        "The existing deterministic terminal policy is PRESERVED: parity/elimination win conditions plus the in-tree MAX_DAYS -> DRAW outcome recorded in terminal_result. A test asserts the mini7_v1/bench10_v1 day-cap outcomes are byte-unchanged (same terminal_result and event_hash chain) before/after this story.",
-        "OpenSkill draw handling is applied UNCONDITIONALLY and consistently (drop any 'if draws are possible' conditional - draws ARE possible today); a test asserts the day-cap outcome is deterministic and replay-stable, AND asserts a model cannot raise its conservative_score purely by forcing draws (sigma-shrink from added games is acceptable; mu-gain from a draw is not).",
-        "Per-faction rating diagnostics (genuinely new work): store Town-ELO and Scum-ELO and per-role sample counts separately even if a blended number is displayed; only GLOBAL + FACTION TOWN/MAFIA scopes exist today, so this adds the per-role sample-count breakdown. A model with N games shows its town/mafia/per-role sample breakdown.",
-        "All backend gates pass."
-      ],
-      "notes": "Gemini: need a 'mathematically clean tie-breaker' to avoid degenerate metas - already in-tree as DRAW(MAX_DAYS). Codex: track town/mafia win rates + per-role sample counts as diagnostics, not just one blended ELO.",
-      "passes": true
-    },
-    {
-      "id": "US-174",
-      "title": "Night Action Resolution (NAR) tier system + resolution matrix",
-      "priority": 174,
+      "id": "US-225",
+      "title": "Render NAR night-resolution events in the spectator watch view (identity-blind)",
+      "priority": 225,
       "dependencies": [],
-      "description": "THE KEYSTONE. Replace ad-hoc night resolution with a formal, deterministic NAR tier system and an explicit resolution MATRIX (rows = action types; columns = blocked / protected / killed / redirected / watched-tracked / cleaned). Every current and future role's night interaction is defined by this matrix. The existing resolvers (core/engine/resolvers/: mafia_kill.py, doctor_protect.py, detective.py, night.py, day_vote.py) must be EXPRESSED AS matrix entries, not left as a parallel resolution path. Both reviewers: a flat prose order will rot; this must be a tested matrix with all edge cases pinned.",
+      "description": "The spectator watch view web/dashboard/src/routes/watch/[id]/+page.svelte renders only PublicMessageSubmitted, VoteSubmitted/VoteCast, DayVoteResolved/PhaseResolved, PlayerEliminated, and GameTerminated. It does not render the night outcome. The ONLY spectator-PUBLIC night-resolution event is PlayerEliminated (visibility=PUBLIC, events.py:410); NightFeedbackDelivered is PRIVATE (events.py:347) and NightResolved is SYSTEM (events.py:392), and core/spectator_projection.py drops both wholesale (SPECTATOR_DROP_VISIBILITIES={PRIVATE,SYSTEM}, project_event_for_spectator returns None for any non-PUBLIC event). Add identity-blind renderers for the spectator-PUBLIC night outcome only: the night-death / no-death announcement carried by the projected PUBLIC PlayerEliminated payload, including the cleaned (Janitor) no-reveal variant, so a watcher can follow that a night resolved. The spectator projection is the source of truth for what is visible; per-seat private feedback (roleblock/protect/investigate/track/watch codes) is NEVER projected to the public watch stream and must not be rendered. Richer public night narration would require a NEW PUBLIC spectator night-summary event in core and is OUT OF SCOPE for this wave.",
       "acceptanceCriteria": [
-        "A documented tier order is implemented deterministically: (1) roleblocks, (2) redirects, (3) kills/protects/visits applied + visit-recording, (4) investigations/track/watch read resolved state, (5) death-reveal (with clean/forge handling). Pure-core, seed-driven, no wall-clock.",
-        "Explicit predeclared resolutions, each with a test: roleblock-vs-roleblock = BOTH blocks apply (no mutual-cancel special case); factional-kill ownership when the designated killer is roleblocked (define whether the kill fails or another scum carries it); whether a blocked action counts as a 'visit' for Tracker/Watcher; whether an investigation on a target that dies the same night still returns a result; structured deterministic FEEDBACK messages for blocked/protected/investigated outcomes (never inferred from chat).",
-        "The existing mafia_kill/doctor_protect/detective resolvers (core/engine/resolvers/) are EXPRESSED AS matrix entries with NO parallel resolution path; a regression test replays a corpus of existing mini7_v1/bench10_v1 games and asserts identical event_hash chains AND identical terminal_result before/after the NAR refactor (no floats in core events).",
-        "A resolution-matrix data structure (or table) is the single source of truth; adding a role means adding matrix entries, not editing scattered conditionals.",
-        "Property test: replay-determinism holds across all role/action interaction combinations (Hypothesis stateful where practical).",
-        "All backend gates pass."
-      ],
-      "notes": "Codex: 'You need a resolution matrix, not prose.' Gemini: 'standard Natural Action Resolution (NAR) tier system' + redirect-vs-block + blocked-as-visit ambiguity. This story must merge BEFORE any new role.",
-      "passes": true
-    },
-    {
-      "id": "US-214",
-      "title": "Structured-action vocabulary keystone: new night ActionTypes + legal-actions + coercion + feedback",
-      "priority": 174.5,
-      "dependencies": [
-        "US-174"
-      ],
-      "description": "ActionType today is only NOOP/ABSTAIN/VOTE/MAFIA_KILL/PROTECT/INVESTIGATE (core/enums.py). Add ROLEBLOCK/FRAME/TRACK/WATCH/CLEAN; emit them per role/phase from legal_actions (core/engine/legal_actions.py + core/observations.py) as the SINGLE source of truth; extend coercion (core/agents/coercion.py) so unknown/illegal types fall back deterministically; add a deterministic structured feedback channel in core/observations.py for roleblocked/tracked/watched results keyed by public_player_id only (never chat-derived). Pure-core, identity-blind. This BLOCKS every active-role story.",
-      "acceptanceCriteria": [
-        "The 5 new ActionType members (ROLEBLOCK, FRAME, TRACK, WATCH, CLEAN) are added to core/enums.py.",
-        "legal_actions emits each new action per the role/phase that may use it, as the SINGLE source of truth (core/engine/legal_actions.py + core/observations.py).",
-        "Coercion maps unknown/illegal/empty actions to a deterministic fallback (ties to US-181), reusing the existing coerce_to_safe_action posture.",
-        "A deterministic structured feedback channel delivers block/track/watch results via observation fields keyed by public_player_id only (never chat).",
-        "Existing mini7_v1/bench10_v1 legal-action spaces are byte-unchanged: a test asserts no new action leaks into the 2 canonical setups.",
+        "The watch route renders the spectator-PUBLIC night outcome - the night-death / no-death announcement from the projected PUBLIC PlayerEliminated payload (including the cleaned (Janitor) no-reveal variant) - using ONLY fields present in the spectator projection (core/spectator_projection.py); it never reads role/faction/model/provider/human-vs-AI from the frame. It does NOT attempt to render roleblock/protect/investigate/track/watch outcomes (those ride NightFeedbackDelivered=PRIVATE / NightResolved=SYSTEM and are dropped by the projection).",
+        "A backend test asserts project_event_for_spectator returns None for every NightFeedbackDelivered event and every NightResolved event, so per-seat private codes (INVESTIGATION_RESULT/TRACK_RESULT/WATCH_RESULT/ACTION_BLOCKED) and the SYSTEM night summary never enter the watch feed.",
+        "Identity-blindness holds: a watch e2e test (web/dashboard/tests/e2e/watch.spec.ts) on a NAR game asserts the rendered watch view contains none of seat_kind/is_human/agent_build/controller_type/takeover and no role/faction strings before the terminal reveal; reuse the shared identity-blind assertion helper (see US-225's shared-helper AC).",
+        "A shared identity-blind e2e assertion helper is created extending the existing play.spec.ts/lobby.spec.ts anonymity pattern, so play + watch + leaderboard specs assert identity-blindness through one helper rather than drifting per-story copies.",
+        "Counts-only / terminal-gated rules are respected: cleaned (Janitor) deaths do not reveal the cleaned role mid-game in the watch view, and role/faction only appear via the terminal endgame reveal (core/reveal.py) path the reveal.spec.ts gate already covers.",
+        "The PlayerEliminated night-outcome renderer is exercised by the watch e2e fixture (a scripted/fixture NAR game) so it is covered by the anonymity gate.",
+        "pnpm -C web/dashboard lint && check && test:e2e pass.",
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
-      "notes": "Keystone prerequisite the review flagged: every active-role story silently assumed these actions exist.",
-      "passes": true
+      "notes": "Source of truth for visibility = core/spectator_projection.py (PRIVATE/SYSTEM dropped, FORBIDDEN_PAYLOAD_KEYS stripped). The only spectator-PUBLIC night-resolution event is PlayerEliminated (events.py:410); NightFeedbackDelivered (PRIVATE, events.py:347) and NightResolved (SYSTEM, events.py:392) are dropped wholesale - DO NOT try to render roleblock/protect/investigate/track/watch from them. Terminal reveal stays in reveal.py. Richer public night narration needs a NEW PUBLIC core event = out of scope.",
+      "passes": false
     },
     {
-      "id": "US-215",
-      "title": "Faction / win-condition substrate generalization (N-faction / solo / alt-win), 2-faction byte-stable",
-      "priority": 181.5,
-      "dependencies": [
-        "US-173"
-      ],
-      "description": "Faction enum is strictly {TOWN, MAFIA} (core/enums.py) and check_win is hardcoded 2-faction parity (alive_mafia >= alive_town) in core/engine/win_conditions.py. Generalize the faction + win-condition model to support a 3rd/solo faction (e.g. SK last-alive) and alt-win conditions, WITHOUT changing the canonical 2-faction path. Prerequisite for US-182/183/185.",
-      "acceptanceCriteria": [
-        "Faction/win-condition model generalized to N-faction / solo / alt-win (the 2-faction parity becomes one case of the general rule).",
-        "The existing 2-faction parity AND the DRAW(MAX_DAYS) outcome are byte-identical: a test replays a corpus of mini7_v1 and bench10_v1 games and asserts identical terminal_result AND identical event_hash chains pre/post.",
-        "Pure-core (no wall-clock/unseeded-random).",
-        "All backend gates pass."
-      ],
-      "notes": "Substrate prerequisite; US-183 (SK) and US-185 (Jester) are unbuildable on the strict 2-faction substrate.",
-      "passes": true
-    },
-    {
-      "id": "US-175",
-      "title": "Godfather (reads innocent to investigation) - first scum-skill role",
-      "priority": 175,
-      "dependencies": [
-        "US-174"
-      ],
-      "description": "The cleanest, lowest-variance scum deception role and the recommended FIRST addition. At investigation resolution, the Godfather returns Town/Innocent instead of true alignment. Deterministic single conditional; 2-faction-clean (Mafia-aligned). Tests information corruption / trust-calibration. PASSIVE investigation-falsify: it needs only the NAR matrix (US-174), not the new active-action vocabulary.",
-      "acceptanceCriteria": [
-        "INVESTIGATE on the Godfather deterministically returns Innocent/Town; identity-blindness preserved (the result is falsified, not leaked). Resolved at the NAR investigation tier.",
-        "Variance guard: a test/diagnostic asserts the Detective still discriminates (the role corrupts a result, it must not make the Detective pure noise); document the measured effect on town inference.",
-        "Belongs only in 10p+ canonical setups (not mini7_v1).",
-        "All role feedback (here, the falsified alignment) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
-        "All backend gates pass."
-      ],
-      "notes": "Codex: add Godfather FIRST; measure whether Detective still discriminates skill. PASSIVE falsify - deliberately does NOT depend on US-214.",
-      "passes": true
-    },
-    {
-      "id": "US-176",
-      "title": "Mafia Roleblocker (action denial) on the NAR engine",
-      "priority": 176,
-      "dependencies": [
-        "US-174",
-        "US-214"
-      ],
-      "description": "Scum action-denial / tempo role. Blocks a target's active night action (passives immune). Uses the NAR tier-1 resolution. High skill (denying the town's power roles) but the biggest resolution-complexity contributor, so it lands only after the NAR matrix (US-174) and the structured-action vocabulary (US-214) and in a dedicated 10p+ setup.",
-      "acceptanceCriteria": [
-        "ROLEBLOCK nullifies the target's active action per the NAR matrix; passives (e.g. Bulletproof/Mason) are immune; the roleblock-vs-roleblock and blocked-factional-killer cases follow US-174's predeclared rules with tests.",
-        "Deterministic structured feedback to the blocked actor; no chat-derived inference.",
-        "Introduced only in a dedicated 10p+ setup, not mini7_v1.",
-        "All role feedback (block results) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
-        "All backend gates pass."
-      ],
-      "notes": "Codex: 'useful but dangerous... add Roleblocker in a dedicated setup.'",
-      "passes": true
-    },
-    {
-      "id": "US-177",
-      "title": "Janitor (suppress public role-reveal on death; leak-safe at game end)",
-      "priority": 177,
-      "dependencies": [
-        "US-174",
-        "US-214"
-      ],
-      "description": "Post-mortem information denial: on a successful kill the Janitor 'cleans' the death so the public death-reveal omits role/alignment. The true role is preserved internally for replay and the endgame reveal context. Must handle the win-condition-halt leak hazard the review raised.",
-      "acceptanceCriteria": [
-        "On a cleaned death the public death event omits role/faction (stripped), verified against the real spectator projection (core/spectator_projection.py) in BOTH anonymous and transparent modes; the true role survives only in internal event state and is disclosed only via the terminal endgame-reveal projection (core/reveal.py).",
-        "LEAK GUARD: a test drives the last-mafia-cleaned-death win and asserts zero role/faction leak in any mid-game observation or spectator projection; the cleaned role is disclosed only via the terminal endgame-reveal projection (test this exact scenario).",
-        "X-shot capped (e.g. 1-shot) to bound variance; resolved at the NAR death-reveal tier.",
-        "All role feedback and reveals are delivered via structured deterministic observation/projection fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
-        "All backend gates pass."
-      ],
-      "notes": "Gemini: 'Janitor State Leaks' when a cleaned death ends the game. Codex: limit shots, be careful with observation redaction. Real modules: core/spectator_projection.py (mid-game) and core/reveal.py (endgame).",
-      "passes": true
-    },
-    {
-      "id": "US-178",
-      "title": "Framer (frame a town target as guilty) - variance-gated",
-      "priority": 178,
-      "dependencies": [
-        "US-174",
-        "US-175",
-        "US-214"
-      ],
-      "description": "The richest opponent-modeling scum role (predict the Detective's target) but the highest variance ('Framer = variance bomb' - N1 luck can lose town through no reasoning fault). Implement deterministically, but GATE its inclusion in any canonical ladder behind a measured variance budget.",
-      "acceptanceCriteria": [
-        "FRAME marks a target; at the NAR investigation tier an investigation of a framed target deterministically returns Guilty/Mafia; framing resolves correctly when the Framer is itself roleblocked (per US-174).",
-        "Framer x Godfather precedence is pinned at the NAR investigation tier: a frame WINS -> Guilty (the frame is an active mark and overrides Godfather's passive self-innocent property); a test covers investigate(framed Godfather) returning Guilty, and the precedence is mirrored as a US-174 matrix entry.",
-        "X-shot/limited; identity-blind preserved.",
-        "VARIANCE GATE (pinned numerically): the role is enabled in a canonical ruleset ONLY IF, over >= 200 mirror-paired games (US-180), the share of outcome variance attributable to frame-target RNG (vs the measured skill delta) is <= 15%; the test computes this and disables Framer from canonical if exceeded; otherwise it ships disabled / experimental-only.",
-        "All role feedback (falsified alignment of a framed target) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
-        "All backend gates pass."
-      ],
-      "notes": "Both reviewers: Framer adds the most noise. Add Godfather + Roleblocker + Janitor first; admit Framer to canonical only if measured variance stays within the pinned <=15% budget.",
-      "passes": true
-    },
-    {
-      "id": "US-179",
-      "title": "Canonical 'deception-hardened' 2-faction ruleset (13p), vanilla-majority",
-      "priority": 179,
-      "dependencies": [
-        "US-172",
-        "US-175",
-        "US-176",
-        "US-177",
-        "US-178"
-      ],
-      "description": "Assemble the vetted scum-skill roles into a NEW canonical 2-faction ruleset at 13 players that benchmarks deception/info-denial/counter-deduction, while keeping power roles a minority so games stay skill-decided not power-decided. The US-178 dependency is a build-order edge: the conditional-Framer include can only be wired once the variance-gated Framer exists.",
-      "acceptanceCriteria": [
-        "A new ruleset deception13_v1 with an EXACT roster of 13 players: 4 Mafia (1 Godfather, 1 Roleblocker, 1 Janitor[1-shot], 1 Goon) ~31% scum; 9 Town (1 Detective, 1 Doctor, 7 Villagers). ROLE_COUNTS are stated explicitly. Vanilla-majority on the town side. Framer included only if US-178's variance gate passed.",
-        "Registered via get_ruleset: the resolver in core/rulesets/__init__.py is extended so the new ruleset_id 'deception13_v1' resolves (currently it only resolves mini7_v1 and bench10_v1).",
-        "It declares a CANONICAL_TEAM rating context and PASSES the US-172 canonicality introspection (exactly two MECE team outcomes).",
-        "Power-role count stays a minority of seats; a balance note in progress.txt documents the town:scum ratio and power-role density vs the variance budget.",
-        "All backend gates pass."
-      ],
-      "notes": "Both reviewers: do NOT put the quartet in mini7; role-heavy scored ladders want 10p+. Keep canonical ladders narrow and well-tested. US-178 is a build-order dependency (conditional-Framer include).",
-      "passes": true
-    },
-    {
-      "id": "US-180",
-      "title": "Paired/mirror games ('duplicate bridge') + balanced assignment + min-sample gates",
-      "priority": 180,
-      "dependencies": [
-        "US-171",
-        "US-173"
-      ],
-      "description": "Isolate logical skill from board RNG by exploiting Padrino's determinism. Role layout is derived deterministically from sha256(b'roles'+game_seed) (core/engine/role_assignment.py), so re-running the SAME seed yields the IDENTICAL layout. The mirror therefore SHARES one game_seed (board RNG/role layout byte-identical) but SWAPS the agent_build->seat roster mapping, so 'got mafia more often' or N1-luck cancels out. Also enforce balanced role/seat assignment and minimum-sample gates before a model is ranked.",
-      "acceptanceCriteria": [
-        "A paired-game scheduler (integrated in runner/scheduler.py) produces mirror pairs that SHARE one game_seed but SWAP the agent_build->seat mapping; a test asserts both legs have IDENTICAL assign_roles output (board RNG/role layout byte-identical) but transposed model placement.",
-        "PlackettLuce updates are order-dependent, so the mirror pair is rated as ONE atomic, order-INDEPENDENT update: apply both legs in canonical (seed, swap-flag) order in a single rating transaction, or net both outcomes into one placement before a single rate call; a test asserts the paired result is identical regardless of leg order.",
-        "The two legs are persisted as distinct game rows sharing a pair_id; canonical rating updates consume the paired result so board-RNG/assignment is controlled for.",
-        "Role/seat assignment across a model's rated games is balanced (or paired) so per-(faction,role) sample counts are tracked; a model is shown as PROVISIONAL until per-context and per-faction minimum-sample gates are met; a test asserts an unbalanced/under-sampled model is flagged provisional rather than ranked.",
-        "All backend gates pass."
-      ],
-      "notes": "Gemini's 'Duplicate Bridge Solution' (CRITICAL) + Codex's seat/role-confounding warning. This is a high-leverage rating-quality win unique to a deterministic engine. Same-seed-shared-layout + swapped-roster is the only correct mirror given role_assignment is seeded by sha256(b'roles'+game_seed).",
-      "passes": true
-    },
-    {
-      "id": "US-181",
-      "title": "Deterministic, consistently-scored invalid-action handling (consolidation)",
-      "priority": 181,
-      "dependencies": [
-        "US-174"
-      ],
-      "description": "More roles => bigger structured-action space => more malformed/illegal action submissions. This is CONSOLIDATION, not net-new: ActionType.NOOP/ABSTAIN already exist and resolvers already coerce illegal actions (core/agents/coercion.py: coerce_to_safe_action returns ABSTAIN in DAY_VOTE and NOOP everywhere else). Consolidate into ONE documented deterministic fallback applied identically across all roles and ladders, counted in diagnostics so invalid-action rate is visible and never silently distorts ratings.",
-      "acceptanceCriteria": [
-        "Consolidate the existing coercion into ONE documented deterministic fallback identical across roles/ladders (a malformed/illegal/empty structured action resolves to NOOP / forced-abstain per phase); never randomized; never chat-derived; a test asserts the existing coercion already satisfies replay-stability.",
-        "Invalid-action rate per model is recorded as a diagnostic and surfaced; a test asserts the fallback is deterministic and replay-stable.",
-        "All backend gates pass."
-      ],
-      "notes": "Codex: 'invalid action handling must be deterministic and scored consistently.' Reframed as consolidation of the in-tree coerce_to_safe_action chokepoint.",
-      "passes": true
-    },
-    {
-      "id": "US-182",
-      "title": "PLACEMENT rating context (multi-team / solo-faction), firewalled from canonical",
-      "priority": 182,
-      "dependencies": [
-        "US-171",
-        "US-172",
-        "US-215"
-      ],
-      "description": "Scored context for modes with >2 outcome groups (e.g. Town vs Mafia vs Serial Killer). Use OpenSkill placement (winner ranked 1st, the rest tie) within that exact context only. Never writes to any canonical ladder. Depends on the US-215 faction/win-condition substrate generalization for the >2-group terminal model.",
-      "acceptanceCriteria": [
-        "A PLACEMENT rating context computes OpenSkill placement ratings from multi-team terminal results; it is its own context (per ruleset) and is CI-asserted non-canonical.",
-        "The US-172 gate confirms placement-context games write zero rows to canonical Rating/RatingEvent.",
-        "All backend gates pass."
-      ],
-      "notes": "Both reviewers: OpenSkill natively handles multi-team placement; correct math for 3-faction/SK, but a SEPARATE context. Requires US-215's generalized N-faction terminal model.",
-      "passes": true
-    },
-    {
-      "id": "US-183",
-      "title": "Serial Killer (solo faction) on a placement-scored ruleset",
-      "priority": 183,
-      "dependencies": [
-        "US-182",
-        "US-174",
-        "US-214",
-        "US-215"
-      ],
-      "description": "Implement the solo-killer faction (wins as last alive) ONLY inside a placement-scored, non-canonical ruleset. Tests solo survival + frame management + tempo. Never enters a canonical 2-faction ladder. Requires the US-215 substrate (the strict 2-faction parity in core/engine/win_conditions.py cannot express an SK-solo win).",
-      "acceptanceCriteria": [
-        "A 3-faction ruleset (Town vs Mafia vs SK) with deterministic SK night kill resolved via the NAR matrix; terminal results map to a placement outcome.",
-        "check_win's 2-faction parity (alive_mafia >= alive_town in core/engine/win_conditions.py) MUST NOT be reused for this 3-faction ruleset (it ignores SK and would mis-fire a MAFIA win or never resolve an SK-solo win); the placement ruleset declares its own deterministic terminal policy (SK wins when last-alive -> OpenSkill placement). A test asserts a board where mafia==town but SK alive does NOT resolve a MAFIA win.",
-        "The new ruleset_id is registered via get_ruleset (extend the resolver in core/rulesets/__init__.py).",
-        "It declares a PLACEMENT context and FAILS the canonical introspection (proving the gate works); CI confirms zero canonical writes.",
-        "All backend gates pass."
-      ],
-      "notes": "Gemini: native multi-team placement is the right model; keep larger setups to dampen its swing. Built on the US-215 generalized win-condition substrate.",
-      "passes": true
-    },
-    {
-      "id": "US-184",
-      "title": "SOLO_RATE scoring context (Bayesian success rate + min-sample gates)",
-      "priority": 184,
-      "dependencies": [
-        "US-171",
-        "US-172"
-      ],
-      "description": "Scored context for alt-win roles whose objective is orthogonal to team play (Jester, Executioner, Survivor). Score them as per-role SUCCESS RATES with Bayesian/binomial credible intervals and minimum-sample gates - NOT ELO. Never writes to canonical or placement team ELO.",
-      "acceptanceCriteria": [
-        "A SOLO_RATE context records per-role success/attempt counts and reports a success rate with a credible interval (e.g. Beta-binomial 95% CI); a role is shown only after a minimum-sample gate.",
-        "CI confirms SOLO_RATE games write zero rows to canonical Rating/RatingEvent and to placement ratings.",
-        "All backend gates pass."
-      ],
-      "notes": "Both reviewers: 'Do not force ELO onto non-zero-sum dynamics'; report intervals + min-sample gates.",
-      "passes": true
-    },
-    {
-      "id": "US-185",
-      "title": "Jester (+ Executioner/Survivor follow-up) on SOLO_RATE-scored modes",
-      "priority": 185,
-      "dependencies": [
-        "US-184",
-        "US-174",
-        "US-214",
-        "US-215"
-      ],
-      "description": "Implement the alt-win roles whose entire value is a novel solo intelligence (Jester = anti-persuasion / reverse psychology), scored ONLY via the SOLO_RATE context (e.g. Jester lynch-bait success rate). Their alt-win conditions exist ONLY inside their own rulesets/contexts and never leak into team ELO. Requires the US-215 substrate for alt-win conditions.",
-      "acceptanceCriteria": [
-        "Jester (win if day-voted out) implemented deterministically (REQUIRED); its outcome records a SOLO_RATE success/attempt, never a team-ELO result. Executioner (target lynched) and Survivor (survive to end) on the same context are deferred to a follow-up story.",
-        "The new ruleset_id is registered via get_ruleset (extend the resolver in core/rulesets/__init__.py).",
-        "A test asserts a Jester/alt-win game produces zero canonical and zero placement-team rating writes (only a SOLO_RATE event).",
-        "All role feedback / alt-win signalling is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
-        "All backend gates pass."
-      ],
-      "notes": "Directly answers the product question: Jester IS benchmark-worthy - as a standalone lynch-bait success rate, never inside Town-vs-Mafia ELO. Executioner/Survivor moved to a follow-up story. Built on the US-215 alt-win substrate.",
-      "passes": true
-    },
-    {
-      "id": "US-186",
-      "title": "Multi-context presentation: separate cards, hard walls, no co-sorting (frontend EXISTS)",
-      "priority": 186,
-      "dependencies": [
-        "US-179",
-        "US-182",
-        "US-184"
-      ],
-      "description": "Surface every context's scores ('every mode scored') WITHOUT implying false comparability. Each model shows multiple context cards (canonical ELO per ruleset, placement ratings, solo success rates); they are never merged or sorted into one ranking; provisional/min-sample states are explicit. The presentation surfaces ALREADY EXIST: the SvelteKit spectator frontend (web/dashboard) and src/padrino/ratings/public_leaderboard.py - this story extends them, it does not introduce a frontend.",
-      "acceptanceCriteria": [
-        "The public API contract (src/padrino/ratings/public_leaderboard.py + the API) computes per-context, per-ruleset cards (e.g. 'bench10_v1 canonical: 31.2 +/-2.1', 'sk_10p placement: 24.8 +/-4.9', 'jester_8p lynch-bait: 42% CI 35-49') with HARD CANONICAL vs non-canonical section separation and no cross-context co-sort; provisional/min-sample flags are explicit.",
-        "The API response shape is pinned: a separate canonical-cards array vs an experimental-cards array, NEVER merged into one list; canonical 'ranked' vs experimental contexts are distinctly labelled; provisional (under-sampled) models are labeled, not ranked.",
-        "The existing SvelteKit spectator dashboard (web/dashboard) renders the separated cards and runs pnpm lint / check / test:e2e.",
-        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration') and the frontend pnpm lint/check/test:e2e gates pass."
-      ],
-      "notes": "CORRECTED: the frontend EXISTS (web/dashboard, first-class since Wave 7) and ratings/public_leaderboard.py exists. Both reviewers: 'same model may have multiple cards, not one merged number'; 'never sort all of these together'; presentation must scream 'separate context.'",
-      "passes": true
-    },
-    {
-      "id": "US-187",
-      "title": "Tracker / Watcher (visit-graph inference)",
-      "priority": 187,
-      "dependencies": [
-        "US-174",
-        "US-214"
-      ],
-      "description": "Canonical-compatible town investigative roles that infer alignment from the night visit graph rather than handed-down labels - a distinct intelligence dimension. Tracker (whom target visited) and Watcher (who visited target). Both resolved via the NAR visit-recording tier (read at the NAR investigation/visit tier).",
-      "acceptanceCriteria": [
-        "Tracker and Watcher return deterministic visit lists per the NAR matrix (visit-recording read at the NAR tier); the blocked-action-as-visit rule (US-174) is honored.",
-        "Per-role AC: Tracker reports whom the target visited; Watcher reports who visited the target; both with deterministic visit lists and tests covering the block-as-visit interaction.",
-        "2-faction-clean; usable in 10p+ canonical setups; tests cover the block/visit interactions.",
-        "All role feedback (visit lists) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
-        "All backend gates pass."
-      ],
-      "notes": "DEFER until NAR is solid. Tracker/Watcher (visit-graph inference) split out from Ninja (now US-187b).",
-      "passes": true
-    },
-    {
-      "id": "US-187b",
-      "title": "Ninja (scum factional-killer visit suppression)",
-      "priority": 187.5,
-      "dependencies": [
-        "US-174",
-        "US-214",
-        "US-187"
-      ],
-      "description": "The scum counter to the visit-graph inference roles: the Ninja suppresses the factional killer's visit deterministically so Tracker/Watcher record no visit for that kill. Only matters once Tracker/Watcher (US-187) exist. Resolved via the NAR visit-recording tier.",
-      "acceptanceCriteria": [
-        "Ninja suppresses the factional-killer visit deterministically per the NAR matrix: a Tracker/Watcher observing a ninja-suppressed kill records no visit; tests cover the ninja/visit interaction (including the block-as-visit interplay from US-174).",
-        "2-faction-clean; usable in 10p+ canonical setups.",
-        "All role feedback (suppressed/observed visit lists) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
-        "All backend gates pass."
-      ],
-      "notes": "Ninja only matters once Tracker/Watcher exist; split from US-187 so the visit-recording read tier ships and is tested before the suppression counter.",
-      "passes": true
-    },
-    {
-      "id": "US-188",
-      "title": "Engine-stress utility roles: Mayor, Commuter, Mason",
-      "priority": 188,
-      "dependencies": [
-        "US-174",
-        "US-214"
-      ],
-      "description": "Lower-priority deterministic, 2-faction-clean roles that also exercise specific engine paths: Mayor (weighted vote -> tests tally/threshold logic), Commuter (untargetable at night -> tests invalid/no-op target bounce), Mason (confirmed-town pair -> coordination; channel firewalled, modeled as a shared fact not chat).",
-      "acceptanceCriteria": [
-        "Mayor: deterministic public vote weight in the tally; a test covers threshold/hammer math with a weighted vote. Mayor (weighted vote) is NOT admitted to any CANONICAL_TEAM ruleset unless it passes the same measured-variance gate as US-178 (otherwise it is an engine-correctness role only).",
-        "Commuter: untargetable resolution at the NAR tier; actions targeting a commuter resolve to the deterministic no-op/bounce (ties to US-181).",
-        "Mason: confirmed-town shared fact (no chat-driven mechanic); 2-faction-clean; identity-blind preserved.",
-        "All role feedback (Mayor tally weight, Commuter bounce, Mason shared fact) is delivered via structured deterministic observation fields keyed by public_player_id only - never model/provider/build identity; covered by the existing anonymity CI gate (tests/test_invariants_human_mp.py / tests/ratings/test_segregation.py); never inferred from chat.",
-        "All backend gates pass."
-      ],
-      "notes": "Gemini: Mayor/Commuter are great engine-correctness tests. Mason is the cheapest coordination role; keep its channel firewalled. Mayor admitted to canonical only behind the US-178-style measured-variance gate.",
-      "passes": true
-    },
-    {
-      "id": "US-216",
-      "title": "Revert bench10_v1 to its byte-stable 3-Goon canonical roster (Godfather stays in deception13_v1)",
-      "priority": 216,
+      "id": "US-226",
+      "title": "Surface the six Wave-10 rulesets in the lobby selector (no hardcoded ruleset list)",
+      "priority": 226,
       "dependencies": [],
-      "description": "WAVE-10 ROUND-2 REVIEW CRITICAL (confirmed 4x). US-175 added the Godfather to the SACRED canonical bench10_v1 ruleset by changing ROLE_COUNTS from {MAFIA_GOON:3,DETECTIVE:1,DOCTOR:1,VILLAGER:5} to {MAFIA_GOON:2, GODFATHER:1,...} (bench10_v1.py:20-26; IS_CANONICAL=True). assign_roles (role_assignment.py:35) expands the multiset from ROLE_COUNTS and seed-shuffles it, so this changes the seat->role mapping for EVERY bench10 seed, and the Godfather reads TOWN to the Detective (nar.py:398) - so existing bench10_v1 canonical ELO + terminal outcomes are no longer reproducible: a byte-stability breach of a sacred ladder backed by real Rating/RatingEvent rows. Worse, US-175 REWROTE the pinned bench10 hashes in tests/integration/test_nar_regression_corpus.py (genuine pre-US-175 final c241612e.../chain 918b471f... -> 8c6933f2.../c87ebf0e...) so CI self-certifies the regression. The Godfather already exists correctly in the NEW canonical deception13_v1 ruleset, so reverting bench10 does NOT orphan the role.",
+      "description": "web/dashboard/src/routes/lobby/+page.svelte hardcodes the ruleset to a 'mini7_v1' | 'bench10_v1' union with two static <option>s. The six Wave-10 rulesets (deception13_v1, roleblock10_v1, visit12_v1, ninja13_v1, sk12_v1, jester8_v1) are registered in core/rulesets/__init__.py (BUILTIN_RULESET_IDS) and resolvable via get_ruleset but cannot be selected to create a lobby. Surface the available rulesets from the server rather than a hardcoded union, so newly-registered rulesets appear without a frontend edit. Add (or reuse) an API that lists the builtin ruleset ids + display metadata, and render them in the lobby selector (and any home/ladder selection that hardcodes the union).",
       "acceptanceCriteria": [
-        "bench10_v1.ROLE_COUNTS reverted to EXACTLY {MAFIA_GOON:3, DETECTIVE:1, DOCTOR:1, VILLAGER:5}; the GODFATHER entries removed from bench10_v1's _ROLE_FAMILY and ROLE_FACTIONS. The additive Wave-10 fields (RATING_CONTEXT_KIND, IS_CANONICAL, WIN_CONDITIONS) stay.",
-        "tests/core/test_bench10_constants.py reverted to assert MAFIA_GOON==3 with no GODFATHER.",
-        "tests/integration/test_nar_regression_corpus.py bench10 case pins the genuine pre-US-175 hashes (final_event_hash c241612e044bbfa75e346e61f7da3d6e31176f95ac95d32eb92d971770b0aa5f, chain 918b471f1048def56fb8ee4d6333ae00e0fb72364c2768d8294cacc76343ac71); the reverted 3-Goon roster reproduces them (the NoopMockAdapter draw has no night actions, so NAR does not affect this case). mini7_v1 hashes untouched.",
-        "Godfather remains seated in deception13_v1 (verify it still resolves + passes the canonicality gate); a CI guard test asserts every IS_CANONICAL ruleset's pinned corpus hash equals its historical value so a future roster drift on a canonical ladder fails closed.",
+        "An API endpoint returns the list of selectable ruleset ids with display metadata (player count / label), sourced from get_ruleset/BUILTIN_RULESET_IDS - never a hardcoded route-level list (hard rule 5); a backend route test asserts all six Wave-10 ruleset ids plus mini7_v1/bench10_v1 are returned.",
+        "lobby/+page.svelte populates its ruleset selector from that endpoint (or a typed server-provided list) instead of the hardcoded 'mini7_v1' | 'bench10_v1' union; an e2e test (lobby.spec.ts) asserts a Wave-10 ruleset id is selectable.",
+        "The lobby/home/ladder selection no longer pins a literal two-ruleset list; adding a ruleset to BUILTIN_RULESET_IDS surfaces it without further frontend edits (assert via the populated selector).",
+        "Existing lobby anonymity assertions (roster exposes no seat_kind/is_human/agent_build, composition is counts-only) still pass.",
+        "pnpm -C web/dashboard lint && check && test:e2e pass.",
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
-      "notes": "Root cause: US-175 AC said 'Belongs only in 10p+ canonical setups' which was misread as the EXISTING bench10_v1 instead of the NEW deception13_v1. Sacred existing canonical ladders (mini7_v1/bench10_v1) must never have their roster mutated; new roles go in new ruleset_ids.",
-      "passes": true
+      "notes": "Source of truth = core/rulesets/__init__.py get_ruleset/BUILTIN_RULESET_IDS. Do not hardcode rulesets in routes/lobby (hard rule 5). Check whether a ruleset-list endpoint already exists before adding one.",
+      "passes": false
     },
     {
-      "id": "US-217",
-      "title": "Independent canonical byte-stability guard (golden fixtures / resolver equivalence)",
-      "priority": 217,
-      "dependencies": [
-        "US-216"
-      ],
-      "description": "WAVE-10 ROUND-2 REVIEW HIGH (PLAUSIBLE). US-174 rewrote canonical night resolution to route through the NAR matrix (night.py:24 -> resolve_current_night) and made the old composed mafia_kill/doctor_protect/detective resolvers delegate to nar.* - so there is no longer an independent implementation pinning the sacred ladders. mini7_v1/bench10_v1 terminal outcomes are now defended only by NAR staying equivalent + small case tests; a future NAR edit (tie-break nar.py:645, validity filter nar.py:415, same-night suppression nar.py:746) would silently drift a canonical game's elimination + ELO. The corpus NoopMockAdapter case has no night actions, so it does not exercise this.",
-      "acceptanceCriteria": [
-        "Add an independent byte-stability guard for the sacred ladders that does NOT depend on NAR internals: golden fixtures of several full seeded mini7_v1 + bench10_v1 games WITH real night actions (scripted Detective investigations of each mafia seat, Doctor protect, Mafia kill) pinning terminal_result, terminal_reason, the eliminated sequence, and final event_hash; replay reproduces them exactly. (Alternatively retain a frozen pre-Wave-10 canonical night resolver and assert it equals resolve_current_night over a large seeded space of canonical-shaped night submissions.)",
-        "Rename tests/core/test_win_conditions.py::test_builtin_two_faction_policy_matches_legacy_results_and_hashes to reflect it only validates the win-condition evaluator (faction-count -> outcome) and add a docstring; stop implying full-game byte-stability.",
-        "All backend gates pass."
-      ],
-      "notes": "Depends on US-216 (the bench10 golden must use the reverted 3-Goon roster). This restores the firewall the wave promised: canonical outcomes pinned independently of future nar.py edits.",
-      "passes": true
-    },
-    {
-      "id": "US-218",
-      "title": "Suppress Tracker/Watcher night feedback when the observer is killed the same night",
-      "priority": 218,
+      "id": "US-227",
+      "title": "Generalize the per-faction model rollup beyond Town/Mafia",
+      "priority": 227,
       "dependencies": [],
-      "description": "WAVE-10 ROUND-2 REVIEW MEDIUM (CONFIRMED). _resolve_investigations suppresses a same-night-killed Detective's finding (nar.py:745 'if intent.actor in eliminated: continue'), but _resolve_visit_graph_feedback (nar.py:762-800) never receives eliminated_player_ids and never skips a killed Tracker/Watcher. A Tracker/Watcher killed by the factional kill the same night still receives a TRACK_RESULT/WATCH_RESULT (visited/visitor lists), delivered as a PRIVATE NightFeedbackDelivered (game_runner.py:844-861) - leaking resolved visit-graph state past death, the exact asymmetry the investigation leak-guard prevents.",
+      "description": "FACTION-scope ELO is already persisted (Rating.scope_type='FACTION', scope_value in {TOWN, MAFIA}) but ratings/model_rollup.rollup_by_model hardcodes Faction.TOWN.value / Faction.MAFIA.value: _faction_aggregate branches on TOWN vs (else) MAFIA, ModelLeaderboardEntry has dedicated town/mafia fields, and the entry construction calls _faction_aggregate twice with the two literals. Generalize rollup_by_model to iterate whatever FACTION scope_values are present in the persisted FACTION-scope rating rows so a future 3rd-faction writer needs no rollup edit. NOTE: only the binary winner's FACTION rows (scope_value in {TOWN, MAFIA}) are written today (ratings/openskill_service.py); solo/3rd factions (e.g. SK from sk12_v1) flow through the PLACEMENT context, NOT FACTION, so no FACTION row for a solo faction exists yet - the >2-faction test therefore feeds a SYNTHETIC FACTION-scope fixture explicitly labeled forward-compat (not produced by the current writer). Keep the canonical 2-faction numbers byte-identical.",
       "acceptanceCriteria": [
-        "Thread eliminated_player_ids into _resolve_visit_graph_feedback and skip a TRACK/WATCH whose actor is in the eliminated set (mirror _resolve_investigations); the orchestrator call (nar.py:907) passes the eliminated set.",
-        "A regression test (analogous to test_detective_dies_same_night_finding_suppressed): a Tracker/Watcher who is the factional-kill target the same night produces NO TRACK_RESULT/WATCH_RESULT feedback.",
-        "Identity-blindness preserved; feedback never chat-derived.",
-        "All backend gates pass."
-      ],
-      "notes": "Evidence: nar.py:719-759/762-800/907, game_runner.py:88-89/844-861, enums.py:28-29 (TRACKER/WATCHER), visit12_v1/ninja13_v1 seat them.",
-      "passes": true
-    },
-    {
-      "id": "US-219",
-      "title": "Wire PLACEMENT scoring into the runner terminal path (+ DRAW + shared-build guards)",
-      "priority": 219,
-      "dependencies": [],
-      "description": "WAVE-10 ROUND-2 REVIEW MEDIUM (CONFIRMED). update_placement_ratings_for_game / PlacementGameResult (openskill_service.py:492) are never called by game_runner._finalize_game or the scheduler - only canonical-pair + solo_rate are wired. So a non-canonical PLACEMENT ruleset (sk12_v1, IS_CANONICAL=False, 3 rival factions) completes games and writes ZERO placement_ratings rows; the experimental placement leaderboard stays permanently empty and US-182/183 are unverified end-to-end. Two latent placement bugs also surface once wired: _placement_groups_for raises ValueError on a DRAW/no-sole-winner (openskill_service.py:341) which would roll back the terminal transaction, and a build occupying two outcome groups is double-counted (openskill_service.py:359-371).",
-      "acceptanceCriteria": [
-        "_finalize_game computes apply_placement (true when the ruleset declares a NON-canonical PLACEMENT context via declared_for_ruleset and the game is not a canonical mirror pair) and calls update_placement_ratings_for_game, mirroring the solo_rate plumbing.",
-        "An sk12_v1 game run to terminal writes placement_ratings rows AND ZERO rows to scientific Rating/RatingEvent (the canonical firewall holds) - integration test.",
-        "Placement DRAW / no-sole-winner resolves to a sigma-only neutral update (NO ValueError inside the terminal transaction); a build mapped to two outcome groups is rejected or collapsed to a single update (no double mu/sigma/games increment) - tests for both.",
-        "All backend gates pass."
-      ],
-      "notes": "Evidence: game_runner.py:394-462 (_finalize_game dispatches), openskill_service.py:341/359-371/492, public_leaderboard.py:660-680 (_placement_cards), sk12_v1.py:20. Mirror the apply_solo_rate pattern; preserve the firewall.",
-      "passes": true
-    },
-    {
-      "id": "US-220",
-      "title": "Canonicality-gate negative tests for the win-state introspection layer",
-      "priority": 220,
-      "dependencies": [],
-      "description": "WAVE-10 ROUND-2 REVIEW MEDIUM (PLAUSIBLE). The US-172 canonicality gate's layer-2 win-state introspection (_observed_terminal_outcomes; canonicality.py:78-87 - runs real check_win over enumerated alive-counts and rejects winners outside {TOWN,MAFIA,DRAW} or ranked-outcomes != {TOWN,MAFIA}) has its REJECTION branches untested: every existing rejection test trips on the layer-1 flag checks (ALT_WIN/SOLO/etc.) first. A regression that neutered layer-2 would let an alt-win ruleset masquerading as canonical reach the scientific ladder undetected - the firewall's 'not a no-op' guarantee is unproven.",
-      "acceptanceCriteria": [
-        "Add negative tests that construct a ruleset passing ALL layer-1 checks (CANONICAL_TEAM, IS_CANONICAL=True, empty ALT_WIN_CONDITIONS/SOLO_FACTIONS, FACTION_MUTATION_ALLOWED=False, KINGMAKING_OBJECTIVE=False, only Town+Mafia roles summing to PLAYER_COUNT) but whose check_win yields (a) a non-canonical winner (e.g. 'TOWN_SOLO') -> pytest.raises(CanonicalRulesetError, match='non-canonical terminal winners'); (b) an asymmetric outcome set where one team can never win (observed=={TOWN,DRAW}) -> pytest.raises(CanonicalRulesetError, match='ranked outcomes must be exactly').",
-        "All backend gates pass."
-      ],
-      "notes": "Evidence: canonicality.py:56-87, tests/core/test_rating_context_rulesets.py. Stub/monkeypatch the win-condition to force the deviant winner over enumerated alive-counts. Proves layer-2 rejects, guarding against signature drift / swallowed-exception regressions.",
-      "passes": true
-    },
-    {
-      "id": "US-221",
-      "title": "Migration backfill data-driven + all-dialects table coverage + 0047 downgrade byte-stability test",
-      "priority": 221,
-      "dependencies": [],
-      "description": "WAVE-10 ROUND-2 REVIEW LOWs. (a) 0047 backfill hardcodes ruleset_id IN ('mini7_v1','bench10_v1') (0047:256/281), so any OTHER pre-existing canonical SCIENTIFIC league's historical rows keep rating_context_id NULL and drop out of canonical cards (the wave adds more canonical rulesets e.g. deception13_v1/roleblock10_v1). (b) tests/db/test_migrations_all_dialects.py EXPECTED_TABLES was not updated with the 5 new tables (rating_contexts, placement_ratings, placement_rating_events, solo_rate_ratings, solo_rate_rating_events) - the Postgres migration smoke can't catch a 0047 create regression. (c) No test asserts 0047 downgrade removes the additive columns/sibling tables AND preserves canonical Rating byte-stability.",
-      "acceptanceCriteria": [
-        "0047's seed + backfill is data-driven over every SCIENTIFIC league's distinct ruleset_id present, resolving each via the ruleset registry's declared canonical kind/flag (mirror declared_for_ruleset), stamping ALL canonical ones (not the hardcoded pair). Edit 0047 in place (the wave is unmerged; chain stays linear, head 0048). A test seeds a 3rd canonical scientific ruleset pre-0047 and asserts its historical rows get a non-NULL rating_context_id after upgrade.",
-        "test_migrations_all_dialects EXPECTED_TABLES includes the 5 new tables (ideally share the constant with test_migrations.py).",
-        "A 0047 downgrade round-trip test asserts the additive columns + sibling tables are removed AND seeded canonical Rating mu/sigma/conservative_score are byte-stable across upgrade->downgrade.",
-        "All backend gates pass (including test_migrations_all_dialects)."
-      ],
-      "notes": "Evidence: 0047_rating_contexts.py:29-32/256/281/313-331, test_migrations_all_dialects.py:28-48, test_migration_0047_rating_contexts.py. Fail-closed/coverage hardening; no canonical correctness change.",
-      "passes": true
-    },
-    {
-      "id": "US-222",
-      "title": "Placement rating failures must never wedge terminal finalization (+ winner validation + intake guard)",
-      "priority": 222,
-      "dependencies": [],
-      "description": "WAVE-10 ROUND-3 REVIEW HIGH (CONFIRMED) + related MEDIUM. US-219 wired placement scoring INTO the GameTerminated transaction: game_runner.py:433 opens `async with session.begin()`, writes the terminal event (443) + flips status COMPLETED (444), then at 496-501 calls update_placement_ratings_for_game. Two placement-side raises now abort that transaction and leave the game permanently stuck RUNNING (terminal event + COMPLETED flip roll back together; every retry re-raises): (1) CONFIRMED - _apply_placement_scope_update raises ValueError when one agent_build maps to seats in two different factions (a shared-build / self-play placement roster; openskill_service.py:366-371). Rosters have NO build-uniqueness validation (gauntlets/scheduler.py create_gauntlet, api/routes/gauntlets.py), so this is reachable. (2) LATENT - _placement_groups_for raises ValueError when the winner is not a faction value present in seat_groups nor the DRAW sentinel (openskill_service.py:342); a future non-canonical PLACEMENT ruleset with an ALT_TRIGGER/non-faction winner would wedge. The canonical path (_apply_scope_update) tolerates duplicate-build-across-factions without raising - so this is a placement-only regression. Isolated to the NEW experimental placement feature; canonical ladders unaffected.",
-      "acceptanceCriteria": [
-        "A placement-rating failure can NEVER roll back the terminal GameTerminated event or the COMPLETED status flip: build/validate the PlacementGameResult BEFORE the terminal writes, OR run update_placement_ratings_for_game OUTSIDE the GameTerminated begin() block, OR wrap it so any exception is logged and swallowed AFTER the game is finalized. Game completion + event_hash-chain integrity must be independent of placement-rating outcomes.",
-        "The placement gate skips (logged) rather than raising in the terminal path when the terminal_result is neither the DRAW sentinel nor a faction value present among the seats (covers the future non-faction-winner case).",
-        "Defense-in-depth: gauntlet intake (create_gauntlet / POST /gauntlets) rejects with 422 a non-canonical PLACEMENT roster whose duplicate builds would land in seats of different factions, so the ill-defined case is caught at creation.",
-        "Tests: (a) a placement gauntlet with the same build across two factions runs to terminal -> game is COMPLETED (NOT stuck RUNNING), terminal event persisted, placement scoring skipped/handled with no double-count, and ZERO scientific Rating/RatingEvent writes (firewall holds); (b) a placement ruleset whose winner is a non-faction string finalizes the game without raising in the terminal txn; (c) intake rejects the shared-build-across-factions placement roster.",
+        "rollup_by_model no longer hardcodes Faction.TOWN.value/Faction.MAFIA.value in _faction_aggregate and the entry construction; per-faction aggregates are produced by iterating the faction values actually present in the persisted FACTION-scope rating rows (faction-keyed dict).",
+        "A regression test asserts the rollup output for an existing Town/Mafia dataset is byte-identical (same mu/sigma/conservative_score/games/wins per faction) before/after the generalization.",
+        "A test feeds a SYNTHETIC >2-faction FACTION-scope fixture (a third faction's FACTION-scope rows, explicitly labeled forward-compat: not produced by the current writer) and asserts all factions appear in the rollup without a code change.",
+        "Pure aggregation; no wall-clock/unseeded-random.",
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
-      "notes": "Evidence: game_runner.py:364-381/403-409/433/443-451/496-501, openskill_service.py:342/366-371, gauntlets/scheduler.py:74-76, api/routes/gauntlets.py:126-168. The load-bearing fix is making the terminal write resilient to a ratings-side guard; the dedup raise itself is defensible (a build can't be both winner and loser of one Plackett-Luce update) - it just must not happen inside the terminal transaction.",
-      "passes": true
+      "notes": "Hardcoded sites: ratings/model_rollup.py rollup_by_model + _faction_aggregate (TOWN vs else-MAFIA) + ModelLeaderboardEntry town/mafia fields. openskill_service.py emits FACTION-scope rows ONLY for the binary winner (scope_value in {TOWN, MAFIA}); SK/solo outcomes go through PLACEMENT, not FACTION - so a >2-faction FACTION dataset is necessarily synthetic forward-compat. This is read/aggregation generalization only; does not change rating WRITES. Backend-only (feeds US-228).",
+      "passes": false
     },
     {
-      "id": "US-223",
-      "title": "Restore migration 0047 frozen-snapshot (no live-core import)",
-      "priority": 223,
-      "dependencies": [],
-      "description": "WAVE-10 ROUND-3 REVIEW MEDIUM (+ related LOW). US-221 made migration 0047 import LIVE core code (`from padrino.core.rulesets import get_ruleset`, `from padrino.core.enums import RatingContextKind`) and seed canonical contexts (display_label/kind/is_canonical) from the CURRENT ruleset module attributes (0047:24-25/103-153). It is the ONLY migration that imports core, breaking the frozen-snapshot invariant: re-running 0047 produces output dependent on whatever the ruleset modules say at run-time (a future label or IS_CANONICAL edit retroactively changes what 0047 seeds/stamps). It is byte-stable today (live labels equal the old literals) but is a determinism/maintainability hazard. NOTE: the data-driven backfill only matters for rulesets that have PRE-EXISTING Rating rows before 0047 ran - only mini7_v1/bench10_v1 do; the new wave-10 canonical rulesets (roleblock10/visit12/deception13/ninja13) ship WITH the migration (no pre-existing rows) and get their context at runtime via ensure_declared_context, so they need no backfill.",
-      "acceptanceCriteria": [
-        "Migration 0047 no longer imports live core code; the canonical contexts it seeds + the rows it stamps are FROZEN LITERALS snapshotting the 0047-era state (mini7_v1, bench10_v1 with their exact display labels), so re-running 0047 is deterministic regardless of future ruleset edits.",
-        "Newly-shipped canonical rulesets are handled WITHOUT migration-time live-core coupling: rely on the runtime ensure_declared_context path (no pre-existing rows to backfill); document this. (If a future ruleset ever needs historical-row backfill, that is a new forward migration with its own frozen literals.)",
-        "A test pins the EXACT RATING_CONTEXT_DISPLAY_LABEL strings for mini7_v1/bench10_v1 (so a future label edit is caught) and asserts a PLACEMENT/SOLO_RATE ruleset can never cause 0047 to stamp scientific Rating rows; the existing 0047 upgrade-byte-stability and downgrade round-trip tests still pass.",
-        "All backend gates pass (including test_migrations_all_dialects)."
+      "id": "US-228",
+      "title": "Surface FACTION (Town vs Scum) ELO cards in the public leaderboard API",
+      "priority": 228,
+      "dependencies": [
+        "US-227"
       ],
-      "notes": "Evidence: 0047_rating_contexts.py:24-25/103-153/266-320, repositories/rating_contexts.py (runtime ensure_declared_context). Migrations must be frozen historical artifacts - never import mutable core. The round-1 'data-driven backfill' ask was over-scoped for v1 (only mini7/bench10 have pre-existing rows); frozen literals are correct and restore determinism.",
-      "passes": true
+      "description": "FACTION-scope rating rows are persisted by ratings/openskill_service.py (SCOPE_FACTION, scope_value TOWN/MAFIA) but ratings/public_leaderboard.py never queries them - _canonical_cards/_placement_cards are GLOBAL-only (L607-608, L662-663). This story ADDS a new FACTION-scope query + cards (Town vs Scum, and any generalized faction from US-227); it does not expose an existing internal computation. Surface per-faction ELO cards in the public leaderboard contract so the dashboard can show faction asymmetry. Keep the hard canonical-vs-experimental section separation and never co-sort across scopes/contexts.",
+      "acceptanceCriteria": [
+        "compute_public_leaderboard surfaces FACTION-scope cards (per ruleset) in addition to GLOBAL, as their own labeled cards with scope_type/scope_value, provisional/min-sample flags carried through; FACTION cards are never co-sorted with GLOBAL or with non-canonical context cards.",
+        "The /public/leaderboard response (api/routes/public.py PublicLeaderboardResponse) includes the FACTION cards with distinct scope labels; an API route test asserts a model with Town and Mafia rows yields separate Town/Mafia cards plus its GLOBAL card.",
+        "Canonical-vs-experimental separation is preserved (FACTION cards of a CANONICAL_TEAM context stay in the canonical section; PLACEMENT/SOLO_RATE stay experimental); a test asserts no merged/co-sorted list across contexts.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Backend read-aggregation only - this ADDS a new FACTION-scope query (public_leaderboard.py references FACTION only via the imported constant today; both card queries pin SCOPE_GLOBAL/SCOPE_VALUE_GLOBAL at L607-608, L662-663). Sites: ratings/public_leaderboard.py _canonical_cards/_placement_cards (GLOBAL-only today) + api/routes/public.py PublicLeaderboardResponse. Feeds the frontend leaderboard (US-229).",
+      "passes": false
+    },
+    {
+      "id": "US-229",
+      "title": "Multi-context leaderboard in the nav: canonical + PLACEMENT + SOLO_RATE + FACTION sections",
+      "priority": 229,
+      "dependencies": [
+        "US-228"
+      ],
+      "description": "The /leaderboard page (web/dashboard/src/routes/leaderboard/+page.svelte) already renders canonical_cards and experimental_cards but is NOT linked in the main nav (web/dashboard/src/routes/+layout.svelte links Home/Ladder/Play only), and it does not render the FACTION cards added by US-228. Surface the full multi-context leaderboard in the nav/home: canonical cards, PLACEMENT cards, and SOLO_RATE cards in clearly SEPARATE sections, never co-sorted, with provisional/min-sample flags shown; add the FACTION (Town vs Scum) cards as their own sub-section. Link it in nav and from home.",
+      "acceptanceCriteria": [
+        "The leaderboard page renders canonical, PLACEMENT, and SOLO_RATE cards in visually distinct, separately-headed sections that are never merged into one sorted list; provisional/min-sample (under-sampled) models are explicitly labeled, not ranked.",
+        "FACTION cards are distinguished in the frontend solely via the scope_type/scope_value fields already carried on PublicRatingCardResponse (scope_type=='FACTION'); group by scope_type, never infer faction from any identity/role string. Scope the FACTION sub-section to the two persisted scope_values (Town vs Scum); generalized >2-faction cards (US-227) surface only when present - do NOT require a 3rd-faction card in the e2e. A unit test asserts FACTION-scope cards render in a separate sub-section from scope_type=='GLOBAL'.",
+        "The leaderboard is reachable from the main nav (+layout.svelte) and linked from the home page (+page.svelte); an e2e test navigates from home/nav to the leaderboard and asserts the section headers exist.",
+        "An e2e test (leaderboard.spec.ts) asserts canonical and experimental sections are not co-sorted and that a provisional flag renders when present; it reuses the shared identity-blind assertion helper (created in US-225) for the leaderboard surface.",
+        "pnpm -C web/dashboard lint && check && test:e2e pass.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "The page + the public_leaderboard API already exist; this extends presentation + nav linkage. Both reviewers: 'separate context' must be screamingly obvious; never co-sort.",
+      "passes": false
+    },
+    {
+      "id": "US-230",
+      "title": "Human-lane worker docker-compose service + healthz probe",
+      "priority": 230,
+      "dependencies": [],
+      "description": "docker-compose.yml defines postgres/bootstrap/api/public-api/scheduler/dashboard only - there is NO human-lane worker service, so the 'padrino human-lane' worker (cli.py human-lane -> runner/human_lane.run_human_lane) never runs in the compose stack and launched human lobbies sit RUNNING forever. Add a human-lane worker compose service that runs 'padrino human-lane' against the same postgres, gated on bootstrap completion like the other workers, internal-network-only, with a liveness/health probe. Mirror the scheduler service's depends_on/restart posture.",
+      "acceptanceCriteria": [
+        "docker-compose.yml gains a human-lane worker service running the 'padrino human-lane' command against postgres, depends_on bootstrap service_completed_successfully + postgres healthy, internal-network-only (no published port), with a restart policy matching scheduler.",
+        "A health/liveness probe exists for the worker (e.g. a /healthz/human-lane endpoint queried like the scheduler's /healthz/scheduler, or an equivalent worker liveness check); a test asserts the probe endpoint/handler exists and reports lane liveness.",
+        "A compose-shape test (or a parse-and-assert test of docker-compose.yml) asserts the human-lane service exists with the expected command and dependency gating.",
+        "Document in progress.txt that the human lane is now part of the runnable single-host stack (no distributed worker).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Entry point: cli.py 'human-lane' command -> runner/human_lane.run_human_lane(session_factory, concurrency, stop_event). No Redis (hard rule). Single-host only. Confirm/add a healthz route alongside the existing /healthz and /healthz/scheduler.",
+      "passes": false
+    },
+    {
+      "id": "US-231",
+      "title": "Ops-size the human-lane cost caps + global breaker (sensible + configurable)",
+      "priority": 231,
+      "dependencies": [],
+      "description": "The placeholder human-lane economics trip too early at real concurrency. settings.py defines padrino_human_global_lobby_cost_breaker_usd=50.0, padrino_human_lobby_cost_cap_usd=2.0, padrino_human_admission_inference_reserve_usd=0.5, and per-user/day caps; economics/human_cost_governance.global_breaker_open() opens once cumulative spend >= the $50 breaker. At real concurrency the global breaker trips almost immediately and STOPS new lobbies/turns. Re-size the placeholder caps to sensible single-host defaults and ensure every cap is configurable via settings/env (no magic numbers in the governance logic). Do NOT build a cost overhaul - just sane, overridable defaults + clear breaker-open observability.",
+      "acceptanceCriteria": [
+        "Re-size single-host defaults in settings.py (e.g. padrino_human_global_lobby_cost_breaker_usd raised from 50.0 to a documented single-host value); document the chosen numbers + rationale in progress.txt; a test asserts the new default and that an env override changes the breaker threshold.",
+        "A test asserts global_breaker_open() and the per-lobby/per-user caps read exclusively from Settings (overriding a setting changes the breaker threshold) and that the breaker only STOPS new lobbies/turns - it never kills an active game (assert active-game continuation when the breaker is open).",
+        "A test asserts the breaker-open path emits the existing structured warning with spent_usd/cap_usd so operators can see why new lobbies are refused.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Sites: settings.py (padrino_human_global_lobby_cost_breaker_usd etc.) + economics/human_cost_governance.global_breaker_open / per-lobby / per-user caps. Single-host scope; not a cost overhaul. Preserve the 'breaker never kills an active game' invariant already in the docstring.",
+      "passes": false
+    },
+    {
+      "id": "US-232",
+      "title": "Wire token-based cost fallback into the per-call cost persist path (custom endpoints)",
+      "priority": 232,
+      "dependencies": [],
+      "description": "llm/litellm_adapter._extract_cost reads response._hidden_params['response_cost'], which is absent for custom OpenAI-compatible endpoints (Z.AI/Xiaomi), so LlmCall.cost_usd is persisted NULL and the human-lane $ breaker / per-model cost silently sees zero. A token-based fallback already exists - economics/human_cost_governance.price_turn_usd(settings, response_cost, model, input_tokens, output_tokens) falls back to settings.padrino_human_fallback_token_price_per_1k when response_cost is None - but it is not wired into the cost computed at the adapter/persist boundary. Wire the fallback so cost_usd is never silently zero/NULL for a priced model, using token counts from the response.",
+      "acceptanceCriteria": [
+        "The per-call cost written to LlmCall.cost_usd uses price_turn_usd (or an equivalent fallback) so that when litellm returns no response_cost, the token-based price table produces a non-null cost for a model present in padrino_human_fallback_token_price_per_1k; a test drives a custom-endpoint-style response with no _hidden_params response_cost and asserts cost_usd is the token-table value, not NULL/zero.",
+        "When response_cost IS present it is still preferred (test asserts the litellm value wins over the fallback).",
+        "The fallback price table is configurable via settings (a new model can be priced without code change); a test asserts an overridden table entry is used.",
+        "The human-lane global spend accounting (global_human_lane_spend_usd) reflects the fallback-priced turns so the breaker is not silently zero; a test asserts cumulative spend includes a fallback-priced turn.",
+        "Apply the price_turn_usd fallback at the PERSIST boundary where Settings + model + AdapterResult input/output token counts are all in scope - NOT inside _extract_cost. _extract_cost keeps returning litellm response_cost or None; price_turn_usd(settings, response_cost=..., model=..., input_tokens=..., output_tokens=...) resolves None to the token-table price. A test asserts the persisted LlmCall.cost_usd value, not _extract_cost in isolation.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Sites: the persist boundary (Settings+model+tokens in scope) wires price_turn_usd; llm/litellm_adapter._extract_cost (response-only, lines ~377-383, called at L315) keeps returning response_cost or None - do NOT thread Settings into it. economics/human_cost_governance.price_turn_usd (the fallback already exists, prefers response_cost when present, L110), settings.padrino_human_fallback_token_price_per_1k, db/models.LlmCall.cost_usd. The fix is wiring at the persist seam, not net-new math.",
+      "passes": false
+    },
+    {
+      "id": "US-233",
+      "title": "Validate single-host human-lane restart-resume (durable rehydration) - no distributed leasing",
+      "priority": 233,
+      "dependencies": [
+        "US-230"
+      ],
+      "description": "The human lane already has durable rehydration: runner/human_durability.rehydrate_active_human_games() replays the hash-chained game_events to rebuild GameState for in-progress human games on worker start (using human_game_runtime + the reconnect-grace presence concept, not a lease). For a SINGLE worker this is sufficient; the review asked to VALIDATE restart-resume and a single-host heartbeat sufficiency, NOT to build distributed leasing. Add an explicit restart-resume test proving a worker restart resumes an in-progress human game from the durable state with a continuous hash chain, and document that single-host requires no lease.",
+      "acceptanceCriteria": [
+        "A test starts a human game, simulates a worker stop with the game in-progress, then calls rehydrate_active_human_games() (fresh worker) and asserts the game resumes from the persisted phase/deadline with the hash chain continuing unbroken (replay-equals-live for the resumed tail).",
+        "The test asserts no duplicate/double-processing of the in-progress phase on resume (idempotent rehydration).",
+        "A documented note (progress.txt) states the single-host lane needs no distributed lease; the reconnect-grace presence mechanism (padrino_human_reconnect_grace_seconds) is the only liveness concept and distributed leasing is explicitly out of scope.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Validate, do NOT build leasing. Sites: runner/human_durability.rehydrate_active_human_games, human_game_runtime table, runner/human_lane reconnect-grace (padrino_human_reconnect_grace_seconds). Depends on US-230 so the worker that does the resume is the one in the compose stack.",
+      "passes": false
+    },
+    {
+      "id": "US-234a",
+      "title": "Ranked lobby flag end-to-end (frontend toggle + league binding + human_lane ranked plumbing; ranked game still writes NOTHING yet)",
+      "priority": 234,
+      "dependencies": [
+        "US-224",
+        "US-230"
+      ],
+      "description": "Human games are hardcoded casual: api/routes/lobbies.create_lobby always uses get_or_create_humans_included (ranked=False) and runner/human_lane passes ranked=False positionally into the game loop. This story wires the ranked flag end-to-end WITHOUT yet writing any ratings: a frontend ranked toggle on lobby creation, a ranked binding through lobbies.create_lobby (a ranked lobby binds a HUMANS_INCLUDED league with ranked=True; a casual lobby stays ranked=False), and the human_lane ranked plumbing so the ranked flag reaches the terminal-outcome path. A ranked game still writes NOTHING (no human_rating, no scientific rows) at the end of this story - the writer is US-234b. The canonical Rating/RatingEvent reach path (League.kind==SCIENTIFIC + _should_apply_ratings) is UNCHANGED.",
+      "acceptanceCriteria": [
+        "Lobby creation accepts an opt-in ranked flag (default casual) from a frontend ranked toggle; a ranked lobby binds a HUMANS_INCLUDED league with ranked=True; a casual lobby stays ranked=False. A backend test asserts the ranked flag is persisted/bound on the league for a ranked lobby and absent for a casual lobby.",
+        "The human_lane ranked plumbing threads the ranked flag to the terminal-outcome path: runner/human_lane's execute closure calls drive_game_loop(config, adapter, False, ...) - the positional False at human_lane.py:929-937 (L932) is the ranked literal; the ranked param is already threaded at L678/L694 and the always-casual invariant is commented at L874. Replace the hardcoded positional with the bound ranked value so the terminal-outcome path sees the real ranked flag. A test asserts a ranked human game reaches the terminal-outcome path with ranked=True.",
+        "RANKED GAME STILL WRITES NOTHING in this story: a ranked HUMANS_INCLUDED terminal game writes ZERO scientific Rating/RatingEvent rows AND ZERO human_rating/human_rating_event rows (the writer is US-234b); a test asserts both counts are zero.",
+        "The canonical Rating/RatingEvent reach path (League.kind==SCIENTIFIC + _should_apply_ratings) is UNCHANGED; a test asserts a SCIENTIFIC game still writes scientific rows.",
+        "Anonymity preserved end-to-end: the ranked toggle introduces no identity leak in any observation/spectator surface (the existing FORBIDDEN_PAYLOAD_KEYS/anonymity gates still pass).",
+        "pnpm -C web/dashboard lint && check && test:e2e pass.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Hardcodes to flip: lobbies.create_lobby (get_or_create_humans_included ranked=False) + the positional False at human_lane.py:929-937 (L932; ranked param threaded at L678/L694, always-casual comment at L874). This story is the flag/plumbing only - the writer fires from the terminal-outcome path in US-234b, not by flipping the positional alone. Frontend touches the lobby ranked toggle, hence the pnpm gate.",
+      "passes": false
+    },
+    {
+      "id": "US-234b",
+      "title": "Human-ranked-ELO writer for human_rating/human_rating_event (segregation-proof)",
+      "priority": 234.5,
+      "dependencies": [
+        "US-234a"
+      ],
+      "description": "The human_rating/human_rating_event sibling tables (migration 0025) are dormant. With the ranked flag now wired end-to-end (US-234a), light up a NEW ranked-ELO writer that updates ONLY the human_rating/human_rating_event sibling tables (OpenSkill update keyed by human_player_id). It fires from the terminal-outcome path ONLY when League.kind==HUMANS_INCLUDED AND ranked. It must PROVABLY never write the scientific Rating/RatingEvent tables - reuse the fail-closed segregation posture (League.kind + the _should_apply_ratings chokepoint pattern) on a SEPARATE human reach path keyed by League.kind==HUMANS_INCLUDED, never on the canonical reach path.",
+      "acceptanceCriteria": [
+        "A new human-ranked-ELO writer updates ONLY human_rating/human_rating_event for a ranked HUMANS_INCLUDED terminal game (OpenSkill update keyed by human_player_id, with scope_type/scope_value), fired from the terminal-outcome path ONLY when the league is HUMANS_INCLUDED AND ranked; a unit test asserts it writes human_rating rows and ZERO scientific rows.",
+        "human_rating/human_rating_event use scope_type=GLOBAL, scope_value=global ONLY in this wave (matching the dormant migration-0025 sibling tables and keeping US-236's read simple); FACTION/PLACEMENT human scopes are explicitly out of scope. A test asserts the writer emits only GLOBAL-scope human rating rows.",
+        "FAIL CLOSED: a missing/unknown ranked flag or league kind coerces to casual/unrated; the human writer can never be reached for a SCIENTIFIC league; a test asserts a SCIENTIFIC terminal game never invokes the human writer and a casual human game never invokes it either.",
+        "Anonymity preserved end-to-end: ranked human play introduces no identity leak in any observation/spectator surface (the existing FORBIDDEN_PAYLOAD_KEYS/anonymity gates still pass).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Tables exist since 0025 (HumanRating/HumanRatingEvent), dormant. Reuse the _should_apply_ratings fail-closed pattern but on a SEPARATE human reach path keyed by League.kind==HUMANS_INCLUDED AND ranked, firing from the terminal-outcome path. GLOBAL-scope only this wave (matches the sibling-table heritage; US-236 reads it back).",
+      "passes": false
+    },
+    {
+      "id": "US-235",
+      "title": "Extend the segregation CI gate for the ranked vs casual human paths",
+      "priority": 235,
+      "dependencies": [
+        "US-234b"
+      ],
+      "description": "tests/ratings/test_segregation.py currently asserts a casual human game writes zero scientific rows and that even an accidental ranked=True human seat fails closed (counts == (0,0,0,0)). Now that the ranked Humans-Included writer exists (US-234), the gate must assert the THREE-way invariant: a RANKED human game writes ZERO scientific/canonical rows AND DOES write Humans-Included (human_rating/human_rating_event) rows; a CASUAL human game writes NEITHER scientific NOR human_rating rows; a SCIENTIFIC game writes scientific rows and zero human_rating rows. This is the CI proof that lighting up ranked did not breach segregation.",
+      "acceptanceCriteria": [
+        "test_segregation.py gains a test asserting a RANKED HUMANS_INCLUDED terminal game writes ZERO rows to ratings/rating_events AND writes >=1 row to human_rating and human_rating_event.",
+        "A test asserts a CASUAL human game writes ZERO rows to ratings/rating_events AND ZERO rows to human_rating/human_rating_event (casual is still fully dormant).",
+        "A test asserts a SCIENTIFIC ranked game writes scientific rating rows and ZERO human_rating rows (the inverse direction).",
+        "The gate runs in the default pytest -m 'not integration' suite and fails if any direction is violated.",
+        "Reuse the existing _count_all_rating_rows 4-tuple helper (ratings, rating_events, human_ratings, human_rating_events) and EXTEND the existing scientific test at tests/ratings/test_segregation.py:~L214 - do not add a parallel counter or rewrite the in-tree gate.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Builds directly on US-234b's writer. Existing helpers: _count_all_rating_rows returns the 4-tuple (ratings, rating_events, human_ratings, human_rating_events) at test_segregation.py:155-169; a ranked scientific league test already exists at ~L214. Extend the single-source gate, do not rewrite it.",
+      "passes": false
+    },
+    {
+      "id": "US-236",
+      "title": "Surface human personal ELO + human/AI ladders on the multi-context leaderboard",
+      "priority": 236,
+      "dependencies": [
+        "US-229",
+        "US-234b"
+      ],
+      "description": "Once ranked human games write human_rating (US-234b) and the multi-context leaderboard is surfaced (US-229), expose human personal ELO and the human/AI ladders on the leaderboard. The Humans-Included League ladder is a SEPARATE context from the scientific canonical ladders and must never be co-sorted with them; human personal ELO is keyed by human_player_id and must stay identity-blind on any pre-reveal surface (no human display identity leaking into live/observation views).",
+      "acceptanceCriteria": [
+        "The public leaderboard API surfaces Humans-Included League cards (human personal ELO + the human/AI ladder for ranked human games) as their own clearly-separated section, never co-sorted with scientific canonical/PLACEMENT/SOLO_RATE cards; provisional/min-sample flags carried through.",
+        "A backend test asserts the Humans-Included cards come from human_rating (not Rating) and are labeled as a distinct league/context. The read consumes the GLOBAL-scope human_rating rows that US-234b's writer emits (scope_type=GLOBAL, scope_value=global - the only human scope written this wave); FACTION/PLACEMENT human scopes are out of scope.",
+        "The leaderboard page renders the Humans-Included section distinctly; an e2e test asserts it is present and visually separated from the scientific sections.",
+        "Identity-blindness: nothing on this surface reveals which seats were human in any specific live/in-progress game; only aggregated post-game human ladder standings are shown (covered by the existing anonymity gates where applicable).",
+        "pnpm -C web/dashboard lint && check && test:e2e pass.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "This is the user's chosen ranked product surface. Depends on the P0 multi-context surface (US-229) and the P2 writer (US-234b). Reads back US-234b's GLOBAL-scope human_rating rows (GLOBAL-only this wave). Keep the human ladder its own hard-walled section.",
+      "passes": false
+    },
+    {
+      "id": "US-237",
+      "title": "Ranked-integrity guard: out-of-band coaching + ranked anonymity timing-delay validation",
+      "priority": 237,
+      "dependencies": [
+        "US-234a"
+      ],
+      "description": "Making human games ranked turns out-of-band coaching (a human secretly fed reads by a stronger player/model outside the game) into an integrity problem, and ranked raises the stakes on the anonymity timing-delay holding. Add a concrete, enforceable ranked-integrity acknowledgment on ranked lobby creation (a boolean integrity_acknowledged flag, reusing the existing lobby record - NO new table, NO migration, NO collusion-detection or anti-coaching infrastructure) AND validate that the existing symmetric fixed release-delay (runner/human_tick.run_human_tick: padrino_human_release_delay_seconds applied identically to human and AI public messages) holds on the ranked path so response latency cannot leak human-vs-AI in a ranked game.",
+      "acceptanceCriteria": [
+        "Ranked lobby creation requires a boolean integrity_acknowledged flag on the ranked lobby (reuse the existing lobby record / a boolean column - NO new table, NO migration, NO collusion-detection or anti-coaching infrastructure). A ranked lobby with integrity_acknowledged=false is rejected (422); a casual lobby ignores the flag. A test asserts: ranked-without-ack refused (422), ranked-with-ack persists the flag, casual creates without it.",
+        "A test asserts the symmetric fixed release-delay (all public messages share one released_at instant via run_human_tick) holds on the RANKED path exactly as on the casual path - human and AI messages release at the identical instant, so timing cannot out a seat in a ranked game.",
+        "No new identity leak is introduced on the ranked path (existing anonymity gates pass).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Concrete guard: a reused boolean integrity_acknowledged on the ranked lobby record (no new table/migration, no anti-collusion infra); ranked-without-ack -> 422. The timing-delay validation is the load-bearing AC. Sites: runner/human_tick.run_human_tick (released_at symmetry), settings.padrino_human_release_delay_seconds, lobby creation (ranked flag from US-234a).",
+      "passes": false
+    },
+    {
+      "id": "US-238",
+      "title": "Real-action NAR golden corpus for every Wave-10 ruleset (consolidate script-builders)",
+      "priority": 238,
+      "dependencies": [],
+      "description": "tests/integration/test_nar_regression_corpus.py byte-pins terminal_result/terminal_reason/event_count/final_event_hash/event_hash_chain for the six Wave-10 rulesets ONLY as all-NOOP DRAW games (NoopMockAdapter via _canonical_draw_factory/_bench10_draw); only mini7 has a real-action scripted game. So the tier-ordered NAR interactions (kill/protect/roleblock/ninja/track/watch/clean/investigate) have NO real-action golden - a refactor that breaks resolution ordering would still pass. Add real-action full-game goldens (scripted DeterministicMockAdapter games that actually drive each ruleset's signature night actions) for every Wave-10 ruleset, pinning terminal_result + final event_hash + chain digest. Consolidate the drifting conftest script-builders (make_villager_script / make_mafia_script / make_town_win_script / make_mafia_win_script) into one reusable, role-aware builder.",
+      "acceptanceCriteria": [
+        "For each of deception13_v1, roleblock10_v1, visit12_v1, ninja13_v1, sk12_v1, jester8_v1 there is at least one REAL-ACTION scripted full game (DeterministicMockAdapter driving that ruleset's signature actions - e.g. roleblock denies a power role, ninja suppresses a tracked kill, SK solo kill, jester lynch-bait) whose terminal_result + final event_hash + event_hash_chain digest are byte-pinned; a NOOP-DRAW-only game is NOT sufficient for these.",
+        "A test asserts each real-action golden's pinned terminal_result + final event_hash + chain digest are stable across a re-run (replay-determinism) and that the resolution exercised the intended NAR tier (e.g. the roleblock game's blocked-action feedback is present). tests/integration/test_nar_regression_corpus.py uses mock adapters (DeterministicMockAdapter/NoopMockAdapter) and already runs under the default pytest -m 'not integration' gate; the integration marker is reserved for tests that hit real LLM providers (pyproject.toml). The new real-action goldens MUST NOT add pytest.mark.integration so they remain in the default gate.",
+        "The drifting per-script builders in conftest are consolidated into ONE reusable role-aware script builder used by the corpus; a test (or the corpus itself) demonstrates the four old builders' behaviors are reproducible through the consolidated builder.",
+        "Pure/deterministic: no wall-clock/unseeded-random; replays through the event log.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Real adapters: llm/mock.DeterministicMockAdapter (script keyed by (phase_id, public_player_id)). Existing all-NOOP factories: _bench10_draw/_canonical_draw_factory use NoopMockAdapter. Consolidate conftest make_*_script helpers. tests/integration/test_nar_regression_corpus.py uses mock adapters and already runs under the default pytest -m 'not integration' gate (it carries ZERO pytest.mark.integration; the integration marker means 'hits real LLM providers', pyproject.toml). The new real-action goldens MUST NOT add pytest.mark.integration so they stay in the default gate.",
+      "passes": false
+    },
+    {
+      "id": "US-239",
+      "title": "Hot-path secondary indexes migration 0049 (game_events / llm_calls / retention)",
+      "priority": 239,
+      "dependencies": [],
+      "description": "Hot read paths lack secondary indexes: game_events has only the (game_id, sequence) unique constraint (no standalone game_id index for full-chain reads), and llm_calls has only FKs (no composite index on (game_id, agent_build_id, event_id), and retention-scan columns are unindexed). Add the hot-path secondary indexes as ONE linear Alembic migration 0049 (after the current head 0048). Idempotent up/down; no data migration.",
+      "acceptanceCriteria": [
+        "A new Alembic migration 0049 (down_revision 0048) adds: an index on game_events.game_id; a composite index on llm_calls (game_id, agent_build_id, event_id); and indexes on the retention-scan columns used by the retention sweep (identify them from the retention code and index the actual scan predicate columns).",
+        "The migration is linear after head 0048 (a test/assert confirms a single head after this migration) and has a working downgrade that drops exactly the added indexes.",
+        "The corresponding Index/__table_args__ declarations are added to the SQLAlchemy models so models and migration agree (a metadata-vs-migration consistency check passes).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Current head is 0048_game_mirror_pair_metadata. Sites: db/models.GameEvent (uq_game_event_sequence only) + db/models.LlmCall (FKs only). Find the retention sweep code to identify the real scan columns before indexing them.",
+      "passes": false
+    },
+    {
+      "id": "US-240",
+      "title": "Isolate child-game failures in the scheduler gather (return_exceptions)",
+      "priority": 240,
+      "dependencies": [],
+      "description": "runner/scheduler.py runs all child games of a gauntlet via asyncio.gather(*(_run_one_game(...) for child in child_games)) at ~line 254 with NO return_exceptions, so a single game's exception aborts the entire gauntlet (and cancels its siblings). Make the gather non-isolating-proof: collect per-game results/exceptions (return_exceptions=True), let surviving games complete, and record which child games failed so the gauntlet finishes with partial results instead of crashing. This is the prerequisite for the FAILED status + bounded retry in US-241.",
+      "acceptanceCriteria": [
+        "The scheduler gather no longer aborts the whole gauntlet on one child-game failure: failures are captured per-game (return_exceptions=True or equivalent) and surviving games complete; a test injects a failing _run_one_game and asserts the other child games still complete and the failure is recorded, not propagated as a gauntlet-level crash.",
+        "Per-game failures are logged with the failing game_id (structured); a test asserts the failing game is identifiable from the result.",
+        "No change to the success path's rating/ingestion behavior for the games that DID complete (assert completed games still produce their normal outcomes).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Site: runner/scheduler.py ~line 254 asyncio.gather over child_games (no return_exceptions). Single-host resilience only; no campaign abstraction. Pairs with US-241.",
+      "passes": false
+    },
+    {
+      "id": "US-241",
+      "title": "FAILED game status + bounded single-host retry",
+      "priority": 241,
+      "dependencies": [
+        "US-240"
+      ],
+      "description": "There is no FAILED game status (game status strings observed: CREATED/PENDING/RUNNING/COMPLETED; the enum has no FAILED). With per-game failures now isolated (US-240), give a failed child game a terminal FAILED status and a bounded single-host retry (retry up to N times, then mark FAILED) so a transient failure does not silently lose a game and a permanent failure is visibly terminal. No campaign abstraction, no distributed retry - a simple bounded in-process retry on the single-host scheduler.",
+      "acceptanceCriteria": [
+        "A FAILED game status is added and persisted; a child game that exhausts its bounded retry is recorded as FAILED (terminal), distinct from COMPLETED; a test asserts a permanently-failing game ends in FAILED after the bounded attempts.",
+        "A bounded single-host retry re-runs a failed child game up to a configurable max-attempts (settings-driven); a test asserts a game that fails once then succeeds ends COMPLETED with the retry counted, and a game that always fails ends FAILED after exactly max-attempts.",
+        "A FAILED game writes ZERO rating rows (it never reached a valid terminal_result, so _should_apply_ratings already excludes it); a test asserts a FAILED game produces no rating writes.",
+        "FAILED is added as a string literal to the existing game-status string set - status remains a String column (db/models.py:152, no DB enum migration). Define the FAILED literal ONCE in a shared constant/Literal used by the scheduler, the status writes, and any terminal-status query; assert no other module hardcodes the FAILED string.",
+        "Audit the existing COMPLETED-only predicates so a FAILED row is never mistaken for terminal - ratings/model_rollup.py:66 (_COMPLETED_STATUS) / ratings/judge_sampling.py:138 / runner/scheduler.py:126 / runner/continuous_matchmaking.py still exclude FAILED games; a test asserts a FAILED game appears in none of those COMPLETED-scoped results.",
+        "FAILED games are excluded from scheduler/matchmaker re-selection: audit the scheduler.py status!='COMPLETED' re-pick (~L126) + continuous_matchmaking so a FAILED row is never re-run; a test asserts a FAILED game is not re-selected.",
+        "Retry is in-process single-host only (no distributed/durable retry queue, no campaign abstraction).",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Game status is a bare String column today (db/models.py:152, also 184/286; no enum FAILED). Add FAILED via a single shared literal/constant - COMPLETED is currently a scattered literal (judge_sampling.py:138, scheduler.py:126, model_rollup.py:66). _should_apply_ratings already requires terminal_result in {TOWN,MAFIA,DRAW}, so FAILED is naturally unrated. Builds on US-240's isolated gather. No enum migration.",
+      "passes": false
+    },
+    {
+      "id": "US-242",
+      "title": "Single-host Postgres backup runbook + tested hash-chain-verifying restore",
+      "priority": 242,
+      "dependencies": [],
+      "description": "Add a single-host Postgres backup/restore runbook and a TESTED restore that re-verifies the event-log hash-chain after restore, so a restored database is provably intact (no silent chain corruption). No distributed/HA backup - a single-host dump/restore runbook with a verification step. (The DB-default-driver flip is deliberately OUT of scope: flipping the production default + adding a settings assertion is a config-behavior change beyond this wave's surface/ranked/single-host-hardening remit and risks destabilizing the sqlite-based default test gate; it may be mentioned only as a docs note in the runbook.)",
+      "acceptanceCriteria": [
+        "A documented backup runbook (dump) + restore procedure for the single-host Postgres exists (a runbook doc the story is explicitly allowed to create) covering the production compose stack.",
+        "A tested restore: a test (or scripted harness invoked by a test) loads a backup of a finished game's events into a fresh DB and re-verifies the hash-chain (event_hash = sha256(prev + canonical_json(event))) across the restored game_events, asserting the chain is unbroken and matches the pre-backup final hash.",
+        "Single-host only - no HA/replication/distributed backup.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "This story is explicitly permitted to create a runbook doc (the only doc-creating story in this wave). Hash-chain rule: event_hash = sha256(prev_event_hash + canonical_json(event_without_hash_or_timestamp)). Verify the chain re-validates post-restore. The Postgres-as-non-dev-default flip is OUT of scope (scope drift; may appear only as a docs note in the runbook).",
+      "passes": false
+    },
+    {
+      "id": "US-243",
+      "title": "Add the bench10_v1 ruleset to the public ladder context (ladder no longer mini7-only)",
+      "priority": 243,
+      "dependencies": [
+        "US-226",
+        "US-228"
+      ],
+      "description": "The public ladder page hardcodes RULESETS = ['mini7_v1'] (web/dashboard/src/routes/(public)/ladder/+page.svelte) and the home/profile surfaces pin mini7_v1, so the scientific bench10_v1 (and any other registered canonical ruleset) is never ladder-visible even though it is rated. Generalize the public ladder selection to surface every CANONICAL_TEAM ruleset the leaderboard API exposes, not a single hardcoded id, so the canonical benchmark ladders are all reachable. Keep canonical-only here (experimental contexts stay on the multi-context leaderboard from US-229).",
+      "acceptanceCriteria": [
+        "The public ladder selection is driven by the canonical rulesets the leaderboard API exposes (sourced from get_ruleset/BUILTIN_RULESET_IDS + the CANONICAL_TEAM contexts), not a hardcoded RULESETS=['mini7_v1']; consume the canonical ruleset list from the US-226 ruleset-list endpoint rather than re-deriving or hardcoding it; an e2e test asserts at least mini7_v1 and bench10_v1 are selectable on the ladder.",
+        "Switching the ladder ruleset shows that ruleset's canonical standings (the per-ruleset leaderboard); a test asserts the ladder reflects the selected canonical ruleset.",
+        "Only CANONICAL_TEAM rulesets appear on the ladder (experimental PLACEMENT/SOLO_RATE stay on the US-229 multi-context leaderboard); a test asserts a non-canonical context is not offered on the ladder.",
+        "Existing ladder anonymity assertions still pass.",
+        "pnpm -C web/dashboard lint && check && test:e2e pass.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
+      ],
+      "notes": "Sites: web/dashboard/src/routes/(public)/ladder/+page.svelte RULESETS=['mini7_v1'] + home/profile mini7 pins. Depends on US-228 so the per-faction/per-ruleset card data is available. Complements US-226 (lobby) and US-229 (multi-context leaderboard).",
+      "passes": false
     }
   ]
 }
