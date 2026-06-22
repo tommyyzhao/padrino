@@ -484,7 +484,7 @@
         "All backend gates pass (including test_migrations_all_dialects)."
       ],
       "notes": "Evidence: 0047_rating_contexts.py:29-32/256/281/313-331, test_migrations_all_dialects.py:28-48, test_migration_0047_rating_contexts.py. Fail-closed/coverage hardening; no canonical correctness change.",
-      "passes": false
+      "passes": true
     }
   ]
 }

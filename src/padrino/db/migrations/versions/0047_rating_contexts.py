@@ -21,15 +21,13 @@ from typing import Any
 import sqlalchemy as sa
 from alembic import op
 
+from padrino.core.enums import RatingContextKind
+from padrino.core.rulesets import get_ruleset
+
 revision: str = "0047"
 down_revision: str | None = "0046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
-
-_CANONICAL_CONTEXTS: tuple[tuple[str, str], ...] = (
-    ("mini7_v1", "Mini 7 canonical team"),
-    ("bench10_v1", "Bench 10 canonical team"),
-)
 
 
 def _uuid_param(value: uuid.UUID) -> str:
@@ -74,7 +72,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("ruleset_id", "kind", name="uq_rating_context_ruleset_kind"),
     )
-    _seed_builtin_canonical_contexts()
+    _seed_existing_scientific_canonical_contexts()
 
     with op.batch_alter_table("ratings") as batch_op:
         batch_op.add_column(sa.Column("ruleset_id", sa.String(), nullable=True))
@@ -102,7 +100,47 @@ def upgrade() -> None:
     _stamp_existing_canonical_rows()
 
 
-def _seed_builtin_canonical_contexts() -> None:
+def _declared_canonical_context(ruleset_id: str) -> tuple[str, str] | None:
+    try:
+        ruleset = get_ruleset(ruleset_id)
+    except ValueError:
+        return None
+
+    kind = getattr(ruleset, "RATING_CONTEXT_KIND", None)
+    is_canonical = bool(getattr(ruleset, "IS_CANONICAL", False))
+    display_label = str(getattr(ruleset, "RATING_CONTEXT_DISPLAY_LABEL", "")).strip()
+    if kind is not RatingContextKind.CANONICAL_TEAM or not is_canonical or not display_label:
+        return None
+    return kind.value, display_label
+
+
+def _seed_existing_scientific_canonical_contexts() -> None:
+    bind = op.get_bind()
+    ruleset_rows = bind.execute(
+        sa.text(
+            "SELECT DISTINCT ruleset_id FROM leagues WHERE kind = 'SCIENTIFIC' ORDER BY ruleset_id"
+        )
+    ).all()
+    rows = []
+    now = datetime.now(UTC)
+    for row in ruleset_rows:
+        declared = _declared_canonical_context(str(row.ruleset_id))
+        if declared is None:
+            continue
+        kind, display_label = declared
+        rows.append(
+            {
+                "id": uuid.uuid4(),
+                "kind": kind,
+                "ruleset_id": row.ruleset_id,
+                "is_canonical": True,
+                "display_label": display_label,
+                "created_at": now,
+            }
+        )
+    if not rows:
+        return
+
     table = sa.table(
         "rating_contexts",
         sa.column("id", sa.Uuid()),
@@ -112,21 +150,7 @@ def _seed_builtin_canonical_contexts() -> None:
         sa.column("display_label", sa.String()),
         sa.column("created_at", sa.DateTime(timezone=True)),
     )
-    now = datetime.now(UTC)
-    op.bulk_insert(
-        table,
-        [
-            {
-                "id": uuid.uuid4(),
-                "kind": "CANONICAL_TEAM",
-                "ruleset_id": ruleset_id,
-                "is_canonical": True,
-                "display_label": label,
-                "created_at": now,
-            }
-            for ruleset_id, label in _CANONICAL_CONTEXTS
-        ],
-    )
+    op.bulk_insert(table, rows)
 
 
 def _create_noncanonical_sibling_tables() -> None:
@@ -241,25 +265,18 @@ def _create_noncanonical_sibling_tables() -> None:
 
 def _stamp_existing_canonical_rows() -> None:
     bind = op.get_bind()
-    context_rows = bind.execute(
-        sa.text(
-            "SELECT id, ruleset_id FROM rating_contexts "
-            "WHERE kind = 'CANONICAL_TEAM' AND is_canonical = true"
-        )
-    ).all()
-    context_by_ruleset = {row.ruleset_id: row.id for row in context_rows}
-
     rating_rows = bind.execute(
         sa.text(
-            "SELECT r.id, l.ruleset_id FROM ratings r "
+            "SELECT r.id, l.ruleset_id, rc.id AS context_id FROM ratings r "
             "JOIN leagues l ON l.id = r.league_id "
-            "WHERE l.kind = 'SCIENTIFIC' AND l.ruleset_id IN ('mini7_v1', 'bench10_v1')"
+            "JOIN rating_contexts rc "
+            "ON rc.ruleset_id = l.ruleset_id "
+            "AND rc.kind = 'CANONICAL_TEAM' "
+            "AND rc.is_canonical = true "
+            "WHERE l.kind = 'SCIENTIFIC'"
         )
     ).all()
     for row in rating_rows:
-        context_id = context_by_ruleset.get(row.ruleset_id)
-        if context_id is None:
-            continue
         bind.execute(
             sa.text(
                 "UPDATE ratings SET ruleset_id = :ruleset_id, "
@@ -267,24 +284,26 @@ def _stamp_existing_canonical_rows() -> None:
             ),
             {
                 "ruleset_id": row.ruleset_id,
-                "context_id": _coerce_context_id(context_id),
+                "context_id": _coerce_context_id(row.context_id),
                 "id": row.id,
             },
         )
 
     event_rows = bind.execute(
         sa.text(
-            "SELECT re.id, l.ruleset_id, g.game_seed, g.terminal_result "
+            "SELECT re.id, l.ruleset_id, rc.id AS context_id, g.game_seed, "
+            "g.terminal_result "
             "FROM rating_events re "
             "JOIN leagues l ON l.id = re.league_id "
+            "JOIN rating_contexts rc "
+            "ON rc.ruleset_id = l.ruleset_id "
+            "AND rc.kind = 'CANONICAL_TEAM' "
+            "AND rc.is_canonical = true "
             "JOIN games g ON g.id = re.game_id "
-            "WHERE l.kind = 'SCIENTIFIC' AND l.ruleset_id IN ('mini7_v1', 'bench10_v1')"
+            "WHERE l.kind = 'SCIENTIFIC'"
         )
     ).all()
     for row in event_rows:
-        context_id = context_by_ruleset.get(row.ruleset_id)
-        if context_id is None:
-            continue
         bind.execute(
             sa.text(
                 "UPDATE rating_events SET ruleset_id = :ruleset_id, "
@@ -293,7 +312,7 @@ def _stamp_existing_canonical_rows() -> None:
             ),
             {
                 "ruleset_id": row.ruleset_id,
-                "context_id": _coerce_context_id(context_id),
+                "context_id": _coerce_context_id(row.context_id),
                 "game_seed": row.game_seed,
                 "team_outcome": _winner_from_terminal_result(row.terminal_result),
                 "id": row.id,

@@ -22,30 +22,10 @@ from alembic.config import Config
 from sqlalchemy import create_engine as sync_create_engine
 from sqlalchemy import inspect
 
+from tests.db.test_migrations import EXPECTED_TABLES
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
-
-EXPECTED_TABLES = {
-    "model_providers",
-    "model_configs",
-    "prompt_versions",
-    "agent_builds",
-    "leagues",
-    "gauntlets",
-    "gauntlet_roster_slots",
-    "games",
-    "game_seats",
-    "game_events",
-    "llm_calls",
-    "ratings",
-    "rating_events",
-    "api_keys",
-    "scheduler_heartbeats",
-    "ingested_games",
-    "rate_limit_buckets",
-    "scheduled_gauntlets",
-    "behavioral_evaluations",
-}
 
 
 def _docker_available() -> bool:

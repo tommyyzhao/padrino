@@ -12,7 +12,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine as sync_create_engine
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
@@ -35,6 +35,13 @@ def _alembic_config() -> Config:
 
 def _sync_url(url: str) -> str:
     return url.replace("sqlite+aiosqlite://", "sqlite://", 1)
+
+
+CANONICAL_FIXTURE_RULESETS: tuple[tuple[str, str], ...] = (
+    ("mini7_v1", "TOWN"),
+    ("bench10_v1", "MAFIA"),
+    ("roleblock10_v1", "TOWN"),
+)
 
 
 def _seed_pre_0047_ratings(url: str) -> dict[str, object]:
@@ -91,7 +98,7 @@ def _seed_pre_0047_ratings(url: str) -> dict[str, object]:
                 },
             )
 
-            for ruleset_id, winner in (("mini7_v1", "TOWN"), ("bench10_v1", "MAFIA")):
+            for ruleset_id, winner in CANONICAL_FIXTURE_RULESETS:
                 league_id = uuid.uuid4().hex
                 game_id = uuid.uuid4().hex
                 global_rating_id = uuid.uuid4().hex
@@ -176,6 +183,30 @@ def _seed_pre_0047_ratings(url: str) -> dict[str, object]:
     return seeded
 
 
+def _rating_numeric_bytes(url: str) -> list[tuple[str, str, str, str]]:
+    engine = sync_create_engine(_sync_url(url))
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, CAST(mu AS TEXT) AS mu, CAST(sigma AS TEXT) AS sigma, "
+                    "CAST(conservative_score AS TEXT) AS conservative_score "
+                    "FROM ratings ORDER BY id"
+                )
+            ).all()
+            return [
+                (
+                    str(row.id),
+                    str(row.mu),
+                    str(row.sigma),
+                    str(row.conservative_score),
+                )
+                for row in rows
+            ]
+    finally:
+        engine.dispose()
+
+
 def test_0047_stamps_existing_scientific_ratings_without_rerating(
     sqlite_db_url: str,
 ) -> None:
@@ -195,7 +226,8 @@ def test_0047_stamps_existing_scientific_ratings_without_rerating(
                 )
             ).all()
             context_by_ruleset = {row.ruleset_id: row for row in contexts}
-            assert set(context_by_ruleset) >= {"mini7_v1", "bench10_v1"}
+            expected_rulesets = {ruleset_id for ruleset_id, _winner in CANONICAL_FIXTURE_RULESETS}
+            assert set(context_by_ruleset) >= expected_rulesets
             assert all(bool(row.is_canonical) for row in context_by_ruleset.values())
 
             rating_rows = conn.execute(
@@ -233,3 +265,43 @@ def test_0047_stamps_existing_scientific_ratings_without_rerating(
                 assert row.team_outcome == team_outcome
     finally:
         engine.dispose()
+
+
+def test_0047_downgrade_removes_additive_schema_and_preserves_rating_bytes(
+    sqlite_db_url: str,
+) -> None:
+    cfg = _alembic_config()
+    command.upgrade(cfg, "0046")
+    _seed_pre_0047_ratings(sqlite_db_url)
+    before = _rating_numeric_bytes(sqlite_db_url)
+
+    command.upgrade(cfg, "0047")
+    command.downgrade(cfg, "0046")
+
+    engine = sync_create_engine(_sync_url(sqlite_db_url))
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(conn)
+            tables = set(inspector.get_table_names())
+            assert tables.isdisjoint(
+                {
+                    "rating_contexts",
+                    "placement_ratings",
+                    "placement_rating_events",
+                    "solo_rate_ratings",
+                    "solo_rate_rating_events",
+                }
+            )
+            assert {"ruleset_id", "rating_context_id"}.isdisjoint(
+                {column["name"] for column in inspector.get_columns("ratings")}
+            )
+            assert {
+                "ruleset_id",
+                "rating_context_id",
+                "game_seed",
+                "team_outcome",
+            }.isdisjoint({column["name"] for column in inspector.get_columns("rating_events")})
+    finally:
+        engine.dispose()
+
+    assert _rating_numeric_bytes(sqlite_db_url) == before

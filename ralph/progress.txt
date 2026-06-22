@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Data-driven migration backfills (US-221): when a migration stamps historical
+  rating rows from ruleset metadata, query the distinct persisted
+  `SCIENTIFIC` league `ruleset_id`s and resolve each through the current
+  ruleset registry's declared `RATING_CONTEXT_KIND` / `IS_CANONICAL` /
+  display-label contract. Do not hardcode the sacred pair; fresh future
+  scientific canonical rulesets such as `roleblock10_v1` must receive the same
+  additive marker without re-rating.
 - Canonicality layer-2 negative tests (US-220): to prove
   `_observed_terminal_outcomes` is not a no-op, build a minimal canonical-looking
   ruleset that passes all layer-1 flags and monkeypatch
@@ -2140,3 +2147,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2464
   passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T21:58 PDT - US-221
+- Made migration `0047` seed and stamp canonical rating contexts from existing
+  persisted `SCIENTIFIC` league rulesets by resolving each through the ruleset
+  registry, so historical rows for a third canonical ruleset such as
+  `roleblock10_v1` get `rating_context_id` without a hardcoded allowlist.
+- Extended `tests/db/test_migration_0047_rating_contexts.py` to seed a third
+  canonical scientific ruleset before `0047`, assert upgrade stamping, and
+  round-trip downgrade to prove the additive columns and sibling tables are
+  removed while seeded `Rating` `mu` / `sigma` / `conservative_score` byte
+  strings stay unchanged.
+- Shared `EXPECTED_TABLES` from `tests/db/test_migrations.py` into
+  `tests/db/test_migrations_all_dialects.py`, covering `rating_contexts`,
+  `placement_ratings`, `placement_rating_events`, `solo_rate_ratings`, and
+  `solo_rate_rating_events` in the all-dialects migration smoke.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/migrations/versions/0047_rating_contexts.py`,
+  `tests/db/test_migration_0047_rating_contexts.py`,
+  `tests/db/test_migrations_all_dialects.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0047_rating_contexts.py -q` failed
+  before the migration fix on missing `roleblock10_v1`; focused GREEN
+  `uv run pytest tests/db/test_migration_0047_rating_contexts.py -q` -> 2
+  passed; `uv run pytest tests/db/test_migrations_all_dialects.py -q` -> 2
+  passed / 2 skipped (Docker unavailable for local Postgres);
+  `uv run pytest tests/db/test_migrations.py -q` -> 4 passed;
+  `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2465 passed / 47 skipped / 10
+  deselected.
