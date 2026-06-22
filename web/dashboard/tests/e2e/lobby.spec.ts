@@ -137,6 +137,7 @@ function lobbySummary(status = 'OPEN') {
     identity_mode: 'ANONYMOUS',
     theme_pack_id: null,
     stakes: 'CASUAL',
+    ranked: false,
     status,
     invite_token: INVITE_TOKEN,
     host_principal_id: HOST_PRINCIPAL,
@@ -293,7 +294,9 @@ test.describe('lobby UI (US-154)', () => {
     await expectIdentityBlind(page.getByTestId('lobby-roster'));
   });
 
-  test('create form shows ruleset, identity mode, and CASUAL stakes', async ({ page }) => {
+  test('create form shows ruleset, identity mode, ranked toggle, and CASUAL default', async ({
+    page
+  }) => {
     await routeRulesets(page);
     await page.goto('/lobby');
     await expect(page.getByTestId('lobby-create-form')).toBeVisible();
@@ -306,6 +309,46 @@ test.describe('lobby UI (US-154)', () => {
     await rulesetSelect.selectOption('roleblock10_v1');
     await expect(rulesetSelect).toHaveValue('roleblock10_v1');
     await expect(page.getByTestId('lobby-create-identity-mode')).toBeVisible();
+    await expect(page.getByTestId('lobby-create-ranked')).not.toBeChecked();
     await expect(page.getByTestId('lobby-create-stakes')).toContainText('CASUAL');
+  });
+
+  test('ranked create toggle submits ranked lobbies without identity markers', async ({ page }) => {
+    let createBody: Record<string, unknown> | null = null;
+    const isApi = (route: import('@playwright/test').Route) => {
+      const t = route.request().resourceType();
+      return t === 'fetch' || t === 'xhr';
+    };
+
+    await routeRulesets(page);
+    await page.route('**/human/guest', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({ principal_id: HOST_PRINCIPAL, kind: 'guest', display_name: null })
+      });
+    });
+    await page.route('**/lobbies', async (route) => {
+      if (!isApi(route)) return route.continue();
+      createBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...lobbySummary(), ranked: true })
+      });
+    });
+
+    await page.goto('/lobby');
+    await page.getByTestId('lobby-create-ranked').check();
+    await expect(page.getByTestId('lobby-create-stakes')).toContainText('RANKED');
+    await page.getByTestId('lobby-create-submit').click();
+
+    await expect.poll(() => createBody).toMatchObject({
+      ruleset_id: 'mini7_v1',
+      identity_mode: 'ANONYMOUS',
+      ranked: true
+    });
+    expect(JSON.stringify(createBody)).not.toMatch(/seat_kind|is_human/i);
   });
 });

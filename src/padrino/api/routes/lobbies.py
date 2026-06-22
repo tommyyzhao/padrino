@@ -116,6 +116,10 @@ class LobbyCreate(BaseModel):
     #: deterministic auto-fill at launch (US-149). Length must not exceed the AI
     #: seat count (player_count - 1, the host's own HUMAN seat).
     prepick_agent_build_ids: list[uuid.UUID] = Field(default_factory=list)
+    #: Opt in to the segregated Humans-Included ranked lane. Default remains
+    #: casual/unrated; the human ELO writer is intentionally still dormant in
+    #: US-234a.
+    ranked: bool = False
 
 
 class LobbySummary(BaseModel):
@@ -126,6 +130,7 @@ class LobbySummary(BaseModel):
     identity_mode: str
     theme_pack_id: str | None
     stakes: str
+    ranked: bool
     status: str
     invite_token: str
     host_principal_id: uuid.UUID
@@ -154,9 +159,10 @@ async def create_lobby(
 ) -> LobbySummary:
     """Create a private friend lobby owned by the calling human.
 
-    The lobby is OPEN and CASUAL; the host occupies seat 0 (HUMAN). The remaining
-    seats are AI: the host's pre-picked human-eligible models fill them in order,
-    any beyond the pre-pick are left empty for curated auto-fill (US-149).
+    The lobby is OPEN and defaults casual; the host occupies seat 0 (HUMAN).
+    The remaining seats are AI: the host's pre-picked human-eligible models fill
+    them in order, any beyond the pre-pick are left empty for curated auto-fill
+    (US-149).
 
     Admission is enforced FIRST: the calling principal's per-user/day game cap,
     inference-$ cap, and the global cost breaker gate lobby creation (US-151). A
@@ -184,7 +190,9 @@ async def create_lobby(
             )
 
     now = datetime.now(UTC)
-    league = await leagues_repo.get_or_create_humans_included(session, ruleset_id=body.ruleset_id)
+    league = await leagues_repo.get_or_create_humans_included(
+        session, ruleset_id=body.ruleset_id, ranked=body.ranked
+    )
 
     lobby = await lobbies_repo.create_lobby(
         session,
@@ -650,6 +658,7 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
     assert lobby is not None  # callers resolve the lobby first
     members = await lobbies_repo.list_members(session, lobby_id)
     seats = await lobbies_repo.list_seats(session, lobby_id)
+    league = await leagues_repo.get(session, lobby.league_id)
     composition = composition_summary(
         # A lobby HUMAN seat maps to a game-time HUMAN; an AI seat maps to AI.
         # Counts only — the per-seat layout is never exposed.
@@ -662,6 +671,7 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
         identity_mode=lobby.identity_mode,
         theme_pack_id=lobby.theme_pack_id,
         stakes=LobbyStakes(lobby.stakes).value,
+        ranked=league.ranked if league is not None else False,
         status=lobby.status,
         invite_token=lobby.invite_token,
         host_principal_id=lobby.host_principal_id,

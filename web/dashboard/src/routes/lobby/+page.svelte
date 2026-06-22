@@ -1,7 +1,7 @@
 <script lang="ts">
-  // US-154: Frontend lobby hub — create a private friend lobby OR join from an
-  // invite link. Casual-only (stakes shown CASUAL); count-only composition; no
-  // per-seat human/AI disclosure (anonymity, AGENTS.md rule 7).
+  // US-154/US-234a: Frontend lobby hub — create a private friend lobby OR join
+  // from an invite link. Count-only composition; no per-seat human/AI disclosure
+  // (anonymity, AGENTS.md rule 7).
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
@@ -16,6 +16,7 @@
   let rulesetsLoading = $state(true);
   let rulesetsError = $state<string | null>(null);
   let identityMode = $state<'ANONYMOUS' | 'TRANSPARENT'>('ANONYMOUS');
+  let ranked = $state(false);
   let themePackId = $state('');
   // Bot fill mode: 'autofill' (curated auto-fill) vs 'prepick' (host pre-picks).
   let fillMode = $state<'autofill' | 'prepick'>('autofill');
@@ -70,6 +71,7 @@
       const summary = await padrino.client.createLobby({
         ruleset_id: rulesetId,
         identity_mode: identityMode,
+        ranked,
         theme_pack_id: themePackId.trim() === '' ? null : themePackId.trim(),
         prepick_agent_build_ids: prepick
       });
@@ -154,6 +156,16 @@
         </select>
       </label>
 
+      <label class="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          class="h-4 w-4"
+          data-testid="lobby-create-ranked"
+          bind:checked={ranked}
+        />
+        <span class="font-medium">Ranked</span>
+      </label>
+
       <label class="flex flex-col gap-1 text-xs">
         <span class="font-medium">Theme pack</span>
         <input
@@ -188,7 +200,7 @@
       {/if}
 
       <p class="text-xs text-muted-foreground" data-testid="lobby-create-stakes">
-        Stakes: <span class="font-semibold">CASUAL</span>
+        Mode: <span class="font-semibold">{ranked ? 'RANKED' : 'CASUAL'}</span>
       </p>
 
       <Button type="submit" testid="lobby-create-submit" disabled={creating || rulesets.length === 0}>

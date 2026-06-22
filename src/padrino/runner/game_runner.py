@@ -140,12 +140,16 @@ class GamePersistence:
     and ``Game.terminal_result={winner, reason, day_terminated}`` in the same
     transaction as the event row and (when applicable) the rating updates so
     partial failures roll back together.
+
+    ``ranked`` carries a persisted league binding for executors that call
+    :func:`drive_game_loop` indirectly, such as the human-lane worker.
     """
 
     session_factory: async_sessionmaker[AsyncSession]
     game_id: uuid.UUID
     agent_builds: Mapping[str, uuid.UUID] = field(default_factory=dict)
     league_id: uuid.UUID | None = None
+    ranked: bool = False
     resume: GameResume | None = None
     settings: Settings | None = None
 

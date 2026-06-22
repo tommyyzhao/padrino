@@ -3,6 +3,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked Humans-Included flag plumbing (US-234a): the Humans-Included league is
+  now unique by `(ruleset_id, ranked)` via Alembic `0049`, so casual and ranked
+  lobbies for the same ruleset bind distinct `League` rows. Lobby create owns
+  the opt-in `ranked` flag; the human lane resolves ranked state from the
+  launched `Lobby.game_id -> League` binding, stores it on `GamePersistence`,
+  and passes it into `drive_game_loop`. Missing/non-HUMANS_INCLUDED bindings
+  fail closed to `ranked=False`/`league_id=None`. Until US-234b adds the human
+  writer, human seats still keep scientific ratings closed by incomplete
+  `agent_builds`, so ranked human terminal games write zero scientific and zero
+  human-rating rows. `0049` is consumed; future hot-path-index migration story
+  US-239 must use `0050`.
 - Human restart-resume tests (US-233): validate the single-host worker path by
   rehydrating from `game_events` with `rehydrate_active_human_games()`, then
   resuming through `run_human_lane` / the default human executor at the existing
@@ -2593,3 +2604,54 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2503
   passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T16:20 PDT - US-234a
+- Added the ranked lobby flag end-to-end without enabling rating writes:
+  `POST /lobbies` accepts `ranked` (default false), binds casual/ranked lobbies
+  to distinct HUMANS_INCLUDED `League` rows, and returns the bound `ranked`
+  value in `LobbySummary`.
+- Added Alembic `0049_ranked_humans_included_league` and matching ORM metadata
+  so the partial HUMANS_INCLUDED unique index keys on `(ruleset_id, ranked)`.
+  Downgrade collapses back to one row per ruleset using the existing dependent
+  FK/collision pattern.
+- Threaded human-lane ranked state from launched lobby league binding into
+  `GamePersistence.ranked`, then into `_default_human_game_executor` /
+  `drive_game_loop`. Missing or non-HUMANS_INCLUDED bindings fail closed to
+  unranked/no-league.
+- Added dashboard ranked create toggle and kept identity-blind lobby surfaces:
+  the create form submits `ranked: true`, the lobby detail badge shows RANKED
+  when bound, and Playwright asserts no new human/seat markers in the create
+  request.
+- Ranked human terminal games still write NOTHING in this story: regression
+  coverage asserts zero scientific `Rating`/`RatingEvent` rows and zero dormant
+  `HumanRating`/`HumanRatingEvent` rows. The scientific ranked path remains
+  covered by the existing runner rating integration tests.
+- Tracking correction: this story consumed Alembic revision `0049`, so US-239
+  was updated in `ralph/prd.json` to use migration `0050` after head `0049`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/lobbies.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/leagues.py`,
+  `src/padrino/db/migrations/versions/0049_ranked_humans_included_league.py`,
+  `src/padrino/runner/game_runner.py`, `src/padrino/runner/human_lane.py`,
+  `tests/api/test_lobby_create.py`,
+  `tests/db/test_migration_0049_humans_included_ranked_index.py`,
+  `tests/ratings/test_segregation.py`, `tests/runner/test_human_lane_wiring.py`,
+  `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/routes/lobby/+page.svelte`,
+  `web/dashboard/src/routes/lobby/[id]/+page.svelte`,
+  `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_lobby_create.py::test_create_ranked_lobby_binds_ranked_humans_included_league tests/runner/test_human_lane_wiring.py::test_human_lane_binds_ranked_lobby_league_to_executor tests/runner/test_human_lane_wiring.py::test_default_human_executor_passes_ranked_flag_to_game_loop tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_writes_zero_rating_rows tests/db/test_migration_0049_humans_included_ranked_index.py -q`
+  failed on the expected missing ranked API/repository/runner/migration
+  support; focused GREEN same command -> 5 passed. Focused frontend
+  `pnpm -C web/dashboard exec vitest run src/lib/api/client.test.ts` -> 21
+  passed; `pnpm -C web/dashboard test:e2e -- tests/e2e/lobby.spec.ts --project=chromium`
+  -> 5 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2509 passed / 48 skipped / 10
+  deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26
+  passed / 3 skipped.

@@ -274,6 +274,42 @@ async def test_lobby_references_humans_included_league(
 
 
 @pytest.mark.asyncio
+async def test_create_ranked_lobby_binds_ranked_humans_included_league(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    casual_token = await _guest_token(client)
+    casual = await client.post(
+        "/lobbies",
+        json={"ruleset_id": "mini7_v1"},
+        cookies={HUMAN_SESSION_COOKIE: casual_token},
+    )
+    assert casual.status_code == 201, casual.text
+
+    ranked_token = await _guest_token(client)
+    ranked = await client.post(
+        "/lobbies",
+        json={"ruleset_id": "mini7_v1", "ranked": True},
+        cookies={HUMAN_SESSION_COOKIE: ranked_token},
+    )
+    assert ranked.status_code == 201, ranked.text
+
+    casual_league_id = uuid.UUID(casual.json()["league_id"])
+    ranked_league_id = uuid.UUID(ranked.json()["league_id"])
+    assert casual_league_id != ranked_league_id
+
+    async with session_factory() as session:
+        casual_league = await session.get(League, casual_league_id)
+        ranked_league = await session.get(League, ranked_league_id)
+
+    assert casual_league is not None
+    assert casual_league.kind == LeagueKind.HUMANS_INCLUDED.value
+    assert casual_league.ranked is False
+    assert ranked_league is not None
+    assert ranked_league.kind == LeagueKind.HUMANS_INCLUDED.value
+    assert ranked_league.ranked is True
+
+
+@pytest.mark.asyncio
 async def test_creating_lobby_writes_zero_scientific_rating_rows(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

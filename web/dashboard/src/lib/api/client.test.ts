@@ -254,12 +254,17 @@ describe('PadrinoClient human-session play channels', () => {
   it('drives the lobby create / join / ready / launch surface', async () => {
     const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
     const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
-    await client.createLobby({ ruleset_id: 'mini7_v1', identity_mode: 'ANONYMOUS' });
+    await client.createLobby({ ruleset_id: 'mini7_v1', identity_mode: 'ANONYMOUS', ranked: true });
     await client.joinLobby('tok');
     await client.setLobbyReady('l1', true);
     await client.launchLobby('l1');
     const paths = fetchImpl.mock.calls.map((c) => new URL(c[0]).pathname);
     expect(paths).toEqual(['/lobbies', '/lobbies/join/tok', '/lobbies/l1/ready', '/lobbies/l1/launch']);
+    expect(JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      ruleset_id: 'mini7_v1',
+      identity_mode: 'ANONYMOUS',
+      ranked: true
+    });
     expect(JSON.parse((fetchImpl.mock.calls[2][1] as RequestInit).body as string)).toEqual({
       ready: true
     });

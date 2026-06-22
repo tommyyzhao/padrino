@@ -46,9 +46,16 @@ from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.hashing import compute_event_hash
 from padrino.core.engine.state import GameState, Seat
-from padrino.core.enums import ActionType, SeatKind
+from padrino.core.enums import ActionType, LeagueKind, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
-from padrino.db.models import Game, GameSeat, HumanActionSubmission, HumanChatSubmission
+from padrino.db.models import (
+    Game,
+    GameSeat,
+    HumanActionSubmission,
+    HumanChatSubmission,
+    League,
+    Lobby,
+)
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_action_submissions as human_actions_repo
@@ -901,8 +908,9 @@ def _default_human_game_executor(
         persistence: GamePersistence,
         adapter: LlmAdapter,
     ) -> None:
-        # Human-lane games are always casual (ranked=False) — they never write the
-        # scientific Rating/RatingEvent tables (segregation, hard rule 8).
+        # Human-lane ranked mode is segregated from the scientific benchmark:
+        # the ranked flag reaches terminal persistence, but human seats keep the
+        # scientific Rating/RatingEvent path fail-closed.
         async def release_chat(
             phase: str,
             _settled_at: float,
@@ -959,7 +967,7 @@ def _default_human_game_executor(
         await drive_game_loop(
             config,
             adapter,
-            False,
+            persistence.ranked,
             persistence=persistence,
             tick_runner=tick_runner,
             resume=persistence.resume,
@@ -1020,12 +1028,13 @@ async def human_lane_admission(
 async def _claim_game(
     session_factory: async_sessionmaker[AsyncSession],
     game_id: uuid.UUID,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, uuid.UUID | None, bool] | None:
     """Atomically flip a claimable human-lane game to RUNNING.
 
-    Returns ``(game_seed, ruleset_id, prior_status)`` on a successful claim, or
-    ``None`` when the game vanished, already completed, or is not a human-lane
-    game (so a concurrent worker / the benchmark lane never double-runs it).
+    Returns ``(game_seed, ruleset_id, prior_status, league_id, ranked)`` on a
+    successful claim, or ``None`` when the game vanished, already completed, or
+    is not a human-lane game (so a concurrent worker / the benchmark lane never
+    double-runs it).
     """
     async with session_factory() as session, session.begin():
         game = await games_repo.get(session, game_id)
@@ -1036,10 +1045,38 @@ async def _claim_game(
         seed = game.game_seed
         ruleset_id = game.ruleset_id
         prior_status = game.status
+        league_id, ranked = await _bound_humans_included_league(session, game_id=game_id)
         if game.status != STATUS_RUNNING:
             game.status = STATUS_RUNNING
             await session.flush()
-    return seed, ruleset_id, prior_status
+    return seed, ruleset_id, prior_status, league_id, ranked
+
+
+async def _bound_humans_included_league(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+) -> tuple[uuid.UUID | None, bool]:
+    """Return the launched lobby's Humans-Included league binding.
+
+    Missing or non-human league bindings fail closed to unranked/no-league. This
+    keeps manually seeded human-lane tests and any inconsistent DB row out of
+    the terminal rating path.
+    """
+    row = (
+        await session.execute(
+            select(Lobby.league_id, League.ranked)
+            .join(League, League.id == Lobby.league_id)
+            .where(
+                Lobby.game_id == game_id,
+                League.kind == LeagueKind.HUMANS_INCLUDED.value,
+            )
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        return None, False
+    return row.league_id, bool(row.ranked)
 
 
 async def _run_one_human_game(
@@ -1058,7 +1095,7 @@ async def _run_one_human_game(
         claimed = await _claim_game(session_factory, game_id)
         if claimed is None:
             return
-        game_seed, ruleset_id, prior_status = claimed
+        game_seed, ruleset_id, prior_status, league_id, ranked = claimed
         if prior_status == STATUS_RUNNING and resume is None:
             _logger.warning(
                 "human_lane.running_game_missing_runtime_snapshot",
@@ -1078,14 +1115,15 @@ async def _run_one_human_game(
         else:
             adapter = _InjectedExecutorAdapter()
         config = GameConfig(game_id=str(game_id), game_seed=game_seed, ruleset_id=ruleset_id)
-        # Human seats carry no agent_build_id, so ``agent_builds`` is empty: the
-        # rating write path fails closed (segregation) and no scientific row is
-        # written for a human-lane game.
+        # Human seats carry no agent_build_id in ``agent_builds``, so the
+        # scientific rating write path still fails closed even when a ranked
+        # Humans-Included lobby reaches the terminal path (US-234a).
         persistence = GamePersistence(
             session_factory=session_factory,
             game_id=game_id,
             agent_builds={},
-            league_id=None,
+            league_id=league_id,
+            ranked=ranked,
             resume=resume,
         )
         structlog.contextvars.bind_contextvars(human_lane_game_id=str(game_id))

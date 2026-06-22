@@ -9,9 +9,10 @@ land anywhere ratings could be written.
 Two complementary proofs:
 
 * The casual humans-included path (``ranked=False``) writes nothing.
-* Even if a future bug set ``ranked=True`` on a human-lane game, the presence of
-  a HUMAN seat (a seat with no ``agent_build_id``) makes ``_should_apply_ratings``
-  fail closed, so the scientific tables still stay empty.
+* The ranked humans-included flag reaches the terminal path, but until the
+  separate human ELO writer ships it still writes nothing.
+* A HUMAN seat (a seat with no ``agent_build_id``) makes
+  ``_should_apply_ratings`` fail closed, so the scientific tables stay empty.
 
 It also asserts the discriminator + dormant-schema shape: the single
 ``Humans-Included League`` row is ``ranked=False`` / ``kind=HUMANS_INCLUDED`` and
@@ -93,6 +94,7 @@ async def _seed_human_lane_game(
     *,
     hash_prefix: str,
     human_seat_ids: set[str],
+    ranked: bool = False,
 ) -> tuple[uuid.UUID, uuid.UUID, dict[str, uuid.UUID]]:
     """Seed the humans-included league + a human-lane game.
 
@@ -139,7 +141,7 @@ async def _seed_human_lane_game(
             builds[seat_id] = ab.id
 
         league = await leagues_repo.get_or_create_humans_included(
-            session, ruleset_id=mini7_v1.RULESET_ID
+            session, ruleset_id=mini7_v1.RULESET_ID, ranked=ranked
         )
         game = await games_repo.create(
             session,
@@ -321,6 +323,46 @@ async def test_human_lane_game_writes_zero_rating_rows(
         persistence=persistence,
     )
     assert outcome.final_state.terminal_result == "TOWN"
+
+    counts = await _count_all_rating_rows(session_factory)
+    assert counts == (0, 0, 0, 0)
+
+
+async def test_ranked_humans_included_terminal_game_writes_zero_rating_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A completed ranked human-lane game still writes no ratings in US-234a."""
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    human_seats = {town[0], mafia[0]}
+    league_id, game_id, ai_builds = await _seed_human_lane_game(
+        session_factory,
+        hash_prefix="us234a-ranked-human",
+        human_seat_ids=human_seats,
+        ranked=True,
+    )
+
+    persistence = GamePersistence(
+        session_factory=session_factory,
+        game_id=game_id,
+        agent_builds=ai_builds,
+        league_id=league_id,
+    )
+    outcome = await run_game(
+        GameConfig(game_id="G-SEG-RANKED-HUMAN", game_seed=_GAME_SEED, timeout_s=1.0),
+        DeterministicMockAdapter(script),
+        ranked=True,
+        persistence=persistence,
+    )
+    assert outcome.final_state.terminal_result == "TOWN"
+
+    async with session_factory() as session:
+        league = await session.get(League, league_id)
+    assert league is not None
+    assert league.kind == LeagueKind.HUMANS_INCLUDED.value
+    assert league.ranked is True
 
     counts = await _count_all_rating_rows(session_factory)
     assert counts == (0, 0, 0, 0)

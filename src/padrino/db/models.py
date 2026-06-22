@@ -109,13 +109,15 @@ class AgentBuild(Base):
 class League(Base):
     __tablename__ = "leagues"
     __table_args__ = (
-        # The dormant humans-included league is one-per-ruleset; a partial unique
-        # index scoped to kind=HUMANS_INCLUDED prevents a concurrent get_or_create
-        # from materializing duplicate dormant leagues without constraining the
-        # scientific leagues (which legitimately repeat per ruleset).
+        # The Humans-Included league is one-per-ruleset-and-ranked-mode; a
+        # partial unique index scoped to kind=HUMANS_INCLUDED prevents
+        # concurrent get_or_create calls from materializing duplicate casual or
+        # ranked human leagues without constraining scientific leagues (which
+        # legitimately repeat per ruleset).
         Index(
             "uq_league_humans_included_ruleset",
             "ruleset_id",
+            "ranked",
             unique=True,
             sqlite_where=text("kind = 'HUMANS_INCLUDED'"),
             postgresql_where=text("kind = 'HUMANS_INCLUDED'"),
