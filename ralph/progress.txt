@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- SOLO_RATE scoring (US-184): keep alt-win / orthogonal solo objectives out of
+  every team-ELO path. Resolve only an explicit non-canonical `SOLO_RATE`
+  context, write success/attempt counts to `solo_rate_ratings` /
+  `solo_rate_rating_events`, and expose read-side cards only after a
+  minimum-attempt gate with Beta-posterior credible intervals.
 - Solo-faction placement rulesets (US-183): keep solo / three-faction variants
   non-canonical with `RATING_CONTEXT_KIND = PLACEMENT` and an explicit
   `SOLO_FACTIONS` declaration. Model terminal logic with ordered
@@ -1797,3 +1802,23 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2376 passed / 47 skipped /
   10 deselected.
+
+## 2026-06-21T20:03 PDT - US-184
+- Added the SOLO_RATE sibling scoring service for alt-win roles: it resolves
+  only an explicit non-canonical `SOLO_RATE` context, records per-role
+  success/attempt counts, persists audit rows, and reports gated read-side
+  score cards with normal-approximate Beta posterior 95% credible intervals.
+- Kept the rating firewalls intact: SOLO_RATE updates write zero canonical
+  `Rating` / `RatingEvent` rows and zero PLACEMENT rows; the canonical and
+  placement update paths both fail closed for a SOLO_RATE ruleset.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/solo_rate_ratings.py`,
+  `src/padrino/ratings/solo_rate_service.py`,
+  `tests/ratings/test_solo_rate_service.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for the new SOLO_RATE service;
+  focused GREEN `tests/ratings/test_solo_rate_service.py`; adjacent
+  rating/segregation/migration/dialect suite -> 37 passed / 3 skipped;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2392
+  passed / 47 skipped / 10 deselected.
