@@ -224,7 +224,7 @@
         "All backend gates pass."
       ],
       "notes": "Both reviewers: OpenSkill natively handles multi-team placement; correct math for 3-faction/SK, but a SEPARATE context. Requires US-215's generalized N-faction terminal model.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-183",

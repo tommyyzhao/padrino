@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Non-canonical placement scoring (US-182): keep PLACEMENT OpenSkill writes on
+  the sibling `placement_ratings` / `placement_rating_events` tables keyed by
+  `rating_context_id`; do not accept a `league_id` or touch canonical
+  `Rating` / `RatingEvent`. Resolve only an explicit non-canonical PLACEMENT
+  context for the game's ruleset, rank the winner's terminal group first, and
+  tie every other terminal group for second.
 - Submission diagnostics vocabulary (US-181): keep timeout/invalid-rate
   denominators in one read-side constant set (`diagnostics/submissions.py`) and
   include every runner-emitted structured submission event plus failure events.
@@ -1724,4 +1730,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Gates (all GREEN): focused new/adjacent tests; `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2374 passed / 47 skipped /
+  10 deselected.
+
+## 2026-06-21T19:40 PDT - US-182
+- Added a PLACEMENT OpenSkill update path for multi-outcome games. The service
+  resolves the game's explicit non-canonical PLACEMENT context, updates one
+  GLOBAL placement row per agent build, ranks the winning terminal group first,
+  and ties every other terminal group for second.
+- Kept the canonical firewall intact: placement scoring writes only to
+  `placement_ratings` / `placement_rating_events`, and the segregation gate now
+  proves the same placement-scored game leaves scientific `Rating` /
+  `RatingEvent` plus dormant human rating tables empty.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/placement_ratings.py`,
+  `src/padrino/ratings/openskill_service.py`,
+  `tests/ratings/test_openskill_service.py`,
+  `tests/ratings/test_segregation.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for the new placement service;
+  focused GREEN placement/segregation tests; adjacent rating/segregation/
+  migration/dialect suite -> 26 passed / 3 skipped; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2376 passed / 47 skipped /
   10 deselected.

@@ -25,9 +25,17 @@ from openskill.models import PlackettLuce
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.core.enums import Faction
+from padrino.core.enums import Faction, RatingContextKind
 from padrino.core.rulesets.canonicality import canonical_team_ranks_for_outcome
-from padrino.db.models import Game, GameSeat, RatingContext, RatingEvent
+from padrino.db.models import (
+    Game,
+    GameSeat,
+    PlacementRating,
+    PlacementRatingEvent,
+    RatingContext,
+    RatingEvent,
+)
+from padrino.db.repositories import placement_ratings as placement_ratings_repo
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.db.repositories import ratings as ratings_repo
 
@@ -60,6 +68,15 @@ class PairedGameResult:
     winner: Literal["TOWN", "MAFIA", "DRAW"]
     seat_factions: Mapping[str, Faction]
     agent_builds_by_seat: Mapping[str, uuid.UUID]
+
+
+@dataclass(frozen=True, slots=True)
+class PlacementGameResult:
+    """Per-game multi-outcome placement result for non-canonical contexts."""
+
+    game_id: uuid.UUID
+    winner: str
+    seat_groups: Mapping[str, str]
 
 
 def _ranks_for(winner: Literal["TOWN", "MAFIA", "DRAW"]) -> tuple[int, int]:
@@ -222,6 +239,53 @@ async def _persist_one(
     )
 
 
+async def _persist_one_placement(
+    session: AsyncSession,
+    *,
+    row: PlacementRating,
+    new_mu: float,
+    new_sigma: float,
+    game_id: uuid.UUID,
+    rating_context_id: uuid.UUID,
+    game_seed: str,
+    team_outcome: str,
+    scope_type: str,
+    scope_value: str,
+    public_player_id: str | None = None,
+    now: datetime,
+) -> PlacementRatingEvent:
+    """Update one placement row + append the matching sibling audit event."""
+    before_mu = float(row.mu)
+    before_sigma = float(row.sigma)
+    updated = await placement_ratings_repo.update_placement_rating(
+        session,
+        row.id,
+        mu=new_mu,
+        sigma=new_sigma,
+        conservative_score=_conservative(new_mu, new_sigma),
+        games=row.games + 1,
+        last_game_at=now,
+    )
+    if updated is None:  # pragma: no cover — row was just inserted in this txn.
+        msg = f"Placement rating row {row.id} disappeared between insert and update"
+        raise RuntimeError(msg)
+    return await placement_ratings_repo.record_placement_rating_event(
+        session,
+        rating_context_id=rating_context_id,
+        game_id=game_id,
+        game_seed=game_seed,
+        team_outcome=team_outcome,
+        agent_build_id=updated.agent_build_id,
+        scope_type=scope_type,
+        scope_value=scope_value,
+        before_mu=before_mu,
+        before_sigma=before_sigma,
+        after_mu=new_mu,
+        after_sigma=new_sigma,
+        public_player_id=public_player_id,
+    )
+
+
 async def _resolve_canonical_metadata(
     session: AsyncSession,
     *,
@@ -239,6 +303,105 @@ async def _resolve_canonical_metadata(
     if context is None:
         return None
     return game, context
+
+
+async def _resolve_placement_metadata(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+) -> tuple[Game, RatingContext] | None:
+    """Resolve a non-canonical PLACEMENT context for a game, fail-closed."""
+    game = await session.get(Game, game_id)
+    if game is None:
+        return None
+
+    declared = rating_contexts_repo.declared_for_ruleset(game.ruleset_id)
+    if declared is not None and (
+        declared.kind is not RatingContextKind.PLACEMENT or declared.is_canonical
+    ):
+        return None
+
+    context = await rating_contexts_repo.get_by_ruleset_kind(
+        session,
+        ruleset_id=game.ruleset_id,
+        kind=RatingContextKind.PLACEMENT,
+    )
+    if context is None:
+        return None
+    if context.kind != RatingContextKind.PLACEMENT.value or context.is_canonical:
+        return None
+    return game, context
+
+
+def _placement_groups_for(result: PlacementGameResult) -> list[str]:
+    """Return deterministic placement group order after validating the result."""
+    groups = sorted(set(result.seat_groups.values()))
+    if len(groups) < 2:
+        raise ValueError("placement rating requires at least two outcome groups")
+    if result.winner not in groups:
+        raise ValueError(f"placement winner {result.winner!r} is not present in seat_groups")
+    return groups
+
+
+async def _apply_placement_scope_update(
+    session: AsyncSession,
+    *,
+    game: Game,
+    context: RatingContext,
+    game_result: PlacementGameResult,
+    agent_builds_by_seat: Mapping[str, uuid.UUID],
+    model: PlackettLuce,
+    now: datetime,
+) -> list[PlacementRatingEvent]:
+    """Run one multi-team placement update for the placement GLOBAL scope."""
+    groups = _placement_groups_for(game_result)
+    entries_by_group: dict[str, list[tuple[str, PlacementRating]]] = {group: [] for group in groups}
+    for public_player_id in sorted(game_result.seat_groups):
+        group = game_result.seat_groups[public_player_id]
+        row = await placement_ratings_repo.get_or_create_placement_rating(
+            session,
+            rating_context_id=context.id,
+            agent_build_id=agent_builds_by_seat[public_player_id],
+            scope_type=SCOPE_GLOBAL,
+            scope_value=SCOPE_VALUE_GLOBAL,
+            initial_mu=INITIAL_MU,
+            initial_sigma=INITIAL_SIGMA,
+            initial_conservative_score=_conservative(INITIAL_MU, INITIAL_SIGMA),
+        )
+        entries_by_group[group].append((public_player_id, row))
+
+    rating_teams = [
+        [model.create_rating([row.mu, row.sigma], name=str(row.id)) for _sid, row in entries]
+        for entries in (entries_by_group[group] for group in groups)
+    ]
+    ranks = [1.0 if group == game_result.winner else 2.0 for group in groups]
+    new_teams = model.rate(rating_teams, ranks=ranks)
+
+    events: list[PlacementRatingEvent] = []
+    for _group, entries, new_team in zip(
+        groups,
+        [entries_by_group[group] for group in groups],
+        new_teams,
+        strict=True,
+    ):
+        for (public_player_id, row), new in zip(entries, new_team, strict=True):
+            events.append(
+                await _persist_one_placement(
+                    session,
+                    row=row,
+                    new_mu=new.mu,
+                    new_sigma=new.sigma,
+                    game_id=game.id,
+                    rating_context_id=context.id,
+                    game_seed=game.game_seed,
+                    team_outcome=game_result.winner,
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
+                    public_player_id=public_player_id,
+                    now=now,
+                )
+            )
+    return events
 
 
 async def update_ratings_for_game(
@@ -324,6 +487,38 @@ async def update_ratings_for_game(
     )
 
     return events
+
+
+async def update_placement_ratings_for_game(
+    session: AsyncSession,
+    *,
+    game_result: PlacementGameResult,
+    agent_builds_by_seat: Mapping[str, uuid.UUID],
+    now: datetime | None = None,
+) -> list[PlacementRatingEvent]:
+    """Apply OpenSkill placement updates for one non-canonical game.
+
+    The winning terminal group is ranked first and every other group ties for
+    second place. Writes are restricted to the ``placement_ratings`` sibling
+    tables for the game's exact non-canonical PLACEMENT context; missing,
+    canonical, or otherwise malformed contexts return no events.
+    """
+    metadata = await _resolve_placement_metadata(session, game_id=game_result.game_id)
+    if metadata is None:
+        return []
+    game, context = metadata
+
+    _now = now if now is not None else datetime.now(UTC)
+    model = PlackettLuce(mu=INITIAL_MU, sigma=INITIAL_SIGMA)
+    return await _apply_placement_scope_update(
+        session,
+        game=game,
+        context=context,
+        game_result=game_result,
+        agent_builds_by_seat=agent_builds_by_seat,
+        model=model,
+        now=_now,
+    )
 
 
 def _pair_sort_key(game: Game) -> tuple[str, int, str]:
@@ -477,6 +672,8 @@ __all__ = [
     "SCOPE_VALUE_GLOBAL",
     "GameResult",
     "PairedGameResult",
+    "PlacementGameResult",
+    "update_placement_ratings_for_game",
     "update_ratings_for_completed_pair",
     "update_ratings_for_game",
     "update_ratings_for_mirror_pair",

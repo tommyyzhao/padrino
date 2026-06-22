@@ -9,7 +9,16 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.enums import Faction, RatingContextKind
-from padrino.db.models import AgentBuild, Game, League, Rating, RatingContext, RatingEvent
+from padrino.db.models import (
+    AgentBuild,
+    Game,
+    League,
+    PlacementRating,
+    PlacementRatingEvent,
+    Rating,
+    RatingContext,
+    RatingEvent,
+)
 from padrino.db.repositories import (
     agent_builds,
     games,
@@ -24,9 +33,13 @@ from padrino.ratings.openskill_service import (
     INITIAL_SIGMA,
     GameResult,
     PairedGameResult,
+    PlacementGameResult,
+    update_placement_ratings_for_game,
     update_ratings_for_game,
     update_ratings_for_mirror_pair,
 )
+
+_PLACEMENT_RULESET = "experimental_placement_v1"
 
 
 async def _seed(
@@ -81,6 +94,64 @@ async def _seed(
             status="COMPLETED",
         )
     return league, builds, game
+
+
+async def _seed_placement_game(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    n_builds: int = 5,
+    hash_prefix: str = "placement",
+    context_is_canonical: bool = False,
+) -> tuple[list[AgentBuild], Game, RatingContext]:
+    """Create a non-canonical placement context, builds, and one completed game."""
+    async with session_factory() as session, session.begin():
+        provider = await providers.create(
+            session, name="cerebras", auth_secret_ref="CEREBRAS_API_KEY"
+        )
+        mc = await model_configs.create(
+            session,
+            provider_id=provider.id,
+            model_name="glm-4.7",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        builds: list[AgentBuild] = []
+        for i in range(n_builds):
+            pv = await prompt_versions.create(
+                session,
+                ruleset_id=_PLACEMENT_RULESET,
+                version=f"p{i + 1}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"{hash_prefix}-{i}",
+            )
+            ab = await agent_builds.create(
+                session,
+                display_name=f"placement-build-{i}",
+                model_config_id=mc.id,
+                prompt_version_id=pv.id,
+                adapter_version="2026.05",
+                inference_params={"temperature": 0.7},
+                active=True,
+            )
+            builds.append(ab)
+        game = await games.create(
+            session,
+            ruleset_id=_PLACEMENT_RULESET,
+            game_seed=f"{hash_prefix}-seed",
+            status="COMPLETED",
+        )
+        context = RatingContext(
+            kind=RatingContextKind.PLACEMENT.value,
+            ruleset_id=_PLACEMENT_RULESET,
+            is_canonical=context_is_canonical,
+            display_label="Experimental placement",
+        )
+        session.add(context)
+    return builds, game, context
 
 
 def _seven_seat_layout(
@@ -211,6 +282,102 @@ async def test_canonical_rating_writes_carry_context_and_outcome_metadata(
     assert {event.game_seed for event in events} == {game.game_seed}
     assert {event.team_outcome for event in events} == {"TOWN"}
     assert {event.agent_build_id for event in events} == {build.id for build in builds}
+
+
+async def test_placement_context_rates_winner_first_and_rest_tied(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    builds, game, context = await _seed_placement_game(
+        session_factory,
+        hash_prefix="placement-winner",
+    )
+    groups_by_seat = {
+        "P01": "TOWN",
+        "P02": "TOWN",
+        "P03": "MAFIA",
+        "P04": "MAFIA",
+        "P05": "SERIAL_KILLER",
+    }
+    builds_by_seat = {f"P{i + 1:02d}": builds[i].id for i in range(5)}
+
+    async with session_factory() as session, session.begin():
+        events = await update_placement_ratings_for_game(
+            session,
+            game_result=PlacementGameResult(
+                game_id=game.id,
+                winner="SERIAL_KILLER",
+                seat_groups=groups_by_seat,
+            ),
+            agent_builds_by_seat=builds_by_seat,
+        )
+
+    assert len(events) == 5
+    async with session_factory() as session:
+        placement_rows = (await session.execute(select(PlacementRating))).scalars().all()
+        placement_events = (await session.execute(select(PlacementRatingEvent))).scalars().all()
+        canonical_rows = (await session.execute(select(Rating))).scalars().all()
+        canonical_events = (await session.execute(select(RatingEvent))).scalars().all()
+
+    assert canonical_rows == []
+    assert canonical_events == []
+    assert {row.rating_context_id for row in placement_rows} == {context.id}
+    assert {event.rating_context_id for event in placement_events} == {context.id}
+    assert {event.game_seed for event in placement_events} == {game.game_seed}
+    assert {event.team_outcome for event in placement_events} == {"SERIAL_KILLER"}
+    assert {event.public_player_id for event in placement_events} == set(groups_by_seat)
+    assert {row.scope_type for row in placement_rows} == {"GLOBAL"}
+    assert {row.scope_value for row in placement_rows} == {"global"}
+
+    by_build = {row.agent_build_id: row for row in placement_rows}
+    winner = by_build[builds_by_seat["P05"]]
+    tied_losers = [by_build[builds_by_seat[sid]] for sid in ("P01", "P02", "P03", "P04")]
+    assert winner.mu > INITIAL_MU
+    assert all(row.mu < INITIAL_MU for row in tied_losers)
+    assert len({round(row.mu, 9) for row in tied_losers}) == 1
+    assert all(row.sigma < INITIAL_SIGMA for row in placement_rows)
+    assert all(row.games == 1 for row in placement_rows)
+    assert all(
+        row.conservative_score == pytest.approx(row.mu - 3.0 * row.sigma) for row in placement_rows
+    )
+
+
+async def test_placement_context_requires_non_canonical_context_row(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    builds, game, _context = await _seed_placement_game(
+        session_factory,
+        hash_prefix="placement-canonical-guard",
+        context_is_canonical=True,
+    )
+    groups_by_seat = {
+        "P01": "TOWN",
+        "P02": "MAFIA",
+        "P03": "SERIAL_KILLER",
+        "P04": "TOWN",
+        "P05": "MAFIA",
+    }
+
+    async with session_factory() as session, session.begin():
+        events = await update_placement_ratings_for_game(
+            session,
+            game_result=PlacementGameResult(
+                game_id=game.id,
+                winner="SERIAL_KILLER",
+                seat_groups=groups_by_seat,
+            ),
+            agent_builds_by_seat={f"P{i + 1:02d}": builds[i].id for i in range(5)},
+        )
+
+    assert events == []
+    async with session_factory() as session:
+        placement_rows = (await session.execute(select(PlacementRating))).scalars().all()
+        placement_events = (await session.execute(select(PlacementRatingEvent))).scalars().all()
+        canonical_rows = (await session.execute(select(Rating))).scalars().all()
+        canonical_events = (await session.execute(select(RatingEvent))).scalars().all()
+    assert placement_rows == []
+    assert placement_events == []
+    assert canonical_rows == []
+    assert canonical_events == []
 
 
 async def test_missing_rating_context_fails_closed_without_canonical_write(

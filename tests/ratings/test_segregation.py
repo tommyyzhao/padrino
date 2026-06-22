@@ -37,6 +37,8 @@ from padrino.db.models import (
     HumanRating,
     HumanRatingEvent,
     League,
+    PlacementRating,
+    PlacementRatingEvent,
     Rating,
     RatingContext,
     RatingEvent,
@@ -61,7 +63,12 @@ from padrino.db.repositories import (
 )
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.llm.mock import DeterministicMockAdapter
-from padrino.ratings.openskill_service import GameResult, update_ratings_for_game
+from padrino.ratings.openskill_service import (
+    GameResult,
+    PlacementGameResult,
+    update_placement_ratings_for_game,
+    update_ratings_for_game,
+)
 from padrino.runner.game_runner import (
     GameConfig,
     GamePersistence,
@@ -439,6 +446,30 @@ async def test_non_canonical_context_writes_zero_scientific_rows(
     assert events == []
     counts = await _count_all_rating_rows(session_factory)
     assert counts == (0, 0, 0, 0)
+
+    async with session_factory() as session, session.begin():
+        placement_events = await update_placement_ratings_for_game(
+            session,
+            game_result=PlacementGameResult(
+                game_id=game.id,
+                winner="TOWN",
+                seat_groups={seat_id: faction.value for seat_id, faction in seat_factions.items()},
+            ),
+            agent_builds_by_seat=builds,
+        )
+
+    assert placement_events
+    counts = await _count_all_rating_rows(session_factory)
+    assert counts == (0, 0, 0, 0)
+    async with session_factory() as session:
+        placement_rating_count = (
+            await session.execute(select(func.count()).select_from(PlacementRating))
+        ).scalar_one()
+        placement_event_count = (
+            await session.execute(select(func.count()).select_from(PlacementRatingEvent))
+        ).scalar_one()
+    assert placement_rating_count == 7
+    assert placement_event_count == 7
 
 
 def test_canonical_ruleset_purity_gate_introspects_builtin_rulesets() -> None:
