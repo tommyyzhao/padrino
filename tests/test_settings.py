@@ -65,6 +65,34 @@ def test_env_override_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _fresh().padrino_llm_timeout_seconds == 99
 
 
+def test_human_cost_defaults_are_single_host_sized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Human-lane cost defaults should fit the single-host rollout budget."""
+    monkeypatch.delenv("PADRINO_HUMAN_MAX_GAMES_PER_USER_PER_DAY", raising=False)
+    monkeypatch.delenv("PADRINO_HUMAN_MAX_JOINS_PER_USER_PER_DAY", raising=False)
+    monkeypatch.delenv("PADRINO_HUMAN_MAX_INFERENCE_USD_PER_USER_PER_DAY", raising=False)
+    monkeypatch.delenv("PADRINO_HUMAN_LOBBY_COST_CAP_USD", raising=False)
+    monkeypatch.delenv("PADRINO_HUMAN_GLOBAL_LOBBY_COST_BREAKER_USD", raising=False)
+    monkeypatch.delenv("PADRINO_HUMAN_ADMISSION_INFERENCE_RESERVE_USD", raising=False)
+
+    settings = _fresh()
+
+    assert settings.padrino_human_max_games_per_user_per_day == 20
+    assert settings.padrino_human_max_joins_per_user_per_day == 60
+    assert settings.padrino_human_max_inference_usd_per_user_per_day == 25.0
+    assert settings.padrino_human_lobby_cost_cap_usd == 12.0
+    assert settings.padrino_human_global_lobby_cost_breaker_usd == 1000.0
+    assert settings.padrino_human_admission_inference_reserve_usd == 0.5
+
+
+def test_env_override_human_global_cost_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PADRINO_HUMAN_GLOBAL_LOBBY_COST_BREAKER_USD", "1234.5")
+    assert _fresh().padrino_human_global_lobby_cost_breaker_usd == 1234.5
+
+
 def test_get_settings_returns_same_instance() -> None:
     a = get_settings()
     b = get_settings()

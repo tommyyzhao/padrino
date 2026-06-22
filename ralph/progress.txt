@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human cost-governance cap tests (US-231): `admit_human` checks global
+  inference reservation, then per-principal inference reservation, then the
+  action's count cap. Count-cap tests must set the inference budget high enough
+  to leave at least one `padrino_human_admission_inference_reserve_usd` slot
+  after `ceil(spent_usd / reserve_usd)`, otherwise they fail earlier on
+  `daily_inference_cap_reached`.
 - Single-host worker liveness (US-230): for a new internal worker lane, prefer
   the existing DB-backed heartbeat ledger with a reserved worker-id prefix
   (`human-lane:`) over a new migration when the next Alembic revision is already
@@ -2500,4 +2506,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest tests/test_human_lane_compose.py tests/api/test_healthz_human_lane.py tests/runner/test_human_lane_isolation.py::test_human_lane_worker_heartbeat_is_written_each_tick -q`
   -> 7 passed; `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2491
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T15:49 PDT - US-231
+- Re-sized the human-lane single-host cost defaults to stay within the
+  prd-v3 $500-$2k/month envelope without tripping at light concurrency:
+  20 games/user/day, 60 joins/user/day, $25 inference/user/day, $12 per
+  lobby, and a $1000 global breaker. The $0.50 admission reserve stays in
+  place for fine-grained atomic slots. All values remain env-overridable.
+- Added settings tests for the new defaults and `PADRINO_HUMAN_GLOBAL_LOBBY_COST_BREAKER_USD`
+  override; added economics tests proving global, lobby, and per-user caps are
+  read from `Settings`, the breaker warning carries `spent_usd`/`cap_usd`, and
+  the existing active-game continuation invariant still passes in the default
+  suite.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/settings.py`,
+  `tests/economics/test_human_cost_governance.py`, `tests/test_settings.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/test_settings.py tests/economics/test_human_cost_governance.py -q`
+  failed on the old cost defaults; focused GREEN same command -> 53 passed;
+  `uv run ruff check .`; `uv run ruff format --check .` initially requested
+  formatting for `tests/economics/test_human_cost_governance.py`, then passed
+  after `uv run ruff format tests/economics/test_human_cost_governance.py`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2497
   passed / 48 skipped / 10 deselected.

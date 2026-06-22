@@ -264,13 +264,15 @@ class Settings(BaseSettings):
     # lobbies/joins/launches, and a per-lobby cost cap + circuit breaker throttle
     # NEW lobbies / new LLM turns on breach while LETTING ACTIVE GAMES FINISH
     # (the "AI-only continuation boots humans" anti-pattern is rejected).
-    # Concrete numbers are conservative pending a PREP-v9 sign-off; override via
-    # the matching PADRINO_* env vars.
-    padrino_human_max_games_per_user_per_day: int = 10
-    padrino_human_max_joins_per_user_per_day: int = 30
-    padrino_human_max_inference_usd_per_user_per_day: float = 5.0
-    padrino_human_lobby_cost_cap_usd: float = 2.0
-    padrino_human_global_lobby_cost_breaker_usd: float = 50.0
+    # Defaults are sized for one private-lobby host in the $500-$2k/month
+    # single-host envelope from prd-v3: enough headroom for concurrent friend
+    # games without being an unbounded public-spend posture. Override via the
+    # matching PADRINO_* env vars.
+    padrino_human_max_games_per_user_per_day: int = 20
+    padrino_human_max_joins_per_user_per_day: int = 60
+    padrino_human_max_inference_usd_per_user_per_day: float = 25.0
+    padrino_human_lobby_cost_cap_usd: float = 12.0
+    padrino_human_global_lobby_cost_breaker_usd: float = 1000.0
     # US-190: the inference-$ cap and the global breaker are enforced atomically
     # by reserving discrete budget slots at admission (not a TOCTOU SELECT-sum).
     # This is the estimated USD a single admitted action may accrue; the daily

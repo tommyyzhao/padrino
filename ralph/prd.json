@@ -138,7 +138,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: settings.py (padrino_human_global_lobby_cost_breaker_usd etc.) + economics/human_cost_governance.global_breaker_open / per-lobby / per-user caps. Single-host scope; not a cost overhaul. Preserve the 'breaker never kills an active game' invariant already in the docstring.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-232",
