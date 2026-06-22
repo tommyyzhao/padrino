@@ -426,7 +426,7 @@
         "All backend gates pass."
       ],
       "notes": "Depends on US-216 (the bench10 golden must use the reverted 3-Goon roster). This restores the firewall the wave promised: canonical outcomes pinned independently of future nar.py edits.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-218",

@@ -536,11 +536,12 @@ def _terminal_hash_chain_for(win: WinResult | None) -> tuple[str, ...]:
         (bench10_v1, _full_bench10_seats(mafia_alive=3, town_alive=4), 4),
     ],
 )
-def test_builtin_two_faction_policy_matches_legacy_results_and_hashes(
+def test_builtin_two_faction_policy_evaluator_matches_legacy_faction_count_results(
     ruleset: _HasMaxDays,
     seats: tuple[Seat, ...],
     day: int,
 ) -> None:
+    """Guard only the faction-count win evaluator, not full-game byte stability."""
     state = _state(seats, day=day)
 
     legacy = _legacy_check_win(state, ruleset)
