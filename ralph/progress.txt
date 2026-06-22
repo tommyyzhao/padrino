@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Engine-stress utility roles (US-188): keep Mayor / Commuter / Mason as
+  generic deterministic engine roles without admitting them to canonical
+  built-in rulesets. Mayor vote weight lives in the pure day-vote resolver as
+  public weighted tally metadata behind a disabled variance gate; Commuter is a
+  passive NAR target bounce before visits/effects are recorded; Mason is a
+  structured observation fact (`mason_partners`) keyed only by public player id,
+  never a chat channel.
 - Ninja visit suppression (US-187b): model Ninja as a Mafia role that uses the
   existing `MAFIA_KILL` / `FACTIONAL_KILL` path, not a new action type. Keep
   suppression at the pure NAR visit-recording seam: a Ninja factional kill
@@ -1962,4 +1969,35 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   rating/segregation/migration/dialect suite -> 37 passed / 3 skipped;
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2392
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-21T20:59 PDT - US-188
+- Added engine-stress utility roles to the core role vocabulary: Mayor, Commuter,
+  and Mason. Mayor votes now count with deterministic public weight metadata
+  (`voter_weights`, `total_vote_weight`, `hammer_threshold`) while preserving
+  existing unique-plurality day-vote semantics and omitting weight metadata from
+  legacy all-weight-one runner events.
+- Added a pure Mayor variance gate with the same 200 mirror-pair / 15% variance
+  thresholds used by the Framer gate; the current gate is disabled, and no
+  canonical built-in ruleset admits Mayor.
+- Implemented Commuter as a passive NAR target bounce: targeting a Commuter
+  produces `COMMUTER_UNTARGETABLE` private structured feedback, records no
+  visit/effect for the bounced action, and is allowlisted by the runner for
+  observation delivery.
+- Added Mason shared facts via the deterministic `mason_partners` observation
+  field, keyed only by public player ids and never derived from chat.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/enums.py`,
+  `src/padrino/core/engine/resolvers/day_vote.py`,
+  `src/padrino/core/engine/resolvers/nar.py`,
+  `src/padrino/core/engine/events.py`, `src/padrino/core/observations.py`,
+  `src/padrino/core/rulesets/mayor_variance_gate.py`,
+  `src/padrino/runner/game_runner.py`, `tests/core/test_utility_roles.py`,
+  `tests/runner/test_game_runner.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED import failure for the missing Mayor variance
+  gate; focused GREEN `tests/core/test_utility_roles.py` and
+  `tests/runner/test_game_runner.py`; adjacent core/privacy/rating/runner
+  suites; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2447
   passed / 47 skipped / 10 deselected.

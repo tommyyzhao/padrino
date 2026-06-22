@@ -86,7 +86,7 @@ CAUSE_DAY_VOTE: Final[str] = "day_vote"
 CAUSE_NIGHT_KILL: Final[str] = "night_kill"
 STATUS_COMPLETED: Final[str] = "COMPLETED"
 OBSERVATION_FEEDBACK_CODES: Final[frozenset[str]] = frozenset(
-    {"ACTION_BLOCKED", "TRACK_RESULT", "WATCH_RESULT"}
+    {"ACTION_BLOCKED", "COMMUTER_UNTARGETABLE", "TRACK_RESULT", "WATCH_RESULT"}
 )
 
 _RULESETS: dict[str, Any] = {}
@@ -734,17 +734,23 @@ def _resolve_day_vote_events(
 ) -> list[dict[str, Any]]:
     submissions = {sid: r.action for sid, r in responses.items()}
     result = resolve_day_vote(state, submissions)
+    payload: dict[str, Any] = {
+        "eliminated": result.eliminated,
+        "vote_tally": dict(result.vote_tally),
+        "reason": result.reason,
+    }
+    if any(weight != 1 for weight in result.voter_weights.values()):
+        payload["voter_weights"] = dict(result.voter_weights)
+        payload["total_vote_weight"] = result.total_vote_weight
+        payload["hammer_threshold"] = result.hammer_threshold
+
     events: list[dict[str, Any]] = [
         {
             "event_type": "DayVoteResolved",
             "phase": phase_id,
             "visibility": "PUBLIC",
             "actor_player_id": None,
-            "payload": {
-                "eliminated": result.eliminated,
-                "vote_tally": dict(result.vote_tally),
-                "reason": result.reason,
-            },
+            "payload": payload,
         }
     ]
     if result.eliminated is not None:

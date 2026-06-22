@@ -146,6 +146,9 @@ class DayVoteResolvedPayload(_FrozenModel):
     eliminated: str | None
     vote_tally: dict[str, int]
     reason: str
+    voter_weights: dict[str, int] = Field(default_factory=dict)
+    total_vote_weight: int | None = None
+    hammer_threshold: int | None = None
 
 
 class NightResolvedPayload(_FrozenModel):

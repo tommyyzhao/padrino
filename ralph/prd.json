@@ -332,7 +332,7 @@
         "All backend gates pass."
       ],
       "notes": "Gemini: Mayor/Commuter are great engine-correctness tests. Mason is the cheapest coordination role; keep its channel firewalled. Mayor admitted to canonical only behind the US-178-style measured-variance gate.",
-      "passes": false
+      "passes": true
     }
   ]
 }

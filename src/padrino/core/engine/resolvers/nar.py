@@ -349,6 +349,7 @@ class MatrixNightResolution(BaseModel):
     clean_spent_actor_ids: tuple[str, ...] = ()
     framed_targets: tuple[str, ...] = ()
     frame_spent_actor_ids: tuple[str, ...] = ()
+    commuter_bounced_targets: tuple[str, ...] = ()
     protect_outcomes: dict[str, ProtectOutcome] = Field(default_factory=dict)
     investigation_outcomes: dict[str, InvestigationOutcome] = Field(default_factory=dict)
 
@@ -471,6 +472,15 @@ def _blocked_feedback(intent: NightActionIntent) -> NightFeedback:
     )
 
 
+def _commuter_bounce_feedback(intent: NightActionIntent) -> NightFeedback:
+    return NightFeedback(
+        recipient=intent.actor,
+        code="COMMUTER_UNTARGETABLE",
+        message="Your night action could not target a commuter.",
+        target=intent.target,
+    )
+
+
 def _suppresses_visit(state: GameState, intent: NightActionIntent) -> bool:
     actor = state.seat_by_public_id(intent.actor)
     return (
@@ -516,11 +526,20 @@ def _apply_roleblocks(
     state: GameState,
     intents: Sequence[NightActionIntent],
     visits: list[VisitRecord],
+    feedback: list[NightFeedback],
+    commuter_bounced_targets: set[str],
 ) -> tuple[str, ...]:
-    blocked = {intent.target for intent in _tier_intents(intents, NightActionKind.ROLEBLOCK)}
+    blocked: set[str] = set()
     for intent in _tier_intents(intents, NightActionKind.ROLEBLOCK):
+        target = _alive_seat(state, intent.target)
+        if target is not None and target.role is Role.COMMUTER:
+            commuter_bounced_targets.add(target.public_player_id)
+            feedback.append(_commuter_bounce_feedback(intent))
+            continue
+        if intent.target is not None:
+            blocked.add(intent.target)
         _record_visit(state, visits, intent)
-    return _sort_ids(state, {pid for pid in blocked if pid is not None})
+    return _sort_ids(state, blocked)
 
 
 def _apply_redirects(
@@ -561,6 +580,7 @@ def _active_intents_after_blocks_and_redirects(
     redirects: Mapping[str, str],
     visits: list[VisitRecord],
     feedback: list[NightFeedback],
+    commuter_bounced_targets: set[str],
 ) -> tuple[NightActionIntent, ...]:
     blocked = set(blocked_actor_ids)
     active: list[NightActionIntent] = []
@@ -582,6 +602,11 @@ def _active_intents_after_blocks_and_redirects(
             retargeted.target,
             retargeted.redirect_target,
         ):
+            continue
+        target = _alive_seat(state, retargeted.target)
+        if target is not None and target.role is Role.COMMUTER:
+            commuter_bounced_targets.add(target.public_player_id)
+            feedback.append(_commuter_bounce_feedback(retargeted))
             continue
         _record_visit(state, visits, retargeted)
         active.append(retargeted)
@@ -834,8 +859,15 @@ def resolve_night_actions(
     valid_intents = _valid_intents(state, intents)
     visits: list[VisitRecord] = []
     feedback: list[NightFeedback] = []
+    commuter_bounced_targets: set[str] = set()
 
-    blocked_actor_ids = _apply_roleblocks(state, valid_intents, visits)
+    blocked_actor_ids = _apply_roleblocks(
+        state,
+        valid_intents,
+        visits,
+        feedback,
+        commuter_bounced_targets,
+    )
     redirects = _apply_redirects(state, valid_intents, blocked_actor_ids, visits, feedback)
     active_intents = _active_intents_after_blocks_and_redirects(
         state,
@@ -844,6 +876,7 @@ def resolve_night_actions(
         redirects,
         visits,
         feedback,
+        commuter_bounced_targets,
     )
 
     protected, protected_targets, protect_outcomes = _resolve_protects(active_intents)
@@ -896,6 +929,7 @@ def resolve_night_actions(
         clean_spent_actor_ids=clean_spent_actor_ids,
         framed_targets=framed_targets,
         frame_spent_actor_ids=frame_spent_actor_ids,
+        commuter_bounced_targets=_sort_ids(state, commuter_bounced_targets),
         protect_outcomes=protect_outcomes,
         investigation_outcomes=investigation_outcomes,
     )

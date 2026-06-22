@@ -18,8 +18,9 @@ from padrino.core.engine.actions import Action
 from padrino.core.engine.events import Event, EventAdapter
 from padrino.core.engine.replay import replay_event_log, replay_events
 from padrino.core.engine.role_assignment import assign_roles
+from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED
-from padrino.core.enums import ActionType, Faction, Role
+from padrino.core.enums import ActionType, Faction, PhaseKind, Role
 from padrino.core.rulesets import (
     Ruleset,
     bench10_v1,
@@ -29,7 +30,7 @@ from padrino.core.rulesets import (
     visit12_v1,
 )
 from padrino.llm.mock import DeterministicMockAdapter
-from padrino.runner.game_runner import GameConfig, GameOutcome, run_game
+from padrino.runner.game_runner import GameConfig, GameOutcome, _resolve_night_events, run_game
 from tests.conftest import (
     make_mafia_win_script,
     make_town_win_script,
@@ -351,6 +352,74 @@ async def test_ninja13_runner_suppresses_ninja_kill_visit_only() -> None:
             "visitor_player_ids": (roleblocker,),
         },
     }
+
+
+def test_commuter_bounce_feedback_is_emitted_for_observations() -> None:
+    state = GameState(
+        ruleset_id="utility-role-test",
+        game_id="G-COMMUTER-RUNNER",
+        game_seed="commuter-runner",
+        current_phase=Phase(kind=PhaseKind.NIGHT_ACTIONS, day=1, round=0),
+        seats=(
+            Seat(
+                public_player_id="P01",
+                seat_index=0,
+                role=Role.MAFIA_GOON,
+                faction=Faction.MAFIA,
+                alive=True,
+            ),
+            Seat(
+                public_player_id="P02",
+                seat_index=1,
+                role=Role.MAFIA_GOON,
+                faction=Faction.MAFIA,
+                alive=True,
+            ),
+            Seat(
+                public_player_id="P03",
+                seat_index=2,
+                role=Role.COMMUTER,
+                faction=Faction.TOWN,
+                alive=True,
+            ),
+            Seat(
+                public_player_id="P04",
+                seat_index=3,
+                role=Role.DETECTIVE,
+                faction=Faction.TOWN,
+                alive=True,
+            ),
+        ),
+        day=1,
+    )
+
+    events = _resolve_night_events(
+        state,
+        {
+            "P01": _response(ActionType.MAFIA_KILL, "P03"),
+            "P02": _response(ActionType.MAFIA_KILL, "P03"),
+            "P04": _response(ActionType.INVESTIGATE, "P03"),
+        },
+        "NIGHT_1_ACTIONS",
+    )
+
+    assert events[0]["event_type"] == "NightResolved"
+    assert events[0]["payload"] == {
+        "eliminated": None,
+        "protected": None,
+        "mafia_kill_target": None,
+    }
+    feedback = [
+        event
+        for event in events
+        if event["event_type"] == "NightFeedbackDelivered"
+        and event["payload"]["code"] == "COMMUTER_UNTARGETABLE"
+    ]
+    assert [(event["actor_player_id"], event["payload"]["target"]) for event in feedback] == [
+        ("P01", "P03"),
+        ("P02", "P03"),
+        ("P04", "P03"),
+    ]
 
 
 # --- log shape & invariants -------------------------------------------------
