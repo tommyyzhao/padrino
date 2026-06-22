@@ -913,6 +913,7 @@ class PublicModelEntryResponse(BaseModel):
     losses: int
     timeout_rate: float
     invalid_action_rate: float
+    factions: dict[str, PublicModelFactionAggregate]
     town: PublicModelFactionAggregate
     mafia: PublicModelFactionAggregate
     role_breakdown: dict[str, PublicModelRoleAggregate]

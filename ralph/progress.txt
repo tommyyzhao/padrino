@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Model rollup factions (US-227): `ratings/model_rollup.py` now treats
+  persisted `Rating.scope_type == FACTION` `scope_value`s as data and exposes
+  the primary aggregate as `ModelLeaderboardEntry.factions`. Keep `town` /
+  `mafia` response fields only as legacy mirrors for existing consumers; new
+  per-faction work should consume the faction-keyed dict and must not branch on
+  exactly two factions.
 - Ruleset selector metadata (US-226): public/dashboard ruleset pickers should
   consume `GET /public/rulesets` via `PadrinoClient.publicRulesets()`. The
   endpoint iterates `BUILTIN_RULESET_IDS` and resolves each with `get_ruleset`
@@ -2370,3 +2376,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Extra in-app Browser smoke was attempted after starting a temporary preview
   server, but the Browser runtime failed during setup before exposing a usable
   tab; the required Playwright e2e suite covered the changed lobby selector.
+
+## 2026-06-22T15:13 PDT - US-227
+- Generalized `rollup_by_model` so FACTION-scope rating rows are accepted for
+  every persisted `scope_value`, with per-faction seat outcome counters keyed
+  by faction string rather than fixed Town/Mafia fields.
+- Added the faction-keyed `ModelLeaderboardEntry.factions` aggregate and public
+  model response field, while preserving the existing `town` and `mafia`
+  response payloads for byte-compatible two-faction consumers.
+- Added regression coverage for legacy Town/Mafia payload values plus a
+  synthetic forward-compatible `SERIAL_KILLER` FACTION-scope fixture labeled as
+  not produced by the current writer.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/model_rollup.py`,
+  `src/padrino/api/routes/public.py`, `tests/ratings/test_model_rollup.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_model_rollup.py -q` failed on missing
+  `ModelLeaderboardEntry.factions`; focused GREEN same command -> 12 passed;
+  focused GREEN
+  `uv run pytest tests/api/test_public_models.py -q` -> 14 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2482
+  passed / 47 skipped / 10 deselected.

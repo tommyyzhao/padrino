@@ -71,7 +71,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Hardcoded sites: ratings/model_rollup.py rollup_by_model + _faction_aggregate (TOWN vs else-MAFIA) + ModelLeaderboardEntry town/mafia fields. openskill_service.py emits FACTION-scope rows ONLY for the binary winner (scope_value in {TOWN, MAFIA}); SK/solo outcomes go through PLACEMENT, not FACTION - so a >2-faction FACTION dataset is necessarily synthetic forward-compat. This is read/aggregation generalization only; does not change rating WRITES. Backend-only (feeds US-228).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-228",
