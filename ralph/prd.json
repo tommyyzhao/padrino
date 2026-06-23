@@ -414,7 +414,7 @@
         "All backend gates pass."
       ],
       "notes": "Evidence: runner/human_lane.py:1201/1214-1218. Mirror the US-240/241 benchmark-scheduler isolation for the human lane.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-247",

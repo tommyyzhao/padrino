@@ -48,6 +48,10 @@ from padrino.core.engine.hashing import compute_event_hash
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, LeagueKind, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
+from padrino.db.game_status import (
+    GAME_STATUS_COMPLETED,
+    GAME_STATUS_RUNNING,
+)
 from padrino.db.models import (
     Game,
     GameSeat,
@@ -83,8 +87,8 @@ _logger = structlog.get_logger("padrino.runner.human_lane")
 
 DEFAULT_POLL_INTERVAL_S: Final[float] = 1.0
 HUMAN_ACTION_POLL_INTERVAL_SECONDS: Final[float] = 0.05
-STATUS_COMPLETED: Final[str] = "COMPLETED"
-STATUS_RUNNING: Final[str] = "RUNNING"
+STATUS_COMPLETED: Final[str] = GAME_STATUS_COMPLETED
+STATUS_RUNNING: Final[str] = GAME_STATUS_RUNNING
 
 # A seat is "human-lane" when a human ever occupied it (a live human seat or a
 # seat an AI silently took over). AI-only benchmark games have neither.
@@ -129,6 +133,22 @@ async def _write_worker_heartbeat(
         EVENT_HUMAN_LANE_WORKER_HEARTBEAT,
         worker_id=worker_heartbeats_repo.human_lane_worker_id(worker_id),
     )
+
+
+async def _mark_human_game_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    exc: BaseException,
+) -> None:
+    _logger.error(
+        "human_lane.game.failed",
+        game_id=str(game_id),
+        error_type=type(exc).__name__,
+        error=str(exc),
+    )
+    async with session_factory() as session, session.begin():
+        await games_repo.mark_failed(session, game_id, completed_at=_utcnow())
 
 
 @dataclass(frozen=True, slots=True)
@@ -1038,7 +1058,7 @@ async def _claim_game(
     """
     async with session_factory() as session, session.begin():
         game = await games_repo.get(session, game_id)
-        if game is None or game.status == STATUS_COMPLETED:
+        if game is None or game.status not in _CLAIMABLE_STATUSES:
             return None
         if not await _is_human_lane_game(session, game_id):
             return None
@@ -1191,6 +1211,8 @@ async def run_human_lane(
     )
 
     tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+    failure_markers: set[asyncio.Task[None]] = set()
+    failing_games: set[uuid.UUID] = set()
     rehydrated_by_game = {
         item.game_id: _game_resume_from_rehydrated(item)
         for item in await rehydrate_active_human_games(session_factory)
@@ -1198,7 +1220,15 @@ async def run_human_lane(
 
     try:
         while not stop_event.is_set():
-            await _write_worker_heartbeat(session_factory, worker_id=wid)
+            try:
+                await _write_worker_heartbeat(session_factory, worker_id=wid)
+            except Exception as exc:
+                _logger.warning(
+                    "human_lane.worker.heartbeat_failed",
+                    worker_id=wid,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
             async with session_factory() as session:
                 candidates = await list_human_lane_games(session)
 
@@ -1208,12 +1238,49 @@ async def run_human_lane(
                 _logger.warning("human_lane.breaker.halt_new_turns", in_flight=len(tasks))
                 pending = []
             else:
-                pending = [gid for gid in candidates if gid not in tasks]
+                pending = [
+                    gid for gid in candidates if gid not in tasks and gid not in failing_games
+                ]
             for game_id in pending:
 
                 def _make_done_cb(gid: uuid.UUID) -> Callable[[asyncio.Task[None]], None]:
-                    def _done(_task: asyncio.Task[None]) -> None:
+                    def _done(done_task: asyncio.Task[None]) -> None:
                         tasks.pop(gid, None)
+                        if done_task.cancelled():
+                            return
+                        try:
+                            exc = done_task.exception()
+                        except asyncio.CancelledError:
+                            return
+                        if exc is None:
+                            return
+
+                        failing_games.add(gid)
+                        marker = asyncio.create_task(
+                            _mark_human_game_failed(session_factory, game_id=gid, exc=exc),
+                            name=f"human-lane-game-failed-{gid}",
+                        )
+                        failure_markers.add(marker)
+
+                        def _discard_marker(done_marker: asyncio.Task[None]) -> None:
+                            failure_markers.discard(done_marker)
+                            if done_marker.cancelled():
+                                return
+                            try:
+                                marker_exc = done_marker.exception()
+                            except asyncio.CancelledError:
+                                return
+                            if marker_exc is not None:
+                                _logger.error(
+                                    "human_lane.game.failed_mark_failed_error",
+                                    game_id=str(gid),
+                                    error_type=type(marker_exc).__name__,
+                                    error=str(marker_exc),
+                                )
+                            else:
+                                failing_games.discard(gid)
+
+                        marker.add_done_callback(_discard_marker)
 
                     return _done
 
@@ -1245,6 +1312,9 @@ async def run_human_lane(
         outstanding = list(tasks.values())
         if outstanding:
             await asyncio.gather(*outstanding, return_exceptions=True)
+        outstanding_markers = list(failure_markers)
+        if outstanding_markers:
+            await asyncio.gather(*outstanding_markers, return_exceptions=True)
 
 
 __all__ = [

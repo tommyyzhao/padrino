@@ -3064,3 +3064,29 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   10 deselected; `pnpm -C web/dashboard lint`;
   `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26
   passed / 3 skipped.
+
+## 2026-06-22T20:22 PDT - US-246
+- Added human-lane per-game crash isolation: the done callback now retrieves
+  task exceptions, logs `human_lane.game.failed`, marks the game `FAILED` via
+  the shared game-status repository path, and suppresses in-process re-dispatch
+  while the failure marker is pending.
+- Guarded the human-lane worker heartbeat write so a transient failure logs
+  `human_lane.worker.heartbeat_failed` and the poll loop continues instead of
+  dropping all in-flight games.
+- Added regression coverage for a crashing human-game executor becoming
+  `FAILED` and falling out of `list_human_lane_games`, plus heartbeat-write
+  failure tolerance.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/human_lane.py`,
+  `tests/runner/test_human_lane_isolation.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_human_lane_isolation.py::test_crashed_human_game_is_marked_failed_and_not_reselected tests/runner/test_human_lane_isolation.py::test_heartbeat_failure_does_not_crash_human_lane_loop -q`
+  failed first on the stuck `RUNNING` row and escaping heartbeat exception;
+  focused GREEN same command -> 2 passed; adjacent
+  `uv run pytest tests/runner/test_human_lane_isolation.py
+  tests/runner/test_human_lane_wiring.py tests/runner/test_human_game_durability.py -q`
+  -> 22 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2545 passed / 48 skipped /
+  10 deselected.
