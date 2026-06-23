@@ -265,6 +265,7 @@ class PublicLeaderboardResponse(BaseModel):
     cache_tag: str
     entries: list[PublicLeaderboardEntryResponse]
     canonical_cards: list[PublicRatingCardResponse]
+    faction_cards: list[PublicRatingCardResponse]
     experimental_cards: list[PublicRatingCardResponse]
     human_cards: list[PublicRatingCardResponse]
     next_cursor: str | None = None
@@ -334,6 +335,9 @@ async def public_leaderboard(
         canonical_cards=[
             PublicRatingCardResponse(**card_to_response(card))
             for card in leaderboard.canonical_cards
+        ],
+        faction_cards=[
+            PublicRatingCardResponse(**card_to_response(card)) for card in leaderboard.faction_cards
         ],
         experimental_cards=[
             PublicRatingCardResponse(**card_to_response(card))

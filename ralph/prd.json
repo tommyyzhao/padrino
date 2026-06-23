@@ -399,7 +399,7 @@
         "All backend gates pass; pnpm -C web/dashboard lint && check && test:e2e pass."
       ],
       "notes": "Evidence: ratings/public_leaderboard.py:~730 (_canonical_cards), api/routes/public.py response model. Add a field; never mutate a pinned public-API contract.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-246",

@@ -5,13 +5,16 @@
 
   interface Props {
     canonicalCards: PublicRatingCardResponse[];
+    factionCards: PublicRatingCardResponse[];
     experimentalCards: PublicRatingCardResponse[];
     humanCards?: PublicRatingCardResponse[];
   }
 
-  let { canonicalCards, experimentalCards, humanCards = [] }: Props = $props();
+  let { canonicalCards, factionCards, experimentalCards, humanCards = [] }: Props = $props();
 
-  let sections = $derived(splitLeaderboardCards(canonicalCards, experimentalCards, humanCards));
+  let sections = $derived(
+    splitLeaderboardCards(canonicalCards, factionCards, experimentalCards, humanCards)
+  );
 </script>
 
 <section class="space-y-5" data-testid="leaderboard-canonical-section">
@@ -19,7 +22,7 @@
     <h2 class="text-lg font-semibold">Ranked Canonical</h2>
     <span class="text-xs uppercase tracking-wider text-muted-foreground">Canonical</span>
   </div>
-  {#if canonicalCards.length === 0}
+  {#if canonicalCards.length === 0 && factionCards.length === 0}
     <p class="text-sm text-muted-foreground" data-testid="leaderboard-canonical-empty">
       No canonical cards yet.
     </p>

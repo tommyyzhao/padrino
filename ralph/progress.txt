@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Leaderboard card contract (US-245): `/public/leaderboard.canonical_cards`
+  is pinned to canonical `CANONICAL_TEAM` `GLOBAL/global` rows only. Put
+  canonical `FACTION` scope rows in the sibling `faction_cards` response field,
+  and pass `factionCards` as its own dashboard section input rather than
+  deriving faction cards from `canonical_cards`.
 - Shipped migration repair (US-244): do not edit already-shipped migrations to
   add new columns. Restore the shipped revision byte-for-byte, then add a new
   linear additive revision from the current head. Regression coverage should
@@ -3029,3 +3034,33 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2543
   passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T20:14 PDT - US-245
+- Restored the pinned `/public/leaderboard` contract so `canonical_cards`
+  contains only canonical `CANONICAL_TEAM` `GLOBAL/global` cards.
+- Added a sibling `faction_cards` response field sourced from canonical
+  `FACTION` rating rows, keeping Town/Scum ranks grouped outside
+  `canonical_cards`.
+- Updated the dashboard leaderboard types, page state, section splitter, unit
+  test, and Playwright fixture so the faction subsection reads `faction_cards`
+  explicitly.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `src/padrino/api/routes/public.py`, `tests/api/test_public_routes.py`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/leaderboard/sections.ts`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.svelte`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.test.ts`,
+  `web/dashboard/src/routes/leaderboard/+page.svelte`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_public_routes.py::test_leaderboard_returns_separated_context_cards_without_cross_sort -q`
+  failed on missing `faction_cards`; focused GREEN same command -> 1 passed;
+  `pnpm --dir web/dashboard exec vitest run src/lib/leaderboard/LeaderboardSections.test.ts`
+  -> 2 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2543 passed / 48 skipped /
+  10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26
+  passed / 3 skipped.

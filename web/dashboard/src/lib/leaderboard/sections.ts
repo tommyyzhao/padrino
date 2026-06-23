@@ -12,15 +12,14 @@ export interface LeaderboardCardSections {
 
 export function splitLeaderboardCards(
   canonicalCards: PublicRatingCardResponse[],
+  factionCards: PublicRatingCardResponse[],
   experimentalCards: PublicRatingCardResponse[],
   humanCards: PublicRatingCardResponse[] = []
 ): LeaderboardCardSections {
   return {
     canonicalGlobalCards: canonicalCards.filter((card) => card.scope_type === 'GLOBAL'),
-    canonicalFactionCards: canonicalCards.filter((card) => card.scope_type === 'FACTION'),
-    canonicalOtherCards: canonicalCards.filter(
-      (card) => card.scope_type !== 'GLOBAL' && card.scope_type !== 'FACTION'
-    ),
+    canonicalFactionCards: factionCards,
+    canonicalOtherCards: canonicalCards.filter((card) => card.scope_type !== 'GLOBAL'),
     humanCards,
     placementCards: experimentalCards.filter((card) => card.context_kind === 'PLACEMENT'),
     soloRateCards: experimentalCards.filter((card) => card.context_kind === 'SOLO_RATE'),

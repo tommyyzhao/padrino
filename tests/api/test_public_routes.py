@@ -510,15 +510,20 @@ async def test_leaderboard_returns_separated_context_cards_without_cross_sort(
     body = response.json()
     assert body["ruleset_id"] is None
     assert body["entries"] == []
-    assert set(body) >= {"canonical_cards", "experimental_cards"}
+    assert set(body) >= {"canonical_cards", "faction_cards", "experimental_cards"}
 
     canonical = body["canonical_cards"]
+    faction = body["faction_cards"]
     experimental = body["experimental_cards"]
     assert canonical
+    assert faction
     assert experimental
     assert {card["section"] for card in canonical} == {"canonical"}
     assert {card["section_label"] for card in canonical} == {"Ranked canonical"}
     assert {card["context_kind"] for card in canonical} == {"CANONICAL_TEAM"}
+    assert {card["section"] for card in faction} == {"canonical"}
+    assert {card["section_label"] for card in faction} == {"Ranked canonical"}
+    assert {card["context_kind"] for card in faction} == {"CANONICAL_TEAM"}
     assert {card["section"] for card in experimental} == {"experimental"}
     assert {card["section_label"] for card in experimental} == {"Experimental context"}
     assert {card["context_kind"] for card in experimental} == {"PLACEMENT", "SOLO_RATE"}
@@ -526,19 +531,25 @@ async def test_leaderboard_returns_separated_context_cards_without_cross_sort(
     canonical_by_scope = {
         (card["display_name"], card["scope_type"], card["scope_value"]): card for card in canonical
     }
+    faction_by_scope = {
+        (card["display_name"], card["scope_type"], card["scope_value"]): card for card in faction
+    }
     assert {
         ("Atlas ranked", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL),
+        ("Atlas provisional", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL),
+    } == set(canonical_by_scope)
+    assert {
         ("Atlas ranked", SCOPE_FACTION, Faction.TOWN.value),
         ("Atlas ranked", SCOPE_FACTION, Faction.MAFIA.value),
-    } <= set(canonical_by_scope)
+    } == set(faction_by_scope)
     canonical_ranked = canonical_by_scope[("Atlas ranked", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL)]
     canonical_provisional = canonical_by_scope[
         ("Atlas provisional", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL)
     ]
     assert canonical_ranked["rank"] == 1
     assert canonical_ranked["provisional"] is False
-    assert canonical_by_scope[("Atlas ranked", SCOPE_FACTION, Faction.TOWN.value)]["rank"] == 1
-    assert canonical_by_scope[("Atlas ranked", SCOPE_FACTION, Faction.MAFIA.value)]["rank"] == 1
+    assert faction_by_scope[("Atlas ranked", SCOPE_FACTION, Faction.TOWN.value)]["rank"] == 1
+    assert faction_by_scope[("Atlas ranked", SCOPE_FACTION, Faction.MAFIA.value)]["rank"] == 1
     assert canonical_provisional["rank"] is None
     assert canonical_provisional["provisional"] is True
     assert canonical_provisional["conservative_score"] > canonical_ranked["conservative_score"]

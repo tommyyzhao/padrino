@@ -5,6 +5,7 @@
   import LeaderboardSections from '$lib/leaderboard/LeaderboardSections.svelte';
 
   let canonicalCards = $state<PublicRatingCardResponse[]>([]);
+  let factionCards = $state<PublicRatingCardResponse[]>([]);
   let experimentalCards = $state<PublicRatingCardResponse[]>([]);
   let humanCards = $state<PublicRatingCardResponse[]>([]);
   let loading = $state(false);
@@ -18,6 +19,7 @@
         limit: 100
       });
       canonicalCards = response.canonical_cards;
+      factionCards = response.faction_cards;
       experimentalCards = response.experimental_cards;
       humanCards = response.human_cards;
     } catch (e) {
@@ -37,9 +39,9 @@
     <p data-testid="leaderboard-loading">Loading…</p>
   {:else if error}
     <p class="text-sm text-red-500" data-testid="leaderboard-error">{error}</p>
-  {:else if canonicalCards.length === 0 && experimentalCards.length === 0 && humanCards.length === 0}
+  {:else if canonicalCards.length === 0 && factionCards.length === 0 && experimentalCards.length === 0 && humanCards.length === 0}
     <p class="text-sm text-muted-foreground" data-testid="leaderboard-empty">No entries yet.</p>
   {:else}
-    <LeaderboardSections {canonicalCards} {experimentalCards} {humanCards} />
+    <LeaderboardSections {canonicalCards} {factionCards} {experimentalCards} {humanCards} />
   {/if}
 </div>

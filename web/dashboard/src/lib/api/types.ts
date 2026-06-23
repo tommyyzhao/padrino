@@ -165,6 +165,7 @@ export interface PublicLeaderboardResponse {
   cache_tag: string;
   entries: PublicLeaderboardEntryResponse[];
   canonical_cards: PublicRatingCardResponse[];
+  faction_cards: PublicRatingCardResponse[];
   experimental_cards: PublicRatingCardResponse[];
   human_cards: PublicRatingCardResponse[];
   next_cursor: string | null;

@@ -77,7 +77,9 @@ const LEADERBOARD = {
       mu: 43.0,
       sigma: 1.0,
       conservative_score: 40.0
-    }),
+    })
+  ],
+  faction_cards: [
     card({
       card_id: 'card-faction-town',
       entity_id: 'entity-atlas-town',

@@ -12,8 +12,9 @@ per process and intentionally simple: a single dict keyed by
 ``(ruleset_id, gauntlet_id, cache_tag)``.
 
 US-186 adds per-context cards from the persisted rating tables. Those cards are
-sectioned into canonical vs. experimental arrays and ranked only within their
-exact context/ruleset/scope group, never across rating-context kinds.
+sectioned into canonical, faction, and experimental arrays and ranked only
+within their exact context/ruleset/scope group, never across rating-context
+kinds.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from datetime import datetime
 from typing import Any, Final, Literal
 
 from openskill.models import PlackettLuce
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import LeagueKind, RatingContextKind
@@ -141,6 +142,7 @@ class PublicLeaderboard:
     cache_tag: str
     entries: tuple[PublicLeaderboardEntry, ...]
     canonical_cards: tuple[PublicRatingCard, ...]
+    faction_cards: tuple[PublicRatingCard, ...]
     experimental_cards: tuple[PublicRatingCard, ...]
     human_cards: tuple[PublicRatingCard, ...]
 
@@ -277,6 +279,11 @@ async def compute_public_leaderboard(
         ruleset_id=ruleset_id,
         min_games=provisional_games_threshold,
     )
+    faction_cards = await _faction_cards(
+        session,
+        ruleset_id=ruleset_id,
+        min_games=provisional_games_threshold,
+    )
     experimental_cards = await _experimental_cards(
         session,
         ruleset_id=ruleset_id,
@@ -296,6 +303,7 @@ async def compute_public_leaderboard(
         cache_tag=cache_tag,
         entries=entries,
         canonical_cards=canonical_cards,
+        faction_cards=faction_cards,
         experimental_cards=experimental_cards,
         human_cards=human_cards,
     )
@@ -414,6 +422,7 @@ def _aggregate(
         cache_tag="legacy",
         entries=tuple(entries),
         canonical_cards=(),
+        faction_cards=(),
         experimental_cards=(),
         human_cards=(),
     )
@@ -730,13 +739,53 @@ async def _canonical_cards(
             RatingContext.kind == RatingContextKind.CANONICAL_TEAM.value,
             RatingContext.is_canonical.is_(True),
             Rating.ruleset_id == RatingContext.ruleset_id,
-            or_(
-                and_(
-                    Rating.scope_type == SCOPE_GLOBAL,
-                    Rating.scope_value == SCOPE_VALUE_GLOBAL,
-                ),
-                Rating.scope_type == SCOPE_FACTION,
-            ),
+            Rating.scope_type == SCOPE_GLOBAL,
+            Rating.scope_value == SCOPE_VALUE_GLOBAL,
+        )
+    )
+    if ruleset_id is not None:
+        stmt = stmt.where(RatingContext.ruleset_id == ruleset_id)
+    rows = list((await session.execute(stmt)).all())
+    entities = await _agent_entities(session, (row.agent_build_id for row, _context in rows))
+    cards: list[PublicRatingCard] = []
+    for row, context in rows:
+        entity = entities.get(row.agent_build_id)
+        if entity is None:
+            continue
+        cards.append(
+            _openskill_card(
+                section="canonical",
+                section_label="Ranked canonical",
+                context=context,
+                entity=entity,
+                scope_type=row.scope_type,
+                scope_value=row.scope_value,
+                mu=row.mu,
+                sigma=row.sigma,
+                conservative_score=row.conservative_score,
+                games=row.games,
+                min_games=min_games,
+            )
+        )
+    return _rank_cards(cards)
+
+
+async def _faction_cards(
+    session: AsyncSession,
+    *,
+    ruleset_id: str | None,
+    min_games: int,
+) -> tuple[PublicRatingCard, ...]:
+    stmt = (
+        select(Rating, RatingContext)
+        .join(RatingContext, RatingContext.id == Rating.rating_context_id)
+        .join(League, League.id == Rating.league_id)
+        .where(
+            League.kind == LeagueKind.SCIENTIFIC.value,
+            RatingContext.kind == RatingContextKind.CANONICAL_TEAM.value,
+            RatingContext.is_canonical.is_(True),
+            Rating.ruleset_id == RatingContext.ruleset_id,
+            Rating.scope_type == SCOPE_FACTION,
         )
     )
     if ruleset_id is not None:

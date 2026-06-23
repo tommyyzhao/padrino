@@ -59,7 +59,7 @@ describe('LeaderboardSections', () => {
       scope_value: 'MAFIA'
     });
 
-    const sections = splitLeaderboardCards([global, town, scum], []);
+    const sections = splitLeaderboardCards([global], [town, scum], []);
 
     expect(sections.canonicalGlobalCards.map((card) => card.card_id)).toEqual(['card-global']);
     expect(sections.canonicalFactionCards.map((card) => card.card_id)).toEqual([
@@ -92,7 +92,7 @@ describe('LeaderboardSections', () => {
       metric_label: 'Human ELO'
     });
 
-    const sections = splitLeaderboardCards([canonical], [experimental], [human]);
+    const sections = splitLeaderboardCards([canonical], [], [experimental], [human]);
 
     expect(sections.canonicalGlobalCards.map((card) => card.card_id)).toEqual([
       'card-canonical'
