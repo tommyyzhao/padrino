@@ -370,6 +370,80 @@
       ],
       "notes": "Sites: web/dashboard/src/routes/(public)/ladder/+page.svelte RULESETS=['mini7_v1'] + home/profile mini7 pins. Depends on US-228 so the per-faction/per-ruleset card data is available. Complements US-226 (lobby) and US-229 (multi-context leaderboard).",
       "passes": true
+    },
+    {
+      "id": "US-244",
+      "title": "Revert shipped migration 0035; add lobbies.integrity_acknowledged via new migration 0051",
+      "priority": 244,
+      "dependencies": [],
+      "description": "WAVE-11 REVIEW CRITICAL (CONFIRMED 3x). US-237 added lobbies.integrity_acknowledged by EDITING the already-shipped migration 0035_lobbies.py (revision <=0048, on origin/main since US-147). Alembic skips already-applied revisions, so any DB already at head before Wave 11 NEVER gets the column on `alembic upgrade head`; the ORM model (db/models.py:1329) + lobbies repo (db/repositories/lobbies.py:51) + routes (api/routes/lobbies.py:213/685) all reference it, so the first lobby create/read raises 'no such column: lobbies.integrity_acknowledged' (SQLite) / UndefinedColumn (Postgres) on every existing/upgraded deployment, breaking the entire human-lane lobby lane. The wave's 0049/0050 do not add it. Tests pass only because they build the schema fresh.",
+      "acceptanceCriteria": [
+        "0035_lobbies.py is reverted BYTE-FOR-BYTE to its origin/main shipped state (no integrity_acknowledged column inline).",
+        "A NEW additive revision 0051 (down_revision='0050') adds lobbies.integrity_acknowledged via op.add_column(sa.Boolean(), nullable=False, server_default=sa.false()), dialect-portable (use batch_alter_table for the SQLite downgrade drop); downgrade drops the column. The migration chain stays a single linear head at 0051.",
+        "A migration test asserts a DB already at 0050 (column absent) GAINS integrity_acknowledged after upgrading to head (existing rows backfill false); test_migrations_all_dialects and a from-scratch upgrade both yield the column.",
+        "All backend gates pass (ruff/format/mypy/pytest -m 'not integration', incl. test_migrations_all_dialects)."
+      ],
+      "notes": "Sacred rule: never edit a migration <=0048 (shipped). Evidence: 0035_lobbies.py:39, 0049/0050 lack add_column, db/models.py:1329, db/repositories/lobbies.py:51, api/routes/lobbies.py:213/685.",
+      "passes": false
+    },
+    {
+      "id": "US-245",
+      "title": "Surface FACTION leaderboard cards without mutating the pinned canonical_cards contract",
+      "priority": 245,
+      "dependencies": [],
+      "description": "WAVE-11 REVIEW HIGH (CONFIRMED). US-228/229 made _canonical_cards (ratings/public_leaderboard.py:~730) emit FACTION-scope (Town/Scum) cards INTO canonical_cards, changing the pinned /public/leaderboard response contract (canonical_cards was GLOBAL canonical-team only). Existing API consumers/tests expecting canonical_cards to be GLOBAL-only canonical now get faction rows co-mingled / co-sorted.",
+      "acceptanceCriteria": [
+        "canonical_cards retains its pinned shape (GLOBAL canonical-team rows only); FACTION-scope (Town vs Scum) cards are emitted into a SEPARATE response field (e.g. faction_cards) on the leaderboard response model - never co-mingled with or co-sorted into canonical_cards.",
+        "The frontend multi-context leaderboard reads the new faction_cards field for its separate Town/Scum section (US-229's separate-section / no-co-sort requirement preserved).",
+        "A test pins: /public/leaderboard canonical_cards contains only GLOBAL canonical rows; FACTION cards appear only in faction_cards; no existing canonical_cards consumer/contract is broken.",
+        "All backend gates pass; pnpm -C web/dashboard lint && check && test:e2e pass."
+      ],
+      "notes": "Evidence: ratings/public_leaderboard.py:~730 (_canonical_cards), api/routes/public.py response model. Add a field; never mutate a pinned public-API contract.",
+      "passes": false
+    },
+    {
+      "id": "US-246",
+      "title": "Human-lane per-game failure isolation: FAILED status + guarded heartbeat",
+      "priority": 246,
+      "dependencies": [],
+      "description": "WAVE-11 REVIEW MEDIUM (CONFIRMED) + LOW. The human-lane per-game task done-callback (runner/human_lane.py:1214-1218) never retrieves task.exception(), so a mid-game crash wedges the game in RUNNING with no FAILED status + no in-process resume - US-240/241 gave the BENCHMARK scheduler failure isolation but the human lane was missed, and ranked human play is now active so a wedged ranked game is a real problem. Separately, the heartbeat write at the top of the poll loop (human_lane.py:1201) is unguarded - a transient DB error there crashes the whole worker + all in-flight human games.",
+      "acceptanceCriteria": [
+        "The human-lane per-game done-callback retrieves + logs task.exception() and marks the crashed game FAILED (reuse US-241's shared FAILED status literal); a FAILED human game is excluded from worker re-selection (not re-run).",
+        "The poll-loop heartbeat write is guarded so a transient failure logs-and-continues instead of crashing the worker / dropping all in-flight games.",
+        "Tests: a human game whose tick raises is marked FAILED (not stuck RUNNING) and not re-selected; a heartbeat-write failure does not crash the worker loop.",
+        "All backend gates pass."
+      ],
+      "notes": "Evidence: runner/human_lane.py:1201/1214-1218. Mirror the US-240/241 benchmark-scheduler isolation for the human lane.",
+      "passes": false
+    },
+    {
+      "id": "US-247",
+      "title": "Cost-accounting tidy: thread settings, per-endpoint fallback prices, preserve NULL for errored turns",
+      "priority": 247,
+      "dependencies": [],
+      "description": "WAVE-11 REVIEW LOWs (cost-economics). (a) The production human-lane GamePersistence (runner/human_lane.py:1121-1128) omits settings=, so the US-232 token-cost fallback uses the get_settings() singleton instead of the threaded Settings. (b) padrino_human_fallback_token_price_per_1k (settings.py:286) ships only a 'default' entry, so Z.AI/Xiaomi custom endpoints are all priced at the generic 0.0005/0.0015 per-1K rate. (c) _priced_cost_usd (game_runner.py:637) now persists 0.0 (never NULL) even for provider_error/exhausted turns, changing cost_usd semantics from 'unknown' to 'zero'.",
+      "acceptanceCriteria": [
+        "The human-lane GamePersistence is constructed with the threaded settings= so cost pricing uses the same Settings as the rest of the lane.",
+        "The fallback token-price table ships realistic per-endpoint entries for the custom-base providers actually in use (keyed by their litellm model strings, e.g. cerebras/zai-glm-4.7), with 'default' retained as a backstop.",
+        "cost_usd stays NULL (unknown) for turns with no real billed result (provider_error / exhausted / empty); only turns with a real result get a priced value.",
+        "Tests cover each of the three; all backend gates pass."
+      ],
+      "notes": "Evidence: runner/human_lane.py:1121-1128, settings.py:286, game_runner.py:637 (_priced_cost_usd / _persist_llm_call).",
+      "passes": false
+    },
+    {
+      "id": "US-248",
+      "title": "Model detail page tolerates a /public/rulesets failure (fallback)",
+      "priority": 248,
+      "dependencies": [],
+      "description": "WAVE-11 REVIEW LOW (regressions). The model detail page (web/dashboard/src/routes/(public)/models/[id]/+page.svelte:25) now hard-depends on the new /public/rulesets endpoint (US-226); if it fails or yields no canonical rulesets, the whole agent lookup/page breaks.",
+      "acceptanceCriteria": [
+        "The publicRulesets() fetch is decoupled into its own try/catch (mirroring the recent-games/analytics blocks) with a fallback, so a rulesets failure does not break the model detail page.",
+        "A frontend test/check covers the fallback path.",
+        "All backend gates pass; pnpm -C web/dashboard lint && check && test:e2e pass."
+      ],
+      "notes": "Evidence: web/dashboard/src/routes/(public)/models/[id]/+page.svelte:25.",
+      "passes": false
     }
   ]
 }
