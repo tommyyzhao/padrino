@@ -110,16 +110,25 @@ def test_run_smoke_in_process_serializes_to_json(tmp_path: Path) -> None:
 
 
 def test_smoke_localhost_cli_help() -> None:
-    # Pin a wide terminal so the Typer/rich help renderer does not wrap option
-    # names (e.g. "--db-url") across lines; narrow CI terminals otherwise split
-    # the token and break the substring assertions below.
-    runner = CliRunner(env={"COLUMNS": "200"})
+    import click
+    import typer
+
+    runner = CliRunner()
     result = runner.invoke(app, ["smoke", "localhost", "--help"])
     assert result.exit_code == 0
     assert "smoke" in result.stdout.lower()
-    assert "--db-url" in result.stdout
-    assert "--port" in result.stdout
-    assert "--keep-running" in result.stdout
+    # Assert the command DECLARES its key options by introspecting the command
+    # tree rather than scraping the rendered help text. The rich/Typer help
+    # renderer wraps/elides option names at the (narrow, non-TTY) CI terminal
+    # width, so substring checks against result.stdout are flaky across
+    # environments; introspection is rendering-independent.
+    root = typer.main.get_command(app)
+    assert isinstance(root, click.Group)
+    smoke = root.commands["smoke"]
+    assert isinstance(smoke, click.Group)
+    localhost_cmd = smoke.commands["localhost"]
+    option_names = {opt for param in localhost_cmd.params for opt in param.opts}
+    assert {"--db-url", "--port", "--keep-running"} <= option_names
 
 
 def test_run_smoke_in_process_fails_fast_on_bootstrap_error(
