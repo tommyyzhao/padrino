@@ -110,7 +110,10 @@ def test_run_smoke_in_process_serializes_to_json(tmp_path: Path) -> None:
 
 
 def test_smoke_localhost_cli_help() -> None:
-    runner = CliRunner()
+    # Pin a wide terminal so the Typer/rich help renderer does not wrap option
+    # names (e.g. "--db-url") across lines; narrow CI terminals otherwise split
+    # the token and break the substring assertions below.
+    runner = CliRunner(env={"COLUMNS": "200"})
     result = runner.invoke(app, ["smoke", "localhost", "--help"])
     assert result.exit_code == 0
     assert "smoke" in result.stdout.lower()

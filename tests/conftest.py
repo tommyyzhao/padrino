@@ -15,6 +15,7 @@ without docker can still run the default ``pytest`` invocation.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -28,6 +29,31 @@ from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
 from padrino.core.enums import ActionType
 from padrino.core.rulesets import mini7_v1
+
+
+@pytest.fixture(autouse=True)
+def _ci_dummy_provider_keys(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Make provider ``auth_secret_ref: env:*`` resolve without real secrets.
+
+    Non-integration tests register model providers whose ``env:CEREBRAS_API_KEY``
+    / ``env:DEEPINFRA_API_KEY`` refs are resolved at registration time
+    (``padrino.llm.secrets`` reads ``os.environ``). Locally a developer ``.env``
+    supplies these, so the tests pass; in CI they are absent and registration
+    returns 422, reddening the whole suite. Inject a deterministic dummy value
+    (preserving any real key already in the environment) so the suite is
+    environment-independent. ``integration``-marked tests are left untouched so
+    their "skip when no real key" guard still works.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setenv(
+        "CEREBRAS_API_KEY", os.environ.get("CEREBRAS_API_KEY", "ci-dummy-cerebras-key")
+    )
+    monkeypatch.setenv(
+        "DEEPINFRA_API_KEY", os.environ.get("DEEPINFRA_API_KEY", "ci-dummy-deepinfra-key")
+    )
 
 
 @dataclass(frozen=True, slots=True)
