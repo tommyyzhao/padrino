@@ -41,13 +41,12 @@ from padrino.core.engine.reducer import apply_event, initial_state
 from padrino.core.engine.replay import replay_event_log
 from padrino.core.engine.state import GameState
 from padrino.core.enums import SeatKind
+from padrino.db.game_status import is_terminal_game_status
 from padrino.db.models import GameEvent, GameSeat
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
 
 _logger = structlog.get_logger("padrino.runner.human_durability")
-
-STATUS_COMPLETED = "COMPLETED"
 
 # A seat is "human-lane" when a human ever occupied it (a live human seat or a
 # seat an AI silently took over). AI-only benchmark games have neither.
@@ -153,7 +152,7 @@ async def rehydrate_active_human_games(
         runtime_rows = await runtime_repo.list_all(session)
         for runtime in runtime_rows:
             game = await games_repo.get(session, runtime.game_id)
-            if game is None or game.status == STATUS_COMPLETED:
+            if game is None or is_terminal_game_status(game.status):
                 continue
             if not await _is_human_lane_game(session, runtime.game_id):
                 continue
