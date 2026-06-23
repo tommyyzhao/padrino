@@ -170,7 +170,7 @@
       class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
       data-testid="lobby-stakes"
     >
-      {summary.stakes}
+      {summary.ranked ? 'RANKED' : summary.stakes}
     </span>
   </div>
 

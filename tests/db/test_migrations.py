@@ -73,6 +73,12 @@ def _index_names(db_path: Path, table_name: str) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _lobby_column_names(db_path: Path) -> set[str]:
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("PRAGMA table_info(lobbies)").fetchall()
+    return {r[1] for r in rows}
+
+
 def test_upgrade_head_creates_all_tables(alembic_db: Path) -> None:
     cfg = _alembic_config()
     command.upgrade(cfg, "head")
@@ -81,6 +87,7 @@ def test_upgrade_head_creates_all_tables(alembic_db: Path) -> None:
     assert EXPECTED_TABLES.issubset(tables), f"missing tables: {EXPECTED_TABLES - tables}"
     assert "alembic_version" in tables
     assert "ix_oauth_consumed_flows_consumed_at" in _index_names(alembic_db, "oauth_consumed_flows")
+    assert "integrity_acknowledged" in _lobby_column_names(alembic_db)
 
 
 def test_downgrade_base_drops_all_tables(alembic_db: Path) -> None:

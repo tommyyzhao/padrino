@@ -14,8 +14,9 @@ never recomputes from raw events. Aggregation rule:
 * conservative score — ``mu - 3 * sigma`` post-aggregation
 
 where ``n_i`` is the rating row's ``games`` counter. Both the GLOBAL and the
-per-faction (TOWN/MAFIA) scopes are aggregated independently. Per-faction
-games / wins / draws / losses come from ``game_seats`` joined to
+per-faction scopes are aggregated independently from the FACTION-scope values
+persisted in ``ratings``. Per-faction games / wins / draws / losses come from
+``game_seats`` joined to
 ``Game.terminal_result`` (filter on ``Game.status == 'COMPLETED'``).
 
 Cache is process-local and keyed on the league/ruleset plus a tag derived from
@@ -39,6 +40,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction, Role
+from padrino.db.game_status import GAME_STATUS_COMPLETED
 from padrino.db.models import (
     AgentBuild,
     Game,
@@ -63,7 +65,11 @@ from padrino.ratings.openskill_service import (
 )
 
 RATING_MODEL: Final[str] = "openskill_plackett_luce_v1"
-_COMPLETED_STATUS: Final[str] = "COMPLETED"
+_COMPLETED_STATUS: Final[str] = GAME_STATUS_COMPLETED
+_LEGACY_FACTION_RESPONSE_SCOPES: Final[dict[str, str]] = {
+    "town": Faction.TOWN.value,
+    "mafia": Faction.MAFIA.value,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +119,7 @@ class ModelLeaderboardEntry:
     losses: int
     timeout_rate: float
     invalid_action_rate: float
+    factions: dict[str, FactionAggregate]
     town: FactionAggregate
     mafia: FactionAggregate
     role_breakdown: dict[str, RoleAggregate]
@@ -170,24 +177,47 @@ class _ModelBucket:
     model_name: str
     model_version: str | None
     agent_build_ids: set[uuid.UUID] = field(default_factory=set)
-    # Per-scope (mu_i, sigma_i, n_i) samples keyed by scope_value ('global'|'TOWN'|'MAFIA').
+    # Per-scope (mu_i, sigma_i, n_i) samples keyed by scope_value.
     rating_samples: dict[str, list[tuple[float, float, int]]] = field(default_factory=dict)
+    faction_counts: dict[str, dict[str, int]] = field(default_factory=dict)
     games: int = 0
     wins: int = 0
     draws: int = 0
     losses: int = 0
-    town_games: int = 0
-    town_wins: int = 0
-    town_draws: int = 0
-    town_losses: int = 0
-    mafia_games: int = 0
-    mafia_wins: int = 0
-    mafia_draws: int = 0
-    mafia_losses: int = 0
     role_counts: dict[str, dict[str, int]] = field(default_factory=dict)
     submissions: int = 0
     timeouts: int = 0
     invalids: int = 0
+
+
+@dataclass(slots=True)
+class _SeatCounterBucket:
+    """Seat-derived outcome counts for one agent build."""
+
+    games: int = 0
+    wins: int = 0
+    draws: int = 0
+    losses: int = 0
+    faction_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+
+
+def _empty_outcome_counts() -> dict[str, int]:
+    return {"games": 0, "wins": 0, "draws": 0, "losses": 0}
+
+
+def _record_outcome(
+    counts: dict[str, int],
+    *,
+    faction: str,
+    winner: str | None,
+) -> None:
+    counts["games"] += 1
+    if winner == "DRAW":
+        counts["draws"] += 1
+    elif winner == faction:
+        counts["wins"] += 1
+    elif winner is not None:
+        counts["losses"] += 1
 
 
 def _aggregate_rating(samples: list[tuple[float, float, int]]) -> tuple[float, float]:
@@ -214,25 +244,33 @@ def _aggregate_rating(samples: list[tuple[float, float, int]]) -> tuple[float, f
 def _faction_aggregate(bucket: _ModelBucket, faction: str) -> FactionAggregate:
     samples = bucket.rating_samples.get(faction, [])
     mu, sigma = _aggregate_rating(samples)
-    if faction == Faction.TOWN.value:
-        games = bucket.town_games
-        wins = bucket.town_wins
-        draws = bucket.town_draws
-        losses = bucket.town_losses
-    else:
-        games = bucket.mafia_games
-        wins = bucket.mafia_wins
-        draws = bucket.mafia_draws
-        losses = bucket.mafia_losses
+    counts = bucket.faction_counts.get(faction, _empty_outcome_counts())
     return FactionAggregate(
         mu=mu,
         sigma=sigma,
         conservative_score=_conservative(mu, sigma),
-        games=games,
-        wins=wins,
-        draws=draws,
-        losses=losses,
+        games=counts["games"],
+        wins=counts["wins"],
+        draws=counts["draws"],
+        losses=counts["losses"],
     )
+
+
+def _faction_aggregates(bucket: _ModelBucket) -> dict[str, FactionAggregate]:
+    faction_values = sorted(
+        scope_value for scope_value in bucket.rating_samples if scope_value != SCOPE_VALUE_GLOBAL
+    )
+    return {faction: _faction_aggregate(bucket, faction) for faction in faction_values}
+
+
+def _legacy_faction_response_fields(
+    bucket: _ModelBucket,
+    factions: Mapping[str, FactionAggregate],
+) -> dict[str, FactionAggregate]:
+    return {
+        field: factions.get(scope_value, _faction_aggregate(bucket, scope_value))
+        for field, scope_value in _LEGACY_FACTION_RESPONSE_SCOPES.items()
+    }
 
 
 def _role_aggregates(bucket: _ModelBucket) -> dict[str, RoleAggregate]:
@@ -252,6 +290,8 @@ def _role_aggregates(bucket: _ModelBucket) -> dict[str, RoleAggregate]:
 
 def _bucket_to_entry(bucket: _ModelBucket) -> ModelLeaderboardEntry:
     mu, sigma = _aggregate_rating(bucket.rating_samples.get(SCOPE_VALUE_GLOBAL, []))
+    factions = _faction_aggregates(bucket)
+    legacy_factions = _legacy_faction_response_fields(bucket, factions)
     return ModelLeaderboardEntry(
         model_key=model_key_for(bucket.provider, bucket.model_name, bucket.model_version),
         display_name=_display_name_for(bucket.model_name, bucket.model_version),
@@ -267,8 +307,9 @@ def _bucket_to_entry(bucket: _ModelBucket) -> ModelLeaderboardEntry:
         losses=bucket.losses,
         timeout_rate=(bucket.timeouts / bucket.submissions) if bucket.submissions else 0.0,
         invalid_action_rate=(bucket.invalids / bucket.submissions) if bucket.submissions else 0.0,
-        town=_faction_aggregate(bucket, Faction.TOWN.value),
-        mafia=_faction_aggregate(bucket, Faction.MAFIA.value),
+        factions=factions,
+        town=legacy_factions["town"],
+        mafia=legacy_factions["mafia"],
         role_breakdown=_role_aggregates(bucket),
         agent_build_count=len(bucket.agent_build_ids),
         agent_build_ids=tuple(sorted(bucket.agent_build_ids, key=str)),
@@ -347,7 +388,7 @@ async def _seat_counters_per_build(
     *,
     league_id: uuid.UUID,
     ruleset_id: str,
-) -> dict[uuid.UUID, dict[str, int]]:
+) -> dict[uuid.UUID, _SeatCounterBucket]:
     """Aggregate per-(agent_build, faction) game counts for terminal games.
 
     Filters games on ``Game.status == 'COMPLETED'`` and
@@ -367,52 +408,29 @@ async def _seat_counters_per_build(
             Gauntlet.league_id == league_id,
             Game.ruleset_id == ruleset_id,
             Game.status == _COMPLETED_STATUS,
+            GameSeat.agent_build_id.is_not(None),
         )
     )
-    out: dict[uuid.UUID, dict[str, int]] = defaultdict(
-        lambda: {
-            "games": 0,
-            "wins": 0,
-            "draws": 0,
-            "losses": 0,
-            "town_games": 0,
-            "town_wins": 0,
-            "town_draws": 0,
-            "town_losses": 0,
-            "mafia_games": 0,
-            "mafia_wins": 0,
-            "mafia_draws": 0,
-            "mafia_losses": 0,
-        }
-    )
+    out: dict[uuid.UUID, _SeatCounterBucket] = defaultdict(_SeatCounterBucket)
     for ab_id, faction, terminal in (await session.execute(stmt)).all():
+        if ab_id is None:
+            continue
+        faction_value = str(faction)
         bucket = out[ab_id]
-        bucket["games"] += 1
         winner = terminal.get("winner") if isinstance(terminal, dict) else None
-        is_town = faction == Faction.TOWN.value
-        is_mafia = faction == Faction.MAFIA.value
-        if is_town:
-            bucket["town_games"] += 1
-        elif is_mafia:
-            bucket["mafia_games"] += 1
-        if winner == "DRAW":
-            bucket["draws"] += 1
-            if is_town:
-                bucket["town_draws"] += 1
-            elif is_mafia:
-                bucket["mafia_draws"] += 1
-        elif winner == faction:
-            bucket["wins"] += 1
-            if is_town:
-                bucket["town_wins"] += 1
-            elif is_mafia:
-                bucket["mafia_wins"] += 1
-        elif winner in {Faction.TOWN.value, Faction.MAFIA.value}:
-            bucket["losses"] += 1
-            if is_town:
-                bucket["town_losses"] += 1
-            elif is_mafia:
-                bucket["mafia_losses"] += 1
+        total_counts = {
+            "games": bucket.games,
+            "wins": bucket.wins,
+            "draws": bucket.draws,
+            "losses": bucket.losses,
+        }
+        _record_outcome(total_counts, faction=faction_value, winner=winner)
+        bucket.games = total_counts["games"]
+        bucket.wins = total_counts["wins"]
+        bucket.draws = total_counts["draws"]
+        bucket.losses = total_counts["losses"]
+        faction_counts = bucket.faction_counts.setdefault(faction_value, _empty_outcome_counts())
+        _record_outcome(faction_counts, faction=faction_value, winner=winner)
     return dict(out)
 
 
@@ -456,7 +474,7 @@ async def _role_counters_per_build(
             role_bucket["draws"] += 1
         elif winner == faction:
             role_bucket["wins"] += 1
-        elif winner in {Faction.TOWN.value, Faction.MAFIA.value}:
+        elif winner is not None:
             role_bucket["losses"] += 1
     return out
 
@@ -566,43 +584,38 @@ async def rollup_by_model(
             bucket.rating_samples.setdefault(SCOPE_VALUE_GLOBAL, []).append(
                 (float(rating.mu), float(rating.sigma), int(rating.games))
             )
-        elif rating.scope_type == SCOPE_FACTION and rating.scope_value in (
-            Faction.TOWN.value,
-            Faction.MAFIA.value,
-        ):
+        elif rating.scope_type == SCOPE_FACTION:
             bucket.rating_samples.setdefault(rating.scope_value, []).append(
                 (float(rating.mu), float(rating.sigma), int(rating.games))
             )
 
-    for ab_id, counts in seat_counters.items():
+    for ab_id, seat_counts in seat_counters.items():
         bucket = _bucket_for(ab_id)
         if bucket is None:
             continue
-        bucket.games += counts["games"]
-        bucket.wins += counts["wins"]
-        bucket.draws += counts["draws"]
-        bucket.losses += counts["losses"]
-        bucket.town_games += counts["town_games"]
-        bucket.town_wins += counts["town_wins"]
-        bucket.town_draws += counts["town_draws"]
-        bucket.town_losses += counts["town_losses"]
-        bucket.mafia_games += counts["mafia_games"]
-        bucket.mafia_wins += counts["mafia_wins"]
-        bucket.mafia_draws += counts["mafia_draws"]
-        bucket.mafia_losses += counts["mafia_losses"]
+        bucket.games += seat_counts.games
+        bucket.wins += seat_counts.wins
+        bucket.draws += seat_counts.draws
+        bucket.losses += seat_counts.losses
+        for faction, faction_counts in seat_counts.faction_counts.items():
+            bucket_counts = bucket.faction_counts.setdefault(faction, _empty_outcome_counts())
+            bucket_counts["games"] += faction_counts["games"]
+            bucket_counts["wins"] += faction_counts["wins"]
+            bucket_counts["draws"] += faction_counts["draws"]
+            bucket_counts["losses"] += faction_counts["losses"]
 
     for ab_id, role_counts in role_counters.items():
         bucket = _bucket_for(ab_id)
         if bucket is None:
             continue
-        for role, counts in role_counts.items():
+        for role, role_aggregate_counts in role_counts.items():
             bucket_counts = bucket.role_counts.setdefault(
                 role, {"games": 0, "wins": 0, "draws": 0, "losses": 0}
             )
-            bucket_counts["games"] += counts["games"]
-            bucket_counts["wins"] += counts["wins"]
-            bucket_counts["draws"] += counts["draws"]
-            bucket_counts["losses"] += counts["losses"]
+            bucket_counts["games"] += role_aggregate_counts["games"]
+            bucket_counts["wins"] += role_aggregate_counts["wins"]
+            bucket_counts["draws"] += role_aggregate_counts["draws"]
+            bucket_counts["losses"] += role_aggregate_counts["losses"]
 
     for ab_id, metrics in submission_metrics.items():
         bucket = _bucket_for(ab_id)
@@ -744,6 +757,9 @@ def entry_to_response(entry: ModelLeaderboardEntry) -> dict[str, object]:
         "losses": entry.losses,
         "timeout_rate": entry.timeout_rate,
         "invalid_action_rate": entry.invalid_action_rate,
+        "factions": {
+            faction: _faction_dict(aggregate) for faction, aggregate in entry.factions.items()
+        },
         "town": _faction_dict(entry.town),
         "mafia": _faction_dict(entry.mafia),
         "role_breakdown": {

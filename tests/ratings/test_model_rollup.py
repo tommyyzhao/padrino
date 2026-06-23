@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import math
 import uuid
+from collections.abc import Sequence
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
+from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED
 from padrino.db.models import AgentBuild, ModelProvider, Rating
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
@@ -45,6 +47,7 @@ from padrino.db.repositories import (
 )
 from padrino.ratings.model_rollup import (
     detail_for_model,
+    entry_to_response,
     model_key_for,
     reset_cache,
     rollup_by_model,
@@ -146,7 +149,8 @@ async def _build_gauntlet_with_seats(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     league_id: uuid.UUID,
-    game_outcomes: list[tuple[str, list[tuple[uuid.UUID, Faction]]]],
+    game_outcomes: Sequence[tuple[str, Sequence[tuple[uuid.UUID, Faction | str]]]],
+    game_status: str = GAME_STATUS_COMPLETED,
 ) -> None:
     """Insert one gauntlet + one terminal game per outcome.
 
@@ -154,6 +158,19 @@ async def _build_gauntlet_with_seats(
     A fresh gauntlet is created per call (its prompt_version is reused from any
     of the agent builds).
     """
+
+    def _faction_value(faction: Faction | str) -> str:
+        return faction.value if isinstance(faction, Faction) else faction
+
+    def _role_for_faction(faction: str) -> str:
+        if faction == Faction.MAFIA.value:
+            return Role.MAFIA_GOON.value
+        if faction == Faction.SERIAL_KILLER.value:
+            return Role.SERIAL_KILLER.value
+        if faction == Faction.JESTER.value:
+            return Role.JESTER.value
+        return Role.VILLAGER.value
+
     async with session_factory() as session, session.begin():
         # Pull one prompt_version_id from an existing agent_build so the
         # gauntlet row passes its FK.
@@ -179,23 +196,24 @@ async def _build_gauntlet_with_seats(
                 ruleset_id=mini7_v1.RULESET_ID,
                 game_seed=f"rollup-{idx}",
                 gauntlet_id=gauntlet.id,
-                status="COMPLETED",
+                status=game_status,
             )
             await games_repo.update_status(
                 session,
                 game.id,
-                status="COMPLETED",
+                status=game_status,
                 terminal_result={"winner": winner, "reason": "scripted", "day_terminated": 2},
             )
             for j, (ab_id, faction) in enumerate(seats):
+                faction_value = _faction_value(faction)
                 await games_repo.add_seat(
                     session,
                     game_id=game.id,
                     public_player_id=f"P{j + 1:02d}",
                     seat_index=j,
                     agent_build_id=ab_id,
-                    role=Role.MAFIA_GOON.value if faction is Faction.MAFIA else Role.VILLAGER.value,
-                    faction=faction.value,
+                    role=_role_for_faction(faction_value),
+                    faction=faction_value,
                 )
 
 
@@ -548,6 +566,56 @@ async def test_detail_returns_none_when_model_unknown(
     assert detail is None
 
 
+async def test_failed_games_do_not_count_as_completed_rollup_samples(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id = await _seed_league(session_factory)
+    async with session_factory() as session, session.begin():
+        ab = await _make_agent_build(
+            session,
+            display_name="failed-sample",
+            provider_name="p",
+            model_name="m",
+            model_version="1.0",
+            suffix="failed-sample",
+        )
+        _insert_rating(
+            session,
+            league_id=league_id,
+            agent_build_id=ab.id,
+            scope_type=SCOPE_GLOBAL,
+            scope_value=SCOPE_VALUE_GLOBAL,
+            mu=25.0,
+            sigma=5.0,
+            games=1,
+        )
+        ab_id = ab.id
+
+    await _build_gauntlet_with_seats(
+        session_factory,
+        league_id=league_id,
+        game_outcomes=[("TOWN", [(ab_id, Faction.TOWN)])],
+        game_status=GAME_STATUS_FAILED,
+    )
+
+    async with session_factory() as session:
+        rollup = await rollup_by_model(session, league_id, mini7_v1.RULESET_ID)
+        detail = await detail_for_model(
+            session,
+            league_id=league_id,
+            ruleset_id=mini7_v1.RULESET_ID,
+            model_key=model_key_for("p", "m", "1.0"),
+        )
+
+    assert len(rollup.entries) == 1
+    entry = rollup.entries[0]
+    assert entry.games == 0
+    assert entry.wins == 0
+    assert entry.town.games == 0
+    assert detail is not None
+    assert detail.recent_game_ids == ()
+
+
 async def test_recent_games_capped_at_limit(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -714,6 +782,161 @@ async def test_faction_scope_ratings_aggregate_independently(
     # separate.
     assert math.isclose(entry.mu, 25.0)
     assert entry.town.mu != entry.mu
+
+
+async def test_town_mafia_faction_rollup_preserves_legacy_response_fields(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Existing two-faction consumers keep the same Town/Mafia payload shape."""
+    league_id = await _seed_league(session_factory)
+    async with session_factory() as session, session.begin():
+        ab = await _make_agent_build(
+            session,
+            display_name="alpha",
+            provider_name="p",
+            model_name="m",
+            model_version="1.0",
+            suffix="legacy-factions",
+        )
+        _insert_rating(
+            session,
+            league_id=league_id,
+            agent_build_id=ab.id,
+            scope_type=SCOPE_GLOBAL,
+            scope_value=SCOPE_VALUE_GLOBAL,
+            mu=25.0,
+            sigma=5.0,
+            games=4,
+        )
+        _insert_rating(
+            session,
+            league_id=league_id,
+            agent_build_id=ab.id,
+            scope_type=SCOPE_FACTION,
+            scope_value=Faction.TOWN.value,
+            mu=27.0,
+            sigma=4.5,
+            games=3,
+        )
+        _insert_rating(
+            session,
+            league_id=league_id,
+            agent_build_id=ab.id,
+            scope_type=SCOPE_FACTION,
+            scope_value=Faction.MAFIA.value,
+            mu=22.0,
+            sigma=5.5,
+            games=1,
+        )
+
+    await _build_gauntlet_with_seats(
+        session_factory,
+        league_id=league_id,
+        game_outcomes=[
+            (
+                Faction.TOWN.value,
+                [(ab.id, Faction.TOWN), (ab.id, Faction.TOWN), (ab.id, Faction.MAFIA)],
+            ),
+            (
+                Faction.MAFIA.value,
+                [(ab.id, Faction.TOWN), (ab.id, Faction.TOWN), (ab.id, Faction.MAFIA)],
+            ),
+        ],
+    )
+
+    async with session_factory() as session:
+        rollup = await rollup_by_model(session, league_id, mini7_v1.RULESET_ID)
+
+    payload = entry_to_response(rollup.entries[0])
+    assert payload["town"] == {
+        "mu": 27.0,
+        "sigma": 4.5,
+        "conservative_score": 13.5,
+        "games": 4,
+        "wins": 2,
+        "draws": 0,
+        "losses": 2,
+    }
+    assert payload["mafia"] == {
+        "mu": 22.0,
+        "sigma": 5.5,
+        "conservative_score": 5.5,
+        "games": 2,
+        "wins": 1,
+        "draws": 0,
+        "losses": 1,
+    }
+
+
+async def test_rollup_includes_synthetic_forward_compatible_faction_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Forward-compat fixture: current writers do not produce this FACTION row."""
+    league_id = await _seed_league(session_factory)
+    async with session_factory() as session, session.begin():
+        ab = await _make_agent_build(
+            session,
+            display_name="alpha",
+            provider_name="p",
+            model_name="m",
+            model_version="1.0",
+            suffix="third-faction",
+        )
+        _insert_rating(
+            session,
+            league_id=league_id,
+            agent_build_id=ab.id,
+            scope_type=SCOPE_GLOBAL,
+            scope_value=SCOPE_VALUE_GLOBAL,
+            mu=26.0,
+            sigma=4.0,
+            games=3,
+        )
+        for faction, mu, sigma, games in (
+            (Faction.TOWN.value, 25.0, 5.0, 1),
+            (Faction.MAFIA.value, 24.0, 5.5, 1),
+            (Faction.SERIAL_KILLER.value, 31.0, 3.0, 1),
+        ):
+            _insert_rating(
+                session,
+                league_id=league_id,
+                agent_build_id=ab.id,
+                scope_type=SCOPE_FACTION,
+                scope_value=faction,
+                mu=mu,
+                sigma=sigma,
+                games=games,
+            )
+
+    await _build_gauntlet_with_seats(
+        session_factory,
+        league_id=league_id,
+        game_outcomes=[
+            (
+                Faction.SERIAL_KILLER.value,
+                [
+                    (ab.id, Faction.TOWN),
+                    (ab.id, Faction.MAFIA),
+                    (ab.id, Faction.SERIAL_KILLER.value),
+                ],
+            )
+        ],
+    )
+
+    async with session_factory() as session:
+        rollup = await rollup_by_model(session, league_id, mini7_v1.RULESET_ID)
+
+    entry = rollup.entries[0]
+    assert set(entry.factions) == {
+        Faction.TOWN.value,
+        Faction.MAFIA.value,
+        Faction.SERIAL_KILLER.value,
+    }
+    assert math.isclose(entry.factions[Faction.SERIAL_KILLER.value].mu, 31.0)
+    assert entry.factions[Faction.SERIAL_KILLER.value].games == 1
+    assert entry.factions[Faction.SERIAL_KILLER.value].wins == 1
+    assert entry.factions[Faction.TOWN.value].losses == 1
+    assert entry.factions[Faction.MAFIA.value].losses == 1
 
 
 async def test_model_rollup_carries_exact_role_sample_counts(

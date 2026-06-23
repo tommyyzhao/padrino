@@ -17,8 +17,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import LogCapture
 
 from padrino.core.enums import FundingSource
 from padrino.db.models import (
@@ -472,6 +474,51 @@ async def test_global_breaker_opens_and_admission_denied(
 
 
 @pytest.mark.asyncio
+async def test_global_breaker_threshold_is_settings_driven(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Changing Settings changes the global breaker threshold without code."""
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        gid = await _game(session)
+        await _human_seat(session, game_id=gid, principal_id=pid)
+        await _call(session, game_id=gid, cost=75.0)
+
+    async with session_factory() as session:
+        assert await global_breaker_open(session, _settings(global_breaker=75.0)) is True
+        assert await global_breaker_open(session, _settings(global_breaker=75.01)) is False
+
+
+@pytest.mark.asyncio
+async def test_breaker_open_warning_includes_spend_and_cap(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Operators can see the spend and cap that opened the global breaker."""
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        gid = await _game(session)
+        await _human_seat(session, game_id=gid, principal_id=pid)
+        await _call(session, game_id=gid, cost=75.25)
+
+    cap = LogCapture()
+    original_config = structlog.get_config()
+    structlog.reset_defaults()
+    structlog.configure(processors=[cap], cache_logger_on_first_use=False)
+    try:
+        async with session_factory() as session:
+            assert await global_breaker_open(session, _settings(global_breaker=75.0)) is True
+    finally:
+        structlog.reset_defaults()
+        structlog.configure(**original_config)
+
+    entries = [e for e in cap.entries if e.get("event") == "human_cost.breaker.open"]
+    assert len(entries) == 1
+    assert entries[0]["scope"] == "global"
+    assert entries[0]["spent_usd"] == 75.25
+    assert entries[0]["cap_usd"] == 75.0
+
+
+@pytest.mark.asyncio
 async def test_lobby_breaker_opens_on_per_lobby_cap(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -500,6 +547,102 @@ async def test_lobby_breaker_opens_on_per_lobby_cap(
         loaded = await session.get(Lobby, lobby_id)
         assert loaded is not None
         assert await lobby_breaker_open(session, s, loaded) is True
+
+
+@pytest.mark.asyncio
+async def test_lobby_breaker_threshold_is_settings_driven(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Changing Settings changes the per-lobby cost threshold without code."""
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        gid = await _game(session)
+        await _human_seat(session, game_id=gid, principal_id=pid)
+        await _call(session, game_id=gid, cost=3.0)
+        lobby = Lobby(
+            ruleset_id="mini7_v1",
+            identity_mode="ANONYMOUS",
+            invite_token=str(uuid.uuid4()),
+            lobby_seed="s",
+            host_principal_id=pid,
+            league_id=await _league(session),
+            game_id=gid,
+            status="LAUNCHED",
+        )
+        session.add(lobby)
+        await session.flush()
+        lobby_id = lobby.id
+
+    async with session_factory() as session:
+        loaded = await session.get(Lobby, lobby_id)
+        assert loaded is not None
+        assert await lobby_breaker_open(
+            session, _settings(lobby_cap=3.0, global_breaker=1000.0), loaded
+        )
+        assert not await lobby_breaker_open(
+            session, _settings(lobby_cap=3.01, global_breaker=1000.0), loaded
+        )
+
+
+@pytest.mark.asyncio
+async def test_per_user_caps_are_settings_driven(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Changing Settings changes per-user game/join/inference thresholds."""
+    async with session_factory() as session, session.begin():
+        pid = await _principal(session)
+        league = await _league(session)
+        gid = await _game(session, created_at=_TODAY_START + timedelta(hours=1))
+        await _human_seat(session, game_id=gid, principal_id=pid)
+        await _call(session, game_id=gid, cost=5.0, created_at=_TODAY_START + timedelta(hours=2))
+        lobby = Lobby(
+            ruleset_id="mini7_v1",
+            identity_mode="ANONYMOUS",
+            invite_token=str(uuid.uuid4()),
+            lobby_seed="s",
+            host_principal_id=pid,
+            league_id=league,
+        )
+        session.add(lobby)
+        await session.flush()
+        session.add(
+            LobbyMember(
+                lobby_id=lobby.id,
+                principal_id=pid,
+                is_host=False,
+                joined_at=_TODAY_START + timedelta(hours=3),
+            )
+        )
+
+    low_inference = _settings(games_per_day=2, joins_per_day=2, inference_per_day=5.0)
+    low_counts = _settings(games_per_day=1, joins_per_day=1, inference_per_day=6.0)
+    high = _settings(games_per_day=2, joins_per_day=2, inference_per_day=6.0)
+    async with session_factory() as session, session.begin():
+        assert (
+            await admit_human(
+                session, low_inference, principal_id=pid, action=ACTION_CREATE, now=_NOW
+            )
+        ) == HumanAdmitDecision(allowed=False, reason="daily_inference_cap_reached")
+    async with session_factory() as session, session.begin():
+        assert (
+            await admit_human(session, low_counts, principal_id=pid, action=ACTION_CREATE, now=_NOW)
+        ) == HumanAdmitDecision(allowed=False, reason="daily_game_cap_reached")
+    async with session_factory() as session, session.begin():
+        assert (
+            await admit_human(session, low_counts, principal_id=pid, action=ACTION_JOIN, now=_NOW)
+        ) == HumanAdmitDecision(allowed=False, reason="daily_join_cap_reached")
+
+    async with session_factory() as session, session.begin():
+        create_decision = await admit_human(
+            session, high, principal_id=pid, action=ACTION_CREATE, now=_NOW
+        )
+    async with session_factory() as session, session.begin():
+        join_decision = await admit_human(
+            session, high, principal_id=pid, action=ACTION_JOIN, now=_NOW
+        )
+
+    assert create_decision.allowed is True
+    assert join_decision.allowed is True
 
 
 @pytest.mark.asyncio

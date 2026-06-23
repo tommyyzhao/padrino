@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   actionAllowed,
+  actionTypeLabel,
   composerStatusFromChat,
   countdownBucket,
   countdownLabel,
   isNightActionPhase,
   isVotePhase,
+  nightActionType,
   secondsUntil,
   spriteUrl
 } from './playSurface';
@@ -65,6 +67,24 @@ describe('legal-action gating', () => {
     expect(isNightActionPhase(night)).toBe(true);
     expect(isNightActionPhase(vote)).toBe(false);
     expect(isNightActionPhase(noop)).toBe(false);
+  });
+
+  it('derives every NAR night action from the server-provided legal action list', () => {
+    for (const type of ['ROLEBLOCK', 'FRAME', 'TRACK', 'WATCH', 'CLEAN', 'SERIAL_KILL']) {
+      const legal: LegalActionsView = {
+        allowed_action_types: [type],
+        legal_targets: ['p2', 'p3']
+      };
+
+      expect(isNightActionPhase(legal)).toBe(true);
+      expect(nightActionType(legal)).toBe(type);
+      expect(actionTypeLabel(type)).toMatch(/\S/);
+    }
+  });
+
+  it('does not treat vote or noop phases as night actions just because targets exist', () => {
+    expect(nightActionType(vote)).toBeNull();
+    expect(nightActionType(noop)).toBeNull();
   });
 });
 

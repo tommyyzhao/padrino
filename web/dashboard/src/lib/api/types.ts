@@ -127,7 +127,7 @@ export interface PublicLeaderboardEntryResponse {
 
 export interface PublicRatingCardResponse {
   card_id: string;
-  section: 'canonical' | 'experimental';
+  section: 'canonical' | 'experimental' | 'humans_included';
   section_label: string;
   context_kind: string;
   context_label: string;
@@ -165,7 +165,9 @@ export interface PublicLeaderboardResponse {
   cache_tag: string;
   entries: PublicLeaderboardEntryResponse[];
   canonical_cards: PublicRatingCardResponse[];
+  faction_cards: PublicRatingCardResponse[];
   experimental_cards: PublicRatingCardResponse[];
+  human_cards: PublicRatingCardResponse[];
   next_cursor: string | null;
   total_estimate: number;
 }
@@ -210,6 +212,18 @@ export interface PublicLadderResponse {
   entries: PublicLadderEntry[];
   next_cursor: string | null;
   total_estimate: number;
+}
+
+export interface PublicRulesetEntry {
+  ruleset_id: string;
+  label: string;
+  player_count: number;
+  rating_context_kind: string;
+  is_canonical: boolean;
+}
+
+export interface PublicRulesetsResponse {
+  items: PublicRulesetEntry[];
 }
 
 export interface VotingAccuracyAnalytics {
@@ -430,6 +444,8 @@ export interface LobbySummary {
   identity_mode: string;
   theme_pack_id: string | null;
   stakes: string;
+  ranked: boolean;
+  integrity_acknowledged: boolean;
   status: string;
   invite_token: string;
   host_principal_id: string;

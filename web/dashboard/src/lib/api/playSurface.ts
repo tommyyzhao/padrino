@@ -93,12 +93,27 @@ export function actionAllowed(legal: LegalActionsView | null, actionType: string
   return legal.allowed_action_types.includes(actionType);
 }
 
+/** Human-readable label for a server-provided action type. */
+export function actionTypeLabel(actionType: string): string {
+  return actionType
+    .split('_')
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(' ');
+}
+
+/** The server-provided targeted non-vote action for the current seat, if any. */
+export function nightActionType(legal: LegalActionsView | null): string | null {
+  if (legal === null) return null;
+  if (legal.allowed_action_types.length === 0) return null;
+  if (isVotePhase(legal)) return null;
+  if (legal.legal_targets.length === 0) return null;
+  return legal.allowed_action_types[0] ?? null;
+}
+
 /** Whether the seat's current phase is a night-action phase (role-conditional). */
 export function isNightActionPhase(legal: LegalActionsView | null): boolean {
-  if (legal === null) return false;
-  return ['MAFIA_KILL', 'PROTECT', 'INVESTIGATE'].some((t) =>
-    legal.allowed_action_types.includes(t)
-  );
+  return nightActionType(legal) !== null;
 }
 
 /** Whether the seat's current phase is the day-vote phase. */

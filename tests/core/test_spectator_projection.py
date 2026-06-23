@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -143,6 +144,107 @@ def test_night_resolved_system_event_is_dropped_entirely() -> None:
         "prev_event_hash": "y" * 64,
         "event_hash": "z" * 64,
     }
+    assert project_event_for_spectator(event) is None
+
+
+@pytest.mark.parametrize(
+    "code,payload",
+    [
+        (
+            "INVESTIGATION_RESULT",
+            {
+                "code": "INVESTIGATION_RESULT",
+                "target": "P04",
+                "finding": "MAFIA",
+                "visited_player_ids": (),
+                "visitor_player_ids": (),
+            },
+        ),
+        (
+            "TRACK_RESULT",
+            {
+                "code": "TRACK_RESULT",
+                "target": "P02",
+                "finding": None,
+                "visited_player_ids": ("P03",),
+                "visitor_player_ids": (),
+            },
+        ),
+        (
+            "WATCH_RESULT",
+            {
+                "code": "WATCH_RESULT",
+                "target": "P05",
+                "finding": None,
+                "visited_player_ids": (),
+                "visitor_player_ids": ("P01", "P09"),
+            },
+        ),
+        (
+            "ACTION_BLOCKED",
+            {
+                "code": "ACTION_BLOCKED",
+                "target": "P06",
+                "finding": None,
+                "visited_player_ids": (),
+                "visitor_player_ids": (),
+            },
+        ),
+    ],
+)
+def test_nar_private_night_feedback_never_enters_spectator_projection(
+    code: str,
+    payload: dict[str, Any],
+) -> None:
+    event = {
+        "sequence": 9,
+        "event_type": "NightFeedbackDelivered",
+        "phase": "NIGHT_1_ACTIONS",
+        "visibility": "PRIVATE",
+        "actor_player_id": "P02",
+        "payload": payload,
+        "prev_event_hash": code.lower(),
+        "event_hash": code.upper(),
+    }
+
+    assert project_event_for_spectator(event) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "eliminated": None,
+            "protected": "P05",
+            "mafia_kill_target": "P05",
+        },
+        {
+            "eliminated": "P04",
+            "protected": None,
+            "mafia_kill_target": "P04",
+            "eliminated_player_ids": ("P04", "P07"),
+            "serial_kill_target": "P07",
+            "cleaned_deaths": ("P04",),
+            "clean_spent_actor_ids": ("P02",),
+            "framed_targets": ("P06",),
+            "frame_spent_actor_ids": ("P08",),
+        },
+    ],
+)
+def test_nar_system_night_summary_never_enters_spectator_projection(
+    payload: dict[str, Any],
+) -> None:
+    event = {
+        "sequence": 10,
+        "event_type": "NightResolved",
+        "phase": "NIGHT_1_ACTIONS",
+        "visibility": "SYSTEM",
+        "actor_player_id": None,
+        "payload": payload,
+        "prev_event_hash": "night-summary-prev",
+        "event_hash": "night-summary-next",
+    }
+
     assert project_event_for_spectator(event) is None
 
 

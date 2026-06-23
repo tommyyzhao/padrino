@@ -16,6 +16,9 @@ The docker-compose stack is the supported path; the bare-Python path
 the test suite, but every step below is described against the compose
 stack first.
 
+For production backups and restore drills against the bundled Postgres stack,
+use [`postgres-backup-restore.md`](./postgres-backup-restore.md).
+
 ## Quickstart — docker-compose
 
 ```
@@ -287,4 +290,3 @@ server {
     }
 }
 ```
-

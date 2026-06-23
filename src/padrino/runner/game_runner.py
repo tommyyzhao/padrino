@@ -47,14 +47,17 @@ from padrino.core.engine.resolvers.night import resolve_night
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED, check_win
-from padrino.core.enums import ActionType, Faction, PhaseKind, RatingContextKind, Role
+from padrino.core.enums import ActionType, Faction, LeagueKind, PhaseKind, RatingContextKind, Role
 from padrino.core.observations import Observation, format_phase_id
 from padrino.core.rulesets import Ruleset as CoreRuleset
 from padrino.core.rulesets import get_ruleset, mini7_v1
+from padrino.db.game_status import GAME_STATUS_COMPLETED
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
+from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
+from padrino.economics.human_cost_governance import price_turn_usd
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
@@ -68,6 +71,10 @@ from padrino.observability.events import (
 from padrino.observability.metrics import record_game_completed
 from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
+from padrino.ratings.human_openskill_service import (
+    HumanGameResult,
+    update_human_ratings_for_game,
+)
 from padrino.ratings.openskill_service import (
     PLACEMENT_DRAW,
     GameResult,
@@ -82,13 +89,13 @@ from padrino.ratings.solo_rate_service import (
     update_solo_rate_ratings_for_game,
 )
 from padrino.runner.tick import run_tick
+from padrino.settings import Settings, get_settings
 
 _logger = structlog.get_logger("padrino.runner")
 
 MAFIA_CHANNEL_ID: Final[str] = "mafia"
 CAUSE_DAY_VOTE: Final[str] = "day_vote"
 CAUSE_NIGHT_KILL: Final[str] = "night_kill"
-STATUS_COMPLETED: Final[str] = "COMPLETED"
 OBSERVATION_FEEDBACK_CODES: Final[frozenset[str]] = frozenset(
     {"ACTION_BLOCKED", "COMMUTER_UNTARGETABLE", "TRACK_RESULT", "WATCH_RESULT"}
 )
@@ -138,13 +145,18 @@ class GamePersistence:
     and ``Game.terminal_result={winner, reason, day_terminated}`` in the same
     transaction as the event row and (when applicable) the rating updates so
     partial failures roll back together.
+
+    ``ranked`` carries a persisted league binding for executors that call
+    :func:`drive_game_loop` indirectly, such as the human-lane worker.
     """
 
     session_factory: async_sessionmaker[AsyncSession]
     game_id: uuid.UUID
     agent_builds: Mapping[str, uuid.UUID] = field(default_factory=dict)
     league_id: uuid.UUID | None = None
+    ranked: bool = False
     resume: GameResume | None = None
+    settings: Settings | None = None
 
 
 class GameConfig(BaseModel):
@@ -362,6 +374,22 @@ def _should_apply_solo_rate(
     return all(s.public_player_id in persistence.agent_builds for s in state.seats)
 
 
+async def _should_apply_human_ratings(
+    session: AsyncSession,
+    persistence: GamePersistence,
+    ranked: bool,
+    state: GameState,
+) -> bool:
+    if not ranked or persistence.league_id is None:
+        return False
+    if state.terminal_result not in ("TOWN", "MAFIA", "DRAW"):
+        return False
+    league = await leagues_repo.get(session, persistence.league_id)
+    if league is None:
+        return False
+    return league.kind == LeagueKind.HUMANS_INCLUDED.value and league.ranked is True
+
+
 def _should_apply_placement(
     persistence: GamePersistence,
     ranked: bool,
@@ -460,6 +488,7 @@ async def _persist_terminated_event(
     """Persist the ``GameTerminated`` row, game-row finalize, and ratings."""
     apply_ratings = _should_apply_ratings(persistence, ranked, state)
     apply_solo_rate = _should_apply_solo_rate(persistence, ranked, state)
+    apply_human_ratings = False
     placement_result: PlacementGameResult | None = None
     terminal_result_payload: dict[str, Any] = {
         "winner": state.terminal_result,
@@ -468,12 +497,13 @@ async def _persist_terminated_event(
     }
     async with persistence.session_factory() as session, session.begin():
         game = await games_repo.get(session, persistence.game_id)
-        if game is not None and game.status == STATUS_COMPLETED:
+        if game is not None and game.status == GAME_STATUS_COMPLETED:
             _logger.info(
                 "Game already terminated and completed; skipping rating application and status updates.",
                 game_id=str(persistence.game_id),
             )
             return
+        apply_human_ratings = await _should_apply_human_ratings(session, persistence, ranked, state)
         apply_placement = _should_apply_placement(persistence, ranked, state, game)
         if apply_placement:
             placement_result = _placement_result_for(state, persistence.game_id)
@@ -482,7 +512,7 @@ async def _persist_terminated_event(
         await games_repo.update_status(
             session,
             persistence.game_id,
-            status=STATUS_COMPLETED,
+            status=GAME_STATUS_COMPLETED,
             terminal_result=terminal_result_payload,
             current_phase=stored.body["phase"],
             event_hash_head=stored.event_hash,
@@ -523,6 +553,25 @@ async def _persist_terminated_event(
                     winner=winner,
                     seats=rated_seat_count,
                 )
+        if apply_human_ratings:
+            assert persistence.league_id is not None
+            human_winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
+            human_events = await update_human_ratings_for_game(
+                session,
+                league_id=persistence.league_id,
+                ranked=ranked,
+                game_result=HumanGameResult(
+                    game_id=persistence.game_id,
+                    winner=human_winner,
+                ),
+            )
+            if human_events:
+                _logger.info(
+                    "human.rating.updated",
+                    league_id=str(persistence.league_id),
+                    winner=human_winner,
+                    seats=len(human_events),
+                )
         if apply_solo_rate:
             solo_result = _solo_rate_result_for(state, persistence.game_id)
             if solo_result is not None:
@@ -547,6 +596,31 @@ def _parsed_response_to_json(result: AdapterResult) -> dict[str, Any] | None:
     if isinstance(parsed, ResponseError):
         return parsed.model_dump(mode="json")
     return None
+
+
+_UNBILLED_RESULT_STATUSES: Final[frozenset[str]] = frozenset(
+    {"provider_error", "primary_failed", "both_failed", "exhausted"}
+)
+
+
+def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float | None:
+    if result.cost_usd is None:
+        if result.status in _UNBILLED_RESULT_STATUSES:
+            return None
+        if (
+            result.raw_response == ""
+            and result.input_tokens is None
+            and result.output_tokens is None
+        ):
+            return None
+    settings = persistence.settings or get_settings()
+    return price_turn_usd(
+        settings,
+        response_cost=result.cost_usd,
+        model=result.model_id or "default",
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+    )
 
 
 async def _persist_llm_call(
@@ -574,7 +648,7 @@ async def _persist_llm_call(
             latency_ms=result.latency_ms,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
-            cost_usd=result.cost_usd,
+            cost_usd=_priced_cost_usd(persistence, result),
             provider_response_id=result.provider_response_id,
         )
 

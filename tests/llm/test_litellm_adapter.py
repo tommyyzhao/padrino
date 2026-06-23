@@ -172,6 +172,7 @@ def test_success_returns_ok_status() -> None:
     assert result.input_tokens == 100
     assert result.output_tokens == 30
     assert result.cost_usd == 0.0001
+    assert result.model_id == "cerebras/zai-glm-4.7"
     assert result.provider_response_id == "resp-1"
     assert result.error is None
 
@@ -227,6 +228,7 @@ def test_primary_failure_falls_back_to_secondary() -> None:
     assert result.provider_response_id == "resp-fallback"
     assert result.input_tokens == 80
     assert result.cost_usd == 0.00005
+    assert result.model_id == "deepinfra/deepseek-ai/DeepSeek-V4-Flash"
     assert len(adapter.last_attempts) == 2
     assert adapter.last_attempts[0].status == "primary_failed"
     assert adapter.last_attempts[0].error is not None
@@ -414,6 +416,7 @@ def test_missing_usage_metadata_yields_none_token_counts() -> None:
     assert result.input_tokens is None
     assert result.output_tokens is None
     assert result.cost_usd is None
+    assert result.model_id == "cerebras/zai-glm-4.7"
 
 
 def test_constructor_resolves_auth_secret_once(monkeypatch: pytest.MonkeyPatch) -> None:

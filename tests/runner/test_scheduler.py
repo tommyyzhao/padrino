@@ -12,13 +12,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import uuid
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import LogCapture
 
 from padrino.core.rulesets import mini7_v1
+from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED
+from padrino.db.models import Rating, RatingEvent
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -49,7 +56,9 @@ from padrino.runner.game_runner import GameConfig, GamePersistence
 from padrino.runner.scheduler import (
     SchedulerOptions,
     run_scheduler,
+    scheduler_options_from_settings,
 )
+from padrino.settings import Settings
 
 
 async def _seed_gauntlet(
@@ -166,6 +175,50 @@ class _FakeExecutor:
                 self.in_flight -= 1
 
 
+class _FailingExecutor(_FakeExecutor):
+    """Fake executor that fails exactly one selected child game."""
+
+    def __init__(self, *, failing_game_id: uuid.UUID) -> None:
+        super().__init__()
+        self.failing_game_id = failing_game_id
+
+    async def __call__(
+        self,
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        if persistence.game_id == self.failing_game_id:
+            self.calls.append((config, persistence, ranked))
+            raise RuntimeError("injected child-game failure")
+        await super().__call__(config, persistence, adapter, ranked)
+
+
+class _FlakyExecutor(_FakeExecutor):
+    """Fake executor that fails a selected game a fixed number of times."""
+
+    def __init__(self, *, failing_game_id: uuid.UUID, failures_before_success: int) -> None:
+        super().__init__()
+        self.failing_game_id = failing_game_id
+        self.failures_before_success = failures_before_success
+        self.attempts_by_game: dict[uuid.UUID, int] = {}
+
+    async def __call__(
+        self,
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        attempt = self.attempts_by_game.get(persistence.game_id, 0) + 1
+        self.attempts_by_game[persistence.game_id] = attempt
+        if persistence.game_id == self.failing_game_id and attempt <= self.failures_before_success:
+            self.calls.append((config, persistence, ranked))
+            raise RuntimeError(f"injected child-game failure attempt {attempt}")
+        await super().__call__(config, persistence, adapter, ranked)
+
+
 def _adapter_factory_noop() -> LlmAdapter:
     return NoopMockAdapter()
 
@@ -262,6 +315,210 @@ async def test_pending_gauntlet_runs_and_finalizes_to_completed(
     assert g.status == "COMPLETED"
     assert g.completed_at is not None
     assert g.heartbeat_at is None
+
+
+async def test_child_game_failure_isolated_and_logged(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="partial",
+        clone_count=3,
+    )
+    failing_game_id = game_ids[1]
+    executor = _FailingExecutor(failing_game_id=failing_game_id)
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=1,
+    )
+    capture = LogCapture()
+    original_config = structlog.get_config()
+    structlog.reset_defaults()
+    structlog.configure(processors=[capture], cache_logger_on_first_use=False)
+
+    try:
+        await _drive_scheduler_until(
+            session_factory,
+            gauntlet_id,
+            "COMPLETED",
+            stop=stop,
+            run=run_scheduler(
+                session_factory,
+                concurrency=3,
+                stop_event=stop,
+                adapter_factory=_adapter_factory_noop,
+                game_executor=executor,
+                options=options,
+            ),
+        )
+    finally:
+        structlog.reset_defaults()
+        structlog.configure(**original_config)
+
+    assert {call[1].game_id for call in executor.calls} == set(game_ids)
+    async with session_factory() as session:
+        games = await games_repo.list_by_gauntlet(session, gauntlet_id)
+    statuses = {game.id: game.status for game in games}
+    assert statuses[failing_game_id] == GAME_STATUS_FAILED
+    assert statuses[game_ids[0]] == GAME_STATUS_COMPLETED
+    assert statuses[game_ids[2]] == GAME_STATUS_COMPLETED
+
+    failure_events = [
+        entry for entry in capture.entries if entry["event"] == "scheduler.game.failed"
+    ]
+    assert len(failure_events) == 1
+    assert failure_events[0]["gauntlet_id"] == str(gauntlet_id)
+    assert failure_events[0]["game_id"] == str(failing_game_id)
+    assert failure_events[0]["error_type"] == "RuntimeError"
+    assert failure_events[0]["attempts"] == 1
+
+
+async def test_child_game_retry_succeeds_before_marking_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="retry-success",
+        clone_count=1,
+    )
+    game_id = game_ids[0]
+    executor = _FlakyExecutor(failing_game_id=game_id, failures_before_success=1)
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=2,
+    )
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+
+    assert game is not None
+    assert game.status == GAME_STATUS_COMPLETED
+    assert executor.attempts_by_game[game_id] == 2
+
+
+async def test_child_game_exhausts_bounded_attempts_and_writes_no_ratings(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="retry-exhaust",
+        clone_count=1,
+    )
+    game_id = game_ids[0]
+    executor = _FlakyExecutor(failing_game_id=game_id, failures_before_success=99)
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=3,
+    )
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+        rating_rows = list((await session.execute(select(Rating))).scalars())
+        rating_event_rows = list((await session.execute(select(RatingEvent))).scalars())
+
+    assert game is not None
+    assert game.status == GAME_STATUS_FAILED
+    assert game.terminal_result is None
+    assert game.completed_at is not None
+    assert executor.attempts_by_game[game_id] == 3
+    assert rating_rows == []
+    assert rating_event_rows == []
+
+
+async def test_failed_game_is_not_reselected_by_scheduler(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="skip-failed",
+        clone_count=2,
+    )
+    failed_game_id, runnable_game_id = game_ids
+    async with session_factory() as session, session.begin():
+        await games_repo.update_status(
+            session,
+            failed_game_id,
+            status=GAME_STATUS_FAILED,
+            completed_at=datetime.now(UTC),
+        )
+    executor = _FakeExecutor()
+    stop = asyncio.Event()
+    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=2,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
+    )
+
+    assert [call[1].game_id for call in executor.calls] == [runnable_game_id]
+
+
+def test_scheduler_retry_options_are_settings_driven() -> None:
+    settings = Settings(padrino_scheduler_game_max_attempts=5)
+
+    options = scheduler_options_from_settings(settings)
+
+    assert options.game_max_attempts == 5
+
+
+def test_failed_game_status_literal_is_only_hardcoded_in_shared_status_module() -> None:
+    root = Path("src/padrino")
+    hits: list[tuple[str, int]] = []
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"[\"']FAILED[\"']", text):
+            hits.append((path.as_posix(), text.count("\n", 0, match.start()) + 1))
+
+    assert {path for path, _line in hits} == {"src/padrino/db/game_status.py"}
 
 
 async def test_concurrency_cap_honored_via_injected_semaphore(

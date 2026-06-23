@@ -9,8 +9,8 @@ completes and recomputes the aggregate for every human principal seated in it.
 Segregation (hard rule 8): stats are materialized ONLY from human-lane games — a
 game with at least one seat a human occupied (``seat_kind`` in
 ``{HUMAN, AI_TAKEOVER}``).  A scientific-league (AI-only) game contributes ZERO
-rows.  There is NO leaderboard or ELO in v1; the dormant ``human_rating`` table
-stays empty.
+rows.  ELO is handled by the separate ranked human ELO writer; this module only
+materializes deterministic play-history counts.
 
 Per-game stats come from the pure
 :func:`padrino.analytics.deterministic.compute_participant_stats`; this module is

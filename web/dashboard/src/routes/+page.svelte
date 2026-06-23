@@ -2,13 +2,12 @@
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
+  import { canonicalTeamRulesets } from '$lib/rulesets';
   import type {
     PublicLadderEntry,
     PublicLiveGameEntry,
     PublicRecentGameEntry
   } from '$lib/api/types';
-
-  const RULESET = 'mini7_v1';
 
   // KPIs are sourced exclusively from the public spectator surface so the home
   // page works against a public-surface-only API (no private /games, /gauntlets).
@@ -23,10 +22,10 @@
     // Three public surfaces feed both the KPIs and the lobby sections.
     // Run them concurrently; each degrades independently on failure so a single
     // unavailable surface never blocks the page or shows a hard error.
-    const [liveResult, recentResult, ladderResult] = await Promise.allSettled([
+    const [liveResult, recentResult, rulesetsResult] = await Promise.allSettled([
       padrino.client.publicLiveIndex(),
       padrino.client.publicRecentIndex({ limit: 10 }),
-      padrino.client.publicLadder({ ruleset_id: RULESET, limit: 3 })
+      padrino.client.publicRulesets()
     ]);
 
     if (liveResult.status === 'fulfilled') {
@@ -39,8 +38,19 @@
       recentCount = recentResult.value.total_estimate;
     }
 
-    if (ladderResult.status === 'fulfilled') {
-      topAgents = ladderResult.value.entries.slice(0, 3);
+    if (rulesetsResult.status === 'fulfilled') {
+      const firstCanonical = canonicalTeamRulesets(rulesetsResult.value.items)[0];
+      if (firstCanonical) {
+        try {
+          const ladder = await padrino.client.publicLadder({
+            ruleset_id: firstCanonical.ruleset_id,
+            limit: 3
+          });
+          topAgents = ladder.entries.slice(0, 3);
+        } catch {
+          topAgents = [];
+        }
+      }
     }
   }
 
@@ -69,7 +79,16 @@
 </div>
 
 <section class="mt-8" data-testid="home-top-agents">
-  <h2 class="mb-3 text-lg font-semibold">Top 3 agents</h2>
+  <div class="mb-3 flex items-center justify-between gap-3">
+    <h2 class="text-lg font-semibold">Top 3 agents</h2>
+    <a
+      href="/leaderboard"
+      class="text-sm underline-offset-2 hover:underline"
+      data-testid="home-leaderboard-link"
+    >
+      Leaderboard
+    </a>
+  </div>
   {#if topAgents.length === 0}
     <p class="text-sm text-muted-foreground" data-testid="home-top-agents-empty">
       No ranked results yet.

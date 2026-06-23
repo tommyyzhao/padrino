@@ -25,13 +25,19 @@ import contextlib
 import uuid
 from collections.abc import Callable
 
+import pytest
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import LogCapture
 
+import padrino.runner.human_lane as human_lane_module
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import SeatKind
 from padrino.core.rulesets import mini7_v1
+from padrino.db.game_status import GAME_STATUS_FAILED
 from padrino.db.models import Game, GameSeat, LlmCall
+from padrino.db.repositories import scheduler_heartbeats as worker_heartbeats_repo
 from padrino.runner.game_runner import GameConfig, GamePersistence
 from padrino.runner.human_lane import (
     HumanLaneAdmission,
@@ -110,6 +116,23 @@ async def _drain_until(predicate: Callable[[], bool], *, timeout_s: float = 5.0)
     raise AssertionError("predicate never became true within the budget")
 
 
+async def _drain_until_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    game_id: uuid.UUID,
+    expected: str,
+    *,
+    timeout_s: float = 5.0,
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        async with session_factory() as session:
+            game = await session.get(Game, game_id)
+            if game is not None and game.status == expected:
+                return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"game {game_id} never reached status {expected!r}")
+
+
 async def test_human_lane_claims_only_human_games(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -150,6 +173,53 @@ async def test_human_lane_runs_game_and_excludes_ai_only(
 
     assert human_id in ran
     assert ai_id not in ran
+
+
+async def test_crashed_human_game_is_marked_failed_and_not_reselected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id = await _seed_game(session_factory, status="PENDING", human=True)
+    calls = 0
+
+    async def _executor(config: GameConfig, persistence: GamePersistence, adapter: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("human tick exploded")
+
+    capture = LogCapture()
+    original_config = structlog.get_config()
+    structlog.configure(processors=[capture], cache_logger_on_first_use=False)
+    stop = asyncio.Event()
+    lane = asyncio.create_task(
+        run_human_lane(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            game_executor=_executor,
+            poll_interval_s=0.01,
+        )
+    )
+    try:
+        await _drain_until(lambda: calls == 1)
+        await _drain_until_status(session_factory, game_id, GAME_STATUS_FAILED)
+        await asyncio.sleep(0.05)
+    finally:
+        stop.set()
+        await lane
+        structlog.reset_defaults()
+        structlog.configure(**original_config)
+
+    assert calls == 1
+    async with session_factory() as session:
+        claimable = await list_human_lane_games(session)
+    assert game_id not in claimable
+
+    failure_events = [
+        entry for entry in capture.entries if entry["event"] == "human_lane.game.failed"
+    ]
+    assert len(failure_events) == 1
+    assert failure_events[0]["game_id"] == str(game_id)
+    assert failure_events[0]["error_type"] == "RuntimeError"
 
 
 async def test_human_lane_honors_its_own_concurrency_cap(
@@ -283,6 +353,92 @@ async def test_run_human_lane_rejects_bad_concurrency(
             assert "concurrency" in str(exc)
         else:  # pragma: no cover - defensive
             raise AssertionError("expected ValueError for concurrency=0")
+
+
+async def test_human_lane_worker_heartbeat_is_written_each_tick(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    stop = asyncio.Event()
+
+    async def _signal() -> None:
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    setter = asyncio.create_task(_signal())
+    await asyncio.wait_for(
+        run_human_lane(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            poll_interval_s=0.01,
+            worker_id="test-worker:42",
+        ),
+        timeout=2.0,
+    )
+    await setter
+
+    async with session_factory() as session:
+        beats = await worker_heartbeats_repo.list_(session)
+    assert len(beats) == 1
+    assert beats[0].worker_id == "human-lane:test-worker:42"
+    assert beats[0].beat_at.tzinfo is not None
+
+
+async def test_heartbeat_failure_does_not_crash_human_lane_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    calls = 0
+    continued = asyncio.Event()
+
+    async def _flaky_heartbeat(
+        session_factory_arg: async_sessionmaker[AsyncSession],
+        *,
+        worker_id: str,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("heartbeat store unavailable")
+        continued.set()
+
+    monkeypatch.setattr(human_lane_module, "_write_worker_heartbeat", _flaky_heartbeat)
+
+    capture = LogCapture()
+    original_config = structlog.get_config()
+    structlog.configure(processors=[capture], cache_logger_on_first_use=False)
+    stop = asyncio.Event()
+
+    async def _stop_after_continue() -> None:
+        await continued.wait()
+        stop.set()
+
+    stopper = asyncio.create_task(_stop_after_continue())
+    try:
+        await asyncio.wait_for(
+            run_human_lane(
+                session_factory,
+                concurrency=1,
+                stop_event=stop,
+                poll_interval_s=0.01,
+                worker_id="test-worker:heartbeat-failure",
+            ),
+            timeout=2.0,
+        )
+    finally:
+        stop.set()
+        stopper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stopper
+        structlog.reset_defaults()
+        structlog.configure(**original_config)
+
+    assert calls >= 2
+    heartbeat_failures = [
+        entry for entry in capture.entries if entry["event"] == "human_lane.worker.heartbeat_failed"
+    ]
+    assert len(heartbeat_failures) == 1
+    assert heartbeat_failures[0]["worker_id"] == "test-worker:heartbeat-failure"
 
 
 def _breaker_settings(threshold: float) -> Settings:

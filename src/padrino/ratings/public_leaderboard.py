@@ -12,8 +12,9 @@ per process and intentionally simple: a single dict keyed by
 ``(ruleset_id, gauntlet_id, cache_tag)``.
 
 US-186 adds per-context cards from the persisted rating tables. Those cards are
-sectioned into canonical vs. experimental arrays and ranked only within their
-exact context/ruleset/scope group, never across rating-context kinds.
+sectioned into canonical, faction, and experimental arrays and ranked only
+within their exact context/ruleset/scope group, never across rating-context
+kinds.
 """
 
 from __future__ import annotations
@@ -32,11 +33,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.core.enums import LeagueKind, RatingContextKind
 from padrino.db.models import (
     AgentBuild,
+    HumanRating,
     IngestedGame,
     League,
     ModelConfig,
     ModelProvider,
     PlacementRating,
+    Principal,
     PromptVersion,
     Rating,
     RatingContext,
@@ -45,6 +48,7 @@ from padrino.db.models import (
 from padrino.ratings.openskill_service import (
     INITIAL_MU,
     INITIAL_SIGMA,
+    SCOPE_FACTION,
     SCOPE_GLOBAL,
     SCOPE_VALUE_GLOBAL,
 )
@@ -59,6 +63,11 @@ RATING_MODEL: Final[str] = "openskill_plackett_luce_v1"
 _TOWN: Final[Literal["TOWN"]] = "TOWN"
 _MAFIA: Final[Literal["MAFIA"]] = "MAFIA"
 _DRAW: Final[Literal["DRAW"]] = "DRAW"
+_HUMANS_INCLUDED_CONTEXT_KIND: Final[str] = "HUMANS_INCLUDED"
+_HUMANS_INCLUDED_SECTION_LABEL: Final[str] = "Humans-Included League"
+_HUMAN_MODEL_PROVIDER: Final[str] = "human"
+_HUMAN_MODEL_NAME: Final[str] = "human_player"
+_HUMAN_PROMPT_VERSION: Final[str] = "humans-included"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +108,7 @@ class PublicRatingCard:
     """
 
     card_id: str
-    section: Literal["canonical", "experimental"]
+    section: Literal["canonical", "experimental", "humans_included"]
     section_label: str
     context_kind: str
     context_label: str
@@ -133,7 +142,9 @@ class PublicLeaderboard:
     cache_tag: str
     entries: tuple[PublicLeaderboardEntry, ...]
     canonical_cards: tuple[PublicRatingCard, ...]
+    faction_cards: tuple[PublicRatingCard, ...]
     experimental_cards: tuple[PublicRatingCard, ...]
+    human_cards: tuple[PublicRatingCard, ...]
 
 
 def _conservative(mu: float, sigma: float) -> float:
@@ -237,9 +248,10 @@ async def compute_public_leaderboard(
     canonical_tag = await _rating_cache_part(session, Rating, ruleset_id=ruleset_id)
     placement_tag = await _rating_cache_part(session, PlacementRating, ruleset_id=ruleset_id)
     solo_tag = await _rating_cache_part(session, SoloRateRating, ruleset_id=ruleset_id)
+    human_tag = await _human_rating_cache_part(session, ruleset_id=ruleset_id)
     cache_tag = (
         f"ingested:{ingested_tag};canonical:{canonical_tag};"
-        f"placement:{placement_tag};solo:{solo_tag}"
+        f"placement:{placement_tag};solo:{solo_tag};human:{human_tag}"
     )
     cache_key: tuple[str | None, str | None, str] = (ruleset_id, gauntlet_id, cache_tag)
     cached = _CACHE.get(cache_key)
@@ -267,11 +279,21 @@ async def compute_public_leaderboard(
         ruleset_id=ruleset_id,
         min_games=provisional_games_threshold,
     )
+    faction_cards = await _faction_cards(
+        session,
+        ruleset_id=ruleset_id,
+        min_games=provisional_games_threshold,
+    )
     experimental_cards = await _experimental_cards(
         session,
         ruleset_id=ruleset_id,
         min_games=provisional_games_threshold,
         min_attempts=solo_rate_min_attempts,
+    )
+    human_cards = await _human_cards(
+        session,
+        ruleset_id=ruleset_id,
+        min_games=provisional_games_threshold,
     )
 
     leaderboard = PublicLeaderboard(
@@ -281,7 +303,9 @@ async def compute_public_leaderboard(
         cache_tag=cache_tag,
         entries=entries,
         canonical_cards=canonical_cards,
+        faction_cards=faction_cards,
         experimental_cards=experimental_cards,
+        human_cards=human_cards,
     )
     _CACHE[cache_key] = leaderboard
     return leaderboard
@@ -317,6 +341,26 @@ async def _rating_cache_part(
     )
     if ruleset_id is not None:
         stmt = stmt.where(RatingContext.ruleset_id == ruleset_id)
+    max_dt, count = (await session.execute(stmt)).one()
+    return _cache_part(max_dt, int(count))
+
+
+async def _human_rating_cache_part(
+    session: AsyncSession,
+    *,
+    ruleset_id: str | None,
+) -> str:
+    stmt = (
+        select(func.max(HumanRating.updated_at), func.count(HumanRating.id))
+        .select_from(HumanRating)
+        .join(League, League.id == HumanRating.league_id)
+        .where(
+            League.kind == LeagueKind.HUMANS_INCLUDED.value,
+            League.ranked.is_(True),
+        )
+    )
+    if ruleset_id is not None:
+        stmt = stmt.where(League.ruleset_id == ruleset_id)
     max_dt, count = (await session.execute(stmt)).one()
     return _cache_part(max_dt, int(count))
 
@@ -378,7 +422,9 @@ def _aggregate(
         cache_tag="legacy",
         entries=tuple(entries),
         canonical_cards=(),
+        faction_cards=(),
         experimental_cards=(),
+        human_cards=(),
     )
 
 
@@ -422,6 +468,46 @@ async def _agent_entities(
             prompt_version=str(prompt_version),
         )
     return entities
+
+
+def _human_entity(human_player_id: str, display_name: str | None) -> PublicEntity:
+    digest = hashlib.sha256(f"human|{human_player_id}".encode()).hexdigest()
+    stripped = display_name.strip() if display_name is not None else ""
+    safe_display_name = stripped or f"Human {digest[:8]}"
+    return PublicEntity(
+        entity_id=digest[:32],
+        display_name=safe_display_name,
+        model_provider=_HUMAN_MODEL_PROVIDER,
+        model_name=_HUMAN_MODEL_NAME,
+        model_version=None,
+        prompt_version=_HUMAN_PROMPT_VERSION,
+    )
+
+
+async def _human_entities(
+    session: AsyncSession,
+    human_player_ids: Iterable[str],
+) -> dict[str, PublicEntity]:
+    ids = list(dict.fromkeys(human_player_ids))
+    if not ids:
+        return {}
+
+    uuid_to_raw: dict[uuid.UUID, str] = {}
+    for raw in ids:
+        try:
+            uuid_to_raw[uuid.UUID(raw)] = raw
+        except ValueError:
+            continue
+
+    display_names: dict[str, str | None] = {}
+    if uuid_to_raw:
+        stmt = select(Principal.id, Principal.display_name).where(
+            Principal.id.in_(list(uuid_to_raw))
+        )
+        for principal_id, display_name in (await session.execute(stmt)).all():
+            display_names[uuid_to_raw[principal_id]] = display_name
+
+    return {raw: _human_entity(raw, display_names.get(raw)) for raw in ids}
 
 
 def _card_id(
@@ -487,6 +573,55 @@ def _openskill_card(
         rank=None,
         provisional=provisional,
         provisional_reason=_provisional_reason(context.kind, games, min_games),
+        sample_count=games,
+        games=games,
+        attempts=None,
+        successes=None,
+        mu=mu,
+        sigma=sigma,
+        conservative_score=conservative_score,
+        mean_success_rate=None,
+        credible_interval_low=None,
+        credible_interval_high=None,
+    )
+
+
+def _human_openskill_card(
+    *,
+    ruleset_id: str,
+    entity: PublicEntity,
+    scope_type: str,
+    scope_value: str,
+    mu: float,
+    sigma: float,
+    conservative_score: float,
+    games: int,
+    min_games: int,
+) -> PublicRatingCard:
+    provisional = games < min_games
+    return PublicRatingCard(
+        card_id=_card_id(
+            section="humans_included",
+            context_kind=_HUMANS_INCLUDED_CONTEXT_KIND,
+            ruleset_id=ruleset_id,
+            scope_type=scope_type,
+            scope_value=scope_value,
+            entity_id=entity.entity_id,
+        ),
+        section="humans_included",
+        section_label=_HUMANS_INCLUDED_SECTION_LABEL,
+        context_kind=_HUMANS_INCLUDED_CONTEXT_KIND,
+        context_label=f"Humans-Included {ruleset_id} ranked",
+        ruleset_id=ruleset_id,
+        entity=entity,
+        scope_type=scope_type,
+        scope_value=scope_value,
+        metric="openskill_conservative",
+        metric_label="Human ELO",
+        score=conservative_score,
+        rank=None,
+        provisional=provisional,
+        provisional_reason=_provisional_reason(_HUMANS_INCLUDED_CONTEXT_KIND, games, min_games),
         sample_count=games,
         games=games,
         attempts=None,
@@ -635,6 +770,51 @@ async def _canonical_cards(
     return _rank_cards(cards)
 
 
+async def _faction_cards(
+    session: AsyncSession,
+    *,
+    ruleset_id: str | None,
+    min_games: int,
+) -> tuple[PublicRatingCard, ...]:
+    stmt = (
+        select(Rating, RatingContext)
+        .join(RatingContext, RatingContext.id == Rating.rating_context_id)
+        .join(League, League.id == Rating.league_id)
+        .where(
+            League.kind == LeagueKind.SCIENTIFIC.value,
+            RatingContext.kind == RatingContextKind.CANONICAL_TEAM.value,
+            RatingContext.is_canonical.is_(True),
+            Rating.ruleset_id == RatingContext.ruleset_id,
+            Rating.scope_type == SCOPE_FACTION,
+        )
+    )
+    if ruleset_id is not None:
+        stmt = stmt.where(RatingContext.ruleset_id == ruleset_id)
+    rows = list((await session.execute(stmt)).all())
+    entities = await _agent_entities(session, (row.agent_build_id for row, _context in rows))
+    cards: list[PublicRatingCard] = []
+    for row, context in rows:
+        entity = entities.get(row.agent_build_id)
+        if entity is None:
+            continue
+        cards.append(
+            _openskill_card(
+                section="canonical",
+                section_label="Ranked canonical",
+                context=context,
+                entity=entity,
+                scope_type=row.scope_type,
+                scope_value=row.scope_value,
+                mu=row.mu,
+                sigma=row.sigma,
+                conservative_score=row.conservative_score,
+                games=row.games,
+                min_games=min_games,
+            )
+        )
+    return _rank_cards(cards)
+
+
 async def _experimental_cards(
     session: AsyncSession,
     *,
@@ -645,6 +825,47 @@ async def _experimental_cards(
     placement_cards = await _placement_cards(session, ruleset_id=ruleset_id, min_games=min_games)
     solo_cards = await _solo_cards(session, ruleset_id=ruleset_id, min_attempts=min_attempts)
     return _rank_cards((*placement_cards, *solo_cards))
+
+
+async def _human_cards(
+    session: AsyncSession,
+    *,
+    ruleset_id: str | None,
+    min_games: int,
+) -> tuple[PublicRatingCard, ...]:
+    stmt = (
+        select(HumanRating, League)
+        .join(League, League.id == HumanRating.league_id)
+        .where(
+            League.kind == LeagueKind.HUMANS_INCLUDED.value,
+            League.ranked.is_(True),
+            HumanRating.scope_type == SCOPE_GLOBAL,
+            HumanRating.scope_value == SCOPE_VALUE_GLOBAL,
+        )
+    )
+    if ruleset_id is not None:
+        stmt = stmt.where(League.ruleset_id == ruleset_id)
+    rows = list((await session.execute(stmt)).all())
+    entities = await _human_entities(session, (row.human_player_id for row, _league in rows))
+    cards: list[PublicRatingCard] = []
+    for row, league in rows:
+        entity = entities.get(row.human_player_id)
+        if entity is None:
+            continue
+        cards.append(
+            _human_openskill_card(
+                ruleset_id=league.ruleset_id,
+                entity=entity,
+                scope_type=row.scope_type,
+                scope_value=row.scope_value,
+                mu=row.mu,
+                sigma=row.sigma,
+                conservative_score=row.conservative_score,
+                games=row.games,
+                min_games=min_games,
+            )
+        )
+    return _rank_cards(cards)
 
 
 async def _placement_cards(

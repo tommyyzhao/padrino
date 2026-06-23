@@ -1,7 +1,7 @@
 """Private friend lobby create/configure routes (US-147).
 
 A host creates a private lobby and configures the human-multiplayer game it will
-launch: the ruleset/size (``mini7_v1`` / ``bench10_v1``), the per-game
+launch: the ruleset/size, the per-game
 ``identity_mode`` (default ANONYMOUS), a static ``theme_pack_id``, the bot
 pre-pick (a list of human-eligible model ``agent_build`` ids) vs curated
 auto-fill, and stakes pinned ``CASUAL``. ``GET /lobbies/{id}`` returns a
@@ -18,7 +18,6 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -41,7 +40,7 @@ from padrino.api.lobby_presence import (
 from padrino.api.lobby_state import stream_lobby_state
 from padrino.core.composition import CompositionSummary, composition_summary
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStakes, LobbyStatus
-from padrino.core.rulesets import get_ruleset
+from padrino.core.rulesets import Ruleset, get_ruleset
 from padrino.db.models import Lobby
 from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
@@ -109,7 +108,7 @@ class LobbyCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    ruleset_id: Literal["mini7_v1", "bench10_v1"]
+    ruleset_id: str = Field(min_length=1)
     identity_mode: IdentityMode = IdentityMode.ANONYMOUS
     theme_pack_id: str | None = Field(default=None, max_length=64)
     #: Pre-picked human-eligible model agent_build ids assigned to AI seats, in
@@ -117,6 +116,12 @@ class LobbyCreate(BaseModel):
     #: deterministic auto-fill at launch (US-149). Length must not exceed the AI
     #: seat count (player_count - 1, the host's own HUMAN seat).
     prepick_agent_build_ids: list[uuid.UUID] = Field(default_factory=list)
+    #: Opt in to the segregated Humans-Included ranked lane. Default remains
+    #: casual/unrated.
+    ranked: bool = False
+    #: Ranked integrity acknowledgement: out-of-band coaching is structurally
+    #: unpreventable, so ranked lobbies require an explicit host acknowledgement.
+    integrity_acknowledged: bool = False
 
 
 class LobbySummary(BaseModel):
@@ -127,6 +132,8 @@ class LobbySummary(BaseModel):
     identity_mode: str
     theme_pack_id: str | None
     stakes: str
+    ranked: bool
+    integrity_acknowledged: bool
     status: str
     invite_token: str
     host_principal_id: uuid.UUID
@@ -134,6 +141,16 @@ class LobbySummary(BaseModel):
     game_id: uuid.UUID | None
     member_count: int
     composition: CompositionSummary
+
+
+def _ruleset_or_422(ruleset_id: str) -> Ruleset:
+    try:
+        return get_ruleset(ruleset_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="unknown_ruleset",
+        ) from exc
 
 
 @router.post("/lobbies", response_model=LobbySummary, status_code=status.HTTP_201_CREATED)
@@ -145,18 +162,25 @@ async def create_lobby(
 ) -> LobbySummary:
     """Create a private friend lobby owned by the calling human.
 
-    The lobby is OPEN and CASUAL; the host occupies seat 0 (HUMAN). The remaining
-    seats are AI: the host's pre-picked human-eligible models fill them in order,
-    any beyond the pre-pick are left empty for curated auto-fill (US-149).
+    The lobby is OPEN and defaults casual; the host occupies seat 0 (HUMAN).
+    The remaining seats are AI: the host's pre-picked human-eligible models fill
+    them in order, any beyond the pre-pick are left empty for curated auto-fill
+    (US-149).
 
     Admission is enforced FIRST: the calling principal's per-user/day game cap,
     inference-$ cap, and the global cost breaker gate lobby creation (US-151). A
     denied decision is a 429 before any row is written.
     """
+    if body.ranked and not body.integrity_acknowledged:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="integrity_acknowledgement_required",
+        )
+
     admission = await _enforce_admission(
         request, session, principal_id=ctx.principal_id, action=ACTION_CREATE
     )
-    ruleset = get_ruleset(body.ruleset_id)
+    ruleset = _ruleset_or_422(body.ruleset_id)
     player_count: int = ruleset.PLAYER_COUNT
     ai_seat_count = player_count - 1
 
@@ -175,7 +199,9 @@ async def create_lobby(
             )
 
     now = datetime.now(UTC)
-    league = await leagues_repo.get_or_create_humans_included(session, ruleset_id=body.ruleset_id)
+    league = await leagues_repo.get_or_create_humans_included(
+        session, ruleset_id=body.ruleset_id, ranked=body.ranked
+    )
 
     lobby = await lobbies_repo.create_lobby(
         session,
@@ -184,6 +210,7 @@ async def create_lobby(
         theme_pack_id=body.theme_pack_id,
         lobby_seed=secrets.token_hex(16),
         invite_token=secrets.token_urlsafe(24),
+        integrity_acknowledged=body.integrity_acknowledged if body.ranked else False,
         host_principal_id=ctx.principal_id,
         league_id=league.id,
         now=now,
@@ -641,6 +668,7 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
     assert lobby is not None  # callers resolve the lobby first
     members = await lobbies_repo.list_members(session, lobby_id)
     seats = await lobbies_repo.list_seats(session, lobby_id)
+    league = await leagues_repo.get(session, lobby.league_id)
     composition = composition_summary(
         # A lobby HUMAN seat maps to a game-time HUMAN; an AI seat maps to AI.
         # Counts only — the per-seat layout is never exposed.
@@ -653,6 +681,8 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
         identity_mode=lobby.identity_mode,
         theme_pack_id=lobby.theme_pack_id,
         stakes=LobbyStakes(lobby.stakes).value,
+        ranked=league.ranked if league is not None else False,
+        integrity_acknowledged=lobby.integrity_acknowledged,
         status=lobby.status,
         invite_token=lobby.invite_token,
         host_principal_id=lobby.host_principal_id,

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.hashing import GENESIS_HASH, compute_event_hash
 from padrino.core.rulesets import mini7_v1
+from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED
 from padrino.db.models import (
     BehavioralEvaluation,
     JudgeEnrichmentCard,
@@ -112,6 +113,7 @@ async def _seed_completed_game(
     roster: list[uuid.UUID],
     *,
     seed: str = "test-seed",
+    status: str = GAME_STATUS_COMPLETED,
 ) -> uuid.UUID:
     """Create a completed game with 7 seated agents and a minimal event log."""
     game = await games_repo.create(session, ruleset_id=mini7_v1.RULESET_ID, game_seed=seed)
@@ -175,7 +177,7 @@ async def _seed_completed_game(
     await games_repo.update_status(
         session,
         game.id,
-        status="COMPLETED",
+        status=status,
         terminal_result={"winner": "MAFIA", "reason": "mafia_outnumber_town", "day_terminated": 2},
     )
     return game.id
@@ -288,6 +290,28 @@ async def test_no_eligible_games_returns_zero(
         session_factory, settings=settings, judge_adapter=MockJudgeAdapter()
     )
     assert n == 0
+
+
+async def test_failed_games_are_not_sampled_for_judge_enrichment(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        _pv_id, roster = await _seed_world(session)
+        await _seed_completed_game(
+            session,
+            roster,
+            seed="failed-sampling-seed",
+            status=GAME_STATUS_FAILED,
+        )
+
+    adapter = MockJudgeAdapter()
+    settings = Settings(padrino_judge_sample_rate=1.0, padrino_judge_max_games_per_run=10)
+    n = await run_sampled_judge_enrichment(
+        session_factory, settings=settings, judge_adapter=adapter
+    )
+
+    assert n == 0
+    assert adapter.calls == []
 
 
 async def test_enrichment_cards_aggregated_with_correct_averages(

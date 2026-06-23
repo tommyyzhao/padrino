@@ -264,13 +264,15 @@ class Settings(BaseSettings):
     # lobbies/joins/launches, and a per-lobby cost cap + circuit breaker throttle
     # NEW lobbies / new LLM turns on breach while LETTING ACTIVE GAMES FINISH
     # (the "AI-only continuation boots humans" anti-pattern is rejected).
-    # Concrete numbers are conservative pending a PREP-v9 sign-off; override via
-    # the matching PADRINO_* env vars.
-    padrino_human_max_games_per_user_per_day: int = 10
-    padrino_human_max_joins_per_user_per_day: int = 30
-    padrino_human_max_inference_usd_per_user_per_day: float = 5.0
-    padrino_human_lobby_cost_cap_usd: float = 2.0
-    padrino_human_global_lobby_cost_breaker_usd: float = 50.0
+    # Defaults are sized for one private-lobby host in the $500-$2k/month
+    # single-host envelope from prd-v3: enough headroom for concurrent friend
+    # games without being an unbounded public-spend posture. Override via the
+    # matching PADRINO_* env vars.
+    padrino_human_max_games_per_user_per_day: int = 20
+    padrino_human_max_joins_per_user_per_day: int = 60
+    padrino_human_max_inference_usd_per_user_per_day: float = 25.0
+    padrino_human_lobby_cost_cap_usd: float = 12.0
+    padrino_human_global_lobby_cost_breaker_usd: float = 1000.0
     # US-190: the inference-$ cap and the global breaker are enforced atomically
     # by reserving discrete budget slots at admission (not a TOCTOU SELECT-sum).
     # This is the estimated USD a single admitted action may accrue; the daily
@@ -282,6 +284,12 @@ class Settings(BaseSettings):
     # carries no ``response_cost`` (None). Keyed by LiteLLM model string; the
     # ``default`` key is the catch-all when a model is not listed.
     padrino_human_fallback_token_price_per_1k: dict[str, tuple[float, float]] = {
+        "cerebras/zai-glm-4.7": (0.00225, 0.00275),
+        "openai/glm-4.7": (0.0006, 0.0022),
+        "deepinfra/deepseek-ai/DeepSeek-V4-Flash": (0.0001, 0.0002),
+        "deepinfra/google/gemma-4-26B-A4B-it": (0.00007, 0.00034),
+        "openai/mimo-v2.5": (0.00014, 0.00028),
+        "openai/mimo-v2.5-pro": (0.000435, 0.00087),
         "default": (0.0005, 0.0015),
     }
 
@@ -343,6 +351,10 @@ class Settings(BaseSettings):
     padrino_alert_webhook_timeout_s: float = 5.0
     padrino_scheduler_heartbeat_stale_seconds: float = 120.0
     padrino_admission_denied_streak_threshold: int = 5
+    # Benchmark scheduler child-game retry (US-241). This is deliberately
+    # single-host/in-process only: the scheduler retries an exception from the
+    # child executor this many total attempts before marking that game FAILED.
+    padrino_scheduler_game_max_attempts: int = 2
 
     def build_routing_policy(
         self,

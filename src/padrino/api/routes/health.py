@@ -1,9 +1,13 @@
-"""Scheduler readiness endpoint (US-060).
+"""Worker readiness endpoints (US-060, US-230).
 
 ``GET /healthz/scheduler`` surfaces the scheduler's last per-worker
 heartbeat, queue depth, and oldest pending age so operators can alert on a
 stuck worker without scraping logs. The existing ``/healthz`` route in
 :mod:`padrino.api.app` remains the cheap process-liveness probe.
+
+``GET /healthz/human-lane`` mirrors that pattern for the separate human-game
+worker lane: the worker writes a DB heartbeat and this API process reports lane
+liveness plus coarse queue counts.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.api.deps import get_session
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
+from padrino.runner.human_lane import list_human_lane_games
 
 router = APIRouter()
 
@@ -31,6 +36,26 @@ class SchedulerHealthResponse(BaseModel):
     pending_gauntlets: int
     running_gauntlets: int
     oldest_pending_age_s: float | None
+
+
+class HumanLaneHealthResponse(BaseModel):
+    status: str
+    last_heartbeat_at: datetime | None
+    waiting_games: int
+    running_games: int
+
+
+def _heartbeat_liveness_status(
+    *,
+    last_heartbeat_at: datetime | None,
+    now: datetime,
+) -> str:
+    if last_heartbeat_at is None:
+        return "down"
+    age_s = (now - last_heartbeat_at).total_seconds()
+    if age_s > HEARTBEAT_DOWN_THRESHOLD_S:
+        return "down"
+    return "ok"
 
 
 def _classify(
@@ -53,7 +78,7 @@ def _classify(
 async def healthz_scheduler(
     session: AsyncSession = Depends(get_session),
 ) -> SchedulerHealthResponse:
-    last_heartbeat_at = await scheduler_heartbeats_repo.latest_beat(session)
+    last_heartbeat_at = await scheduler_heartbeats_repo.latest_scheduler_beat(session)
     pending_count = await gauntlets_repo.count_by_status(session, "PENDING")
     running_count = await gauntlets_repo.count_by_status(session, "RUNNING")
     oldest_pending_created_at = await gauntlets_repo.oldest_pending_created_at(session)
@@ -78,9 +103,27 @@ async def healthz_scheduler(
     )
 
 
+@router.get("/healthz/human-lane", response_model=HumanLaneHealthResponse)
+async def healthz_human_lane(
+    session: AsyncSession = Depends(get_session),
+) -> HumanLaneHealthResponse:
+    last_heartbeat_at = await scheduler_heartbeats_repo.latest_human_lane_beat(session)
+    waiting = await list_human_lane_games(session, statuses=frozenset({"CREATED", "PENDING"}))
+    running = await list_human_lane_games(session, statuses=frozenset({"RUNNING"}))
+    now = datetime.now(UTC)
+
+    return HumanLaneHealthResponse(
+        status=_heartbeat_liveness_status(last_heartbeat_at=last_heartbeat_at, now=now),
+        last_heartbeat_at=last_heartbeat_at,
+        waiting_games=len(waiting),
+        running_games=len(running),
+    )
+
+
 __all__ = [
     "HEARTBEAT_DOWN_THRESHOLD_S",
     "PENDING_DEGRADED_THRESHOLD_S",
+    "HumanLaneHealthResponse",
     "SchedulerHealthResponse",
     "router",
 ]

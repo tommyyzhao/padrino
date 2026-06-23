@@ -28,10 +28,11 @@ from padrino.api.auth import (
     generate_raw_key,
 )
 from padrino.api.routes.public import PUBLIC_TRANSCRIPT_FORBIDDEN_KEYS
-from padrino.core.enums import RatingContextKind
-from padrino.db.models import AgentBuild, PlacementRating, Rating, SoloRateRating
+from padrino.core.enums import Faction, RatingContextKind
+from padrino.db.models import AgentBuild, HumanRating, PlacementRating, Rating, SoloRateRating
 from padrino.db.repositories import (
     agent_builds,
+    human_principals,
     leagues,
     model_configs,
     prompt_versions,
@@ -44,6 +45,7 @@ from padrino.db.repositories import (
     ingested_games as ingested_games_repo,
 )
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
+from padrino.ratings.openskill_service import SCOPE_FACTION, SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL
 from padrino.ratings.public_leaderboard import RATING_MODEL, reset_cache
 from padrino.settings import get_settings
 
@@ -301,8 +303,8 @@ async def _seed_context_card_rows(
                     ruleset_id="mini7_v1",
                     rating_context_id=canonical_context.id,
                     agent_build_id=canonical_ranked.id,
-                    scope_type="GLOBAL",
-                    scope_value="global",
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
                     mu=31.2,
                     sigma=2.1,
                     conservative_score=24.9,
@@ -312,9 +314,33 @@ async def _seed_context_card_rows(
                     league_id=canonical_league.id,
                     ruleset_id="mini7_v1",
                     rating_context_id=canonical_context.id,
+                    agent_build_id=canonical_ranked.id,
+                    scope_type=SCOPE_FACTION,
+                    scope_value=Faction.TOWN.value,
+                    mu=29.0,
+                    sigma=2.0,
+                    conservative_score=23.0,
+                    games=12,
+                ),
+                Rating(
+                    league_id=canonical_league.id,
+                    ruleset_id="mini7_v1",
+                    rating_context_id=canonical_context.id,
+                    agent_build_id=canonical_ranked.id,
+                    scope_type=SCOPE_FACTION,
+                    scope_value=Faction.MAFIA.value,
+                    mu=28.0,
+                    sigma=2.5,
+                    conservative_score=20.5,
+                    games=12,
+                ),
+                Rating(
+                    league_id=canonical_league.id,
+                    ruleset_id="mini7_v1",
+                    rating_context_id=canonical_context.id,
                     agent_build_id=canonical_provisional.id,
-                    scope_type="GLOBAL",
-                    scope_value="global",
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
                     mu=50.0,
                     sigma=1.0,
                     conservative_score=47.0,
@@ -374,6 +400,72 @@ async def _seed_context_card_rows(
         )
 
 
+async def _seed_human_leaderboard_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Seed ranked and casual Humans-Included rows for the public card contract."""
+    async with session_factory() as session, session.begin():
+        ranked_league = await leagues.get_or_create_humans_included(
+            session,
+            ruleset_id="mini7_v1",
+            ranked=True,
+        )
+        casual_league = await leagues.get_or_create_humans_included(
+            session,
+            ruleset_id="mini7_v1",
+            ranked=False,
+        )
+        ace = await human_principals.create_principal(
+            session,
+            kind=human_principals.PRINCIPAL_KIND_ACCOUNT,
+            display_name="Human Ace",
+        )
+        seedling = await human_principals.create_principal(
+            session,
+            kind=human_principals.PRINCIPAL_KIND_ACCOUNT,
+            display_name="Human Seedling",
+        )
+        casual = await human_principals.create_principal(
+            session,
+            kind=human_principals.PRINCIPAL_KIND_ACCOUNT,
+            display_name="Casual Human",
+        )
+        session.add_all(
+            [
+                HumanRating(
+                    league_id=ranked_league.id,
+                    human_player_id=str(ace.id),
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
+                    mu=34.0,
+                    sigma=2.0,
+                    conservative_score=28.0,
+                    games=12,
+                ),
+                HumanRating(
+                    league_id=ranked_league.id,
+                    human_player_id=str(seedling.id),
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
+                    mu=64.0,
+                    sigma=1.0,
+                    conservative_score=61.0,
+                    games=2,
+                ),
+                HumanRating(
+                    league_id=casual_league.id,
+                    human_player_id=str(casual.id),
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
+                    mu=99.0,
+                    sigma=1.0,
+                    conservative_score=96.0,
+                    games=20,
+                ),
+            ]
+        )
+
+
 @pytest_asyncio.fixture
 async def client(
     session_factory: async_sessionmaker[AsyncSession],
@@ -418,25 +510,46 @@ async def test_leaderboard_returns_separated_context_cards_without_cross_sort(
     body = response.json()
     assert body["ruleset_id"] is None
     assert body["entries"] == []
-    assert set(body) >= {"canonical_cards", "experimental_cards"}
+    assert set(body) >= {"canonical_cards", "faction_cards", "experimental_cards"}
 
     canonical = body["canonical_cards"]
+    faction = body["faction_cards"]
     experimental = body["experimental_cards"]
     assert canonical
+    assert faction
     assert experimental
     assert {card["section"] for card in canonical} == {"canonical"}
     assert {card["section_label"] for card in canonical} == {"Ranked canonical"}
     assert {card["context_kind"] for card in canonical} == {"CANONICAL_TEAM"}
+    assert {card["section"] for card in faction} == {"canonical"}
+    assert {card["section_label"] for card in faction} == {"Ranked canonical"}
+    assert {card["context_kind"] for card in faction} == {"CANONICAL_TEAM"}
     assert {card["section"] for card in experimental} == {"experimental"}
     assert {card["section_label"] for card in experimental} == {"Experimental context"}
     assert {card["context_kind"] for card in experimental} == {"PLACEMENT", "SOLO_RATE"}
 
-    canonical_ranked = next(card for card in canonical if card["display_name"] == "Atlas ranked")
-    canonical_provisional = next(
-        card for card in canonical if card["display_name"] == "Atlas provisional"
-    )
+    canonical_by_scope = {
+        (card["display_name"], card["scope_type"], card["scope_value"]): card for card in canonical
+    }
+    faction_by_scope = {
+        (card["display_name"], card["scope_type"], card["scope_value"]): card for card in faction
+    }
+    assert {
+        ("Atlas ranked", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL),
+        ("Atlas provisional", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL),
+    } == set(canonical_by_scope)
+    assert {
+        ("Atlas ranked", SCOPE_FACTION, Faction.TOWN.value),
+        ("Atlas ranked", SCOPE_FACTION, Faction.MAFIA.value),
+    } == set(faction_by_scope)
+    canonical_ranked = canonical_by_scope[("Atlas ranked", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL)]
+    canonical_provisional = canonical_by_scope[
+        ("Atlas provisional", SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL)
+    ]
     assert canonical_ranked["rank"] == 1
     assert canonical_ranked["provisional"] is False
+    assert faction_by_scope[("Atlas ranked", SCOPE_FACTION, Faction.TOWN.value)]["rank"] == 1
+    assert faction_by_scope[("Atlas ranked", SCOPE_FACTION, Faction.MAFIA.value)]["rank"] == 1
     assert canonical_provisional["rank"] is None
     assert canonical_provisional["provisional"] is True
     assert canonical_provisional["conservative_score"] > canonical_ranked["conservative_score"]
@@ -461,6 +574,47 @@ async def test_leaderboard_returns_separated_context_cards_without_cross_sort(
     assert solo_provisional["provisional"] is True
     assert solo_provisional["sample_count"] == 9
     assert "10 attempts" in solo_provisional["provisional_reason"]
+
+
+async def test_leaderboard_returns_ranked_humans_included_cards_from_human_rating_only(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    raw, _ = await _seed_key(session_factory, scopes=[SCOPE_SPECTATOR], label="lurker")
+    await _seed_context_card_rows(session_factory)
+    await _seed_human_leaderboard_rows(session_factory)
+
+    response = await client.get("/public/leaderboard", headers=_auth(raw))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body) >= {"canonical_cards", "experimental_cards", "human_cards"}
+
+    human_cards = body["human_cards"]
+    assert human_cards
+    assert {card["section"] for card in human_cards} == {"humans_included"}
+    assert {card["section_label"] for card in human_cards} == {"Humans-Included League"}
+    assert {card["context_kind"] for card in human_cards} == {"HUMANS_INCLUDED"}
+    assert {card["context_label"] for card in human_cards} == {"Humans-Included mini7_v1 ranked"}
+    assert {card["scope_type"] for card in human_cards} == {SCOPE_GLOBAL}
+    assert {card["scope_value"] for card in human_cards} == {SCOPE_VALUE_GLOBAL}
+    assert {card["metric"] for card in human_cards} == {"openskill_conservative"}
+    assert {card["metric_label"] for card in human_cards} == {"Human ELO"}
+    assert {card["ruleset_id"] for card in human_cards} == {"mini7_v1"}
+
+    by_name = {card["display_name"]: card for card in human_cards}
+    assert set(by_name) == {"Human Ace", "Human Seedling"}
+    assert "Casual Human" not in by_name
+    assert all(card["display_name"] != "Atlas ranked" for card in human_cards)
+    assert by_name["Human Ace"]["rank"] == 1
+    assert by_name["Human Ace"]["provisional"] is False
+    assert by_name["Human Seedling"]["rank"] is None
+    assert by_name["Human Seedling"]["provisional"] is True
+    assert (
+        by_name["Human Seedling"]["conservative_score"] > by_name["Human Ace"]["conservative_score"]
+    )
+    assert "10 games" in by_name["Human Seedling"]["provisional_reason"]
+    assert all("human_player_id" not in card for card in human_cards)
 
 
 async def test_leaderboard_sorted_by_conservative_score(

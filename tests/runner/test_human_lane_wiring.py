@@ -8,6 +8,7 @@ shortcut that was acceptable before the POST channels existed.
 from __future__ import annotations
 
 import ast
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import padrino.runner.human_lane as human_lane_module
 from padrino.api.app import create_app
 from padrino.api.auth import RateLimiter
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
@@ -28,7 +30,7 @@ from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import ActionType, Faction, Role, SeatKind
+from padrino.core.enums import ActionType, Faction, LeagueKind, Role, SeatKind
 from padrino.core.human_chat import human_chat_content_ref
 from padrino.core.observations import Observation
 from padrino.core.rulesets import mini7_v1
@@ -40,6 +42,8 @@ from padrino.db.models import (
     HumanActionSubmission,
     HumanChatMessage,
     HumanChatSubmission,
+    League,
+    Lobby,
     ModelConfig,
     ModelProvider,
     Principal,
@@ -50,11 +54,14 @@ from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.llm.multiplex import SeatMultiplexAdapter
+from padrino.runner.game_runner import GameConfig, GamePersistence
 from padrino.runner.human_chat_release import release_held_chat_for_phase
 from padrino.runner.human_durability import replay_state_from_rows
 from padrino.runner.human_lane import (
     AiAdapterFactory,
+    _default_human_game_executor,
     _run_human_tick_responses,
+    _run_one_human_game,
     build_human_lane_adapter,
 )
 from padrino.runner.human_tick import HumanTickConfig, run_human_tick
@@ -116,6 +123,24 @@ class _CaptureAdapter:
         )
 
 
+class _NoopAdapter:
+    """Adapter stub for tests that intercept the game loop before any tick."""
+
+    async def complete(self, observation: Observation) -> AdapterResult:
+        response = AgentResponse(
+            public_message=None,
+            private_message=None,
+            action=Action(type=ActionType.NOOP, target=None),
+            memory_update="",
+            rationale_summary=None,
+        )
+        return AdapterResult(
+            raw_response=response.model_dump_json(),
+            parsed_response=response,
+            latency_ms=0,
+        )
+
+
 def _call_names(path: Path) -> set[str]:
     tree = ast.parse(path.read_text())
     names: set[str] = set()
@@ -150,6 +175,109 @@ def test_human_lane_production_wiring_guard() -> None:
 
     assert _production_callers("run_human_tick")
     assert _production_callers("HumanAdapter")
+
+
+@pytest.mark.asyncio
+async def test_human_lane_binds_ranked_lobby_league_to_executor(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id, league_id = await _seed_bound_human_lane_game(session_factory, ranked=True)
+    captured: dict[str, object] = {}
+
+    async def executor(
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+    ) -> None:
+        captured["ruleset_id"] = config.ruleset_id
+        captured["league_id"] = persistence.league_id
+        captured["ranked"] = persistence.ranked
+        captured["adapter"] = adapter
+
+    await _run_one_human_game(
+        session_factory,
+        game_id=game_id,
+        semaphore=asyncio.Semaphore(1),
+        adapter_factory=None,
+        ai_adapter_factory=None,
+        game_executor=executor,
+        settings=Settings(),
+        build_production_adapter=False,
+        resume=None,
+    )
+
+    assert captured["ruleset_id"] == mini7_v1.RULESET_ID
+    assert captured["league_id"] == league_id
+    assert captured["ranked"] is True
+
+
+@pytest.mark.asyncio
+async def test_human_lane_threads_settings_into_game_persistence(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id, _league_id = await _seed_bound_human_lane_game(session_factory, ranked=False)
+    settings = Settings(
+        padrino_human_fallback_token_price_per_1k={
+            "default": (0.0, 0.0),
+            "openai/glm-4.7": (0.123, 0.456),
+        },
+    )
+    captured: dict[str, object] = {}
+
+    async def executor(
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+    ) -> None:
+        captured["settings"] = persistence.settings
+        captured["game_id"] = config.game_id
+        captured["adapter"] = adapter
+
+    await _run_one_human_game(
+        session_factory,
+        game_id=game_id,
+        semaphore=asyncio.Semaphore(1),
+        adapter_factory=None,
+        ai_adapter_factory=None,
+        game_executor=executor,
+        settings=settings,
+        build_production_adapter=False,
+        resume=None,
+    )
+
+    assert captured["game_id"] == str(game_id)
+    assert captured["settings"] is settings
+
+
+@pytest.mark.asyncio
+async def test_default_human_executor_passes_ranked_flag_to_game_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_drive_game_loop(
+        config: GameConfig,
+        adapter: LlmAdapter,
+        ranked: bool,
+        **_kwargs: object,
+    ) -> object:
+        captured["game_id"] = config.game_id
+        captured["ranked"] = ranked
+        captured["adapter"] = adapter
+        return object()
+
+    monkeypatch.setattr(human_lane_module, "drive_game_loop", fake_drive_game_loop)
+    game_id = uuid.uuid4()
+    executor = _default_human_game_executor(Settings())
+    await executor(
+        GameConfig(game_id=str(game_id), game_seed=_GAME_SEED, ruleset_id=mini7_v1.RULESET_ID),
+        GamePersistence(session_factory=session_factory, game_id=game_id, ranked=True),
+        _NoopAdapter(),
+    )
+
+    assert captured["game_id"] == str(game_id)
+    assert captured["ranked"] is True
 
 
 @pytest.fixture(autouse=True)
@@ -264,6 +392,58 @@ async def _seed_mixed_game(
             )
         await session.flush()
         return game.id
+
+
+async def _seed_bound_human_lane_game(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    ranked: bool,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    async with session_factory() as session, session.begin():
+        principal = Principal(kind="guest", display_name=None)
+        league = League(
+            name="Humans-Included League",
+            ruleset_id=mini7_v1.RULESET_ID,
+            ranked=ranked,
+            kind=LeagueKind.HUMANS_INCLUDED.value,
+        )
+        game = Game(
+            gauntlet_id=None,
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed=_GAME_SEED,
+            status="PENDING",
+        )
+        session.add_all([principal, league, game])
+        await session.flush()
+        session.add(
+            Lobby(
+                ruleset_id=mini7_v1.RULESET_ID,
+                identity_mode="ANONYMOUS",
+                invite_token=f"invite-{uuid.uuid4()}",
+                theme_pack_id=None,
+                stakes="CASUAL",
+                lobby_seed=f"seed-{uuid.uuid4()}",
+                host_principal_id=principal.id,
+                league_id=league.id,
+                game_id=game.id,
+            )
+        )
+        for seat in assign_roles(_GAME_SEED, mini7_v1):
+            session.add(
+                GameSeat(
+                    game_id=game.id,
+                    public_player_id=seat.public_player_id,
+                    seat_index=seat.seat_index,
+                    agent_build_id=None,
+                    seat_kind=SeatKind.HUMAN.value,
+                    occupant_principal_id=principal.id,
+                    role=seat.role.value,
+                    faction=seat.faction.value,
+                    alive=True,
+                )
+            )
+        await session.flush()
+        return game.id, league.id
 
 
 def _vote_phase_bodies() -> list[dict[str, object]]:

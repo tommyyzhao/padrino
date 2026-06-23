@@ -27,6 +27,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.db.base import session_scope
+from padrino.db.game_status import GAME_STATUS_COMPLETED
 from padrino.db.models import (
     BehavioralEvaluation,
     Game,
@@ -135,7 +136,7 @@ async def run_sampled_judge_enrichment(
         subq = select(BehavioralEvaluation.game_id).distinct()
         stmt = (
             select(Game.id)
-            .where(Game.status == "COMPLETED", ~Game.id.in_(subq))
+            .where(Game.status == GAME_STATUS_COMPLETED, ~Game.id.in_(subq))
             .order_by(Game.created_at.desc())
             .limit(_CANDIDATE_POOL_SIZE)
         )

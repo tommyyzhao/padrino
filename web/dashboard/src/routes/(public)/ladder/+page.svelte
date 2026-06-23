@@ -2,20 +2,21 @@
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
-  import type { PublicLadderEntry } from '$lib/api/types';
+  import { canonicalTeamRulesets } from '$lib/rulesets';
+  import type { PublicLadderEntry, PublicRulesetEntry } from '$lib/api/types';
 
-  const RULESETS = ['mini7_v1'];
-
-  let ruleset = $state(RULESETS[0]);
+  let rulesets = $state<PublicRulesetEntry[]>([]);
+  let ruleset = $state<string | null>(null);
   let entries = $state<PublicLadderEntry[]>([]);
+  let rulesetsLoading = $state(true);
   let loading = $state(false);
   let error = $state<string | null>(null);
 
-  async function load() {
+  async function load(selectedRuleset: string) {
     loading = true;
     error = null;
     try {
-      const response = await padrino.client.publicLadder({ ruleset_id: ruleset, limit: 50 });
+      const response = await padrino.client.publicLadder({ ruleset_id: selectedRuleset, limit: 50 });
       entries = response.entries;
     } catch (e) {
       error = (e as Error).message;
@@ -25,13 +26,42 @@
     }
   }
 
+  async function loadRulesets() {
+    rulesetsLoading = true;
+    error = null;
+    try {
+      const response = await padrino.client.publicRulesets();
+      rulesets = canonicalTeamRulesets(response.items);
+      if (rulesets.length === 0) {
+        ruleset = null;
+        entries = [];
+        error = 'No canonical ladder rulesets available.';
+        return;
+      }
+      const selected =
+        ruleset !== null && rulesets.some((option) => option.ruleset_id === ruleset)
+          ? ruleset
+          : rulesets[0].ruleset_id;
+      ruleset = selected;
+      await load(selected);
+    } catch (e) {
+      rulesets = [];
+      ruleset = null;
+      entries = [];
+      loading = false;
+      error = (e as Error).message;
+    } finally {
+      rulesetsLoading = false;
+    }
+  }
+
   function switchRuleset(r: string) {
     ruleset = r;
-    void load();
+    void load(r);
   }
 
   onMount(() => {
-    void load();
+    void loadRulesets();
   });
 </script>
 
@@ -42,20 +72,26 @@
 <h1 class="mb-4 text-xl font-semibold">Ladder</h1>
 
 <div class="mb-4 flex gap-2" data-testid="ladder-ruleset-switch">
-  {#each RULESETS as r (r)}
-    <button
-      class={'rounded px-3 py-1 text-sm ' +
-        (r === ruleset
-          ? 'bg-primary text-primary-foreground'
-          : 'bg-muted text-muted-foreground hover:bg-muted/80')}
-      data-testid="ladder-ruleset-btn"
-      data-ruleset={r}
-      data-active={r === ruleset ? 'true' : 'false'}
-      onclick={() => switchRuleset(r)}
-    >
-      {r}
-    </button>
-  {/each}
+  {#if rulesetsLoading}
+    <span class="text-sm text-muted-foreground" data-testid="ladder-rulesets-loading">
+      Loading rulesets…
+    </span>
+  {:else}
+    {#each rulesets as option (option.ruleset_id)}
+      <button
+        class={'rounded px-3 py-1 text-sm ' +
+          (option.ruleset_id === ruleset
+            ? 'bg-primary text-primary-foreground'
+            : 'bg-muted text-muted-foreground hover:bg-muted/80')}
+        data-testid="ladder-ruleset-btn"
+        data-ruleset={option.ruleset_id}
+        data-active={option.ruleset_id === ruleset ? 'true' : 'false'}
+        onclick={() => switchRuleset(option.ruleset_id)}
+      >
+        {option.label} ({option.ruleset_id})
+      </button>
+    {/each}
+  {/if}
 </div>
 
 {#if loading}

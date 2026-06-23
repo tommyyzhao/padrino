@@ -1,16 +1,23 @@
 <script lang="ts">
-  // US-154: Frontend lobby hub — create a private friend lobby OR join from an
-  // invite link. Casual-only (stakes shown CASUAL); count-only composition; no
-  // per-seat human/AI disclosure (anonymity, AGENTS.md rule 7).
+  // US-154/US-234a: Frontend lobby hub — create a private friend lobby OR join
+  // from an invite link. Count-only composition; no per-seat human/AI disclosure
+  // (anonymity, AGENTS.md rule 7).
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
+  import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import Button from '$lib/components/Button.svelte';
   import { padrino } from '$lib/clientStore.svelte';
+  import type { PublicRulesetEntry } from '$lib/api/types';
 
   // ---- create form state
-  let rulesetId = $state<'mini7_v1' | 'bench10_v1'>('mini7_v1');
+  let rulesetId = $state('mini7_v1');
+  let rulesets = $state<PublicRulesetEntry[]>([]);
+  let rulesetsLoading = $state(true);
+  let rulesetsError = $state<string | null>(null);
   let identityMode = $state<'ANONYMOUS' | 'TRANSPARENT'>('ANONYMOUS');
+  let ranked = $state(false);
+  let integrityAcknowledged = $state(false);
   let themePackId = $state('');
   // Bot fill mode: 'autofill' (curated auto-fill) vs 'prepick' (host pre-picks).
   let fillMode = $state<'autofill' | 'prepick'>('autofill');
@@ -24,6 +31,23 @@
   let inviteToken = $state($page.url.searchParams.get('invite') ?? '');
   let joining = $state(false);
   let joinError = $state<string | null>(null);
+
+  async function loadRulesets(): Promise<void> {
+    rulesetsLoading = true;
+    rulesetsError = null;
+    try {
+      const response = await padrino.client.publicRulesets();
+      rulesets = response.items;
+      if (rulesets.length > 0 && !rulesets.some((r) => r.ruleset_id === rulesetId)) {
+        rulesetId = rulesets[0].ruleset_id;
+      }
+    } catch (e) {
+      rulesets = [];
+      rulesetsError = (e as Error).message;
+    } finally {
+      rulesetsLoading = false;
+    }
+  }
 
   async function ensureGuest(): Promise<void> {
     // A guest principal + http-only session cookie is required before any
@@ -48,6 +72,8 @@
       const summary = await padrino.client.createLobby({
         ruleset_id: rulesetId,
         identity_mode: identityMode,
+        ranked,
+        integrity_acknowledged: ranked ? integrityAcknowledged : false,
         theme_pack_id: themePackId.trim() === '' ? null : themePackId.trim(),
         prepick_agent_build_ids: prepick
       });
@@ -73,6 +99,10 @@
       joining = false;
     }
   }
+
+  onMount(() => {
+    void loadRulesets();
+  });
 </script>
 
 <div class="mb-4">
@@ -98,11 +128,23 @@
           class="rounded border border-border bg-background px-2 py-1 text-sm"
           data-testid="lobby-create-ruleset"
           bind:value={rulesetId}
+          disabled={rulesetsLoading || rulesets.length === 0}
         >
-          <option value="mini7_v1">mini7_v1 (7 players)</option>
-          <option value="bench10_v1">bench10_v1 (10 players)</option>
+          {#if rulesetsLoading}
+            <option value={rulesetId}>Loading rulesets…</option>
+          {:else}
+            {#each rulesets as ruleset (ruleset.ruleset_id)}
+              <option value={ruleset.ruleset_id}>
+                {ruleset.label} ({ruleset.player_count} players)
+              </option>
+            {/each}
+          {/if}
         </select>
       </label>
+
+      {#if rulesetsError}
+        <p class="text-xs text-red-500" data-testid="lobby-rulesets-error">{rulesetsError}</p>
+      {/if}
 
       <label class="flex flex-col gap-1 text-xs">
         <span class="font-medium">Identity mode</span>
@@ -115,6 +157,28 @@
           <option value="TRANSPARENT">Transparent</option>
         </select>
       </label>
+
+      <label class="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          class="h-4 w-4"
+          data-testid="lobby-create-ranked"
+          bind:checked={ranked}
+        />
+        <span class="font-medium">Ranked</span>
+      </label>
+
+      {#if ranked}
+        <label class="flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            class="h-4 w-4"
+            data-testid="lobby-create-integrity-ack"
+            bind:checked={integrityAcknowledged}
+          />
+          <span class="font-medium">Ranked integrity acknowledged</span>
+        </label>
+      {/if}
 
       <label class="flex flex-col gap-1 text-xs">
         <span class="font-medium">Theme pack</span>
@@ -150,10 +214,14 @@
       {/if}
 
       <p class="text-xs text-muted-foreground" data-testid="lobby-create-stakes">
-        Stakes: <span class="font-semibold">CASUAL</span>
+        Mode: <span class="font-semibold">{ranked ? 'RANKED' : 'CASUAL'}</span>
       </p>
 
-      <Button type="submit" testid="lobby-create-submit" disabled={creating}>
+      <Button
+        type="submit"
+        testid="lobby-create-submit"
+        disabled={creating || rulesets.length === 0 || (ranked && !integrityAcknowledged)}
+      >
         {creating ? 'Creating…' : 'Create lobby'}
       </Button>
 

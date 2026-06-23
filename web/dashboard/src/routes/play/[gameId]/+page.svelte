@@ -17,11 +17,13 @@
   import { createPlaySession, type PlaySession } from '$lib/playSession.svelte';
   import { newIdempotencyKey } from '$lib/api/liveClient';
   import {
+    actionTypeLabel,
     composerStatusFromChat,
     countdownBucket,
     countdownLabel,
     isNightActionPhase,
     isVotePhase,
+    nightActionType,
     secondsUntil,
     spriteUrl,
     type ComposerStatus
@@ -69,6 +71,10 @@
   const phase = $derived(session?.phase ?? '—');
   const terminal = $derived(session?.terminal ?? false);
   const winner = $derived(session?.winner ?? null);
+  const selectedNightActionType = $derived(nightActionType(legal));
+  const selectedNightActionLabel = $derived(
+    selectedNightActionType ? actionTypeLabel(selectedNightActionType) : 'Night action'
+  );
 
   function seatSpriteUrl(publicPlayerId: string): string {
     return spriteUrl(padrino.baseUrl, themePackId, spriteByKey[publicPlayerId] ?? null);
@@ -136,17 +142,9 @@
     }
   }
 
-  function nightActionType(): string | null {
-    if (legal === null) return null;
-    for (const t of ['INVESTIGATE', 'PROTECT', 'MAFIA_KILL']) {
-      if (legal.allowed_action_types.includes(t)) return t;
-    }
-    return null;
-  }
-
   async function submitNightAction(): Promise<void> {
     if (!gameId) return;
-    const type = nightActionType();
+    const type = nightActionType(legal);
     if (type === null) return;
     actionBusy = true;
     actionNote = null;
@@ -157,7 +155,7 @@
         action: target ? { type, target } : { type: 'NOOP' },
         idempotency_key: newIdempotencyKey()
       });
-      actionNote = 'Night action submitted.';
+      actionNote = `${actionTypeLabel(type)} submitted.`;
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -304,7 +302,9 @@
       {:else if isNightActionPhase(legal)}
         <div class="flex flex-col gap-2" data-testid="play-night-panel">
           <label class="flex flex-col gap-1 text-xs">
-            <span class="font-medium">Night action</span>
+            <span class="font-medium" data-testid="play-night-action-type">
+              {selectedNightActionLabel}
+            </span>
             <select
               class="rounded border border-border bg-background px-2 py-1 text-sm"
               data-testid="play-night-target"
@@ -321,7 +321,7 @@
             disabled={actionBusy}
             onclick={() => void submitNightAction()}
           >
-            {actionBusy ? 'Submitting…' : 'Submit action'}
+            {actionBusy ? 'Submitting…' : `Submit ${selectedNightActionLabel}`}
           </Button>
         </div>
       {:else}

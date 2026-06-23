@@ -27,7 +27,15 @@ from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Phase
 from padrino.core.enums import ActionType, Faction, PhaseKind, Role
 from padrino.core.rulesets import mini7_v1, sk12_v1
-from padrino.db.models import GameEvent, PlacementRating, PlacementRatingEvent, Rating, RatingEvent
+from padrino.db.models import (
+    GameEvent,
+    HumanRating,
+    HumanRatingEvent,
+    PlacementRating,
+    PlacementRatingEvent,
+    Rating,
+    RatingEvent,
+)
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -294,7 +302,11 @@ async def test_town_win_updates_town_up_mafia_down(
             .scalars()
             .all()
         )
+        human_rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
     assert len(events) == 14
+    assert human_rows == []
+    assert human_events == []
     for evt in events:
         assert evt.before_mu == pytest.approx(INITIAL_MU)
         assert evt.before_sigma == pytest.approx(INITIAL_SIGMA)

@@ -35,13 +35,14 @@ async def get_or_create_humans_included(
     session: AsyncSession,
     *,
     ruleset_id: str,
+    ranked: bool = False,
 ) -> League:
-    """Return the dormant casual humans-included league for one ruleset.
+    """Return the Humans-Included league for one ruleset and ranked mode.
 
-    The humans-included league is ``ranked=False`` and discriminated by
-    ``kind=HUMANS_INCLUDED`` so scientific vs human leagues are queryable. Human
-    games reference it; it is the home of the dormant ``human_rating`` schema and
-    NEVER writes a scientific rating row.
+    The humans-included league is discriminated by ``kind=HUMANS_INCLUDED`` so
+    scientific vs human leagues are queryable. Human games reference it; it is
+    the home of the segregated ``human_rating`` schema and NEVER writes a
+    scientific rating row.
     """
 
     def _select_existing() -> Select[tuple[League]]:
@@ -50,6 +51,7 @@ async def get_or_create_humans_included(
             .where(
                 League.kind == LeagueKind.HUMANS_INCLUDED.value,
                 League.ruleset_id == ruleset_id,
+                League.ranked == ranked,
             )
             .limit(1)
         )
@@ -61,7 +63,7 @@ async def get_or_create_humans_included(
     obj = League(
         name=HUMANS_INCLUDED_LEAGUE_NAME,
         ruleset_id=ruleset_id,
-        ranked=False,
+        ranked=ranked,
         kind=LeagueKind.HUMANS_INCLUDED.value,
     )
     session.add(obj)

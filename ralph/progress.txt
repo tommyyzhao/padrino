@@ -3,6 +3,175 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Model detail ruleset fallback (US-248): keep `/models/[id]` ruleset
+  discovery in its own failure boundary. Use `publicRulesets()` +
+  `canonicalTeamRulesets()` when available, but fall back to the shipped
+  canonical ladder ids before calling `/public/ladder` so a transient ruleset
+  endpoint failure or empty canonical response does not become a page-level
+  model-detail error.
+- LLM cost fallback seam (US-247): keep token-price fallback at
+  `runner/game_runner._priced_cost_usd`, where `Settings`, attempted
+  `AdapterResult.model_id`, and token counts are all in scope. Thread any
+  lane-specific `Settings` into `GamePersistence`; preserve `LlmCall.cost_usd`
+  as `NULL` for unbilled provider-error/exhausted/empty no-token results so
+  unknown cost does not become semantic zero. Default fallback table keys should
+  match persisted LiteLLM model strings exactly.
+- Leaderboard card contract (US-245): `/public/leaderboard.canonical_cards`
+  is pinned to canonical `CANONICAL_TEAM` `GLOBAL/global` rows only. Put
+  canonical `FACTION` scope rows in the sibling `faction_cards` response field,
+  and pass `factionCards` as its own dashboard section input rather than
+  deriving faction cards from `canonical_cards`.
+- Shipped migration repair (US-244): do not edit already-shipped migrations to
+  add new columns. Restore the shipped revision byte-for-byte, then add a new
+  linear additive revision from the current head. Regression coverage should
+  upgrade to the previous head first, assert the column is absent there, seed an
+  existing row, upgrade to head, assert server-default backfill, and verify
+  downgrade drops only the additive column.
+- Canonical ladder selectors (US-243): dashboard ladder consumers should read
+  `padrino.client.publicRulesets()` and filter with
+  `canonicalTeamRulesets` (`is_canonical &&
+  rating_context_kind === "CANONICAL_TEAM"`). Keep PLACEMENT / SOLO_RATE
+  contexts on `/leaderboard`; `/ladder` is for per-ruleset canonical team
+  standings only.
+- Backup/restore hash-chain checks (US-242): post-restore verification should
+  read restored `games` + `game_events` rows and reuse
+  `padrino.ops.backup_restore.verify_restored_game_hash_chain`, which converts
+  `GameEvent` rows to `EventEnvelope` and delegates canonical replay to
+  `export.bundle.verify_chain`. The CLI surface is `padrino game
+  verify-restore <game-id> --db-url <restored-db-url>`; compare its `tip_hash`
+  to the pre-backup `games.event_hash_head`.
+- FAILED scheduler retry (US-241): keep persisted game-status literals in
+  `padrino.db.game_status` and treat `COMPLETED` plus `FAILED` as scheduler
+  terminal statuses. The benchmark scheduler retry is single-host/in-process:
+  retry child executor exceptions up to `padrino_scheduler_game_max_attempts`,
+  then `games_repo.mark_failed` clears `terminal_result`, stamps `completed_at`,
+  and leaves ratings/read-side completed-only paths gated on `COMPLETED`.
+  Regression coverage should include retry success, retry exhaustion, zero
+  rating rows, no scheduler/matchmaker re-selection, and no stray `"FAILED"`
+  literals outside the shared status module.
+- Isolated scheduler child failures (US-240): when a gauntlet fans out child
+  games, gather with `return_exceptions=True` and zip results back to the
+  `_ScheduledGame` metadata so every exception carries its `game_id`. Log each
+  failed child as `scheduler.game.failed` with structured `gauntlet_id`,
+  `game_id`, and error fields, then let completed siblings continue through the
+  normal completion/rating path. Leave durable FAILED status/retry semantics to
+  the dedicated follow-up story, not the gather seam.
+- Hot-path index migrations (US-239): keep Alembic index names and ORM
+  `Index` declarations byte-matched, then test both the single linear head and
+  a downgrade to the previous head that restores the pre-migration index set.
+  For retention indexes, derive from executor predicates: completed-game scans
+  use `games.completed_at IS NOT NULL` plus `is_broadcastable`, and scrub scans
+  use `llm_calls.game_id` for rows where `raw_response IS NOT NULL`; partial
+  indexes keep those hot rows narrow.
+- Real-action NAR corpus (US-238): keep deterministic full-game goldens on
+  `DeterministicMockAdapter` scripts built through the shared
+  `make_role_aware_script` helper. For future role rulesets, pin
+  terminal_result, event count, final event hash, and chain digest, then assert
+  the role-specific event signal (`NightFeedbackDelivered`, cleaned death,
+  serial kill target, jester day vote, etc.) plus replay equality. Keep
+  `NoopMockAdapter` draw goldens only for legacy baseline coverage, not as proof
+  that a role ruleset's NAR behavior is covered.
+- Ranked lobby integrity ack (US-237): enforce
+  `integrity_acknowledged` before lobby admission/cost slots are claimed, so a
+  refused ranked create writes no lobby rows and burns no admission budget. Store
+  the flag on the existing `Lobby` row; casual lobbies coerce it to `False`.
+  Do not consume Alembic `0050` for this guard: US-239 still owns that revision,
+  so the existing lobby-table migration shape carries the column and
+  `test_migrations.py` asserts Alembic-upgraded DBs include it. Dashboard ranked
+  creates must send the ack while keeping the request free of identity markers.
+- Humans-Included leaderboard cards (US-236): expose ranked human ELO as a
+  separate top-level `human_cards` read-side bucket, never inside
+  `canonical_cards` or `experimental_cards`. Source it only from
+  `HumanRating` rows joined through `League.kind == HUMANS_INCLUDED` and
+  `League.ranked is True`, limited this wave to `GLOBAL/global`. Card
+  `entity_id` is a hash of `human_player_id`; the raw `human_player_id` is never
+  serialized, and the dashboard passes `humanCards` as its own section input.
+- Ranked human ELO writer (US-234b): keep the Humans-Included writer separate
+  from `ratings/openskill_service.py`. The terminal path first checks runtime
+  `ranked`, a bound `league_id`, `League.kind == HUMANS_INCLUDED`, and
+  `League.ranked is True`; only then does it call
+  `ratings/human_openskill_service.update_human_ratings_for_game`. That service
+  writes only `HumanRating` / `HumanRatingEvent` with `GLOBAL/global` scope this
+  wave. AI seats participate as transient initial OpenSkill ratings so mixed
+  human+AI games can move human principals without inserting AI rows into the
+  human sibling table. Scientific ratings still fail closed through
+  `_should_apply_ratings` and incomplete human-seat `agent_builds`.
+- Ranked Humans-Included flag plumbing (US-234a): the Humans-Included league is
+  now unique by `(ruleset_id, ranked)` via Alembic `0049`, so casual and ranked
+  lobbies for the same ruleset bind distinct `League` rows. Lobby create owns
+  the opt-in `ranked` flag; the human lane resolves ranked state from the
+  launched `Lobby.game_id -> League` binding, stores it on `GamePersistence`,
+  and passes it into `drive_game_loop`. Missing/non-HUMANS_INCLUDED bindings
+  fail closed to `ranked=False`/`league_id=None`. Human seats still keep
+  scientific ratings closed by incomplete `agent_builds`; ranked human ELO now
+  writes through the separate US-234b sibling-table path. `0049` is consumed;
+  future hot-path-index migration story US-239 must use `0050`.
+- Human restart-resume tests (US-233): validate the single-host worker path by
+  rehydrating from `game_events` with `rehydrate_active_human_games()`, then
+  resuming through `run_human_lane` / the default human executor at the existing
+  event-log head. In tests that run a real resumed game on the shared in-memory
+  SQLite engine, avoid a tight human-lane heartbeat poll loop; wait on an
+  executor-side event and use a long `poll_interval_s` so heartbeat writes do
+  not contend with event persistence on the StaticPool connection.
+- LLM cost fallback persist seam (US-232): keep
+  `llm/litellm_adapter._extract_cost` response-local and returning only
+  LiteLLM `_hidden_params.response_cost` or `None`. Carry the actual attempted
+  LiteLLM model string on `AdapterResult.model_id`, then resolve persisted
+  `LlmCall.cost_usd` in `runner/game_runner._persist_llm_call` with
+  `price_turn_usd(settings, response_cost, model, input_tokens, output_tokens)`.
+  Human-lane breaker/spend accounting reads the persisted row, so fallback
+  pricing must be applied before `llm_calls_repo.record_call`.
+- Human cost-governance cap tests (US-231): `admit_human` checks global
+  inference reservation, then per-principal inference reservation, then the
+  action's count cap. Count-cap tests must set the inference budget high enough
+  to leave at least one `padrino_human_admission_inference_reserve_usd` slot
+  after `ceil(spent_usd / reserve_usd)`, otherwise they fail earlier on
+  `daily_inference_cap_reached`.
+- Single-host worker liveness (US-230): for a new internal worker lane, prefer
+  the existing DB-backed heartbeat ledger with a reserved worker-id prefix
+  (`human-lane:`) over a new migration when the next Alembic revision is already
+  allocated. Health routes must filter prefixes both ways so one lane's
+  heartbeat cannot satisfy another lane's liveness probe. YAML-only compose
+  shape guards that must run in the default suite should live outside
+  `tests/docker/`, because that directory is auto-skipped as docker-keyworded.
+- Multi-context leaderboard UI (US-229): treat `/public/leaderboard`
+  `canonical_cards` / `experimental_cards` as already separated read-side
+  contracts, then split canonical presentation ONLY by `scope_type`
+  (`GLOBAL` vs `FACTION`) and experimental presentation ONLY by
+  `context_kind` (`PLACEMENT` vs `SOLO_RATE`). Never infer faction sections
+  from display names/context labels, and never co-sort cards across those
+  rendered groups. Hermetic dashboard specs that navigate from home should
+  intercept every `/public/*` fetch the route can trigger.
+- Public leaderboard context cards (US-228): canonical cards intentionally
+  include only the `GLOBAL/global` row plus every persisted `FACTION` scope for
+  a CANONICAL_TEAM `RatingContext`; placement and solo cards stay in sibling
+  experimental tables. Rank grouping must keep `scope_type/scope_value` in the
+  group key so GLOBAL, TOWN, MAFIA, and any future faction cards never share
+  rank space.
+- Model rollup factions (US-227): `ratings/model_rollup.py` now treats
+  persisted `Rating.scope_type == FACTION` `scope_value`s as data and exposes
+  the primary aggregate as `ModelLeaderboardEntry.factions`. Keep `town` /
+  `mafia` response fields only as legacy mirrors for existing consumers; new
+  per-faction work should consume the faction-keyed dict and must not branch on
+  exactly two factions.
+- Ruleset selector metadata (US-226): public/dashboard ruleset pickers should
+  consume `GET /public/rulesets` via `PadrinoClient.publicRulesets()`. The
+  endpoint iterates `BUILTIN_RULESET_IDS` and resolves each with `get_ruleset`
+  for `RULESET_ID`, `PLAYER_COUNT`, `RATING_CONTEXT_DISPLAY_LABEL`,
+  `RATING_CONTEXT_KIND`, and `IS_CANONICAL`; do not duplicate route- or
+  component-level ruleset lists.
+- Spectator watch NAR outcomes (US-225): render public night deaths only from
+  the projected PUBLIC `PlayerEliminated.payload.public_player_id` /
+  `payload.cause`; `actor_player_id` is normally `None` for resolved
+  eliminations. Do not invent a public no-death/NAR summary from
+  `NightResolved`, because it is SYSTEM and dropped by spectator projection.
+  Keep shared Playwright identity-blind assertions in
+  `web/dashboard/tests/e2e/helpers/identityBlind.ts`.
+- Server-driven play actions (US-224): the human play UI must treat
+  `SeatObservationFrame.legal_actions.allowed_action_types` as the action
+  universe. For night actions, select the server-provided targeted non-vote
+  action and render a generic label from the action string; do not enumerate
+  role/action ids in the Svelte route or `playSurface` helper.
 - Frozen migration snapshots (US-223): historical migrations must not import
   live core/ruleset declarations. Seed and backfill only frozen literal rows
   that existed at the migration's ship point; newer rulesets should be
@@ -2245,3 +2414,740 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2471 passed / 47 skipped / 10
   deselected.
+
+## 2026-06-22T14:45 PDT - US-224
+- Moved the play surface's night-action selection into generic
+  `playSurface.nightActionType`, sourced from the streamed
+  `legal_actions.allowed_action_types` / `legal_targets` snapshot instead of
+  the old vanilla `MAFIA_KILL` / `PROTECT` / `INVESTIGATE` list.
+- Rendered the server-provided action label in the night panel and submit
+  button, so NAR actions such as `ROLEBLOCK` are visible and POST the same
+  structured action type back to `/human/games/{id}/actions`.
+- Added Vitest coverage for all currently server-emitted NAR night actions
+  (`ROLEBLOCK`, `FRAME`, `TRACK`, `WATCH`, `CLEAN`, `SERIAL_KILL`), a backend
+  observation SSE contract assertion for `allowed_action_types`, and a
+  Playwright fixture proving `ROLEBLOCK` renders with its legal targets and
+  submits correctly.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/playSurface.ts`,
+  `web/dashboard/src/lib/api/playSurface.test.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`,
+  `tests/api/test_seat_observation_stream.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- playSurface` failed on the old hardcoded
+  helper; focused GREEN same command -> 51 passed; focused
+  `uv run pytest tests/api/test_seat_observation_stream.py::test_seat_sees_own_observation_legal_actions_and_deadline -q`
+  -> 1 passed; focused
+  `pnpm -C web/dashboard test:e2e -g "server-driven NAR night action"` -> 1
+  passed; `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`;
+  `pnpm -C web/dashboard test:e2e` -> 23 passed / 3 skipped;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2471
+  passed / 47 skipped / 10 deselected.
+- Extra in-app Browser smoke was attempted after starting a temporary dev
+  server, but the Browser plugin setup failed before exposing a usable tab; the
+  required Playwright e2e suite covered the changed play surface.
+
+## 2026-06-22T14:54 PDT - US-225
+- Updated the spectator watch page to fold real public projection frames:
+  `VoteSubmitted.payload.target` for votes and
+  `PlayerEliminated.payload.public_player_id` for eliminated seats.
+- Added an identity-blind Night card that renders only projected public night
+  eliminations, including cleaned no-reveal deaths where `role` / `faction` are
+  absent; private NAR feedback and SYSTEM `NightResolved` summaries remain
+  unrendered.
+- Added explicit backend projection tests proving `NightFeedbackDelivered`
+  private codes (`INVESTIGATION_RESULT`, `TRACK_RESULT`, `WATCH_RESULT`,
+  `ACTION_BLOCKED`) and representative `NightResolved` payloads return `None`
+  from `project_event_for_spectator`.
+- Added shared Playwright identity-blind helper coverage and reused it in
+  play, watch, lobby, and leaderboard specs.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/core/test_spectator_projection.py`,
+  `web/dashboard/src/routes/watch/[id]/+page.svelte`,
+  `web/dashboard/tests/e2e/helpers/identityBlind.ts`,
+  `web/dashboard/tests/e2e/watch.spec.ts`,
+  `web/dashboard/tests/e2e/play.spec.ts`,
+  `web/dashboard/tests/e2e/lobby.spec.ts`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- watch.spec.ts` failed on the old
+  payload/renderer behavior; focused GREEN same command -> 3 passed; focused
+  `uv run pytest tests/core/test_spectator_projection.py -q` -> 15 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2477
+  passed / 47 skipped / 10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 24
+  passed / 3 skipped.
+
+## 2026-06-22T15:02 PDT - US-226
+- Added `GET /public/rulesets`, sourced from
+  `BUILTIN_RULESET_IDS` + `get_ruleset`, returning selectable ruleset ids with
+  label, player count, rating context kind, and canonicality metadata.
+- Relaxed lobby creation from the old `mini7_v1` / `bench10_v1` request
+  `Literal` to dynamic registry validation, preserving 422 behavior for unknown
+  rulesets and allowing Wave-10 lobby creation.
+- Updated the dashboard API client/types and the lobby create selector to load
+  server-provided ruleset metadata; Playwright now asserts a Wave-10 ruleset is
+  selectable while the existing lobby anonymity checks still run.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/public.py`,
+  `src/padrino/api/routes/lobbies.py`, `tests/api/test_public_rulesets.py`,
+  `tests/api/test_lobby_create.py`, `tests/api/test_public_surface_only.py`,
+  `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/routes/lobby/+page.svelte`,
+  `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_public_rulesets.py tests/api/test_lobby_create.py::test_create_lobby_rejects_unknown_ruleset`
+  failed on missing `/public/rulesets`; focused RED
+  `pnpm -C web/dashboard exec vitest run src/lib/api/client.test.ts` failed on
+  missing `publicRulesets`; focused GREEN
+  `uv run pytest tests/api/test_public_rulesets.py tests/api/test_lobby_create.py::test_create_lobby_rejects_unknown_ruleset tests/api/test_lobby_create.py::test_create_lobby_accepts_wave10_ruleset_from_registry`
+  -> 3 passed; focused GREEN
+  `pnpm -C web/dashboard exec vitest run src/lib/api/client.test.ts` -> 21
+  passed; focused GREEN
+  `pnpm -C web/dashboard exec playwright test tests/e2e/lobby.spec.ts --project=chromium`
+  -> 4 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2480
+  passed / 47 skipped / 10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 24
+  passed / 3 skipped.
+- Extra in-app Browser smoke was attempted after starting a temporary preview
+  server, but the Browser runtime failed during setup before exposing a usable
+  tab; the required Playwright e2e suite covered the changed lobby selector.
+
+## 2026-06-22T15:13 PDT - US-227
+- Generalized `rollup_by_model` so FACTION-scope rating rows are accepted for
+  every persisted `scope_value`, with per-faction seat outcome counters keyed
+  by faction string rather than fixed Town/Mafia fields.
+- Added the faction-keyed `ModelLeaderboardEntry.factions` aggregate and public
+  model response field, while preserving the existing `town` and `mafia`
+  response payloads for byte-compatible two-faction consumers.
+- Added regression coverage for legacy Town/Mafia payload values plus a
+  synthetic forward-compatible `SERIAL_KILLER` FACTION-scope fixture labeled as
+  not produced by the current writer.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/model_rollup.py`,
+  `src/padrino/api/routes/public.py`, `tests/ratings/test_model_rollup.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_model_rollup.py -q` failed on missing
+  `ModelLeaderboardEntry.factions`; focused GREEN same command -> 12 passed;
+  focused GREEN
+  `uv run pytest tests/api/test_public_models.py -q` -> 14 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2482
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-22T15:20 PDT - US-228
+- Surfaced canonical FACTION-scope rating rows as public leaderboard cards by
+  broadening `_canonical_cards` from `GLOBAL/global` only to `GLOBAL/global`
+  plus every persisted `FACTION` scope for canonical scientific rating rows.
+- Extended the public leaderboard route regression fixture to seed
+  `GLOBAL/global`, `FACTION/TOWN`, and `FACTION/MAFIA` rows for one model and
+  assert the API returns three separate canonical cards with independent ranks,
+  while PLACEMENT and SOLO_RATE remain experimental cards.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `tests/api/test_public_routes.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_public_routes.py::test_leaderboard_returns_separated_context_cards_without_cross_sort -q`
+  failed on missing FACTION cards; focused GREEN same command -> 1 passed;
+  focused GREEN `uv run pytest tests/api/test_public_routes.py -q` -> 17
+  passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2482
+  passed / 47 skipped / 10 deselected.
+
+## 2026-06-22T15:34 PDT - US-229
+- Surfaced `/leaderboard` in the main nav and from the home page, then split
+  leaderboard presentation into separate canonical/global, canonical/FACTION,
+  PLACEMENT, and SOLO_RATE sections without cross-context co-sorting.
+- Added a reusable leaderboard section/card component pair plus a pure
+  `splitLeaderboardCards` helper. The unit test proves FACTION grouping uses
+  `scope_type` rather than display-name text; Playwright proves the rendered
+  subsections, provisional under-sampled label, identity-blind body, and
+  home/nav navigation path.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/leaderboard/LeaderboardCard.svelte`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.svelte`,
+  `web/dashboard/src/lib/leaderboard/sections.ts`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.test.ts`,
+  `web/dashboard/src/routes/+layout.svelte`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/leaderboard/+page.svelte`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- LeaderboardSections` failed on missing
+  `LeaderboardSections.svelte`; focused GREEN same command -> 53 passed;
+  focused GREEN `pnpm -C web/dashboard test:e2e -- -g leaderboard` -> 2
+  passed / 1 skipped; `pnpm -C web/dashboard test` -> 53 passed;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard lint` (solo rerun
+  after a parallel Vite timestamp-file race); `pnpm -C web/dashboard test:e2e`
+  -> 25 passed / 3 skipped; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2482 passed / 47 skipped / 10
+  deselected.
+
+## 2026-06-22T16:06 PDT - US-230
+- Added the `human-lane` service to `docker-compose.yml`, reusing the Padrino
+  image and running `padrino human-lane` against Postgres. It depends on
+  Postgres healthy, bootstrap completed successfully, and the internal API
+  healthy; it publishes no host port, stays only on the `internal` network, and
+  uses the same restart policy as the scheduler.
+- Added `/healthz/human-lane`, backed by a `human-lane:`-prefixed worker
+  heartbeat written by `run_human_lane` each poll tick. Scheduler health now
+  filters those lane-prefixed rows out, so a human-lane worker cannot make
+  `/healthz/scheduler` look healthy.
+- The human lane is now part of the runnable single-host compose stack. This is
+  still a single-host worker, not a distributed worker; no Redis, lease service,
+  or multi-host coordination was added.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `docker-compose.yml`, `src/padrino/api/routes/health.py`,
+  `src/padrino/db/repositories/scheduler_heartbeats.py`,
+  `src/padrino/observability/events.py`, `src/padrino/runner/human_lane.py`,
+  `tests/api/test_healthz_human_lane.py`, `tests/test_human_lane_compose.py`,
+  `tests/docker/test_compose_v2.py`, `tests/runner/test_human_lane_isolation.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_healthz_human_lane.py -q` failed on missing
+  route / unfiltered scheduler health; focused RED
+  `uv run pytest tests/runner/test_human_lane_isolation.py::test_human_lane_worker_heartbeat_is_written_each_tick -q`
+  failed on missing `worker_id` seam; focused GREEN
+  `uv run pytest tests/test_human_lane_compose.py tests/api/test_healthz_human_lane.py tests/runner/test_human_lane_isolation.py::test_human_lane_worker_heartbeat_is_written_each_tick -q`
+  -> 7 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2491
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T15:49 PDT - US-231
+- Re-sized the human-lane single-host cost defaults to stay within the
+  prd-v3 $500-$2k/month envelope without tripping at light concurrency:
+  20 games/user/day, 60 joins/user/day, $25 inference/user/day, $12 per
+  lobby, and a $1000 global breaker. The $0.50 admission reserve stays in
+  place for fine-grained atomic slots. All values remain env-overridable.
+- Added settings tests for the new defaults and `PADRINO_HUMAN_GLOBAL_LOBBY_COST_BREAKER_USD`
+  override; added economics tests proving global, lobby, and per-user caps are
+  read from `Settings`, the breaker warning carries `spent_usd`/`cap_usd`, and
+  the existing active-game continuation invariant still passes in the default
+  suite.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/settings.py`,
+  `tests/economics/test_human_cost_governance.py`, `tests/test_settings.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/test_settings.py tests/economics/test_human_cost_governance.py -q`
+  failed on the old cost defaults; focused GREEN same command -> 53 passed;
+  `uv run ruff check .`; `uv run ruff format --check .` initially requested
+  formatting for `tests/economics/test_human_cost_governance.py`, then passed
+  after `uv run ruff format tests/economics/test_human_cost_governance.py`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2497
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T17:05 PDT - US-232
+- Wired token fallback pricing into the LLM call persistence boundary. The
+  LiteLLM adapter still records raw `response_cost` only, but now also carries
+  the actual attempted model string on `AdapterResult.model_id`; the runner
+  uses that plus token counts and settings to persist a priced `LlmCall.cost_usd`.
+- Added persistence tests for missing `response_cost`, response-cost precedence,
+  settings-driven model price overrides, and human-lane global spend summing a
+  fallback-priced human-game turn.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/llm/adapter.py`,
+  `src/padrino/llm/litellm_adapter.py`, `src/padrino/runner/game_runner.py`,
+  `tests/llm/test_litellm_adapter.py`,
+  `tests/runner/test_llm_call_cost_persistence.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/runner/test_llm_call_cost_persistence.py tests/llm/test_litellm_adapter.py -q`
+  -> 34 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2502
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T16:03 PDT - US-233
+- Added an explicit single-host restart-resume regression for a human-lane game
+  stopped mid-`DAY_1_VOTE`: the test calls
+  `rehydrate_active_human_games()`, resumes through `run_human_lane`, verifies
+  the persisted phase/deadline, asserts the resumed tail chains from the
+  previous head, and checks replayed terminal state equals the live game row.
+- The regression asserts idempotent rehydration of the in-progress phase:
+  `DAY_1_VOTE` has exactly one `PhaseStarted`, one `DayVoteResolved`, one
+  `PhaseResolved`, and one vote submission per seat after resume.
+- Single-host scope note: the human lane needs no distributed lease in this
+  design. The worker heartbeat is a health signal, not a lease; reconnect-grace
+  presence (`padrino_human_reconnect_grace_seconds`) is the only seat/game
+  liveness mechanism, and distributed leasing / multi-host coordination remains
+  explicitly out of scope.
+- Test learning: a tight `run_human_lane(..., poll_interval_s=0.01)` heartbeat
+  loop can contend with a real resumed game on the shared in-memory SQLite
+  StaticPool and produce artificial persistence gaps. For restart-resume tests,
+  wait on the executor and keep the poll interval long.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/runner/test_human_runtime_snapshots.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/runner/test_human_runtime_snapshots.py -q` -> 4 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2503
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T16:20 PDT - US-234a
+- Added the ranked lobby flag end-to-end without enabling rating writes:
+  `POST /lobbies` accepts `ranked` (default false), binds casual/ranked lobbies
+  to distinct HUMANS_INCLUDED `League` rows, and returns the bound `ranked`
+  value in `LobbySummary`.
+- Added Alembic `0049_ranked_humans_included_league` and matching ORM metadata
+  so the partial HUMANS_INCLUDED unique index keys on `(ruleset_id, ranked)`.
+  Downgrade collapses back to one row per ruleset using the existing dependent
+  FK/collision pattern.
+- Threaded human-lane ranked state from launched lobby league binding into
+  `GamePersistence.ranked`, then into `_default_human_game_executor` /
+  `drive_game_loop`. Missing or non-HUMANS_INCLUDED bindings fail closed to
+  unranked/no-league.
+- Added dashboard ranked create toggle and kept identity-blind lobby surfaces:
+  the create form submits `ranked: true`, the lobby detail badge shows RANKED
+  when bound, and Playwright asserts no new human/seat markers in the create
+  request.
+- Ranked human terminal games still write NOTHING in this story: regression
+  coverage asserts zero scientific `Rating`/`RatingEvent` rows and zero dormant
+  `HumanRating`/`HumanRatingEvent` rows. The scientific ranked path remains
+  covered by the existing runner rating integration tests.
+- Tracking correction: this story consumed Alembic revision `0049`, so US-239
+  was updated in `ralph/prd.json` to use migration `0050` after head `0049`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/lobbies.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/leagues.py`,
+  `src/padrino/db/migrations/versions/0049_ranked_humans_included_league.py`,
+  `src/padrino/runner/game_runner.py`, `src/padrino/runner/human_lane.py`,
+  `tests/api/test_lobby_create.py`,
+  `tests/db/test_migration_0049_humans_included_ranked_index.py`,
+  `tests/ratings/test_segregation.py`, `tests/runner/test_human_lane_wiring.py`,
+  `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/routes/lobby/+page.svelte`,
+  `web/dashboard/src/routes/lobby/[id]/+page.svelte`,
+  `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_lobby_create.py::test_create_ranked_lobby_binds_ranked_humans_included_league tests/runner/test_human_lane_wiring.py::test_human_lane_binds_ranked_lobby_league_to_executor tests/runner/test_human_lane_wiring.py::test_default_human_executor_passes_ranked_flag_to_game_loop tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_writes_zero_rating_rows tests/db/test_migration_0049_humans_included_ranked_index.py -q`
+  failed on the expected missing ranked API/repository/runner/migration
+  support; focused GREEN same command -> 5 passed. Focused frontend
+  `pnpm -C web/dashboard exec vitest run src/lib/api/client.test.ts` -> 21
+  passed; `pnpm -C web/dashboard test:e2e -- tests/e2e/lobby.spec.ts --project=chromium`
+  -> 5 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2509 passed / 48 skipped / 10
+  deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26
+  passed / 3 skipped.
+
+## 2026-06-22T16:33 PDT - US-234b
+- Activated the ranked Humans-Included ELO writer on a separate sibling-table
+  path. `runner/game_runner.py` now reaches it only for terminal games where the
+  runtime ranked flag is true and the persisted league is
+  `HUMANS_INCLUDED` + ranked; scientific/casual paths remain fail-closed.
+- Added `db/repositories/human_ratings.py` and
+  `ratings/human_openskill_service.py`. The writer persists only
+  `HumanRating` / `HumanRatingEvent` rows keyed by principal string and only in
+  `GLOBAL/global` scope. AI seats are transient initial OpenSkill ratings, so
+  mixed games move human principals without inserting AI rows into the sibling
+  table.
+- Extended regression coverage: service-level tests prove ranked human writes
+  human rows and zero scientific rows, fail-closed tests cover casual,
+  scientific, and missing-league cases, the real terminal segregation test now
+  expects ranked human rows, and the scientific runner rating integration test
+  asserts zero human rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/analytics/human_stats.py`,
+  `src/padrino/api/routes/lobbies.py`, `src/padrino/core/enums.py`,
+  `src/padrino/db/models.py`, `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/db/repositories/leagues.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/ratings/test_human_ranked_elo.py`,
+  `tests/ratings/test_segregation.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py -q` failed on missing
+  `padrino.ratings.human_openskill_service`; focused RED
+  `uv run pytest tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_writes_human_rating_rows_only -q`
+  failed with `(0, 0, 0, 0)` counts before the writer hook; focused GREEN
+  `uv run pytest tests/ratings/test_human_ranked_elo.py tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_writes_human_rating_rows_only tests/ratings/test_segregation.py::test_human_lane_game_writes_zero_rating_rows tests/ratings/test_segregation.py::test_human_seat_fails_closed_even_if_ranked_true tests/runner/test_rating_integration.py::test_town_win_updates_town_up_mafia_down -q`
+  -> 6 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2512 passed / 48 skipped / 10
+  deselected. Frontend gates not run; US-234b is backend-only and did not touch
+  `web/dashboard`.
+
+## 2026-06-22T16:38 PDT - US-235
+- Extended the in-tree segregation CI gate around the existing four-table
+  `_count_all_rating_rows` helper: the ranked Humans-Included terminal path
+  still proves zero scientific rows plus human sibling rows, the casual
+  human-lane path is explicitly named as casual and stays fully dormant, and
+  the scientific canonical test now asserts scientific rows are present while
+  `HumanRating` / `HumanRatingEvent` remain zero.
+- This was test-only; the ranked human writer behavior was already present
+  from US-234b.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/ratings/test_segregation.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/ratings/test_segregation.py -q` -> 9 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2512
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T16:51 PDT - US-236
+- Added `/public/leaderboard` `human_cards`, sourced only from ranked
+  Humans-Included `HumanRating` rows at `GLOBAL/global`. These cards carry their
+  own `section="humans_included"`, context label, ranks, and provisional flags,
+  and remain separate from scientific canonical / PLACEMENT / SOLO_RATE cards.
+- Rendered a distinct Humans-Included League section on the dashboard
+  leaderboard. The Svelte section splitter now accepts `humanCards` separately,
+  and the hermetic Playwright fixture asserts the section is present and
+  visually separated from canonical and experimental sections.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `src/padrino/api/routes/public.py`, `tests/api/test_public_routes.py`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.svelte`,
+  `web/dashboard/src/lib/leaderboard/sections.ts`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.test.ts`,
+  `web/dashboard/src/routes/leaderboard/+page.svelte`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_public_routes.py::test_leaderboard_returns_ranked_humans_included_cards_from_human_rating_only -q`
+  failed on missing `human_cards`; focused RED
+  `pnpm -C web/dashboard exec vitest run src/lib/leaderboard/LeaderboardSections.test.ts`
+  failed on missing `humanCards`; focused GREEN same commands -> 1 passed /
+  2 passed; focused GREEN `uv run pytest tests/api/test_public_routes.py -q`
+  -> 18 passed; focused GREEN
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/leaderboard.spec.ts --project=chromium`
+  -> 2 passed / 1 skipped; full gates `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2513 passed / 48 skipped /
+  10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` ->
+  26 passed / 3 skipped; extra `pnpm -C web/dashboard test` -> 54 passed.
+
+## 2026-06-22T17:02 PDT - US-237
+- Added the ranked integrity acknowledgement guard to lobby creation. Ranked `POST /lobbies` now rejects missing/false `integrity_acknowledged` with 422 before admission is claimed; ranked-with-ack stores `Lobby.integrity_acknowledged=True`; casual lobbies store `False` and remain casual by default.
+- Added the `integrity_acknowledged` boolean to the existing lobby row shape and Alembic lobby-table definition without creating a new revision, preserving `0050` for US-239. `tests/db/test_migrations.py` now asserts the upgraded schema includes the column.
+- Added ranked-path release-delay regression coverage around `run_human_tick`: ranked and casual paths produce the same shared `released_at` instant for all public messages, so response timing does not reveal human vs AI seats.
+- Updated the dashboard ranked create flow to require and submit the acknowledgement while the Playwright request assertion still verifies no seat/human identity markers are sent.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/lobbies.py`, `src/padrino/db/models.py`, `src/padrino/db/repositories/lobbies.py`, `src/padrino/db/migrations/versions/0035_lobbies.py`, `tests/api/test_lobby_create.py`, `tests/db/test_migrations.py`, `tests/runner/test_human_tick_symmetry.py`, `web/dashboard/src/lib/api/client.ts`, `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/lib/api/client.test.ts`, `web/dashboard/src/routes/lobby/+page.svelte`, `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest tests/api/test_lobby_create.py::test_ranked_lobby_requires_and_persists_integrity_acknowledgement -q` failed because ranked create returned 201 before the guard; focused GREEN `uv run pytest tests/api/test_lobby_create.py tests/runner/test_human_tick_symmetry.py tests/db/test_migrations.py -q` -> 26 passed. Full gates: `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2515 passed / 48 skipped / 10 deselected; `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26 passed / 3 skipped.
+
+## 2026-06-22T17:11 PDT - US-238
+- Replaced the Wave-10 NAR corpus draw-only coverage with real-action
+  deterministic full-game goldens for `roleblock10_v1`, `deception13_v1`,
+  `visit12_v1`, `ninja13_v1`, `sk12_v1`, and `jester8_v1`. Each case now pins
+  terminal result/reason, event count, final event hash, and hash-chain digest,
+  then re-runs to prove replay-stable byte output.
+- Consolidated the old deterministic mock script builders behind
+  `make_role_aware_script`, which supports arbitrary structured role actions
+  while preserving the `make_villager_script`, `make_mafia_script`,
+  `make_town_win_script`, and `make_mafia_win_script` APIs. Added a regression
+  proving the old behaviors are reproducible through the new builder.
+- The corpus now asserts the intended mechanical signal per ruleset: blocked
+  detective feedback, cleaned death reveal plus Godfather false-town
+  investigation, track/watch visit feedback, Ninja visit suppression, serial
+  kill multi-death resolution, and Jester day-vote alt trigger.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/conftest.py`,
+  `tests/integration/test_nar_regression_corpus.py`,
+  `tests/llm/test_mock_adapter.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/llm/test_mock_adapter.py::test_role_aware_script_builder_reproduces_legacy_helper_behaviors tests/integration/test_nar_regression_corpus.py -q`
+  failed first on the expected placeholder pins and one helper target
+  mismatch; focused GREEN same command -> 17 passed. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2525
+  passed / 48 skipped / 10 deselected. Frontend gates not run; US-238 is
+  backend/test-only and did not touch `web/dashboard`.
+
+## 2026-06-22T17:19 PDT - US-239
+- Added linear Alembic migration `0050_hot_path_secondary_indexes` after
+  `0049`, adding `game_events.game_id`, `llm_calls(game_id, agent_build_id,
+  event_id)`, and retention-focused partial indexes for completed games and
+  unscrubbed LLM payload rows.
+- Added matching SQLAlchemy `Index` declarations on `Game`, `GameEvent`, and
+  `LlmCall` so metadata and migrated schemas stay aligned.
+- Added migration regression coverage for single-head linearity, upgrade index
+  columns, partial scrub predicate, exact downgrade cleanup to the prior index
+  set, and ORM-vs-migration consistency.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0050_hot_path_secondary_indexes.py`,
+  `tests/db/test_migration_0050_hot_path_indexes.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0050_hot_path_indexes.py -q` -> 3
+  failed before migration/model indexes; focused GREEN same command -> 3
+  passed; adjacent `uv run pytest tests/db/test_migrations.py
+  tests/db/test_migration_0049_humans_included_ranked_index.py
+  tests/db/test_migration_0050_hot_path_indexes.py -q` -> 8 passed and
+  `uv run pytest tests/db/test_models.py tests/db/test_retention_executor.py
+  -q` -> 23 passed; full gates `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2529 passed / 48 skipped /
+  10 deselected. Frontend gates not run; US-239 is backend/migration-only and
+  did not touch `web/dashboard`.
+
+## 2026-06-22T17:28 PDT - US-240
+- Isolated benchmark scheduler child-game exceptions by routing the fan-out
+  through a `return_exceptions=True` gather helper that returns typed
+  per-child failures instead of propagating the first exception as a
+  gauntlet-level crash.
+- Added structured `scheduler.game.failed` logs with `gauntlet_id`, `game_id`,
+  `error_type`, and `error`, and included failed child ids/count on the
+  gauntlet-completed event for partial-result observability.
+- Added a scheduler regression that injects one failing child game, proves the
+  surviving child games still complete with their normal terminal result, and
+  asserts the failing `game_id` is identifiable from the structured log.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/observability/events.py`,
+  `src/padrino/runner/scheduler.py`, `tests/runner/test_scheduler.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_scheduler.py::test_child_game_failure_isolated_and_logged -q`
+  showed the expected failing-test marker before the old gather path wedged and
+  was terminated; focused GREEN same command -> 1 passed; scheduler module
+  `uv run pytest tests/runner/test_scheduler.py -q` -> 8 passed; full gates
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2530
+  passed / 48 skipped / 10 deselected. Frontend gates not run; US-240 is
+  backend scheduler-only and did not touch `web/dashboard`.
+
+## 2026-06-22T17:40 PDT - US-241
+- Added shared persisted game-status literals in `padrino.db.game_status`,
+  including `FAILED` and the terminal-status set used by scheduler child
+  selection.
+- Added scheduler child-game retry bounded by
+  `padrino_scheduler_game_max_attempts`; exhausted attempts mark the game
+  `FAILED`, clear `terminal_result`, and log `scheduler.game.failed` with the
+  attempt count.
+- Kept `FAILED` out of completed-scoped readers by routing model rollup, judge
+  sampling, continuous-matchmaking history, and scheduler re-selection through
+  the shared status contract.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/game_status.py`,
+  `src/padrino/db/repositories/games.py`,
+  `src/padrino/ratings/judge_sampling.py`,
+  `src/padrino/ratings/model_rollup.py`, `src/padrino/runner/game_runner.py`,
+  `src/padrino/runner/scheduler.py`,
+  `src/padrino/scheduler/continuous_matchmaking.py`, `src/padrino/settings.py`,
+  `tests/ratings/test_judge_sampling.py`,
+  `tests/ratings/test_model_rollup.py`, `tests/runner/test_scheduler.py`,
+  `tests/scheduler/test_continuous_matchmaking.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_scheduler.py tests/ratings/test_model_rollup.py::test_failed_games_do_not_count_as_completed_rollup_samples tests/ratings/test_judge_sampling.py::test_failed_games_are_not_sampled_for_judge_enrichment tests/scheduler/test_continuous_matchmaking.py::test_failed_games_are_not_counted_in_match_history`
+  first failed on the missing shared status module; focused GREEN same command
+  -> 16 passed. Full gates `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2538 passed / 48 skipped /
+  10 deselected. Frontend gates not run; US-241 is backend scheduler/rating
+  predicate work and did not touch `web/dashboard`.
+
+## 2026-06-22T18:01 PDT - US-242
+- Added `padrino.ops.backup_restore.verify_restored_game_hash_chain`, which
+  reads a restored completed game's `game_events`, replays the canonical
+  hash-chain, requires a terminal `GameTerminated` row, and compares the tip to
+  `games.event_hash_head`.
+- Added `padrino game verify-restore <game-id> --db-url <restored-db-url>` so
+  the restore runbook has a concrete operator command that exits non-zero on a
+  missing/non-completed game, missing events, chain mismatch, or tip mismatch.
+- Added `docs/deployment/postgres-backup-restore.md`, covering routine
+  `pg_dump`, non-destructive restore drills, production compose-stack restore,
+  managed-Postgres variants, and the required hash-chain verification step.
+- Added a hermetic restore regression that runs a finished `mini7_v1` game,
+  writes a JSON backup of its `games`/`game_events` rows, restores those rows
+  into a fresh database, and asserts the restored chain tip matches the
+  pre-backup final hash.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ops/__init__.py`,
+  `src/padrino/ops/backup_restore.py`, `src/padrino/cli.py`,
+  `tests/ops/test_backup_restore.py`,
+  `docs/deployment/postgres-backup-restore.md`,
+  `docs/deployment/central-backend.md`, `docs/deployment/self-host.md`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused `uv run pytest tests/ops/test_backup_restore.py
+  -q` -> 1 passed; touched-file `uv run mypy src/padrino/ops
+  src/padrino/cli.py tests/ops/test_backup_restore.py` -> clean. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2540
+  passed / 48 skipped / 10 deselected. Frontend gates not run; US-242 is
+  backend/docs-only and did not touch `web/dashboard`.
+
+## 2026-06-22T19:46 PDT - US-243
+- Made `/ladder` load its ruleset selector from `/public/rulesets`, filter to
+  canonical `CANONICAL_TEAM` rulesets, and fetch `/public/ladder` standings for
+  the active ruleset. `bench10_v1` is now selectable alongside `mini7_v1`, while
+  non-canonical PLACEMENT / SOLO_RATE contexts stay off the ladder.
+- Added shared dashboard helper `canonicalTeamRulesets` and reused it for the
+  home top-agent feed and model-profile ladder lookup so bench10-only ladder
+  rows remain reachable from their profile links.
+- Extended the ladder Playwright fixture to assert mini7 + bench10 selection,
+  selected-ruleset standings, and non-canonical exclusion; extended the
+  leaderboard hermetic public-surface mock for `/public/rulesets`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/rulesets.ts`,
+  `web/dashboard/src/routes/(public)/ladder/+page.svelte`,
+  `web/dashboard/src/routes/(public)/models/[id]/+page.svelte`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/tests/e2e/ladder.spec.ts`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/ladder.spec.ts --project=chromium`
+  failed on missing `bench10_v1`; focused GREEN same command -> 3 passed.
+  Full frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26
+  passed / 3 skipped. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2540 passed / 48 skipped /
+  10 deselected.
+
+## 2026-06-22T20:07 PDT - US-244
+- Restored shipped migration `0035_lobbies.py` to the `origin/main` byte state
+  so databases already upgraded before Wave 11 no longer depend on an edited
+  historical revision.
+- Added linear Alembic migration `0051_lobby_integrity_acknowledged` after
+  `0050`, adding `lobbies.integrity_acknowledged` with `false` server-default
+  backfill and a SQLite-safe batch downgrade.
+- Added migration regression coverage for the real production path: upgrade to
+  `0050` with no column, seed an existing lobby, upgrade to head, verify the
+  backfilled false value, then downgrade back to `0050`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/migrations/versions/0035_lobbies.py`,
+  `src/padrino/db/migrations/versions/0051_lobby_integrity_acknowledged.py`,
+  `tests/db/test_migration_0051_lobby_integrity_ack.py`,
+  `tests/db/test_migration_0050_hot_path_indexes.py`,
+  `tests/db/test_migrations_all_dialects.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0051_lobby_integrity_ack.py -q`
+  failed on head still `0050` and the column already present at `0050`;
+  focused GREEN same command -> 2 passed; adjacent
+  `uv run pytest tests/db/test_migration_0050_hot_path_indexes.py
+  tests/db/test_migrations.py tests/db/test_migrations_all_dialects.py -q`
+  -> 9 passed / 2 skipped (Postgres Docker unavailable). Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2543
+  passed / 48 skipped / 10 deselected.
+
+## 2026-06-22T20:14 PDT - US-245
+- Restored the pinned `/public/leaderboard` contract so `canonical_cards`
+  contains only canonical `CANONICAL_TEAM` `GLOBAL/global` cards.
+- Added a sibling `faction_cards` response field sourced from canonical
+  `FACTION` rating rows, keeping Town/Scum ranks grouped outside
+  `canonical_cards`.
+- Updated the dashboard leaderboard types, page state, section splitter, unit
+  test, and Playwright fixture so the faction subsection reads `faction_cards`
+  explicitly.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `src/padrino/api/routes/public.py`, `tests/api/test_public_routes.py`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/leaderboard/sections.ts`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.svelte`,
+  `web/dashboard/src/lib/leaderboard/LeaderboardSections.test.ts`,
+  `web/dashboard/src/routes/leaderboard/+page.svelte`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_public_routes.py::test_leaderboard_returns_separated_context_cards_without_cross_sort -q`
+  failed on missing `faction_cards`; focused GREEN same command -> 1 passed;
+  `pnpm --dir web/dashboard exec vitest run src/lib/leaderboard/LeaderboardSections.test.ts`
+  -> 2 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2543 passed / 48 skipped /
+  10 deselected; `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26
+  passed / 3 skipped.
+
+## 2026-06-22T20:22 PDT - US-246
+- Added human-lane per-game crash isolation: the done callback now retrieves
+  task exceptions, logs `human_lane.game.failed`, marks the game `FAILED` via
+  the shared game-status repository path, and suppresses in-process re-dispatch
+  while the failure marker is pending.
+- Guarded the human-lane worker heartbeat write so a transient failure logs
+  `human_lane.worker.heartbeat_failed` and the poll loop continues instead of
+  dropping all in-flight games.
+- Added regression coverage for a crashing human-game executor becoming
+  `FAILED` and falling out of `list_human_lane_games`, plus heartbeat-write
+  failure tolerance.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/human_lane.py`,
+  `tests/runner/test_human_lane_isolation.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_human_lane_isolation.py::test_crashed_human_game_is_marked_failed_and_not_reselected tests/runner/test_human_lane_isolation.py::test_heartbeat_failure_does_not_crash_human_lane_loop -q`
+  failed first on the stuck `RUNNING` row and escaping heartbeat exception;
+  focused GREEN same command -> 2 passed; adjacent
+  `uv run pytest tests/runner/test_human_lane_isolation.py
+  tests/runner/test_human_lane_wiring.py tests/runner/test_human_game_durability.py -q`
+  -> 22 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2545 passed / 48 skipped /
+  10 deselected.
+
+## 2026-06-22T20:30 PDT - US-247
+- Threaded the human-lane `Settings` object into `GamePersistence` so cost
+  pricing uses the same configuration as the rest of the lane.
+- Added concrete fallback token prices for the configured Cerebras, Z.AI,
+  DeepInfra, and Xiaomi LiteLLM model strings while retaining `default` as the
+  backstop. Prices are stored as USD per 1K tokens, converted from the vendors'
+  public per-1M-token pricing pages checked during this iteration.
+- Preserved `LlmCall.cost_usd = NULL` for unbilled result shapes
+  (`provider_error`, `exhausted`, and empty no-token results) while keeping
+  successful/provider-response turns on the `price_turn_usd` persist seam.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/settings.py`,
+  `src/padrino/runner/game_runner.py`, `src/padrino/runner/human_lane.py`,
+  `tests/test_settings.py`, `tests/runner/test_llm_call_cost_persistence.py`,
+  `tests/runner/test_human_lane_wiring.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/test_settings.py::test_human_fallback_token_prices_cover_configured_endpoints tests/runner/test_llm_call_cost_persistence.py::test_persisted_llm_call_preserves_null_cost_for_unbilled_turns tests/runner/test_human_lane_wiring.py::test_human_lane_threads_settings_into_game_persistence -q`
+  failed on missing per-model prices, forced `0.0` persisted cost, and missing
+  `settings` threading; focused GREEN
+  `uv run pytest tests/test_settings.py::test_human_fallback_token_prices_cover_configured_endpoints tests/runner/test_llm_call_cost_persistence.py tests/runner/test_human_lane_wiring.py::test_human_lane_threads_settings_into_game_persistence -q`
+  -> 9 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2550 passed / 48 skipped /
+  10 deselected.
+
+## 2026-06-22T20:37 PDT - US-248
+- Decoupled model-detail ruleset discovery from the primary agent lookup:
+  `/public/rulesets` now has its own catch/fallback path, and an empty
+  canonical response falls back the same way.
+- Added a dashboard e2e regression for `/models/:id` where `/public/rulesets`
+  returns 500 but the page still locates the agent via the fallback
+  `bench10_v1` ladder lookup without rendering `model-error`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/rulesets.ts`,
+  `web/dashboard/src/routes/(public)/models/[id]/+page.svelte`,
+  `web/dashboard/tests/e2e/ladder.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `pnpm -C web/dashboard test:e2e -g "model detail"` -> 1 passed. Full gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`;
+  `pnpm -C web/dashboard test:e2e` -> 27 passed / 3 skipped;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2550
+  passed / 48 skipped / 10 deselected.
+- Learning: pass grep args to `web/dashboard/tests/e2e/run.mjs` without an
+  extra literal `--`; otherwise Playwright treats `-g` as a test file pattern.

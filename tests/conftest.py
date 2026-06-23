@@ -18,6 +18,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Protocol
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -26,6 +28,21 @@ from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
 from padrino.core.enums import ActionType
 from padrino.core.rulesets import mini7_v1
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptedAction:
+    """One structured action override for deterministic mock scripts."""
+
+    action_type: ActionType
+    target: str | None = None
+
+
+class ScriptPhaseRuleset(Protocol):
+    """Ruleset fields required to enumerate deterministic script phases."""
+
+    MAX_DAYS: int
+    DISCUSSION_ROUNDS_PER_DAY: int
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -114,19 +131,48 @@ def _phase_default(phase_id: str) -> AgentResponse:
     return _response(ActionType.NOOP, None)
 
 
-def mini7_phase_ids() -> tuple[str, ...]:
-    """All phase ids mini7_v1 may emit, in chronological order.
+def phase_ids_for_ruleset(ruleset: ScriptPhaseRuleset) -> tuple[str, ...]:
+    """All phase ids a ruleset may emit, in chronological order.
 
     Excludes ``SETUP`` and ``TERMINAL`` since those phases never prompt seats.
     """
     out: list[str] = ["NIGHT_0_MAFIA_INTRO"]
-    for d in range(1, mini7_v1.MAX_DAYS + 1):
-        for r in range(1, mini7_v1.DISCUSSION_ROUNDS_PER_DAY + 1):
+    for d in range(1, ruleset.MAX_DAYS + 1):
+        for r in range(1, ruleset.DISCUSSION_ROUNDS_PER_DAY + 1):
             out.append(f"DAY_{d}_DISCUSSION_ROUND_{r}")
         out.append(f"DAY_{d}_VOTE")
         out.append(f"NIGHT_{d}_MAFIA_DISCUSSION")
         out.append(f"NIGHT_{d}_ACTIONS")
     return tuple(out)
+
+
+def mini7_phase_ids() -> tuple[str, ...]:
+    """All phase ids mini7_v1 may emit, in chronological order."""
+    return phase_ids_for_ruleset(mini7_v1)
+
+
+def make_role_aware_script(
+    seat_ids: Sequence[str],
+    phase_ids: Sequence[str],
+    *,
+    actions: Mapping[tuple[str, str], ScriptedAction] | None = None,
+) -> dict[tuple[str, str], AgentResponse]:
+    """Build a deterministic script with structured per-seat action overrides.
+
+    Unspecified seats use the engine-safe baseline: ABSTAIN during day votes and
+    NOOP elsewhere. ``actions`` can override any seat/phase with current or
+    future role actions such as ROLEBLOCK, TRACK, CLEAN, or SERIAL_KILL.
+    """
+    overrides: Mapping[tuple[str, str], ScriptedAction] = actions or {}
+    script: dict[tuple[str, str], AgentResponse] = {}
+    for phase_id in phase_ids:
+        for sid in seat_ids:
+            override = overrides.get((phase_id, sid))
+            if override is None:
+                script[(phase_id, sid)] = _phase_default(phase_id)
+            else:
+                script[(phase_id, sid)] = _response(override.action_type, override.target)
+    return script
 
 
 def make_villager_script(
@@ -141,15 +187,12 @@ def make_villager_script(
     response from ABSTAIN to ``VOTE(target)``.
     """
     overrides: Mapping[str, Mapping[str, str]] = votes or {}
-    script: dict[tuple[str, str], AgentResponse] = {}
-    for phase_id in phase_ids:
-        phase_overrides = overrides.get(phase_id, {})
-        for sid in seat_ids:
-            if sid in phase_overrides:
-                script[(phase_id, sid)] = _response(ActionType.VOTE, phase_overrides[sid])
-            else:
-                script[(phase_id, sid)] = _phase_default(phase_id)
-    return script
+    actions = {
+        (phase_id, sid): ScriptedAction(ActionType.VOTE, target)
+        for phase_id, phase_overrides in overrides.items()
+        for sid, target in phase_overrides.items()
+    }
+    return make_role_aware_script(seat_ids, phase_ids, actions=actions)
 
 
 def make_mafia_script(
@@ -168,17 +211,20 @@ def make_mafia_script(
     """
     kills: Mapping[str, str] = night_kill_targets or {}
     vote_overrides: Mapping[str, Mapping[str, str]] = votes or {}
-    script: dict[tuple[str, str], AgentResponse] = {}
-    for phase_id in phase_ids:
-        phase_votes = vote_overrides.get(phase_id, {})
-        for sid in mafia_ids:
-            if sid in phase_votes:
-                script[(phase_id, sid)] = _response(ActionType.VOTE, phase_votes[sid])
-            elif phase_id in kills and phase_id.endswith("_ACTIONS"):
-                script[(phase_id, sid)] = _response(ActionType.MAFIA_KILL, kills[phase_id])
-            else:
-                script[(phase_id, sid)] = _phase_default(phase_id)
-    return script
+    actions = {
+        (phase_id, sid): ScriptedAction(ActionType.VOTE, target)
+        for phase_id, phase_votes in vote_overrides.items()
+        for sid, target in phase_votes.items()
+    }
+    actions.update(
+        {
+            (phase_id, sid): ScriptedAction(ActionType.MAFIA_KILL, target)
+            for phase_id, target in kills.items()
+            if phase_id.endswith("_ACTIONS")
+            for sid in mafia_ids
+        }
+    )
+    return make_role_aware_script(mafia_ids, phase_ids, actions=actions)
 
 
 def make_town_win_script(
@@ -201,23 +247,30 @@ def make_town_win_script(
 
     phase_ids = mini7_phase_ids()
     all_seats = list(mafia_ids) + list(town_ids)
-    script: dict[tuple[str, str], AgentResponse] = {
-        (p, s): _phase_default(p) for p in phase_ids for s in all_seats
-    }
+    actions: dict[tuple[str, str], ScriptedAction] = {}
 
     for sid in town_ids:
-        script[("DAY_1_VOTE", sid)] = _response(ActionType.VOTE, mafia_ids[0])
+        actions[("DAY_1_VOTE", sid)] = ScriptedAction(ActionType.VOTE, mafia_ids[0])
 
     protect_target = next(t for t in town_ids if t != doctor_id)
     for mid in mafia_ids:
-        script[("NIGHT_1_ACTIONS", mid)] = _response(ActionType.MAFIA_KILL, protect_target)
-    script[("NIGHT_1_ACTIONS", doctor_id)] = _response(ActionType.PROTECT, protect_target)
-    script[("NIGHT_1_ACTIONS", detective_id)] = _response(ActionType.INVESTIGATE, mafia_ids[1])
+        actions[("NIGHT_1_ACTIONS", mid)] = ScriptedAction(
+            ActionType.MAFIA_KILL,
+            protect_target,
+        )
+    actions[("NIGHT_1_ACTIONS", doctor_id)] = ScriptedAction(
+        ActionType.PROTECT,
+        protect_target,
+    )
+    actions[("NIGHT_1_ACTIONS", detective_id)] = ScriptedAction(
+        ActionType.INVESTIGATE,
+        mafia_ids[1],
+    )
 
     for sid in town_ids:
-        script[("DAY_2_VOTE", sid)] = _response(ActionType.VOTE, mafia_ids[1])
+        actions[("DAY_2_VOTE", sid)] = ScriptedAction(ActionType.VOTE, mafia_ids[1])
 
-    return script
+    return make_role_aware_script(all_seats, phase_ids, actions=actions)
 
 
 def make_mafia_win_script(
@@ -235,28 +288,29 @@ def make_mafia_win_script(
 
     phase_ids = mini7_phase_ids()
     all_seats = list(mafia_ids) + list(town_ids)
-    script: dict[tuple[str, str], AgentResponse] = {
-        (p, s): _phase_default(p) for p in phase_ids for s in all_seats
-    }
-
     night_targets = {
         "NIGHT_1_ACTIONS": town_ids[0],
         "NIGHT_2_ACTIONS": town_ids[1],
         "NIGHT_3_ACTIONS": town_ids[2],
     }
-    for phase_id, target in night_targets.items():
-        for mid in mafia_ids:
-            script[(phase_id, mid)] = _response(ActionType.MAFIA_KILL, target)
+    actions = {
+        (phase_id, mid): ScriptedAction(ActionType.MAFIA_KILL, target)
+        for phase_id, target in night_targets.items()
+        for mid in mafia_ids
+    }
 
-    return script
+    return make_role_aware_script(all_seats, phase_ids, actions=actions)
 
 
 __all__ = [
+    "ScriptedAction",
     "make_mafia_script",
     "make_mafia_win_script",
+    "make_role_aware_script",
     "make_town_win_script",
     "make_villager_script",
     "mini7_phase_ids",
+    "phase_ids_for_ruleset",
 ]
 
 

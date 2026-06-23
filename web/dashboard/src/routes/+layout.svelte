@@ -21,6 +21,7 @@
       <nav class="flex gap-4 text-sm">
         <a class="hover:underline" href="/">Home</a>
         <a class="hover:underline" href="/ladder">Ladder</a>
+        <a class="hover:underline" href="/leaderboard" data-testid="nav-leaderboard">Leaderboard</a>
         <a class="hover:underline" href="/lobby" data-testid="nav-lobby">Play</a>
       </nav>
     </div>

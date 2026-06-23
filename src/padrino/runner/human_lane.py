@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import socket
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -44,14 +46,26 @@ from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.hashing import compute_event_hash
 from padrino.core.engine.state import GameState, Seat
-from padrino.core.enums import ActionType, SeatKind
+from padrino.core.enums import ActionType, LeagueKind, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
-from padrino.db.models import Game, GameSeat, HumanActionSubmission, HumanChatSubmission
+from padrino.db.game_status import (
+    GAME_STATUS_COMPLETED,
+    GAME_STATUS_RUNNING,
+)
+from padrino.db.models import (
+    Game,
+    GameSeat,
+    HumanActionSubmission,
+    HumanChatSubmission,
+    League,
+    Lobby,
+)
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import human_action_submissions as human_actions_repo
 from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
+from padrino.db.repositories import scheduler_heartbeats as worker_heartbeats_repo
 from padrino.economics.human_cost_governance import global_breaker_open, human_eligible_pool
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
@@ -59,6 +73,7 @@ from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
+from padrino.observability.events import EVENT_HUMAN_LANE_WORKER_HEARTBEAT
 from padrino.runner.disconnect_takeover import apply_takeover, build_takeover_event
 from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, drive_game_loop
 from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
@@ -72,8 +87,8 @@ _logger = structlog.get_logger("padrino.runner.human_lane")
 
 DEFAULT_POLL_INTERVAL_S: Final[float] = 1.0
 HUMAN_ACTION_POLL_INTERVAL_SECONDS: Final[float] = 0.05
-STATUS_COMPLETED: Final[str] = "COMPLETED"
-STATUS_RUNNING: Final[str] = "RUNNING"
+STATUS_COMPLETED: Final[str] = GAME_STATUS_COMPLETED
+STATUS_RUNNING: Final[str] = GAME_STATUS_RUNNING
 
 # A seat is "human-lane" when a human ever occupied it (a live human seat or a
 # seat an AI silently took over). AI-only benchmark games have neither.
@@ -92,6 +107,48 @@ AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
 HumanChatRelease = Callable[[str, float, EventLog, Sequence[StoredEvent]], Awaitable[None]]
 BeforeTakeoverRevalidate = Callable[[], Awaitable[None]]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def default_human_lane_worker_id() -> str:
+    """Return the reserved human-lane worker id ``"human-lane:<host>:<pid>"``."""
+    return worker_heartbeats_repo.human_lane_worker_id(f"{socket.gethostname()}:{os.getpid()}")
+
+
+async def _write_worker_heartbeat(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    worker_id: str,
+) -> None:
+    async with session_factory() as session, session.begin():
+        await worker_heartbeats_repo.upsert(
+            session,
+            worker_id=worker_heartbeats_repo.human_lane_worker_id(worker_id),
+            beat_at=_utcnow(),
+        )
+    _logger.info(
+        EVENT_HUMAN_LANE_WORKER_HEARTBEAT,
+        worker_id=worker_heartbeats_repo.human_lane_worker_id(worker_id),
+    )
+
+
+async def _mark_human_game_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    exc: BaseException,
+) -> None:
+    _logger.error(
+        "human_lane.game.failed",
+        game_id=str(game_id),
+        error_type=type(exc).__name__,
+        error=str(exc),
+    )
+    async with session_factory() as session, session.begin():
+        await games_repo.mark_failed(session, game_id, completed_at=_utcnow())
 
 
 @dataclass(frozen=True, slots=True)
@@ -871,8 +928,9 @@ def _default_human_game_executor(
         persistence: GamePersistence,
         adapter: LlmAdapter,
     ) -> None:
-        # Human-lane games are always casual (ranked=False) — they never write the
-        # scientific Rating/RatingEvent tables (segregation, hard rule 8).
+        # Human-lane ranked mode is segregated from the scientific benchmark:
+        # the ranked flag reaches terminal persistence, but human seats keep the
+        # scientific Rating/RatingEvent path fail-closed.
         async def release_chat(
             phase: str,
             _settled_at: float,
@@ -929,7 +987,7 @@ def _default_human_game_executor(
         await drive_game_loop(
             config,
             adapter,
-            False,
+            persistence.ranked,
             persistence=persistence,
             tick_runner=tick_runner,
             resume=persistence.resume,
@@ -990,26 +1048,55 @@ async def human_lane_admission(
 async def _claim_game(
     session_factory: async_sessionmaker[AsyncSession],
     game_id: uuid.UUID,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, uuid.UUID | None, bool] | None:
     """Atomically flip a claimable human-lane game to RUNNING.
 
-    Returns ``(game_seed, ruleset_id, prior_status)`` on a successful claim, or
-    ``None`` when the game vanished, already completed, or is not a human-lane
-    game (so a concurrent worker / the benchmark lane never double-runs it).
+    Returns ``(game_seed, ruleset_id, prior_status, league_id, ranked)`` on a
+    successful claim, or ``None`` when the game vanished, already completed, or
+    is not a human-lane game (so a concurrent worker / the benchmark lane never
+    double-runs it).
     """
     async with session_factory() as session, session.begin():
         game = await games_repo.get(session, game_id)
-        if game is None or game.status == STATUS_COMPLETED:
+        if game is None or game.status not in _CLAIMABLE_STATUSES:
             return None
         if not await _is_human_lane_game(session, game_id):
             return None
         seed = game.game_seed
         ruleset_id = game.ruleset_id
         prior_status = game.status
+        league_id, ranked = await _bound_humans_included_league(session, game_id=game_id)
         if game.status != STATUS_RUNNING:
             game.status = STATUS_RUNNING
             await session.flush()
-    return seed, ruleset_id, prior_status
+    return seed, ruleset_id, prior_status, league_id, ranked
+
+
+async def _bound_humans_included_league(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+) -> tuple[uuid.UUID | None, bool]:
+    """Return the launched lobby's Humans-Included league binding.
+
+    Missing or non-human league bindings fail closed to unranked/no-league. This
+    keeps manually seeded human-lane tests and any inconsistent DB row out of
+    the terminal rating path.
+    """
+    row = (
+        await session.execute(
+            select(Lobby.league_id, League.ranked)
+            .join(League, League.id == Lobby.league_id)
+            .where(
+                Lobby.game_id == game_id,
+                League.kind == LeagueKind.HUMANS_INCLUDED.value,
+            )
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        return None, False
+    return row.league_id, bool(row.ranked)
 
 
 async def _run_one_human_game(
@@ -1028,7 +1115,7 @@ async def _run_one_human_game(
         claimed = await _claim_game(session_factory, game_id)
         if claimed is None:
             return
-        game_seed, ruleset_id, prior_status = claimed
+        game_seed, ruleset_id, prior_status, league_id, ranked = claimed
         if prior_status == STATUS_RUNNING and resume is None:
             _logger.warning(
                 "human_lane.running_game_missing_runtime_snapshot",
@@ -1048,15 +1135,17 @@ async def _run_one_human_game(
         else:
             adapter = _InjectedExecutorAdapter()
         config = GameConfig(game_id=str(game_id), game_seed=game_seed, ruleset_id=ruleset_id)
-        # Human seats carry no agent_build_id, so ``agent_builds`` is empty: the
-        # rating write path fails closed (segregation) and no scientific row is
-        # written for a human-lane game.
+        # Human seats carry no agent_build_id in ``agent_builds``, so the
+        # scientific rating write path still fails closed even when a ranked
+        # Humans-Included lobby reaches the terminal path (US-234a).
         persistence = GamePersistence(
             session_factory=session_factory,
             game_id=game_id,
             agent_builds={},
-            league_id=None,
+            league_id=league_id,
+            ranked=ranked,
             resume=resume,
+            settings=settings,
         )
         structlog.contextvars.bind_contextvars(human_lane_game_id=str(game_id))
         try:
@@ -1092,6 +1181,7 @@ async def run_human_lane(
     semaphore: asyncio.Semaphore | None = None,
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
     settings: Settings | None = None,
+    worker_id: str | None = None,
 ) -> None:
     """Drain human-lane games until ``stop_event`` is set.
 
@@ -1114,6 +1204,7 @@ async def run_human_lane(
 
     sem = semaphore or asyncio.Semaphore(concurrency)
     cfg = settings or get_settings()
+    wid = worker_id or default_human_lane_worker_id()
     use_default_executor = game_executor is None
     executor = game_executor or _default_human_game_executor(
         cfg,
@@ -1121,6 +1212,8 @@ async def run_human_lane(
     )
 
     tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+    failure_markers: set[asyncio.Task[None]] = set()
+    failing_games: set[uuid.UUID] = set()
     rehydrated_by_game = {
         item.game_id: _game_resume_from_rehydrated(item)
         for item in await rehydrate_active_human_games(session_factory)
@@ -1128,6 +1221,15 @@ async def run_human_lane(
 
     try:
         while not stop_event.is_set():
+            try:
+                await _write_worker_heartbeat(session_factory, worker_id=wid)
+            except Exception as exc:
+                _logger.warning(
+                    "human_lane.worker.heartbeat_failed",
+                    worker_id=wid,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
             async with session_factory() as session:
                 candidates = await list_human_lane_games(session)
 
@@ -1137,12 +1239,49 @@ async def run_human_lane(
                 _logger.warning("human_lane.breaker.halt_new_turns", in_flight=len(tasks))
                 pending = []
             else:
-                pending = [gid for gid in candidates if gid not in tasks]
+                pending = [
+                    gid for gid in candidates if gid not in tasks and gid not in failing_games
+                ]
             for game_id in pending:
 
                 def _make_done_cb(gid: uuid.UUID) -> Callable[[asyncio.Task[None]], None]:
-                    def _done(_task: asyncio.Task[None]) -> None:
+                    def _done(done_task: asyncio.Task[None]) -> None:
                         tasks.pop(gid, None)
+                        if done_task.cancelled():
+                            return
+                        try:
+                            exc = done_task.exception()
+                        except asyncio.CancelledError:
+                            return
+                        if exc is None:
+                            return
+
+                        failing_games.add(gid)
+                        marker = asyncio.create_task(
+                            _mark_human_game_failed(session_factory, game_id=gid, exc=exc),
+                            name=f"human-lane-game-failed-{gid}",
+                        )
+                        failure_markers.add(marker)
+
+                        def _discard_marker(done_marker: asyncio.Task[None]) -> None:
+                            failure_markers.discard(done_marker)
+                            if done_marker.cancelled():
+                                return
+                            try:
+                                marker_exc = done_marker.exception()
+                            except asyncio.CancelledError:
+                                return
+                            if marker_exc is not None:
+                                _logger.error(
+                                    "human_lane.game.failed_mark_failed_error",
+                                    game_id=str(gid),
+                                    error_type=type(marker_exc).__name__,
+                                    error=str(marker_exc),
+                                )
+                            else:
+                                failing_games.discard(gid)
+
+                        marker.add_done_callback(_discard_marker)
 
                     return _done
 
@@ -1174,6 +1313,9 @@ async def run_human_lane(
         outstanding = list(tasks.values())
         if outstanding:
             await asyncio.gather(*outstanding, return_exceptions=True)
+        outstanding_markers = list(failure_markers)
+        if outstanding_markers:
+            await asyncio.gather(*outstanding_markers, return_exceptions=True)
 
 
 __all__ = [
@@ -1183,6 +1325,7 @@ __all__ = [
     "HumanGameExecutor",
     "HumanLaneAdmission",
     "build_human_lane_adapter",
+    "default_human_lane_worker_id",
     "human_lane_admission",
     "list_human_lane_games",
     "run_human_lane",

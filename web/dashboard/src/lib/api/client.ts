@@ -25,6 +25,7 @@ import type {
   PublicModelAnalyticsResponse,
   PublicModelLeaderboardResponse,
   PublicRecentIndexResponse,
+  PublicRulesetsResponse,
   SeatGuess,
   TuringGuessResult
 } from './types';
@@ -208,6 +209,10 @@ export class PadrinoClient {
     return this.request('/public/ladder', params);
   }
 
+  publicRulesets(): Promise<PublicRulesetsResponse> {
+    return this.request('/public/rulesets');
+  }
+
   publicGameAnalytics(gameId: string): Promise<PublicGameAnalyticsResponse> {
     return this.request(`/public/games/${encodeURIComponent(gameId)}/analytics`);
   }
@@ -341,6 +346,8 @@ export class PadrinoClient {
     identity_mode?: string;
     theme_pack_id?: string | null;
     prepick_agent_build_ids?: string[];
+    ranked?: boolean;
+    integrity_acknowledged?: boolean;
   }): Promise<LobbySummary> {
     return this.mutate('POST', '/lobbies', body);
   }

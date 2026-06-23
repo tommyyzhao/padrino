@@ -99,6 +99,27 @@ describe('PadrinoClient', () => {
     expect(parsed.pathname).toBe('/public/gauntlets/g1/report');
   });
 
+  it('reads public ruleset metadata for selectors', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        items: [
+          {
+            ruleset_id: 'roleblock10_v1',
+            label: 'Roleblock 10 canonical team',
+            player_count: 10,
+            rating_context_kind: 'CANONICAL_TEAM',
+            is_canonical: true
+          }
+        ]
+      })
+    );
+    const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
+    const response = await client.publicRulesets();
+    expect(response.items[0]?.ruleset_id).toBe('roleblock10_v1');
+    const parsed = new URL(fetchImpl.mock.calls[0][0]);
+    expect(parsed.pathname).toBe('/public/rulesets');
+  });
+
   it('getGauntletReport hits the admin-scoped endpoint', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ gauntlet_id: 'g1' }));
     const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
@@ -233,12 +254,23 @@ describe('PadrinoClient human-session play channels', () => {
   it('drives the lobby create / join / ready / launch surface', async () => {
     const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
     const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
-    await client.createLobby({ ruleset_id: 'mini7_v1', identity_mode: 'ANONYMOUS' });
+    await client.createLobby({
+      ruleset_id: 'mini7_v1',
+      identity_mode: 'ANONYMOUS',
+      ranked: true,
+      integrity_acknowledged: true
+    });
     await client.joinLobby('tok');
     await client.setLobbyReady('l1', true);
     await client.launchLobby('l1');
     const paths = fetchImpl.mock.calls.map((c) => new URL(c[0]).pathname);
     expect(paths).toEqual(['/lobbies', '/lobbies/join/tok', '/lobbies/l1/ready', '/lobbies/l1/launch']);
+    expect(JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      ruleset_id: 'mini7_v1',
+      identity_mode: 'ANONYMOUS',
+      ranked: true,
+      integrity_acknowledged: true
+    });
     expect(JSON.parse((fetchImpl.mock.calls[2][1] as RequestInit).body as string)).toEqual({
       ready: true
     });

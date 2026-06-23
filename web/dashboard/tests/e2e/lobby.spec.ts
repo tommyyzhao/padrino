@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectIdentityBlind } from './helpers/identityBlind';
 
 // US-092: Live/recent lobby page.
 //
@@ -112,6 +113,22 @@ const LOBBY_ID = 'cccc0003-0003-0003-0003-cccccccccccc';
 const INVITE_TOKEN = 'invite-abc123';
 const HOST_PRINCIPAL = 'pppp1111-1111-1111-1111-pppppppppppp';
 const GUEST_PRINCIPAL = 'gggg2222-2222-2222-2222-gggggggggggg';
+const RULESET_OPTIONS = [
+  {
+    ruleset_id: 'mini7_v1',
+    label: 'Mini 7 canonical team',
+    player_count: 7,
+    rating_context_kind: 'CANONICAL_TEAM',
+    is_canonical: true
+  },
+  {
+    ruleset_id: 'roleblock10_v1',
+    label: 'Roleblock 10 canonical team',
+    player_count: 10,
+    rating_context_kind: 'CANONICAL_TEAM',
+    is_canonical: true
+  }
+];
 
 function lobbySummary(status = 'OPEN') {
   return {
@@ -120,6 +137,8 @@ function lobbySummary(status = 'OPEN') {
     identity_mode: 'ANONYMOUS',
     theme_pack_id: null,
     stakes: 'CASUAL',
+    ranked: false,
+    integrity_acknowledged: false,
     status,
     invite_token: INVITE_TOKEN,
     host_principal_id: HOST_PRINCIPAL,
@@ -144,6 +163,18 @@ function lobbyRoster(guestReady: boolean) {
 }
 
 test.describe('lobby UI (US-154)', () => {
+  async function routeRulesets(page: import('@playwright/test').Page) {
+    await page.route('**/public/rulesets', async (route) => {
+      const t = route.request().resourceType();
+      if (t !== 'fetch' && t !== 'xhr') return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: RULESET_OPTIONS })
+      });
+    });
+  }
+
   test('guest joins from an invite link, accepts consent, and readies up', async ({ page }) => {
     let consented = false;
     let guestReady = false;
@@ -152,6 +183,8 @@ test.describe('lobby UI (US-154)', () => {
       const t = route.request().resourceType();
       return t === 'fetch' || t === 'xhr';
     };
+
+    await routeRulesets(page);
 
     // Guest quickplay: minting a guest principal (no signup).
     await page.route('**/human/guest', async (route) => {
@@ -259,17 +292,66 @@ test.describe('lobby UI (US-154)', () => {
     await expect(page.getByTestId('lobby-ready-state')).toHaveText('Ready');
 
     // Anonymity: the rendered roster exposes no human/AI seat markers.
-    const rosterHtml = (await page.getByTestId('lobby-roster').innerHTML()).toLowerCase();
-    expect(rosterHtml).not.toContain('seat_kind');
-    expect(rosterHtml).not.toContain('is_human');
-    expect(rosterHtml).not.toContain('agent_build');
+    await expectIdentityBlind(page.getByTestId('lobby-roster'));
   });
 
-  test('create form shows ruleset, identity mode, and CASUAL stakes', async ({ page }) => {
+  test('create form shows ruleset, identity mode, ranked toggle, and CASUAL default', async ({
+    page
+  }) => {
+    await routeRulesets(page);
     await page.goto('/lobby');
     await expect(page.getByTestId('lobby-create-form')).toBeVisible();
-    await expect(page.getByTestId('lobby-create-ruleset')).toBeVisible();
+    const rulesetSelect = page.getByTestId('lobby-create-ruleset');
+    await expect(rulesetSelect).toBeVisible();
+    await expect(rulesetSelect.locator('option')).toHaveCount(2);
+    await expect(rulesetSelect.locator('option[value="roleblock10_v1"]')).toHaveText(
+      'Roleblock 10 canonical team (10 players)'
+    );
+    await rulesetSelect.selectOption('roleblock10_v1');
+    await expect(rulesetSelect).toHaveValue('roleblock10_v1');
     await expect(page.getByTestId('lobby-create-identity-mode')).toBeVisible();
+    await expect(page.getByTestId('lobby-create-ranked')).not.toBeChecked();
     await expect(page.getByTestId('lobby-create-stakes')).toContainText('CASUAL');
+  });
+
+  test('ranked create toggle submits ranked lobbies without identity markers', async ({ page }) => {
+    let createBody: Record<string, unknown> | null = null;
+    const isApi = (route: import('@playwright/test').Route) => {
+      const t = route.request().resourceType();
+      return t === 'fetch' || t === 'xhr';
+    };
+
+    await routeRulesets(page);
+    await page.route('**/human/guest', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({ principal_id: HOST_PRINCIPAL, kind: 'guest', display_name: null })
+      });
+    });
+    await page.route('**/lobbies', async (route) => {
+      if (!isApi(route)) return route.continue();
+      createBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...lobbySummary(), ranked: true })
+      });
+    });
+
+    await page.goto('/lobby');
+    await page.getByTestId('lobby-create-ranked').check();
+    await page.getByTestId('lobby-create-integrity-ack').check();
+    await expect(page.getByTestId('lobby-create-stakes')).toContainText('RANKED');
+    await page.getByTestId('lobby-create-submit').click();
+
+    await expect.poll(() => createBody).toMatchObject({
+      ruleset_id: 'mini7_v1',
+      identity_mode: 'ANONYMOUS',
+      ranked: true,
+      integrity_acknowledged: true
+    });
+    expect(JSON.stringify(createBody)).not.toMatch(/seat_kind|is_human/i);
   });
 });
