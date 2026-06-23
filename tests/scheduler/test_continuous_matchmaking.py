@@ -14,9 +14,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
-from padrino.db.models import Game
+from padrino.db.game_status import GAME_STATUS_FAILED
+from padrino.db.models import AgentBuild, Game
 from padrino.db.repositories import agent_builds as agent_builds_repo
+from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import model_configs as model_configs_repo
 from padrino.db.repositories import prompt_versions as prompt_versions_repo
@@ -24,7 +27,7 @@ from padrino.db.repositories import providers as providers_repo
 from padrino.llm.mock import NoopMockAdapter
 from padrino.llm.prompts import CANONICAL_RESPONSE_SCHEMA, iter_canonical_prompts
 from padrino.public.broadcast_index import BroadcastState
-from padrino.scheduler.continuous_matchmaking import run_continuous_matchmaking_tick
+from padrino.scheduler.continuous_matchmaking import _load_history, run_continuous_matchmaking_tick
 from padrino.settings import Settings
 
 _SEATS = [f"P{i + 1:02d}" for i in range(mini7_v1.PLAYER_COUNT)]
@@ -168,3 +171,32 @@ async def test_cap_reached_skipped_no_games(
     async with session_factory() as session:
         games = list((await session.execute(select(Game))).scalars())
     assert len(games) == 0
+
+
+async def test_failed_games_are_not_counted_in_match_history(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed_roster(session_factory)
+    async with session_factory() as session, session.begin():
+        build_ids = list((await session.execute(select(AgentBuild.id))).scalars())
+        game = await games_repo.create(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed="failed-history-seed",
+            status=GAME_STATUS_FAILED,
+        )
+        for index, build_id in enumerate(build_ids[: mini7_v1.PLAYER_COUNT]):
+            await games_repo.add_seat(
+                session,
+                game_id=game.id,
+                public_player_id=f"P{index + 1:02d}",
+                seat_index=index,
+                agent_build_id=build_id,
+                role=Role.VILLAGER.value,
+                faction=Faction.TOWN.value,
+            )
+
+    async with session_factory() as session:
+        history = await _load_history(session)
+
+    assert history == []

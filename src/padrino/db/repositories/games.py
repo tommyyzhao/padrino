@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.db.game_status import GAME_STATUS_CREATED, GAME_STATUS_FAILED
 from padrino.db.models import Game, GameSeat
 
 
@@ -17,7 +18,7 @@ async def create(
     *,
     ruleset_id: str,
     game_seed: str,
-    status: str = "CREATED",
+    status: str = GAME_STATUS_CREATED,
     gauntlet_id: uuid.UUID | None = None,
     pair_id: uuid.UUID | None = None,
     pair_leg: int | None = None,
@@ -92,6 +93,23 @@ async def update_status(
         game.started_at = started_at
     if completed_at is not None:
         game.completed_at = completed_at
+    await session.flush()
+    return game
+
+
+async def mark_failed(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+    *,
+    completed_at: datetime,
+) -> Game | None:
+    """Mark a child game as terminally failed without a terminal result."""
+    game = await session.get(Game, game_id)
+    if game is None:
+        return None
+    game.status = GAME_STATUS_FAILED
+    game.terminal_result = None
+    game.completed_at = completed_at
     await session.flush()
     return game
 

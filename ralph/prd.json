@@ -334,7 +334,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Game status is a bare String column today (db/models.py:152, also 184/286; no enum FAILED). Add FAILED via a single shared literal/constant - COMPLETED is currently a scattered literal (judge_sampling.py:138, scheduler.py:126, model_rollup.py:66). _should_apply_ratings already requires terminal_result in {TOWN,MAFIA,DRAW}, so FAILED is naturally unrated. Builds on US-240's isolated gather. No enum migration.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-242",

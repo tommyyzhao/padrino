@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.analytics.repository import refresh_analytics_aggregates_for_game
 from padrino.core.rulesets import get_ruleset
+from padrino.db.game_status import GAME_STATUS_COMPLETED
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
 from padrino.economics.admission import admit
 from padrino.gauntlets.tournament import AdapterFactory, run_tournament_from_roster
@@ -58,7 +59,7 @@ async def _load_history(session: AsyncSession) -> list[MatchRecord]:
     stmt = (
         select(Game.id, GameSeat.agent_build_id)
         .join(GameSeat, GameSeat.game_id == Game.id)
-        .where(Game.status == "COMPLETED", Game.ruleset_id == _RULESET_ID)
+        .where(Game.status == GAME_STATUS_COMPLETED, Game.ruleset_id == _RULESET_ID)
     )
     rows = (await session.execute(stmt)).all()
     by_game: dict[uuid.UUID, list[uuid.UUID]] = {}
@@ -206,7 +207,7 @@ async def run_continuous_matchmaking_tick(
     async with session_factory() as session:
         stmt = select(Game.id).where(
             Game.gauntlet_id == gauntlet_id,
-            Game.status == "COMPLETED",
+            Game.status == GAME_STATUS_COMPLETED,
         )
         game_ids = list((await session.execute(stmt)).scalars())
 

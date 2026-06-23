@@ -25,12 +25,13 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.db.game_status import is_terminal_game_status
 from padrino.db.models import Game, GauntletRosterSlot
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import gauntlets as gauntlets_repo
@@ -50,11 +51,15 @@ from padrino.observability.metrics import scheduler_inflight_gauntlets
 from padrino.ratings.openskill_service import update_ratings_for_completed_pair
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
 
+if TYPE_CHECKING:
+    from padrino.settings import Settings
+
 _logger = structlog.get_logger("padrino.scheduler")
 
 DEFAULT_POLL_INTERVAL_S: Final[float] = 1.0
 DEFAULT_HEARTBEAT_INTERVAL_S: Final[float] = 5.0
 DEFAULT_STALE_FACTOR: Final[float] = 2.0
+DEFAULT_GAME_MAX_ATTEMPTS: Final[int] = 2
 
 
 def _utcnow() -> datetime:
@@ -93,6 +98,12 @@ class SchedulerOptions:
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S
     heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
     stale_factor: float = DEFAULT_STALE_FACTOR
+    game_max_attempts: int = DEFAULT_GAME_MAX_ATTEMPTS
+
+
+def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
+    """Build scheduler options from operator settings."""
+    return SchedulerOptions(game_max_attempts=settings.padrino_scheduler_game_max_attempts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +115,8 @@ class _ScheduledGame:
 @dataclass(frozen=True, slots=True)
 class _ScheduledGameFailure:
     game_id: uuid.UUID
-    exception: BaseException
+    exception: Exception
+    attempts: int
 
 
 async def _gauntlet_context(
@@ -130,7 +142,7 @@ async def _gauntlet_context(
                 agent_builds_by_seat=agent_builds_by_seat_for_game(slots, g),
             )
             for g in games
-            if g.status != "COMPLETED"
+            if not is_terminal_game_status(g.status)
         ]
         return (gauntlet.gauntlet_seed, gauntlet.league_id, child_games)
 
@@ -203,29 +215,70 @@ async def _run_child_games(
     adapter_factory: AdapterFactory,
     game_executor: GameExecutor,
     ranked: bool,
+    max_attempts: int,
+    clock: Clock,
 ) -> list[_ScheduledGameFailure]:
+    async def _run_with_retry(child: _ScheduledGame) -> _ScheduledGameFailure | None:
+        last_exception: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await _run_one_game(
+                    session_factory,
+                    gauntlet_id=gauntlet_id,
+                    game_id=child.game_id,
+                    agent_builds_by_seat=child.agent_builds_by_seat,
+                    league_id=league_id,
+                    semaphore=semaphore,
+                    adapter_factory=adapter_factory,
+                    game_executor=game_executor,
+                    ranked=ranked,
+                )
+                return None
+            except Exception as exc:
+                last_exception = exc
+                if attempt < max_attempts:
+                    _logger.warning(
+                        "scheduler.game.retry",
+                        gauntlet_id=str(gauntlet_id),
+                        game_id=str(child.game_id),
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    continue
+
+        assert last_exception is not None
+        async with session_factory() as session, session.begin():
+            await games_repo.mark_failed(session, child.game_id, completed_at=clock())
+        return _ScheduledGameFailure(
+            game_id=child.game_id,
+            exception=last_exception,
+            attempts=max_attempts,
+        )
+
     results = await asyncio.gather(
-        *(
-            _run_one_game(
-                session_factory,
-                gauntlet_id=gauntlet_id,
-                game_id=child.game_id,
-                agent_builds_by_seat=child.agent_builds_by_seat,
-                league_id=league_id,
-                semaphore=semaphore,
-                adapter_factory=adapter_factory,
-                game_executor=game_executor,
-                ranked=ranked,
-            )
-            for child in child_games
-        ),
+        *(_run_with_retry(child) for child in child_games),
         return_exceptions=True,
     )
-    return [
-        _ScheduledGameFailure(game_id=child.game_id, exception=result)
-        for child, result in zip(child_games, results, strict=True)
-        if isinstance(result, BaseException)
-    ]
+    failures: list[_ScheduledGameFailure] = []
+    for child, result in zip(child_games, results, strict=True):
+        if result is None:
+            continue
+        if isinstance(result, _ScheduledGameFailure):
+            failures.append(result)
+            continue
+        if isinstance(result, Exception):
+            async with session_factory() as session, session.begin():
+                await games_repo.mark_failed(session, child.game_id, completed_at=clock())
+            failures.append(
+                _ScheduledGameFailure(
+                    game_id=child.game_id,
+                    exception=result,
+                    attempts=max_attempts,
+                )
+            )
+    return failures
 
 
 async def _heartbeat_loop(
@@ -302,6 +355,8 @@ async def _drive_gauntlet(
             adapter_factory=adapter_factory,
             game_executor=game_executor,
             ranked=ranked,
+            max_attempts=options.game_max_attempts,
+            clock=clock,
         )
     finally:
         hb_stop.set()
@@ -315,6 +370,7 @@ async def _drive_gauntlet(
             game_id=str(failure.game_id),
             error_type=type(failure.exception).__name__,
             error=str(failure.exception),
+            attempts=failure.attempts,
         )
 
     await _rate_completed_pairs_for_gauntlet(
@@ -438,13 +494,20 @@ async def run_scheduler(
     """
     if concurrency < 1:
         raise ValueError(f"concurrency must be >= 1, got {concurrency}")
-    opts = options or SchedulerOptions()
+    if options is None:
+        from padrino.settings import get_settings
+
+        opts = scheduler_options_from_settings(get_settings())
+    else:
+        opts = options
     if opts.heartbeat_interval_s <= 0:
         raise ValueError("heartbeat_interval_s must be > 0")
     if opts.stale_factor <= 0:
         raise ValueError("stale_factor must be > 0")
     if opts.poll_interval_s <= 0:
         raise ValueError("poll_interval_s must be > 0")
+    if opts.game_max_attempts < 1:
+        raise ValueError("game_max_attempts must be >= 1")
 
     sem = semaphore or asyncio.Semaphore(concurrency)
     executor = game_executor or _default_game_executor
@@ -487,6 +550,7 @@ async def run_scheduler(
 
 
 __all__ = [
+    "DEFAULT_GAME_MAX_ATTEMPTS",
     "DEFAULT_HEARTBEAT_INTERVAL_S",
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_STALE_FACTOR",
@@ -499,4 +563,5 @@ __all__ = [
     "agent_builds_by_seat_for_game",
     "default_worker_id",
     "run_scheduler",
+    "scheduler_options_from_settings",
 ]

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
+from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED
 from padrino.db.models import AgentBuild, ModelProvider, Rating
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
@@ -149,6 +150,7 @@ async def _build_gauntlet_with_seats(
     *,
     league_id: uuid.UUID,
     game_outcomes: Sequence[tuple[str, Sequence[tuple[uuid.UUID, Faction | str]]]],
+    game_status: str = GAME_STATUS_COMPLETED,
 ) -> None:
     """Insert one gauntlet + one terminal game per outcome.
 
@@ -194,12 +196,12 @@ async def _build_gauntlet_with_seats(
                 ruleset_id=mini7_v1.RULESET_ID,
                 game_seed=f"rollup-{idx}",
                 gauntlet_id=gauntlet.id,
-                status="COMPLETED",
+                status=game_status,
             )
             await games_repo.update_status(
                 session,
                 game.id,
-                status="COMPLETED",
+                status=game_status,
                 terminal_result={"winner": winner, "reason": "scripted", "day_terminated": 2},
             )
             for j, (ab_id, faction) in enumerate(seats):
@@ -562,6 +564,56 @@ async def test_detail_returns_none_when_model_unknown(
             model_key="nope/nope",
         )
     assert detail is None
+
+
+async def test_failed_games_do_not_count_as_completed_rollup_samples(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id = await _seed_league(session_factory)
+    async with session_factory() as session, session.begin():
+        ab = await _make_agent_build(
+            session,
+            display_name="failed-sample",
+            provider_name="p",
+            model_name="m",
+            model_version="1.0",
+            suffix="failed-sample",
+        )
+        _insert_rating(
+            session,
+            league_id=league_id,
+            agent_build_id=ab.id,
+            scope_type=SCOPE_GLOBAL,
+            scope_value=SCOPE_VALUE_GLOBAL,
+            mu=25.0,
+            sigma=5.0,
+            games=1,
+        )
+        ab_id = ab.id
+
+    await _build_gauntlet_with_seats(
+        session_factory,
+        league_id=league_id,
+        game_outcomes=[("TOWN", [(ab_id, Faction.TOWN)])],
+        game_status=GAME_STATUS_FAILED,
+    )
+
+    async with session_factory() as session:
+        rollup = await rollup_by_model(session, league_id, mini7_v1.RULESET_ID)
+        detail = await detail_for_model(
+            session,
+            league_id=league_id,
+            ruleset_id=mini7_v1.RULESET_ID,
+            model_key=model_key_for("p", "m", "1.0"),
+        )
+
+    assert len(rollup.entries) == 1
+    entry = rollup.entries[0]
+    assert entry.games == 0
+    assert entry.wins == 0
+    assert entry.town.games == 0
+    assert detail is not None
+    assert detail.recent_game_ids == ()
 
 
 async def test_recent_games_capped_at_limit(

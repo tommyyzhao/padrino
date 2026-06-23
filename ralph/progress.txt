@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- FAILED scheduler retry (US-241): keep persisted game-status literals in
+  `padrino.db.game_status` and treat `COMPLETED` plus `FAILED` as scheduler
+  terminal statuses. The benchmark scheduler retry is single-host/in-process:
+  retry child executor exceptions up to `padrino_scheduler_game_max_attempts`,
+  then `games_repo.mark_failed` clears `terminal_result`, stamps `completed_at`,
+  and leaves ratings/read-side completed-only paths gated on `COMPLETED`.
+  Regression coverage should include retry success, retry exhaustion, zero
+  rating rows, no scheduler/matchmaker re-selection, and no stray `"FAILED"`
+  literals outside the shared status module.
 - Isolated scheduler child failures (US-240): when a gauntlet fans out child
   games, gather with `return_exceptions=True` and zip results back to the
   `_ScheduledGame` metadata so every exception carries its `game_id`. Log each
@@ -2883,3 +2892,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2530
   passed / 48 skipped / 10 deselected. Frontend gates not run; US-240 is
   backend scheduler-only and did not touch `web/dashboard`.
+
+## 2026-06-22T17:40 PDT - US-241
+- Added shared persisted game-status literals in `padrino.db.game_status`,
+  including `FAILED` and the terminal-status set used by scheduler child
+  selection.
+- Added scheduler child-game retry bounded by
+  `padrino_scheduler_game_max_attempts`; exhausted attempts mark the game
+  `FAILED`, clear `terminal_result`, and log `scheduler.game.failed` with the
+  attempt count.
+- Kept `FAILED` out of completed-scoped readers by routing model rollup, judge
+  sampling, continuous-matchmaking history, and scheduler re-selection through
+  the shared status contract.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/game_status.py`,
+  `src/padrino/db/repositories/games.py`,
+  `src/padrino/ratings/judge_sampling.py`,
+  `src/padrino/ratings/model_rollup.py`, `src/padrino/runner/game_runner.py`,
+  `src/padrino/runner/scheduler.py`,
+  `src/padrino/scheduler/continuous_matchmaking.py`, `src/padrino/settings.py`,
+  `tests/ratings/test_judge_sampling.py`,
+  `tests/ratings/test_model_rollup.py`, `tests/runner/test_scheduler.py`,
+  `tests/scheduler/test_continuous_matchmaking.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_scheduler.py tests/ratings/test_model_rollup.py::test_failed_games_do_not_count_as_completed_rollup_samples tests/ratings/test_judge_sampling.py::test_failed_games_are_not_sampled_for_judge_enrichment tests/scheduler/test_continuous_matchmaking.py::test_failed_games_are_not_counted_in_match_history`
+  first failed on the missing shared status module; focused GREEN same command
+  -> 16 passed. Full gates `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2538 passed / 48 skipped /
+  10 deselected. Frontend gates not run; US-241 is backend scheduler/rating
+  predicate work and did not touch `web/dashboard`.

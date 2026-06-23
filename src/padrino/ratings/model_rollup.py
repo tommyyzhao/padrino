@@ -40,6 +40,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction, Role
+from padrino.db.game_status import GAME_STATUS_COMPLETED
 from padrino.db.models import (
     AgentBuild,
     Game,
@@ -64,7 +65,7 @@ from padrino.ratings.openskill_service import (
 )
 
 RATING_MODEL: Final[str] = "openskill_plackett_luce_v1"
-_COMPLETED_STATUS: Final[str] = "COMPLETED"
+_COMPLETED_STATUS: Final[str] = GAME_STATUS_COMPLETED
 _LEGACY_FACTION_RESPONSE_SCOPES: Final[dict[str, str]] = {
     "town": Faction.TOWN.value,
     "mafia": Faction.MAFIA.value,

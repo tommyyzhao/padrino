@@ -345,6 +345,10 @@ class Settings(BaseSettings):
     padrino_alert_webhook_timeout_s: float = 5.0
     padrino_scheduler_heartbeat_stale_seconds: float = 120.0
     padrino_admission_denied_streak_threshold: int = 5
+    # Benchmark scheduler child-game retry (US-241). This is deliberately
+    # single-host/in-process only: the scheduler retries an exception from the
+    # child executor this many total attempts before marking that game FAILED.
+    padrino_scheduler_game_max_attempts: int = 2
 
     def build_routing_policy(
         self,

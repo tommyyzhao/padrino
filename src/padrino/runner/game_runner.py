@@ -51,6 +51,7 @@ from padrino.core.enums import ActionType, Faction, LeagueKind, PhaseKind, Ratin
 from padrino.core.observations import Observation, format_phase_id
 from padrino.core.rulesets import Ruleset as CoreRuleset
 from padrino.core.rulesets import get_ruleset, mini7_v1
+from padrino.db.game_status import GAME_STATUS_COMPLETED
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
@@ -95,7 +96,6 @@ _logger = structlog.get_logger("padrino.runner")
 MAFIA_CHANNEL_ID: Final[str] = "mafia"
 CAUSE_DAY_VOTE: Final[str] = "day_vote"
 CAUSE_NIGHT_KILL: Final[str] = "night_kill"
-STATUS_COMPLETED: Final[str] = "COMPLETED"
 OBSERVATION_FEEDBACK_CODES: Final[frozenset[str]] = frozenset(
     {"ACTION_BLOCKED", "COMMUTER_UNTARGETABLE", "TRACK_RESULT", "WATCH_RESULT"}
 )
@@ -497,7 +497,7 @@ async def _persist_terminated_event(
     }
     async with persistence.session_factory() as session, session.begin():
         game = await games_repo.get(session, persistence.game_id)
-        if game is not None and game.status == STATUS_COMPLETED:
+        if game is not None and game.status == GAME_STATUS_COMPLETED:
             _logger.info(
                 "Game already terminated and completed; skipping rating application and status updates.",
                 game_id=str(persistence.game_id),
@@ -512,7 +512,7 @@ async def _persist_terminated_event(
         await games_repo.update_status(
             session,
             persistence.game_id,
-            status=STATUS_COMPLETED,
+            status=GAME_STATUS_COMPLETED,
             terminal_result=terminal_result_payload,
             current_phase=stored.body["phase"],
             event_hash_head=stored.event_hash,
