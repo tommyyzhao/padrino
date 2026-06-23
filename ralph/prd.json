@@ -443,7 +443,7 @@
         "All backend gates pass; pnpm -C web/dashboard lint && check && test:e2e pass."
       ],
       "notes": "Evidence: web/dashboard/src/routes/(public)/models/[id]/+page.svelte:25.",
-      "passes": false
+      "passes": true
     }
   ]
 }

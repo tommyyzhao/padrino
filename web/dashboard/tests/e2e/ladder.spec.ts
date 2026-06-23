@@ -177,3 +177,106 @@ test.describe('ladder', () => {
     await expect(page.getByTestId('ladder-ordinal')).toHaveText('1330');
   });
 });
+
+test.describe('model detail', () => {
+  test('falls back when rulesets are unavailable', async ({ page }) => {
+    const requestedRulesets: string[] = [];
+
+    await page.route('**/public/rulesets', async (route) => {
+      if (
+        route.request().resourceType() === 'fetch' ||
+        route.request().resourceType() === 'xhr'
+      ) {
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'rulesets unavailable' })
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await page.route('**/public/ladder*', async (route) => {
+      if (
+        route.request().resourceType() === 'fetch' ||
+        route.request().resourceType() === 'xhr'
+      ) {
+        const url = new URL(route.request().url());
+        const rulesetId = url.searchParams.get('ruleset_id') ?? '';
+        requestedRulesets.push(rulesetId);
+        const entries =
+          rulesetId === 'bench10_v1'
+            ? [
+                {
+                  agent_build_id: BUILD_ID_C,
+                  display_name: 'BenchBot',
+                  version: 'v2',
+                  ordinal: 1330,
+                  provisional: false,
+                  games: 42,
+                  last_game_at: '2026-06-10T00:00:00Z'
+                }
+              ]
+            : [];
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            ruleset_id: rulesetId,
+            entries,
+            next_cursor: null,
+            total_estimate: entries.length
+          })
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await page.route('**/public/recent*', async (route) => {
+      if (
+        route.request().resourceType() === 'fetch' ||
+        route.request().resourceType() === 'xhr'
+      ) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ items: [], next_cursor: null, total_estimate: 0 })
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await page.route('**/public/models/*/analytics', async (route) => {
+      if (
+        route.request().resourceType() === 'fetch' ||
+        route.request().resourceType() === 'xhr'
+      ) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            agent_build_id: BUILD_ID_C,
+            ruleset_id: 'bench10_v1',
+            version: 'v2',
+            games_played: 42,
+            role_win_rates: [],
+            voting_accuracy: { total_votes: 0, accurate_votes: 0, rate: 0 },
+            survival_curve: [],
+            computed_at: '2026-06-10T00:00:00Z'
+          })
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await page.goto(`/models/${BUILD_ID_C}`);
+
+    await expect(page.getByTestId('model-display-name')).toHaveText('BenchBot');
+    await expect(page.getByTestId('model-error')).toHaveCount(0);
+    expect(requestedRulesets).toContain('bench10_v1');
+  });
+});

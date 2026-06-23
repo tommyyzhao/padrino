@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
-  import { canonicalTeamRulesets } from '$lib/rulesets';
+  import { CANONICAL_TEAM_RULESET_FALLBACK_IDS, canonicalTeamRulesets } from '$lib/rulesets';
   import type {
     PublicLadderEntry,
     PublicModelAnalyticsResponse,
@@ -18,15 +18,27 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
 
+  async function canonicalRulesetIds(): Promise<string[]> {
+    try {
+      const rulesetResponse = await padrino.client.publicRulesets();
+      const rulesets = canonicalTeamRulesets(rulesetResponse.items);
+      if (rulesets.length > 0) {
+        return rulesets.map((r) => r.ruleset_id);
+      }
+    } catch {
+      // Ruleset discovery is supplementary for this page; fall back below.
+    }
+    return [...CANONICAL_TEAM_RULESET_FALLBACK_IDS];
+  }
+
   async function load() {
     loading = true;
     error = null;
     try {
       // Load ladder across canonical team rulesets to find this agent's entry.
-      const rulesetResponse = await padrino.client.publicRulesets();
-      const rulesets = canonicalTeamRulesets(rulesetResponse.items);
+      const rulesets = await canonicalRulesetIds();
       const results = await Promise.all(
-        rulesets.map((r) => padrino.client.publicLadder({ ruleset_id: r.ruleset_id, limit: 100 }))
+        rulesets.map((ruleset_id) => padrino.client.publicLadder({ ruleset_id, limit: 100 }))
       );
       for (const resp of results) {
         const found = resp.entries.find((e) => e.agent_build_id === agentBuildId);

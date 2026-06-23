@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Model detail ruleset fallback (US-248): keep `/models/[id]` ruleset
+  discovery in its own failure boundary. Use `publicRulesets()` +
+  `canonicalTeamRulesets()` when available, but fall back to the shipped
+  canonical ladder ids before calling `/public/ladder` so a transient ruleset
+  endpoint failure or empty canonical response does not become a page-level
+  model-detail error.
 - LLM cost fallback seam (US-247): keep token-price fallback at
   `runner/game_runner._priced_cost_usd`, where `Settings`, attempted
   `AdapterResult.model_id`, and token counts are all in scope. Thread any
@@ -3123,3 +3129,25 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2550 passed / 48 skipped /
   10 deselected.
+
+## 2026-06-22T20:37 PDT - US-248
+- Decoupled model-detail ruleset discovery from the primary agent lookup:
+  `/public/rulesets` now has its own catch/fallback path, and an empty
+  canonical response falls back the same way.
+- Added a dashboard e2e regression for `/models/:id` where `/public/rulesets`
+  returns 500 but the page still locates the agent via the fallback
+  `bench10_v1` ladder lookup without rendering `model-error`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/rulesets.ts`,
+  `web/dashboard/src/routes/(public)/models/[id]/+page.svelte`,
+  `web/dashboard/tests/e2e/ladder.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `pnpm -C web/dashboard test:e2e -g "model detail"` -> 1 passed. Full gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`;
+  `pnpm -C web/dashboard test:e2e` -> 27 passed / 3 skipped;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2550
+  passed / 48 skipped / 10 deselected.
+- Learning: pass grep args to `web/dashboard/tests/e2e/run.mjs` without an
+  extra literal `--`; otherwise Playwright treats `-g` as a test file pattern.
