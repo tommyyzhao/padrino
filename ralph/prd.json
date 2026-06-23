@@ -313,7 +313,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Site: runner/scheduler.py ~line 254 asyncio.gather over child_games (no return_exceptions). Single-host resilience only; no campaign abstraction. Pairs with US-241.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-241",

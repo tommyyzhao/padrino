@@ -23,6 +23,7 @@ EVENT_RATING_UPDATED: Final[str] = "rating.updated"
 EVENT_SCHEDULER_TICK: Final[str] = "scheduler.tick"
 EVENT_SCHEDULER_GAUNTLET_STARTED: Final[str] = "scheduler.gauntlet.started"
 EVENT_SCHEDULER_GAUNTLET_COMPLETED: Final[str] = "scheduler.gauntlet.completed"
+EVENT_SCHEDULER_GAME_FAILED: Final[str] = "scheduler.game.failed"
 EVENT_SCHEDULER_HEARTBEAT: Final[str] = "scheduler.heartbeat"
 EVENT_SCHEDULER_STALE_RESET: Final[str] = "scheduler.stale_reset"
 EVENT_SCHEDULER_WORKER_HEARTBEAT: Final[str] = "scheduler.worker.heartbeat"
@@ -48,6 +49,7 @@ __all__ = [
     "EVENT_PRIVACY_AUDIT_COMPLETED",
     "EVENT_PRIVACY_AUDIT_LEAK_DETECTED",
     "EVENT_RATING_UPDATED",
+    "EVENT_SCHEDULER_GAME_FAILED",
     "EVENT_SCHEDULER_GAUNTLET_COMPLETED",
     "EVENT_SCHEDULER_GAUNTLET_STARTED",
     "EVENT_SCHEDULER_HEARTBEAT",

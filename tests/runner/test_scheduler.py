@@ -16,7 +16,9 @@ import uuid
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import LogCapture
 
 from padrino.core.rulesets import mini7_v1
 from padrino.db.repositories import (
@@ -166,6 +168,26 @@ class _FakeExecutor:
                 self.in_flight -= 1
 
 
+class _FailingExecutor(_FakeExecutor):
+    """Fake executor that fails exactly one selected child game."""
+
+    def __init__(self, *, failing_game_id: uuid.UUID) -> None:
+        super().__init__()
+        self.failing_game_id = failing_game_id
+
+    async def __call__(
+        self,
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        if persistence.game_id == self.failing_game_id:
+            self.calls.append((config, persistence, ranked))
+            raise RuntimeError("injected child-game failure")
+        await super().__call__(config, persistence, adapter, ranked)
+
+
 def _adapter_factory_noop() -> LlmAdapter:
     return NoopMockAdapter()
 
@@ -262,6 +284,59 @@ async def test_pending_gauntlet_runs_and_finalizes_to_completed(
     assert g.status == "COMPLETED"
     assert g.completed_at is not None
     assert g.heartbeat_at is None
+
+
+async def test_child_game_failure_isolated_and_logged(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="partial",
+        clone_count=3,
+    )
+    failing_game_id = game_ids[1]
+    executor = _FailingExecutor(failing_game_id=failing_game_id)
+    stop = asyncio.Event()
+    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    capture = LogCapture()
+    original_config = structlog.get_config()
+    structlog.reset_defaults()
+    structlog.configure(processors=[capture], cache_logger_on_first_use=False)
+
+    try:
+        await _drive_scheduler_until(
+            session_factory,
+            gauntlet_id,
+            "COMPLETED",
+            stop=stop,
+            run=run_scheduler(
+                session_factory,
+                concurrency=3,
+                stop_event=stop,
+                adapter_factory=_adapter_factory_noop,
+                game_executor=executor,
+                options=options,
+            ),
+        )
+    finally:
+        structlog.reset_defaults()
+        structlog.configure(**original_config)
+
+    assert {call[1].game_id for call in executor.calls} == set(game_ids)
+    async with session_factory() as session:
+        games = await games_repo.list_by_gauntlet(session, gauntlet_id)
+    statuses = {game.id: game.status for game in games}
+    assert statuses[failing_game_id] != "COMPLETED"
+    assert statuses[game_ids[0]] == "COMPLETED"
+    assert statuses[game_ids[2]] == "COMPLETED"
+
+    failure_events = [
+        entry for entry in capture.entries if entry["event"] == "scheduler.game.failed"
+    ]
+    assert len(failure_events) == 1
+    assert failure_events[0]["gauntlet_id"] == str(gauntlet_id)
+    assert failure_events[0]["game_id"] == str(failing_game_id)
+    assert failure_events[0]["error_type"] == "RuntimeError"
 
 
 async def test_concurrency_cap_honored_via_injected_semaphore(

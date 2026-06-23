@@ -38,6 +38,7 @@ from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import NoopMockAdapter
 from padrino.observability.events import (
+    EVENT_SCHEDULER_GAME_FAILED,
     EVENT_SCHEDULER_GAUNTLET_COMPLETED,
     EVENT_SCHEDULER_GAUNTLET_STARTED,
     EVENT_SCHEDULER_HEARTBEAT,
@@ -98,6 +99,12 @@ class SchedulerOptions:
 class _ScheduledGame:
     game_id: uuid.UUID
     agent_builds_by_seat: dict[str, uuid.UUID]
+
+
+@dataclass(frozen=True, slots=True)
+class _ScheduledGameFailure:
+    game_id: uuid.UUID
+    exception: BaseException
 
 
 async def _gauntlet_context(
@@ -186,6 +193,41 @@ async def _run_one_game(
             structlog.contextvars.unbind_contextvars("gauntlet_id", "game_id")
 
 
+async def _run_child_games(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    gauntlet_id: uuid.UUID,
+    child_games: Sequence[_ScheduledGame],
+    league_id: uuid.UUID,
+    semaphore: asyncio.Semaphore,
+    adapter_factory: AdapterFactory,
+    game_executor: GameExecutor,
+    ranked: bool,
+) -> list[_ScheduledGameFailure]:
+    results = await asyncio.gather(
+        *(
+            _run_one_game(
+                session_factory,
+                gauntlet_id=gauntlet_id,
+                game_id=child.game_id,
+                agent_builds_by_seat=child.agent_builds_by_seat,
+                league_id=league_id,
+                semaphore=semaphore,
+                adapter_factory=adapter_factory,
+                game_executor=game_executor,
+                ranked=ranked,
+            )
+            for child in child_games
+        ),
+        return_exceptions=True,
+    )
+    return [
+        _ScheduledGameFailure(game_id=child.game_id, exception=result)
+        for child, result in zip(child_games, results, strict=True)
+        if isinstance(result, BaseException)
+    ]
+
+
 async def _heartbeat_loop(
     session_factory: async_sessionmaker[AsyncSession],
     gauntlet_id: uuid.UUID,
@@ -251,26 +293,29 @@ async def _drive_gauntlet(
     ranked = any(child.agent_builds_by_seat for child in child_games)
 
     try:
-        await asyncio.gather(
-            *(
-                _run_one_game(
-                    session_factory,
-                    gauntlet_id=gauntlet_id,
-                    game_id=child.game_id,
-                    agent_builds_by_seat=child.agent_builds_by_seat,
-                    league_id=league_id,
-                    semaphore=semaphore,
-                    adapter_factory=adapter_factory,
-                    game_executor=game_executor,
-                    ranked=ranked,
-                )
-                for child in child_games
-            )
+        failures = await _run_child_games(
+            session_factory,
+            gauntlet_id=gauntlet_id,
+            child_games=child_games,
+            league_id=league_id,
+            semaphore=semaphore,
+            adapter_factory=adapter_factory,
+            game_executor=game_executor,
+            ranked=ranked,
         )
     finally:
         hb_stop.set()
         await hb_task
         scheduler_inflight_gauntlets.dec()
+
+    for failure in failures:
+        _logger.error(
+            EVENT_SCHEDULER_GAME_FAILED,
+            gauntlet_id=str(gauntlet_id),
+            game_id=str(failure.game_id),
+            error_type=type(failure.exception).__name__,
+            error=str(failure.exception),
+        )
 
     await _rate_completed_pairs_for_gauntlet(
         session_factory,
@@ -286,6 +331,8 @@ async def _drive_gauntlet(
         EVENT_SCHEDULER_GAUNTLET_COMPLETED,
         gauntlet_id=str(gauntlet_id),
         games=len(child_games),
+        failed_games=[str(failure.game_id) for failure in failures],
+        failed_game_count=len(failures),
     )
 
 

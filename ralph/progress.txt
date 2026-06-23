@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Isolated scheduler child failures (US-240): when a gauntlet fans out child
+  games, gather with `return_exceptions=True` and zip results back to the
+  `_ScheduledGame` metadata so every exception carries its `game_id`. Log each
+  failed child as `scheduler.game.failed` with structured `gauntlet_id`,
+  `game_id`, and error fields, then let completed siblings continue through the
+  normal completion/rating path. Leave durable FAILED status/retry semantics to
+  the dedicated follow-up story, not the gather seam.
 - Hot-path index migrations (US-239): keep Alembic index names and ORM
   `Index` declarations byte-matched, then test both the single linear head and
   a downgrade to the previous head that restores the pre-migration index set.
@@ -2851,3 +2858,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2529 passed / 48 skipped /
   10 deselected. Frontend gates not run; US-239 is backend/migration-only and
   did not touch `web/dashboard`.
+
+## 2026-06-22T17:28 PDT - US-240
+- Isolated benchmark scheduler child-game exceptions by routing the fan-out
+  through a `return_exceptions=True` gather helper that returns typed
+  per-child failures instead of propagating the first exception as a
+  gauntlet-level crash.
+- Added structured `scheduler.game.failed` logs with `gauntlet_id`, `game_id`,
+  `error_type`, and `error`, and included failed child ids/count on the
+  gauntlet-completed event for partial-result observability.
+- Added a scheduler regression that injects one failing child game, proves the
+  surviving child games still complete with their normal terminal result, and
+  asserts the failing `game_id` is identifiable from the structured log.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/observability/events.py`,
+  `src/padrino/runner/scheduler.py`, `tests/runner/test_scheduler.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_scheduler.py::test_child_game_failure_isolated_and_logged -q`
+  showed the expected failing-test marker before the old gather path wedged and
+  was terminated; focused GREEN same command -> 1 passed; scheduler module
+  `uv run pytest tests/runner/test_scheduler.py -q` -> 8 passed; full gates
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2530
+  passed / 48 skipped / 10 deselected. Frontend gates not run; US-240 is
+  backend scheduler-only and did not touch `web/dashboard`.
