@@ -173,7 +173,16 @@ class GauntletRosterSlot(Base):
 
 class Game(Base):
     __tablename__ = "games"
-    __table_args__ = (Index("ix_games_pair_id", "pair_id"),)
+    __table_args__ = (
+        Index("ix_games_pair_id", "pair_id"),
+        Index(
+            "ix_games_completed_at_is_broadcastable",
+            "completed_at",
+            "is_broadcastable",
+            sqlite_where=text("completed_at IS NOT NULL"),
+            postgresql_where=text("completed_at IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     gauntlet_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -248,7 +257,10 @@ class GameSeat(Base):
 
 class GameEvent(Base):
     __tablename__ = "game_events"
-    __table_args__ = (UniqueConstraint("game_id", "sequence", name="uq_game_event_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("game_id", "sequence", name="uq_game_event_sequence"),
+        Index("ix_game_events_game_id", "game_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
@@ -267,6 +279,20 @@ class GameEvent(Base):
 
 class LlmCall(Base):
     __tablename__ = "llm_calls"
+    __table_args__ = (
+        Index(
+            "ix_llm_calls_game_id_agent_build_id_event_id",
+            "game_id",
+            "agent_build_id",
+            "event_id",
+        ),
+        Index(
+            "ix_llm_calls_game_id_raw_response_present",
+            "game_id",
+            sqlite_where=text("raw_response IS NOT NULL"),
+            postgresql_where=text("raw_response IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)

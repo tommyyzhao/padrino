@@ -298,7 +298,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Current head is 0049_ranked_humans_included_league. Sites: db/models.GameEvent (uq_game_event_sequence only) + db/models.LlmCall (FKs only). Find the retention sweep code to identify the real scan columns before indexing them.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-240",

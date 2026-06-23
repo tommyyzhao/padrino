@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Hot-path index migrations (US-239): keep Alembic index names and ORM
+  `Index` declarations byte-matched, then test both the single linear head and
+  a downgrade to the previous head that restores the pre-migration index set.
+  For retention indexes, derive from executor predicates: completed-game scans
+  use `games.completed_at IS NOT NULL` plus `is_broadcastable`, and scrub scans
+  use `llm_calls.game_id` for rows where `raw_response IS NOT NULL`; partial
+  indexes keep those hot rows narrow.
 - Real-action NAR corpus (US-238): keep deterministic full-game goldens on
   `DeterministicMockAdapter` scripts built through the shared
   `make_role_aware_script` helper. For future role rulesets, pin
@@ -2816,3 +2823,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2525
   passed / 48 skipped / 10 deselected. Frontend gates not run; US-238 is
   backend/test-only and did not touch `web/dashboard`.
+
+## 2026-06-22T17:19 PDT - US-239
+- Added linear Alembic migration `0050_hot_path_secondary_indexes` after
+  `0049`, adding `game_events.game_id`, `llm_calls(game_id, agent_build_id,
+  event_id)`, and retention-focused partial indexes for completed games and
+  unscrubbed LLM payload rows.
+- Added matching SQLAlchemy `Index` declarations on `Game`, `GameEvent`, and
+  `LlmCall` so metadata and migrated schemas stay aligned.
+- Added migration regression coverage for single-head linearity, upgrade index
+  columns, partial scrub predicate, exact downgrade cleanup to the prior index
+  set, and ORM-vs-migration consistency.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0050_hot_path_secondary_indexes.py`,
+  `tests/db/test_migration_0050_hot_path_indexes.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0050_hot_path_indexes.py -q` -> 3
+  failed before migration/model indexes; focused GREEN same command -> 3
+  passed; adjacent `uv run pytest tests/db/test_migrations.py
+  tests/db/test_migration_0049_humans_included_ranked_index.py
+  tests/db/test_migration_0050_hot_path_indexes.py -q` -> 8 passed and
+  `uv run pytest tests/db/test_models.py tests/db/test_retention_executor.py
+  -q` -> 23 passed; full gates `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2529 passed / 48 skipped /
+  10 deselected. Frontend gates not run; US-239 is backend/migration-only and
+  did not touch `web/dashboard`.
