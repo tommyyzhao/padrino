@@ -1145,6 +1145,7 @@ async def _run_one_human_game(
             league_id=league_id,
             ranked=ranked,
             resume=resume,
+            settings=settings,
         )
         structlog.contextvars.bind_contextvars(human_lane_game_id=str(game_id))
         try:

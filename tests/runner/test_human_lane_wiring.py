@@ -212,6 +212,44 @@ async def test_human_lane_binds_ranked_lobby_league_to_executor(
 
 
 @pytest.mark.asyncio
+async def test_human_lane_threads_settings_into_game_persistence(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id, _league_id = await _seed_bound_human_lane_game(session_factory, ranked=False)
+    settings = Settings(
+        padrino_human_fallback_token_price_per_1k={
+            "default": (0.0, 0.0),
+            "openai/glm-4.7": (0.123, 0.456),
+        },
+    )
+    captured: dict[str, object] = {}
+
+    async def executor(
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+    ) -> None:
+        captured["settings"] = persistence.settings
+        captured["game_id"] = config.game_id
+        captured["adapter"] = adapter
+
+    await _run_one_human_game(
+        session_factory,
+        game_id=game_id,
+        semaphore=asyncio.Semaphore(1),
+        adapter_factory=None,
+        ai_adapter_factory=None,
+        game_executor=executor,
+        settings=settings,
+        build_production_adapter=False,
+        resume=None,
+    )
+
+    assert captured["game_id"] == str(game_id)
+    assert captured["settings"] is settings
+
+
+@pytest.mark.asyncio
 async def test_default_human_executor_passes_ranked_flag_to_game_loop(
     monkeypatch: pytest.MonkeyPatch,
     session_factory: async_sessionmaker[AsyncSession],

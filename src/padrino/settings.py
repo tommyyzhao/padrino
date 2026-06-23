@@ -284,6 +284,12 @@ class Settings(BaseSettings):
     # carries no ``response_cost`` (None). Keyed by LiteLLM model string; the
     # ``default`` key is the catch-all when a model is not listed.
     padrino_human_fallback_token_price_per_1k: dict[str, tuple[float, float]] = {
+        "cerebras/zai-glm-4.7": (0.00225, 0.00275),
+        "openai/glm-4.7": (0.0006, 0.0022),
+        "deepinfra/deepseek-ai/DeepSeek-V4-Flash": (0.0001, 0.0002),
+        "deepinfra/google/gemma-4-26B-A4B-it": (0.00007, 0.00034),
+        "openai/mimo-v2.5": (0.00014, 0.00028),
+        "openai/mimo-v2.5-pro": (0.000435, 0.00087),
         "default": (0.0005, 0.0015),
     }
 

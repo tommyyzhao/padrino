@@ -598,7 +598,21 @@ def _parsed_response_to_json(result: AdapterResult) -> dict[str, Any] | None:
     return None
 
 
-def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float:
+_UNBILLED_RESULT_STATUSES: Final[frozenset[str]] = frozenset(
+    {"provider_error", "primary_failed", "both_failed", "exhausted"}
+)
+
+
+def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float | None:
+    if result.cost_usd is None:
+        if result.status in _UNBILLED_RESULT_STATUSES:
+            return None
+        if (
+            result.raw_response == ""
+            and result.input_tokens is None
+            and result.output_tokens is None
+        ):
+            return None
     settings = persistence.settings or get_settings()
     return price_turn_usd(
         settings,

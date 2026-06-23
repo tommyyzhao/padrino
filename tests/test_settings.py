@@ -86,6 +86,22 @@ def test_human_cost_defaults_are_single_host_sized(
     assert settings.padrino_human_admission_inference_reserve_usd == 0.5
 
 
+def test_human_fallback_token_prices_cover_configured_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default fallback prices should cover the model strings Padrino routes."""
+    monkeypatch.delenv("PADRINO_HUMAN_FALLBACK_TOKEN_PRICE_PER_1K", raising=False)
+    table = _fresh().padrino_human_fallback_token_price_per_1k
+
+    assert table["default"] == (0.0005, 0.0015)
+    assert table["cerebras/zai-glm-4.7"] == (0.00225, 0.00275)
+    assert table["openai/glm-4.7"] == (0.0006, 0.0022)
+    assert table["deepinfra/deepseek-ai/DeepSeek-V4-Flash"] == (0.0001, 0.0002)
+    assert table["deepinfra/google/gemma-4-26B-A4B-it"] == (0.00007, 0.00034)
+    assert table["openai/mimo-v2.5"] == (0.00014, 0.00028)
+    assert table["openai/mimo-v2.5-pro"] == (0.000435, 0.00087)
+
+
 def test_env_override_human_global_cost_breaker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

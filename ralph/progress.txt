@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- LLM cost fallback seam (US-247): keep token-price fallback at
+  `runner/game_runner._priced_cost_usd`, where `Settings`, attempted
+  `AdapterResult.model_id`, and token counts are all in scope. Thread any
+  lane-specific `Settings` into `GamePersistence`; preserve `LlmCall.cost_usd`
+  as `NULL` for unbilled provider-error/exhausted/empty no-token results so
+  unknown cost does not become semantic zero. Default fallback table keys should
+  match persisted LiteLLM model strings exactly.
 - Leaderboard card contract (US-245): `/public/leaderboard.canonical_cards`
   is pinned to canonical `CANONICAL_TEAM` `GLOBAL/global` rows only. Put
   canonical `FACTION` scope rows in the sibling `faction_cards` response field,
@@ -3089,4 +3096,30 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 22 passed. Full gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2545 passed / 48 skipped /
+  10 deselected.
+
+## 2026-06-22T20:30 PDT - US-247
+- Threaded the human-lane `Settings` object into `GamePersistence` so cost
+  pricing uses the same configuration as the rest of the lane.
+- Added concrete fallback token prices for the configured Cerebras, Z.AI,
+  DeepInfra, and Xiaomi LiteLLM model strings while retaining `default` as the
+  backstop. Prices are stored as USD per 1K tokens, converted from the vendors'
+  public per-1M-token pricing pages checked during this iteration.
+- Preserved `LlmCall.cost_usd = NULL` for unbilled result shapes
+  (`provider_error`, `exhausted`, and empty no-token results) while keeping
+  successful/provider-response turns on the `price_turn_usd` persist seam.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/settings.py`,
+  `src/padrino/runner/game_runner.py`, `src/padrino/runner/human_lane.py`,
+  `tests/test_settings.py`, `tests/runner/test_llm_call_cost_persistence.py`,
+  `tests/runner/test_human_lane_wiring.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/test_settings.py::test_human_fallback_token_prices_cover_configured_endpoints tests/runner/test_llm_call_cost_persistence.py::test_persisted_llm_call_preserves_null_cost_for_unbilled_turns tests/runner/test_human_lane_wiring.py::test_human_lane_threads_settings_into_game_persistence -q`
+  failed on missing per-model prices, forced `0.0` persisted cost, and missing
+  `settings` threading; focused GREEN
+  `uv run pytest tests/test_settings.py::test_human_fallback_token_prices_cover_configured_endpoints tests/runner/test_llm_call_cost_persistence.py tests/runner/test_human_lane_wiring.py::test_human_lane_threads_settings_into_game_persistence -q`
+  -> 9 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2550 passed / 48 skipped /
   10 deselected.

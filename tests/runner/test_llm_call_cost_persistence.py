@@ -16,7 +16,7 @@ from padrino.db.models import GameSeat
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.economics.human_cost_governance import global_human_lane_spend_usd
-from padrino.llm.adapter import AdapterResult
+from padrino.llm.adapter import AdapterResult, AdapterStatus
 from padrino.runner.game_runner import GamePersistence, _persist_llm_call
 from padrino.settings import Settings
 
@@ -51,9 +51,11 @@ def _observation() -> Observation:
 def _result(
     *,
     model_id: str,
-    input_tokens: int,
-    output_tokens: int,
+    input_tokens: int | None,
+    output_tokens: int | None,
     cost_usd: float | None = None,
+    status: AdapterStatus = "ok",
+    raw_response: str | None = None,
 ) -> AdapterResult:
     response = AgentResponse(
         public_message=None,
@@ -63,14 +65,14 @@ def _result(
         rationale_summary=None,
     )
     return AdapterResult(
-        raw_response=response.model_dump_json(),
+        raw_response=response.model_dump_json() if raw_response is None else raw_response,
         parsed_response=response,
         latency_ms=12,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd=cost_usd,
         model_id=model_id,
-        status="ok",
+        status=status,
     )
 
 
@@ -91,7 +93,7 @@ async def _persist_result(
     *,
     settings: Settings,
     human_seat: bool = False,
-) -> tuple[uuid.UUID, float]:
+) -> tuple[uuid.UUID, float | None]:
     game_id = await _game_id(session_factory)
     if human_seat:
         async with session_factory() as session, session.begin():
@@ -121,8 +123,7 @@ async def _persist_result(
         rows = await llm_calls_repo.list_for_game(session, game_id)
     assert len(rows) == 1
     persisted_cost = rows[0].cost_usd
-    assert persisted_cost is not None
-    return game_id, float(persisted_cost)
+    return game_id, float(persisted_cost) if persisted_cost is not None else None
 
 
 async def test_persisted_llm_call_uses_token_price_when_response_cost_missing(
@@ -141,6 +142,7 @@ async def test_persisted_llm_call_uses_token_price_when_response_cost_missing(
         settings=settings,
     )
 
+    assert cost is not None
     assert cost == pytest.approx(0.003968)
     assert cost > 0.0
 
@@ -166,6 +168,7 @@ async def test_persisted_llm_call_prefers_litellm_response_cost(
         settings=settings,
     )
 
+    assert cost is not None
     assert cost == pytest.approx(0.42)
 
 
@@ -185,7 +188,45 @@ async def test_persisted_llm_call_uses_configured_model_price(
         settings=settings,
     )
 
+    assert cost is not None
     assert cost == pytest.approx(0.03)
+
+
+@pytest.mark.parametrize(
+    "status,raw_response,input_tokens,output_tokens",
+    [
+        ("provider_error", "", None, None),
+        ("exhausted", "", None, None),
+        ("ok", "", None, None),
+    ],
+)
+async def test_persisted_llm_call_preserves_null_cost_for_unbilled_turns(
+    session_factory: async_sessionmaker[AsyncSession],
+    status: AdapterStatus,
+    raw_response: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+) -> None:
+    settings = Settings(
+        padrino_human_fallback_token_price_per_1k={
+            "default": (0.0, 0.0),
+            "openai/glm-4.7": (0.002, 0.006),
+        },
+    )
+
+    _, cost = await _persist_result(
+        session_factory,
+        _result(
+            model_id="openai/glm-4.7",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            status=status,
+            raw_response=raw_response,
+        ),
+        settings=settings,
+    )
+
+    assert cost is None
 
 
 async def test_global_human_lane_spend_includes_fallback_priced_turn(

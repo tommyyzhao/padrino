@@ -429,7 +429,7 @@
         "Tests cover each of the three; all backend gates pass."
       ],
       "notes": "Evidence: runner/human_lane.py:1121-1128, settings.py:286, game_runner.py:637 (_priced_cost_usd / _persist_llm_call).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-248",
