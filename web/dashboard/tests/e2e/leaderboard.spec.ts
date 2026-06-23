@@ -222,6 +222,20 @@ function mockPublicSurfaces(page: Page) {
       });
       return;
     }
+    if (url.pathname === '/public/rulesets') {
+      await fulfillJson(route, {
+        items: [
+          {
+            ruleset_id: 'mini7_v1',
+            label: 'Mini 7 canonical team',
+            player_count: 7,
+            rating_context_kind: 'CANONICAL_TEAM',
+            is_canonical: true
+          }
+        ]
+      });
+      return;
+    }
 
     await route.continue();
   });

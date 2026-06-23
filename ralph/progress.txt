@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Canonical ladder selectors (US-243): dashboard ladder consumers should read
+  `padrino.client.publicRulesets()` and filter with
+  `canonicalTeamRulesets` (`is_canonical &&
+  rating_context_kind === "CANONICAL_TEAM"`). Keep PLACEMENT / SOLO_RATE
+  contexts on `/leaderboard`; `/ladder` is for per-ruleset canonical team
+  standings only.
 - Backup/restore hash-chain checks (US-242): post-restore verification should
   read restored `games` + `game_events` rows and reuse
   `padrino.ops.backup_restore.verify_restored_game_hash_chain`, which converts
@@ -2960,3 +2966,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2540
   passed / 48 skipped / 10 deselected. Frontend gates not run; US-242 is
   backend/docs-only and did not touch `web/dashboard`.
+
+## 2026-06-22T19:46 PDT - US-243
+- Made `/ladder` load its ruleset selector from `/public/rulesets`, filter to
+  canonical `CANONICAL_TEAM` rulesets, and fetch `/public/ladder` standings for
+  the active ruleset. `bench10_v1` is now selectable alongside `mini7_v1`, while
+  non-canonical PLACEMENT / SOLO_RATE contexts stay off the ladder.
+- Added shared dashboard helper `canonicalTeamRulesets` and reused it for the
+  home top-agent feed and model-profile ladder lookup so bench10-only ladder
+  rows remain reachable from their profile links.
+- Extended the ladder Playwright fixture to assert mini7 + bench10 selection,
+  selected-ruleset standings, and non-canonical exclusion; extended the
+  leaderboard hermetic public-surface mock for `/public/rulesets`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/rulesets.ts`,
+  `web/dashboard/src/routes/(public)/ladder/+page.svelte`,
+  `web/dashboard/src/routes/(public)/models/[id]/+page.svelte`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/tests/e2e/ladder.spec.ts`,
+  `web/dashboard/tests/e2e/leaderboard.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/ladder.spec.ts --project=chromium`
+  failed on missing `bench10_v1`; focused GREEN same command -> 3 passed.
+  Full frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26
+  passed / 3 skipped. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2540 passed / 48 skipped /
+  10 deselected.

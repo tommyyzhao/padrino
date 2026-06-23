@@ -3,13 +3,12 @@
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
+  import { canonicalTeamRulesets } from '$lib/rulesets';
   import type {
     PublicLadderEntry,
     PublicModelAnalyticsResponse,
     PublicRecentGameEntry
   } from '$lib/api/types';
-
-  const RULESETS = ['mini7_v1'];
 
   let agentBuildId = $derived($page.params.id ?? '');
 
@@ -23,9 +22,11 @@
     loading = true;
     error = null;
     try {
-      // Load ladder across all rulesets to find this agent's entry
+      // Load ladder across canonical team rulesets to find this agent's entry.
+      const rulesetResponse = await padrino.client.publicRulesets();
+      const rulesets = canonicalTeamRulesets(rulesetResponse.items);
       const results = await Promise.all(
-        RULESETS.map((r) => padrino.client.publicLadder({ ruleset_id: r, limit: 100 }))
+        rulesets.map((r) => padrino.client.publicLadder({ ruleset_id: r.ruleset_id, limit: 100 }))
       );
       for (const resp of results) {
         const found = resp.entries.find((e) => e.agent_build_id === agentBuildId);

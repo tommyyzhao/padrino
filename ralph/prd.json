@@ -369,7 +369,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: web/dashboard/src/routes/(public)/ladder/+page.svelte RULESETS=['mini7_v1'] + home/profile mini7 pins. Depends on US-228 so the per-faction/per-ruleset card data is available. Complements US-226 (lobby) and US-229 (multi-context leaderboard).",
-      "passes": false
+      "passes": true
     }
   ]
 }
