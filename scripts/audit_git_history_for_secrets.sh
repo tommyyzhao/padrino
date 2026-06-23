@@ -81,6 +81,12 @@ function is_allowlisted(path,    _name) {
   if (path ~ /^\.padrino_audit\//) return 1
   if (path ~ /^docs\//) return 1
   if (path ~ /^tests\//) return 1
+  # Autonomous-loop planning + progress artifacts: prd/plan JSON and progress
+  # logs legitimately quote commit SHAs and 64-hex event-hash digests (and
+  # reference env-var names like CEREBRAS_API_KEY) which collide with the
+  # credential heuristics. Same rationale as docs/ and tests/ above — these are
+  # narrative planning docs, never a place real secrets are written.
+  if (path ~ /^ralph\//) return 1
   # Generated lock files — base64 integrity hashes can incidentally contain
   # provider-prefix substrings and we never expect real secrets in lock data.
   _name = path
