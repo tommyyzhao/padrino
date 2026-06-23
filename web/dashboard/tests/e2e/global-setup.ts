@@ -15,7 +15,7 @@
  * Environment overrides:
  *   - PADRINO_E2E_API_PORT      (default 8123)
  *   - PADRINO_E2E_DB_PATH       (default ./.padrino-e2e.db inside cwd)
- *   - PADRINO_E2E_SMOKE_TIMEOUT (default 180 seconds)
+ *   - PADRINO_E2E_SMOKE_TIMEOUT (default 360 seconds)
  *   - PADRINO_E2E_SKIP_BACKEND  (set to "1" to assume backend is already up)
  */
 
@@ -131,7 +131,10 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   }
 
   const apiPort = Number(process.env.PADRINO_E2E_API_PORT ?? '8123');
-  const timeoutMs = Number(process.env.PADRINO_E2E_SMOKE_TIMEOUT ?? '180') * 1000;
+  // 360s default: the smoke runs the full migration chain + a demo gauntlet
+  // before the keep-running server serves /health, which comfortably fits in
+  // <60s locally but can exceed the old 180s budget on slow CI runners.
+  const timeoutMs = Number(process.env.PADRINO_E2E_SMOKE_TIMEOUT ?? '360') * 1000;
   const sandbox = mkdtempSync(join(tmpdir(), 'padrino-e2e-'));
   const dbPath = process.env.PADRINO_E2E_DB_PATH ?? join(sandbox, 'padrino-e2e.db');
 
