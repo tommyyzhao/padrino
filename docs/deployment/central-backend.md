@@ -181,7 +181,10 @@ spectator-scope api key).
 ## Backup and restore
 
 Padrino's source of truth is the Postgres database; the API container is
-stateless. Use `pg_dump` for hot backups:
+stateless. The full single-host compose runbook, including restore drills and
+`game_events` hash-chain verification, lives in
+[`postgres-backup-restore.md`](./postgres-backup-restore.md). Use `pg_dump`
+for hot backups:
 
 ```
 pg_dump --format=custom --no-owner --no-acl \

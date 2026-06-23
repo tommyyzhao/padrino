@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Backup/restore hash-chain checks (US-242): post-restore verification should
+  read restored `games` + `game_events` rows and reuse
+  `padrino.ops.backup_restore.verify_restored_game_hash_chain`, which converts
+  `GameEvent` rows to `EventEnvelope` and delegates canonical replay to
+  `export.bundle.verify_chain`. The CLI surface is `padrino game
+  verify-restore <game-id> --db-url <restored-db-url>`; compare its `tip_hash`
+  to the pre-backup `games.event_hash_head`.
 - FAILED scheduler retry (US-241): keep persisted game-status literals in
   `padrino.db.game_status` and treat `COMPLETED` plus `FAILED` as scheduler
   terminal statuses. The benchmark scheduler retry is single-host/in-process:
@@ -2923,3 +2930,33 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2538 passed / 48 skipped /
   10 deselected. Frontend gates not run; US-241 is backend scheduler/rating
   predicate work and did not touch `web/dashboard`.
+
+## 2026-06-22T18:01 PDT - US-242
+- Added `padrino.ops.backup_restore.verify_restored_game_hash_chain`, which
+  reads a restored completed game's `game_events`, replays the canonical
+  hash-chain, requires a terminal `GameTerminated` row, and compares the tip to
+  `games.event_hash_head`.
+- Added `padrino game verify-restore <game-id> --db-url <restored-db-url>` so
+  the restore runbook has a concrete operator command that exits non-zero on a
+  missing/non-completed game, missing events, chain mismatch, or tip mismatch.
+- Added `docs/deployment/postgres-backup-restore.md`, covering routine
+  `pg_dump`, non-destructive restore drills, production compose-stack restore,
+  managed-Postgres variants, and the required hash-chain verification step.
+- Added a hermetic restore regression that runs a finished `mini7_v1` game,
+  writes a JSON backup of its `games`/`game_events` rows, restores those rows
+  into a fresh database, and asserts the restored chain tip matches the
+  pre-backup final hash.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ops/__init__.py`,
+  `src/padrino/ops/backup_restore.py`, `src/padrino/cli.py`,
+  `tests/ops/test_backup_restore.py`,
+  `docs/deployment/postgres-backup-restore.md`,
+  `docs/deployment/central-backend.md`, `docs/deployment/self-host.md`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused `uv run pytest tests/ops/test_backup_restore.py
+  -q` -> 1 passed; touched-file `uv run mypy src/padrino/ops
+  src/padrino/cli.py tests/ops/test_backup_restore.py` -> clean. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2540
+  passed / 48 skipped / 10 deselected. Frontend gates not run; US-242 is
+  backend/docs-only and did not touch `web/dashboard`.

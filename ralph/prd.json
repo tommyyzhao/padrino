@@ -349,7 +349,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "This story is explicitly permitted to create a runbook doc (the only doc-creating story in this wave). Hash-chain rule: event_hash = sha256(prev_event_hash + canonical_json(event_without_hash_or_timestamp)). Verify the chain re-validates post-restore. The Postgres-as-non-dev-default flip is OUT of scope (scope drift; may appear only as a docs note in the runbook).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-243",

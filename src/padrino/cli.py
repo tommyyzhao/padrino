@@ -14,6 +14,8 @@ Subcommands:
   (migrations, canonical prompts, default league, optional admin key, optional
   provider registration).
 - ``padrino export game`` — emit a signed JSON bundle for one completed game.
+- ``padrino game verify-restore`` — verify a restored completed game's
+  ``game_events`` hash chain against ``games.event_hash_head``.
 - ``padrino smoke localhost`` — release-gate smoke that runs bootstrap, brings
   up the API + scheduler as child processes, drives a mock-adapter gauntlet
   to completion, exports + ingests one game, and asserts the documented
@@ -461,6 +463,70 @@ game_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(game_app, name="game")
+
+
+@game_app.command("verify-restore")
+def game_verify_restore(
+    game_id: str = typer.Argument(..., help="UUID of the restored COMPLETED game to verify."),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL for the restored Padrino database.",
+    ),
+) -> None:
+    """Verify one restored game's persisted hash-chain rows."""
+    import uuid as _uuid
+
+    from padrino.core.engine.replay import ReplayHashMismatchError
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.ops.backup_restore import (
+        RestoreVerification,
+        RestoreVerificationError,
+        verify_restored_game_hash_chain,
+    )
+
+    try:
+        gid = _uuid.UUID(game_id)
+    except ValueError as exc:
+        typer.echo(f"invalid game_id: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    async def _run() -> RestoreVerification:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            async with session_factory() as session:
+                return await verify_restored_game_hash_chain(session, gid)
+        finally:
+            await engine.dispose()
+
+    try:
+        result = asyncio.run(_run())
+    except (ReplayHashMismatchError, RestoreVerificationError) as exc:
+        typer.echo(
+            json.dumps(
+                {"game_id": game_id, "status": "failed", "error": str(exc)},
+                indent=2,
+                sort_keys=True,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(
+        json.dumps(
+            {
+                "event_count": result.event_count,
+                "final_event_type": result.final_event_type,
+                "game_id": str(result.game_id),
+                "status": "ok",
+                "tip_hash": result.tip_hash,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @game_app.command("evaluate-behavioral")
