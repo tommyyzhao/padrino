@@ -419,7 +419,11 @@ async def test_worker_restart_resume_keeps_hash_chain_and_phase_idempotent(
         )
     )
     try:
-        await asyncio.wait_for(finished.wait(), timeout=5.0)
+        # Generous wall-clock budget: the worker resumes from the event log and
+        # drives the game to the vote phase, which is markedly slower against a
+        # real Postgres backend on CI than in-memory SQLite locally. 5s was too
+        # tight and flaked the CI postgres job; 30s keeps it reliable.
+        await asyncio.wait_for(finished.wait(), timeout=30.0)
     finally:
         stop.set()
         await lane
