@@ -35,9 +35,6 @@ def upgrade() -> None:
         sa.Column("identity_mode", sa.String(), nullable=False, server_default="ANONYMOUS"),
         sa.Column("theme_pack_id", sa.String(), nullable=True),
         sa.Column("stakes", sa.String(), nullable=False, server_default="CASUAL"),
-        sa.Column(
-            "integrity_acknowledged", sa.Boolean(), nullable=False, server_default=sa.false()
-        ),
         sa.Column("status", sa.String(), nullable=False, server_default="OPEN"),
         sa.Column("lobby_seed", sa.String(), nullable=False),
         sa.Column("host_principal_id", sa.Uuid(), nullable=False),

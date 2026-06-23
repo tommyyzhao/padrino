@@ -384,7 +384,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration', incl. test_migrations_all_dialects)."
       ],
       "notes": "Sacred rule: never edit a migration <=0048 (shipped). Evidence: 0035_lobbies.py:39, 0049/0050 lack add_column, db/models.py:1329, db/repositories/lobbies.py:51, api/routes/lobbies.py:213/685.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-245",

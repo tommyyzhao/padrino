@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Shipped migration repair (US-244): do not edit already-shipped migrations to
+  add new columns. Restore the shipped revision byte-for-byte, then add a new
+  linear additive revision from the current head. Regression coverage should
+  upgrade to the previous head first, assert the column is absent there, seed an
+  existing row, upgrade to head, assert server-default backfill, and verify
+  downgrade drops only the additive column.
 - Canonical ladder selectors (US-243): dashboard ladder consumers should read
   `padrino.client.publicRulesets()` and filter with
   `canonicalTeamRulesets` (`is_canonical &&
@@ -2995,3 +3001,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2540 passed / 48 skipped /
   10 deselected.
+
+## 2026-06-22T20:07 PDT - US-244
+- Restored shipped migration `0035_lobbies.py` to the `origin/main` byte state
+  so databases already upgraded before Wave 11 no longer depend on an edited
+  historical revision.
+- Added linear Alembic migration `0051_lobby_integrity_acknowledged` after
+  `0050`, adding `lobbies.integrity_acknowledged` with `false` server-default
+  backfill and a SQLite-safe batch downgrade.
+- Added migration regression coverage for the real production path: upgrade to
+  `0050` with no column, seed an existing lobby, upgrade to head, verify the
+  backfilled false value, then downgrade back to `0050`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/migrations/versions/0035_lobbies.py`,
+  `src/padrino/db/migrations/versions/0051_lobby_integrity_acknowledged.py`,
+  `tests/db/test_migration_0051_lobby_integrity_ack.py`,
+  `tests/db/test_migration_0050_hot_path_indexes.py`,
+  `tests/db/test_migrations_all_dialects.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0051_lobby_integrity_ack.py -q`
+  failed on head still `0050` and the column already present at `0050`;
+  focused GREEN same command -> 2 passed; adjacent
+  `uv run pytest tests/db/test_migration_0050_hot_path_indexes.py
+  tests/db/test_migrations.py tests/db/test_migrations_all_dialects.py -q`
+  -> 9 passed / 2 skipped (Postgres Docker unavailable). Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2543
+  passed / 48 skipped / 10 deselected.

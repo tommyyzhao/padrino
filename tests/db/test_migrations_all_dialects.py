@@ -86,6 +86,16 @@ def _table_names_for_url(url: str) -> set[str]:
         engine.dispose()
 
 
+def _column_names_for_url(url: str, table_name: str) -> set[str]:
+    sync_url = _sync_url(url)
+    engine = sync_create_engine(sync_url)
+    try:
+        with engine.connect() as conn:
+            return {column["name"] for column in inspect(conn).get_columns(table_name)}
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture
 def sqlite_db_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     with tempfile.TemporaryDirectory() as tmp:
@@ -153,6 +163,7 @@ def test_sqlite_upgrade_head_creates_all_tables(sqlite_db_url: str) -> None:
     tables = _table_names_for_url(sqlite_db_url)
     assert EXPECTED_TABLES.issubset(tables), f"missing tables: {EXPECTED_TABLES - tables}"
     assert "alembic_version" in tables
+    assert "integrity_acknowledged" in _column_names_for_url(sqlite_db_url, "lobbies")
 
 
 def test_sqlite_full_cycle_upgrade_downgrade_upgrade(sqlite_db_url: str) -> None:
@@ -172,6 +183,7 @@ def test_postgres_upgrade_head_creates_all_tables(postgres_db_url: str) -> None:
     tables = _table_names_for_url(postgres_db_url)
     assert EXPECTED_TABLES.issubset(tables), f"missing tables: {EXPECTED_TABLES - tables}"
     assert "alembic_version" in tables
+    assert "integrity_acknowledged" in _column_names_for_url(postgres_db_url, "lobbies")
 
 
 @pytest.mark.postgres
