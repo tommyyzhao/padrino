@@ -109,6 +109,7 @@ async def test_create_lobby_defaults_casual_anonymous_open(client: AsyncClient) 
     assert body["identity_mode"] == "ANONYMOUS"
     assert body["stakes"] == "CASUAL"
     assert body["status"] == "OPEN"
+    assert body["integrity_acknowledged"] is False
     assert body["game_id"] is None
     assert body["member_count"] == 1
     # mini7_v1 = 7 seats: 1 host HUMAN + 6 AI seats.
@@ -288,7 +289,11 @@ async def test_create_ranked_lobby_binds_ranked_humans_included_league(
     ranked_token = await _guest_token(client)
     ranked = await client.post(
         "/lobbies",
-        json={"ruleset_id": "mini7_v1", "ranked": True},
+        json={
+            "ruleset_id": "mini7_v1",
+            "ranked": True,
+            "integrity_acknowledged": True,
+        },
         cookies={HUMAN_SESSION_COOKIE: ranked_token},
     )
     assert ranked.status_code == 201, ranked.text
@@ -307,6 +312,56 @@ async def test_create_ranked_lobby_binds_ranked_humans_included_league(
     assert ranked_league is not None
     assert ranked_league.kind == LeagueKind.HUMANS_INCLUDED.value
     assert ranked_league.ranked is True
+
+
+@pytest.mark.asyncio
+async def test_ranked_lobby_requires_and_persists_integrity_acknowledgement(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    token = await _guest_token(client)
+    refused = await client.post(
+        "/lobbies",
+        json={"ruleset_id": "mini7_v1", "ranked": True},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == "integrity_acknowledgement_required"
+
+    async with session_factory() as session:
+        lobby_count = (await session.execute(select(func.count()).select_from(Lobby))).scalar_one()
+    assert lobby_count == 0
+
+    ranked = await client.post(
+        "/lobbies",
+        json={
+            "ruleset_id": "mini7_v1",
+            "ranked": True,
+            "integrity_acknowledged": True,
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert ranked.status_code == 201, ranked.text
+    assert ranked.json()["integrity_acknowledged"] is True
+    ranked_lobby_id = uuid.UUID(ranked.json()["id"])
+
+    casual_token = await _guest_token(client)
+    casual = await client.post(
+        "/lobbies",
+        json={"ruleset_id": "mini7_v1"},
+        cookies={HUMAN_SESSION_COOKIE: casual_token},
+    )
+    assert casual.status_code == 201, casual.text
+    assert casual.json()["integrity_acknowledged"] is False
+    casual_lobby_id = uuid.UUID(casual.json()["id"])
+
+    async with session_factory() as session:
+        ranked_lobby = await session.get(Lobby, ranked_lobby_id)
+        casual_lobby = await session.get(Lobby, casual_lobby_id)
+
+    assert ranked_lobby is not None
+    assert ranked_lobby.integrity_acknowledged is True
+    assert casual_lobby is not None
+    assert casual_lobby.integrity_acknowledged is False
 
 
 @pytest.mark.asyncio

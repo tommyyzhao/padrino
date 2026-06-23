@@ -1300,6 +1300,9 @@ class Lobby(Base):
     stakes: Mapped[str] = mapped_column(
         String, nullable=False, default="CASUAL", server_default="CASUAL"
     )
+    integrity_acknowledged: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="OPEN", server_default="OPEN"
     )

@@ -444,6 +444,7 @@ export interface LobbySummary {
   theme_pack_id: string | null;
   stakes: string;
   ranked: boolean;
+  integrity_acknowledged: boolean;
   status: string;
   invite_token: string;
   host_principal_id: string;

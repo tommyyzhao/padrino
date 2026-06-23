@@ -267,7 +267,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Concrete guard: a reused boolean integrity_acknowledged on the ranked lobby record (no new table/migration, no anti-collusion infra); ranked-without-ack -> 422. The timing-delay validation is the load-bearing AC. Sites: runner/human_tick.run_human_tick (released_at symmetry), settings.padrino_human_release_delay_seconds, lobby creation (ranked flag from US-234a).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-238",

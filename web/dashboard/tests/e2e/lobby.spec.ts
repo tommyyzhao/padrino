@@ -138,6 +138,7 @@ function lobbySummary(status = 'OPEN') {
     theme_pack_id: null,
     stakes: 'CASUAL',
     ranked: false,
+    integrity_acknowledged: false,
     status,
     invite_token: INVITE_TOKEN,
     host_principal_id: HOST_PRINCIPAL,
@@ -341,13 +342,15 @@ test.describe('lobby UI (US-154)', () => {
 
     await page.goto('/lobby');
     await page.getByTestId('lobby-create-ranked').check();
+    await page.getByTestId('lobby-create-integrity-ack').check();
     await expect(page.getByTestId('lobby-create-stakes')).toContainText('RANKED');
     await page.getByTestId('lobby-create-submit').click();
 
     await expect.poll(() => createBody).toMatchObject({
       ruleset_id: 'mini7_v1',
       identity_mode: 'ANONYMOUS',
-      ranked: true
+      ranked: true,
+      integrity_acknowledged: true
     });
     expect(JSON.stringify(createBody)).not.toMatch(/seat_kind|is_human/i);
   });

@@ -259,3 +259,43 @@ async def test_release_delay_is_applied_symmetrically_after_resolution() -> None
 
     assert result.released_messages[0].released_at == _RELEASE_DELAY
     assert result.settled_at == _RELEASE_DELAY
+
+
+async def test_ranked_path_uses_same_symmetric_release_schedule_as_casual() -> None:
+    phase = Phase(kind=PhaseKind.DAY_DISCUSSION, day=1, round=0)
+    state = _state(phase)
+    eligible = [SEATS[0], SEATS[1]]
+
+    async def run_for(ranked: bool) -> tuple[tuple[tuple[str, str, float], ...], float]:
+        clock = _FakeClock()
+        adapter = _MultiplexAdapter(
+            {
+                "P01": _ScriptedAdapter({"P01": _ai_result("first")}),
+                "P02": _ScriptedAdapter({"P02": _ai_result("second")}),
+            }
+        )
+        result = await run_human_tick(
+            state,
+            EventLog(),
+            eligible,
+            adapter,
+            ruleset=mini7_v1,
+            config=HumanTickConfig(
+                phase_deadline_seconds=_DEADLINE,
+                release_delay_seconds=_RELEASE_DELAY,
+            ),
+            ranked=ranked,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        return (
+            tuple((m.seat_id, m.text, m.released_at) for m in result.released_messages),
+            result.settled_at,
+        )
+
+    casual_releases, casual_settled_at = await run_for(False)
+    ranked_releases, ranked_settled_at = await run_for(True)
+
+    assert ranked_releases == casual_releases
+    assert ranked_settled_at == casual_settled_at == _RELEASE_DELAY
+    assert {released_at for _, _, released_at in ranked_releases} == {_RELEASE_DELAY}

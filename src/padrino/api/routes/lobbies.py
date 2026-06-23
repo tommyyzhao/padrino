@@ -119,6 +119,9 @@ class LobbyCreate(BaseModel):
     #: Opt in to the segregated Humans-Included ranked lane. Default remains
     #: casual/unrated.
     ranked: bool = False
+    #: Ranked integrity acknowledgement: out-of-band coaching is structurally
+    #: unpreventable, so ranked lobbies require an explicit host acknowledgement.
+    integrity_acknowledged: bool = False
 
 
 class LobbySummary(BaseModel):
@@ -130,6 +133,7 @@ class LobbySummary(BaseModel):
     theme_pack_id: str | None
     stakes: str
     ranked: bool
+    integrity_acknowledged: bool
     status: str
     invite_token: str
     host_principal_id: uuid.UUID
@@ -167,6 +171,12 @@ async def create_lobby(
     inference-$ cap, and the global cost breaker gate lobby creation (US-151). A
     denied decision is a 429 before any row is written.
     """
+    if body.ranked and not body.integrity_acknowledged:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="integrity_acknowledgement_required",
+        )
+
     admission = await _enforce_admission(
         request, session, principal_id=ctx.principal_id, action=ACTION_CREATE
     )
@@ -200,6 +210,7 @@ async def create_lobby(
         theme_pack_id=body.theme_pack_id,
         lobby_seed=secrets.token_hex(16),
         invite_token=secrets.token_urlsafe(24),
+        integrity_acknowledged=body.integrity_acknowledged if body.ranked else False,
         host_principal_id=ctx.principal_id,
         league_id=league.id,
         now=now,
@@ -671,6 +682,7 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
         theme_pack_id=lobby.theme_pack_id,
         stakes=LobbyStakes(lobby.stakes).value,
         ranked=league.ranked if league is not None else False,
+        integrity_acknowledged=lobby.integrity_acknowledged,
         status=lobby.status,
         invite_token=lobby.invite_token,
         host_principal_id=lobby.host_principal_id,

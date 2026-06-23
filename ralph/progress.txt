@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked lobby integrity ack (US-237): enforce
+  `integrity_acknowledged` before lobby admission/cost slots are claimed, so a
+  refused ranked create writes no lobby rows and burns no admission budget. Store
+  the flag on the existing `Lobby` row; casual lobbies coerce it to `False`.
+  Do not consume Alembic `0050` for this guard: US-239 still owns that revision,
+  so the existing lobby-table migration shape carries the column and
+  `test_migrations.py` asserts Alembic-upgraded DBs include it. Dashboard ranked
+  creates must send the ack while keeping the request free of identity markers.
 - Humans-Included leaderboard cards (US-236): expose ranked human ELO as a
   separate top-level `human_cards` read-side bucket, never inside
   `canonical_cards` or `experimental_cards`. Source it only from
@@ -2762,3 +2770,12 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   10 deselected; `pnpm -C web/dashboard lint`;
   `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` ->
   26 passed / 3 skipped; extra `pnpm -C web/dashboard test` -> 54 passed.
+
+## 2026-06-22T17:02 PDT - US-237
+- Added the ranked integrity acknowledgement guard to lobby creation. Ranked `POST /lobbies` now rejects missing/false `integrity_acknowledged` with 422 before admission is claimed; ranked-with-ack stores `Lobby.integrity_acknowledged=True`; casual lobbies store `False` and remain casual by default.
+- Added the `integrity_acknowledged` boolean to the existing lobby row shape and Alembic lobby-table definition without creating a new revision, preserving `0050` for US-239. `tests/db/test_migrations.py` now asserts the upgraded schema includes the column.
+- Added ranked-path release-delay regression coverage around `run_human_tick`: ranked and casual paths produce the same shared `released_at` instant for all public messages, so response timing does not reveal human vs AI seats.
+- Updated the dashboard ranked create flow to require and submit the acknowledgement while the Playwright request assertion still verifies no seat/human identity markers are sent.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/lobbies.py`, `src/padrino/db/models.py`, `src/padrino/db/repositories/lobbies.py`, `src/padrino/db/migrations/versions/0035_lobbies.py`, `tests/api/test_lobby_create.py`, `tests/db/test_migrations.py`, `tests/runner/test_human_tick_symmetry.py`, `web/dashboard/src/lib/api/client.ts`, `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/lib/api/client.test.ts`, `web/dashboard/src/routes/lobby/+page.svelte`, `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest tests/api/test_lobby_create.py::test_ranked_lobby_requires_and_persists_integrity_acknowledgement -q` failed because ranked create returned 201 before the guard; focused GREEN `uv run pytest tests/api/test_lobby_create.py tests/runner/test_human_tick_symmetry.py tests/db/test_migrations.py -q` -> 26 passed. Full gates: `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2515 passed / 48 skipped / 10 deselected; `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26 passed / 3 skipped.

@@ -347,6 +347,7 @@ export class PadrinoClient {
     theme_pack_id?: string | null;
     prepick_agent_build_ids?: string[];
     ranked?: boolean;
+    integrity_acknowledged?: boolean;
   }): Promise<LobbySummary> {
     return this.mutate('POST', '/lobbies', body);
   }
