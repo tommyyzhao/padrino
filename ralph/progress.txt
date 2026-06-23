@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Real-action NAR corpus (US-238): keep deterministic full-game goldens on
+  `DeterministicMockAdapter` scripts built through the shared
+  `make_role_aware_script` helper. For future role rulesets, pin
+  terminal_result, event count, final event hash, and chain digest, then assert
+  the role-specific event signal (`NightFeedbackDelivered`, cleaned death,
+  serial kill target, jester day vote, etc.) plus replay equality. Keep
+  `NoopMockAdapter` draw goldens only for legacy baseline coverage, not as proof
+  that a role ruleset's NAR behavior is covered.
 - Ranked lobby integrity ack (US-237): enforce
   `integrity_acknowledged` before lobby admission/cost slots are claimed, so a
   refused ranked create writes no lobby rows and burns no admission budget. Store
@@ -2779,3 +2787,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Thread URL: n/a (local Codex iteration).
 - Files changed: `src/padrino/api/routes/lobbies.py`, `src/padrino/db/models.py`, `src/padrino/db/repositories/lobbies.py`, `src/padrino/db/migrations/versions/0035_lobbies.py`, `tests/api/test_lobby_create.py`, `tests/db/test_migrations.py`, `tests/runner/test_human_tick_symmetry.py`, `web/dashboard/src/lib/api/client.ts`, `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/lib/api/client.test.ts`, `web/dashboard/src/routes/lobby/+page.svelte`, `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`, `ralph/progress.txt`.
 - Gates (all GREEN): focused RED `uv run pytest tests/api/test_lobby_create.py::test_ranked_lobby_requires_and_persists_integrity_acknowledgement -q` failed because ranked create returned 201 before the guard; focused GREEN `uv run pytest tests/api/test_lobby_create.py tests/runner/test_human_tick_symmetry.py tests/db/test_migrations.py -q` -> 26 passed. Full gates: `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2515 passed / 48 skipped / 10 deselected; `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` -> 26 passed / 3 skipped.
+
+## 2026-06-22T17:11 PDT - US-238
+- Replaced the Wave-10 NAR corpus draw-only coverage with real-action
+  deterministic full-game goldens for `roleblock10_v1`, `deception13_v1`,
+  `visit12_v1`, `ninja13_v1`, `sk12_v1`, and `jester8_v1`. Each case now pins
+  terminal result/reason, event count, final event hash, and hash-chain digest,
+  then re-runs to prove replay-stable byte output.
+- Consolidated the old deterministic mock script builders behind
+  `make_role_aware_script`, which supports arbitrary structured role actions
+  while preserving the `make_villager_script`, `make_mafia_script`,
+  `make_town_win_script`, and `make_mafia_win_script` APIs. Added a regression
+  proving the old behaviors are reproducible through the new builder.
+- The corpus now asserts the intended mechanical signal per ruleset: blocked
+  detective feedback, cleaned death reveal plus Godfather false-town
+  investigation, track/watch visit feedback, Ninja visit suppression, serial
+  kill multi-death resolution, and Jester day-vote alt trigger.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/conftest.py`,
+  `tests/integration/test_nar_regression_corpus.py`,
+  `tests/llm/test_mock_adapter.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/llm/test_mock_adapter.py::test_role_aware_script_builder_reproduces_legacy_helper_behaviors tests/integration/test_nar_regression_corpus.py -q`
+  failed first on the expected placeholder pins and one helper target
+  mismatch; focused GREEN same command -> 17 passed. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2525
+  passed / 48 skipped / 10 deselected. Frontend gates not run; US-238 is
+  backend/test-only and did not touch `web/dashboard`.

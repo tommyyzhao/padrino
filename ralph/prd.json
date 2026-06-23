@@ -283,7 +283,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Real adapters: llm/mock.DeterministicMockAdapter (script keyed by (phase_id, public_player_id)). Existing all-NOOP factories: _bench10_draw/_canonical_draw_factory use NoopMockAdapter. Consolidate conftest make_*_script helpers. tests/integration/test_nar_regression_corpus.py uses mock adapters and already runs under the default pytest -m 'not integration' gate (it carries ZERO pytest.mark.integration; the integration marker means 'hits real LLM providers', pyproject.toml). The new real-action goldens MUST NOT add pytest.mark.integration so they stay in the default gate.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-239",

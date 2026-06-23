@@ -264,6 +264,81 @@ def test_mafia_win_script_kills_a_town_seat_each_night_one_through_three() -> No
         assert script[("DAY_1_VOTE", sid)].action.type is ActionType.ABSTAIN
 
 
+def test_role_aware_script_builder_reproduces_legacy_helper_behaviors() -> None:
+    from tests.conftest import (
+        ScriptedAction,
+        make_mafia_script,
+        make_mafia_win_script,
+        make_role_aware_script,
+        make_town_win_script,
+        make_villager_script,
+        mini7_phase_ids,
+    )
+
+    assert make_role_aware_script(
+        seat_ids=("P05", "P06"),
+        phase_ids=("DAY_1_VOTE", "NIGHT_1_ACTIONS"),
+        actions={("DAY_1_VOTE", "P05"): ScriptedAction(ActionType.VOTE, "P01")},
+    ) == make_villager_script(
+        seat_ids=("P05", "P06"),
+        phase_ids=("DAY_1_VOTE", "NIGHT_1_ACTIONS"),
+        votes={"DAY_1_VOTE": {"P05": "P01"}},
+    )
+
+    assert make_role_aware_script(
+        seat_ids=("P01", "P02"),
+        phase_ids=("NIGHT_1_ACTIONS", "DAY_1_VOTE"),
+        actions={
+            ("NIGHT_1_ACTIONS", "P01"): ScriptedAction(ActionType.MAFIA_KILL, "P05"),
+            ("NIGHT_1_ACTIONS", "P02"): ScriptedAction(ActionType.MAFIA_KILL, "P05"),
+        },
+    ) == make_mafia_script(
+        mafia_ids=("P01", "P02"),
+        phase_ids=("NIGHT_1_ACTIONS", "DAY_1_VOTE"),
+        night_kill_targets={"NIGHT_1_ACTIONS": "P05"},
+    )
+
+    phase_ids = mini7_phase_ids()
+    mafia_ids = ("P01", "P02")
+    town_ids = ("P03", "P04", "P05", "P06", "P07")
+    all_seats = (*mafia_ids, *town_ids)
+    town_win_actions = {
+        **{("DAY_1_VOTE", sid): ScriptedAction(ActionType.VOTE, "P01") for sid in town_ids},
+        **{
+            ("NIGHT_1_ACTIONS", sid): ScriptedAction(ActionType.MAFIA_KILL, "P03")
+            for sid in mafia_ids
+        },
+        ("NIGHT_1_ACTIONS", "P04"): ScriptedAction(ActionType.PROTECT, "P03"),
+        ("NIGHT_1_ACTIONS", "P03"): ScriptedAction(ActionType.INVESTIGATE, "P02"),
+        **{("DAY_2_VOTE", sid): ScriptedAction(ActionType.VOTE, "P02") for sid in town_ids},
+    }
+    assert make_role_aware_script(
+        all_seats,
+        phase_ids,
+        actions=town_win_actions,
+    ) == make_town_win_script(
+        mafia_ids=mafia_ids,
+        town_ids=town_ids,
+        doctor_id="P04",
+        detective_id="P03",
+    )
+
+    mafia_win_actions = {
+        (phase_id, sid): ScriptedAction(ActionType.MAFIA_KILL, target)
+        for phase_id, target in (
+            ("NIGHT_1_ACTIONS", "P03"),
+            ("NIGHT_2_ACTIONS", "P04"),
+            ("NIGHT_3_ACTIONS", "P05"),
+        )
+        for sid in mafia_ids
+    }
+    assert make_role_aware_script(
+        all_seats,
+        phase_ids,
+        actions=mafia_win_actions,
+    ) == make_mafia_win_script(mafia_ids=mafia_ids, town_ids=town_ids)
+
+
 def test_town_win_script_rejects_invalid_role_ids() -> None:
     from tests.conftest import make_town_win_script
 
