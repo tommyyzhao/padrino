@@ -106,7 +106,18 @@ async def _seed_game(
         return game.id
 
 
-async def _drain_until(predicate: Callable[[], bool], *, timeout_s: float = 5.0) -> None:
+# Ceiling for "wait until the async lane worker reaches a state" helpers. The
+# happy path returns in well under a second (~1.7s worst-case locally), so this
+# is only a backstop — but a tight 5s ceiling is spuriously exceeded on the slow,
+# heavily-loaded macOS GitHub runner (the same suite passes on the ubuntu runner),
+# flaking the crash->FAILED drain. A generous ceiling removes the flake with zero
+# happy-path cost; a genuinely stuck worker still fails the assertion, just later.
+_DRAIN_TIMEOUT_S = 30.0
+
+
+async def _drain_until(
+    predicate: Callable[[], bool], *, timeout_s: float = _DRAIN_TIMEOUT_S
+) -> None:
     """Cooperatively wait until ``predicate()`` is true (deterministic budget)."""
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:
@@ -121,7 +132,7 @@ async def _drain_until_status(
     game_id: uuid.UUID,
     expected: str,
     *,
-    timeout_s: float = 5.0,
+    timeout_s: float = _DRAIN_TIMEOUT_S,
 ) -> None:
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:
@@ -306,7 +317,9 @@ async def test_waiting_human_lobbies_do_not_reduce_benchmark_concurrency(
 
     # The benchmark lane (its OWN semaphore) can still acquire all 3 slots: the
     # human backlog took none of them.
-    acquired = [await asyncio.wait_for(benchmark_sem.acquire(), timeout=1.0) for _ in range(3)]
+    acquired = [
+        await asyncio.wait_for(benchmark_sem.acquire(), timeout=_DRAIN_TIMEOUT_S) for _ in range(3)
+    ]
     assert len(acquired) == 3
     assert human_active == 1  # human lane still pinned to its single slot
     for _ in range(3):
@@ -373,7 +386,7 @@ async def test_human_lane_worker_heartbeat_is_written_each_tick(
             poll_interval_s=0.01,
             worker_id="test-worker:42",
         ),
-        timeout=2.0,
+        timeout=_DRAIN_TIMEOUT_S,
     )
     await setter
 
@@ -423,7 +436,7 @@ async def test_heartbeat_failure_does_not_crash_human_lane_loop(
                 poll_interval_s=0.01,
                 worker_id="test-worker:heartbeat-failure",
             ),
-            timeout=2.0,
+            timeout=_DRAIN_TIMEOUT_S,
         )
     finally:
         stop.set()
