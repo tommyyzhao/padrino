@@ -1,4 +1,11 @@
 packages:
   - '.'
+# esbuild ships a native binary via a postinstall build script. pnpm 10+ blocks
+# dependency build scripts by default and `pnpm install` exits non-zero
+# (ERR_PNPM_IGNORED_BUILDS) when a needed one is ignored. pnpm 11's allowlist
+# key is `allowBuilds` (a map of package -> bool); `onlyBuiltDependencies` does
+# NOT suppress the error on pnpm 11.1.3 (verified: pnpm rewrites this file to
+# `allowBuilds: {esbuild: "set this to true or false"}` and still exits 1).
+# NOTE: the Dockerfile must COPY this file before `pnpm install` for it to apply.
 allowBuilds:
   esbuild: true

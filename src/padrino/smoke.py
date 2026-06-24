@@ -32,6 +32,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections import deque
@@ -752,40 +753,47 @@ def _allocate_free_port() -> int:
 class _StderrTail:
     """Capture the last ``maxlen`` stderr lines from a subprocess.
 
-    Runs the read loop on a background thread so subprocess back-pressure
-    never deadlocks the smoke flow.
+    The read loop runs on a *daemon* thread so it can never block interpreter
+    shutdown. Under ``--keep-running`` the API/scheduler children stay alive and
+    keep their stderr write-end open, so the blocking ``readline()`` never sees
+    EOF. On Linux, closing the parent's read fd does NOT interrupt an in-flight
+    ``read()`` on another thread — the worker stays blocked, and the
+    ``ThreadPoolExecutor`` join that ``asyncio.to_thread`` registers at
+    interpreter exit would then hang the smoke process forever (it never exits,
+    so the dashboard-e2e ``padrino smoke localhost`` boot times out). A daemon
+    thread is not joined at exit, so the process terminates cleanly regardless.
+    macOS unblocks the read on ``close()``, which is why the smoke completed
+    locally but hung for the full CI timeout on Linux.
     """
 
     def __init__(self, name: str, maxlen: int = 50) -> None:
         self.name = name
         self._buf: deque[str] = deque(maxlen=maxlen)
-        self._task: asyncio.Task[None] | None = None
+        self._thread: threading.Thread | None = None
         self._stream: Any = None
 
     def start(self, stream: Any) -> None:
         self._stream = stream
 
-        async def _pump() -> None:
+        def _pump() -> None:
             try:
-                while True:
-                    line = await asyncio.to_thread(stream.readline)
-                    if not line:
-                        return
-                    text = line.decode("utf-8", errors="replace").rstrip("\n")
+                for raw in iter(stream.readline, b""):
+                    text = raw.decode("utf-8", errors="replace").rstrip("\n")
                     self._buf.append(f"[{self.name}] {text}")
-            except (asyncio.CancelledError, OSError, ValueError):
+            except (OSError, ValueError):
                 return
 
-        self._task = asyncio.create_task(_pump(), name=f"smoke-stderr-{self.name}")
+        self._thread = threading.Thread(
+            target=_pump, name=f"smoke-stderr-{self.name}", daemon=True
+        )
+        self._thread.start()
 
     async def stop(self) -> None:
-        if self._task is None:
-            return
-        # Force-close the underlying OS fd so the worker thread's blocking
-        # ``readline()`` returns immediately. Calling ``stream.close()`` on
-        # a ``BufferedReader`` would instead wait for the in-flight read to
-        # finish, which deadlocks under ``--keep-running`` because the
-        # children stay alive and never close their stderr write-end.
+        # Best-effort: close the read fd so the daemon thread unblocks where the
+        # OS supports it (macOS). On Linux the in-flight ``read()`` may stay
+        # blocked, but the thread is a daemon so interpreter shutdown never waits
+        # for it. Closing ``stream`` directly would instead wait for the in-flight
+        # read to finish, which deadlocks under ``--keep-running``.
         if self._stream is not None:
             try:
                 fd = self._stream.fileno()
@@ -794,11 +802,8 @@ class _StderrTail:
             if fd is not None and fd >= 0:
                 with contextlib.suppress(OSError):
                     os.close(fd)
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
-        self._task = None
         self._stream = None
+        self._thread = None
 
     def lines(self) -> list[str]:
         return list(self._buf)

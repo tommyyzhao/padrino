@@ -127,6 +127,17 @@ _RULESET = mini7_v1.RULESET_ID
 _HUMAN_SEAT = "P01"
 _DISCUSSION_PHASE = "DAY_1_DISCUSSION_ROUND_1"
 
+# run_tick enforces the phase deadline with a REAL wall-clock
+# ``asyncio.wait_for`` around ``adapter.complete`` (it is not driven by the
+# injected FakeClock). The scripted/capture adapters answer in well under a
+# millisecond, so this value is only a ceiling — but a tight 50ms ceiling is
+# spuriously missed when the full ``--postgres`` suite runs under CPU/IO load on
+# a CI runner, coercing the AI seat to a timed-out safe action (no public
+# message) and dropping the asserted release. A generous ceiling removes the
+# flake with zero happy-path cost (the deadline is never actually hit). The
+# failure was Linux-CI-only; an idle macOS box always made the 50ms barrier.
+_TICK_DEADLINE_S = 30.0
+
 
 # --------------------------------------------------------------------------- #
 # Mixed human+AI driving (US-139 pattern, deterministic clock)
@@ -685,7 +696,7 @@ async def test_wiring_human_and_ai_messages_release_at_same_buffered_instant(
     adapter = await build_human_lane_adapter(
         session_factory,
         game_id=game_id,
-        settings=Settings(padrino_human_phase_deadline_seconds=0.05),
+        settings=Settings(padrino_human_phase_deadline_seconds=_TICK_DEADLINE_S),
         ai_adapter_factory=_ai_adapter_factory(script),
     )
     eligible = [
@@ -750,8 +761,10 @@ async def test_wiring_human_and_ai_messages_release_at_same_buffered_instant(
         adapter,
         mini7_v1,
         False,
-        0.05,
-        config=HumanTickConfig(phase_deadline_seconds=0.05, release_delay_seconds=2.0),
+        _TICK_DEADLINE_S,
+        config=HumanTickConfig(
+            phase_deadline_seconds=_TICK_DEADLINE_S, release_delay_seconds=2.0
+        ),
         clock=clock.now,
         sleep=clock.sleep,
         release_chat=release_chat,
@@ -816,7 +829,7 @@ async def test_wiring_ai_observes_released_human_chat_via_event_log(
     adapter = await build_human_lane_adapter(
         session_factory,
         game_id=game_id,
-        settings=Settings(padrino_human_phase_deadline_seconds=0.05),
+        settings=Settings(padrino_human_phase_deadline_seconds=_TICK_DEADLINE_S),
         ai_adapter_factory=ai_factory,
     )
     ai_seat = next(seat for seat in state.living_seats() if seat.public_player_id != _HUMAN_SEAT)
@@ -826,7 +839,7 @@ async def test_wiring_ai_observes_released_human_chat_via_event_log(
         event_log,
         [ai_seat],
         adapter,
-        timeout_s=0.05,
+        timeout_s=_TICK_DEADLINE_S,
         ruleset=mini7_v1,
         ranked=False,
     )
