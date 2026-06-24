@@ -762,9 +762,7 @@ async def test_wiring_human_and_ai_messages_release_at_same_buffered_instant(
         mini7_v1,
         False,
         _TICK_DEADLINE_S,
-        config=HumanTickConfig(
-            phase_deadline_seconds=_TICK_DEADLINE_S, release_delay_seconds=2.0
-        ),
+        config=HumanTickConfig(phase_deadline_seconds=_TICK_DEADLINE_S, release_delay_seconds=2.0),
         clock=clock.now,
         sleep=clock.sleep,
         release_chat=release_chat,

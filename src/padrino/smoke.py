@@ -783,9 +783,7 @@ class _StderrTail:
             except (OSError, ValueError):
                 return
 
-        self._thread = threading.Thread(
-            target=_pump, name=f"smoke-stderr-{self.name}", daemon=True
-        )
+        self._thread = threading.Thread(target=_pump, name=f"smoke-stderr-{self.name}", daemon=True)
         self._thread.start()
 
     async def stop(self) -> None:
