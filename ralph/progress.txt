@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign pairing matrices (US-257): keep the generator pure under
+  `core/scheduling/pairing.py`. Generate deterministic full-field cyclic rounds
+  for coverage/opponent diversity, assign each cell's group to seats by
+  `assign_roles(derive_campaign_cell_seed(...), ruleset)` exposure deficits,
+  then validate the returned matrix with `analyze_pairing_matrix`. MIRROR cells
+  emit one roster; pair leg 1 reverses that roster while both legs share the
+  per-cell campaign seed.
 - Benchmark resume byte-stability (US-256): prove replay determinism with the
   same `game_id` and `game_seed` on both paths. Run an in-memory reference,
   crash a persisted run after a durable `PhaseStarted` via `drive_game_loop`'s
@@ -3423,3 +3430,25 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2591
   passed / 41 skipped / 10 deselected. Frontend gates not run; US-256 is
   backend runner-only and did not touch `web/dashboard`.
+
+## 2026-06-24 - US-257
+- Added `core/scheduling/pairing.py`, a pure deterministic pairing-matrix
+  generator for campaign cells. It exposes `generate_pairing_matrix`,
+  `derive_campaign_cell_seed`, `mirror_leg_roster`, and diagnostics helpers.
+- The generator returns ordered `(cell_index, roster)` cells, derives per-cell
+  seeds with `sha256(b"campaign:" + campaign_seed + cell_index_be8)`, supports
+  MIRROR / ROUND_ROBIN formats, and verifies coverage, distinct-opponent, and
+  faction/role-family exposure guarantees before returning.
+- Added core tests for ordered mirror cells, seed derivation, subset size,
+  coverage across mini7/bench10 large fields, byte-stability across a fresh
+  Python process, and a pairing-specific pure-import firewall.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/scheduling/pairing.py`,
+  `tests/core/test_pairing.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest tests/core/test_pairing.py -q`
+  failed first on the missing pairing module; focused GREEN same command -> 7
+  passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2601 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-257 is pure backend core work and
+  did not touch `web/dashboard`.

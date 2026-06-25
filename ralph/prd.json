@@ -156,7 +156,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Location: core/scheduling/ (exists, pure - currently only cron helpers). Building blocks: core/engine/rng.SeededRng (next_bytes/randbelow/shuffle/choice), core/seating.seat_permutation, core.rulesets.get_ruleset (pure, by id), core/engine/role_assignment.assign_roles(game_seed, ruleset) (deterministic; REQUIRES a Ruleset, hence ruleset_id in the signature), gauntlets/scheduler derive_pair_id/derive_game_seed/pair_leg (mirror pair concept). Seed prefix b'campaign:' per the plan. Do NOT import gauntlets/evaluation.ModelSeatCounts (impure). SWISS/rating-adaptive DEFERRED (out of scope, note in docstring). This module is INDEPENDENT (no P1/P3 dep) - pure core.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-258",
