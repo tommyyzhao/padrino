@@ -120,7 +120,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Site: scheduler/gauntlet_job.py ~80 (f'scheduled:{schedule_id}:{now.isoformat()}'). Reference idioms: matchmaker._derive_gauntlet_seed (~43-47), gauntlets/scheduler.derive_game_seed (~46-48), derive_pair_id (~51-56). PINNED SOURCE: use row.next_run_at (the cron-computed scheduled fire instant for the occurrence being fired, read BEFORE mark_run recomputes it via next_run_at(schedule_cron, after=now)) as the per-occurrence stable input - deterministic from schedule_cron, NOT the injected now. Do NOT use now/last_run_at (fails the cross-run-same-seed AC#1) and do NOT add a run-count column (ScheduledGauntlet has none; Gauntlet has no schedule_id FK). Reproducibility is load-bearing for campaign replay (P3).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-256",

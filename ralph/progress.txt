@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Scheduled gauntlet seeds (US-255): derive recurring scheduled gauntlet seeds
+  from stable occurrence data only:
+  `derive_scheduled_gauntlet_seed(schedule_id, scheduled_fire_at=row.next_run_at)`
+  before `mark_run` advances the schedule. Normalize SQLite-naive datetimes to
+  UTC for cross-dialect stability; legacy due rows with `next_run_at is None`
+  use the stable `"initial"` occurrence key. The injected `now` remains only
+  the due/reschedule clock, never seed material.
 - Scheduler failure classification (US-254): keep retry/dead-letter policy at
   the scheduler retry seam via `classify_game_exception`. Replay/hash and
   validation/contract failures are poison and immediately `mark_failed` with a
@@ -3366,3 +3373,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2587 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-254 is backend scheduler-only and
   did not touch `web/dashboard`.
+
+## 2026-06-24T18:30 PDT - US-255
+- Replaced the scheduled-gauntlet wall-clock seed
+  `scheduled:{schedule_id}:{now.isoformat()}` with a SHA-256 seed derived from
+  `schedule_id` plus the schedule row's pre-advance `next_run_at`.
+- Added a public `derive_scheduled_gauntlet_seed` helper that normalizes
+  timezone-aware/SQLite-naive scheduled fire instants to UTC and keeps legacy
+  `next_run_at=None` rows deterministic via an `"initial"` occurrence key.
+- Added scheduled-job regression tests proving the same schedule occurrence
+  produces the same seed under different injected wall-clock `now` values,
+  distinct occurrences produce distinct seeds, and league/ruleset/clone-count
+  materialization is otherwise unchanged.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/scheduler/gauntlet_job.py`,
+  `tests/scheduler/test_gauntlet_job.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/scheduler/test_gauntlet_job.py::test_scheduled_seed_uses_fire_instant_not_injected_now tests/scheduler/test_gauntlet_job.py::test_scheduled_seed_changes_between_distinct_occurrences tests/scheduler/test_gauntlet_job.py::test_scheduled_gauntlet_shape_is_unchanged_by_seed_source -q`
+  failed first on the wall-clock seed and missing deterministic helper; focused
+  GREEN same command -> 3 passed. Adjacent GREEN
+  `uv run pytest tests/scheduler/test_gauntlet_job.py -q` -> 6 passed. Full
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2590
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-255 is
+  backend scheduler-only and did not touch `web/dashboard`.

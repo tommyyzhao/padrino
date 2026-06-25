@@ -13,9 +13,10 @@ injected so the scheduler's clock seam (and tests) drive timing deterministicall
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -54,6 +55,30 @@ def _roster_from_spec(spec: dict[str, object]) -> tuple[uuid.UUID, dict[str, uui
     return league_id, roster_by_seat
 
 
+def _scheduled_fire_key(scheduled_fire_at: datetime | None) -> str:
+    if scheduled_fire_at is None:
+        return "initial"
+    if scheduled_fire_at.tzinfo is None:
+        scheduled_fire_at = scheduled_fire_at.replace(tzinfo=UTC)
+    else:
+        scheduled_fire_at = scheduled_fire_at.astimezone(UTC)
+    return scheduled_fire_at.isoformat()
+
+
+def derive_scheduled_gauntlet_seed(
+    schedule_id: uuid.UUID,
+    *,
+    scheduled_fire_at: datetime | None,
+) -> str:
+    """Derive a scheduled gauntlet seed from stable schedule occurrence data."""
+    return hashlib.sha256(
+        b"scheduled:"
+        + str(schedule_id).encode("utf-8")
+        + b":"
+        + _scheduled_fire_key(scheduled_fire_at).encode("utf-8")
+    ).hexdigest()
+
+
 async def run_due_scheduled_gauntlets(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -72,12 +97,16 @@ async def run_due_scheduled_gauntlets(
     runs: list[ScheduledRun] = []
     for row in due:
         schedule_id = row.id
+        scheduled_fire_at = row.next_run_at
         try:
             league_id, roster_by_seat = _roster_from_spec(row.roster_spec_json)
             gauntlet_id, result = await run_tournament_from_roster(
                 session_factory=session_factory,
                 league_id=league_id,
-                gauntlet_seed=f"scheduled:{schedule_id}:{now.isoformat()}",
+                gauntlet_seed=derive_scheduled_gauntlet_seed(
+                    schedule_id,
+                    scheduled_fire_at=scheduled_fire_at,
+                ),
                 roster_by_seat=roster_by_seat,
                 n_games=row.n_games,
                 settings=settings,
@@ -130,4 +159,9 @@ async def run_due_scheduled_gauntlets(
     return runs
 
 
-__all__ = ["STATUS_COST_CAPPED", "ScheduledRun", "run_due_scheduled_gauntlets"]
+__all__ = [
+    "STATUS_COST_CAPPED",
+    "ScheduledRun",
+    "derive_scheduled_gauntlet_seed",
+    "run_due_scheduled_gauntlets",
+]
