@@ -42,9 +42,11 @@ from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
 from padrino.economics.benchmark_admission import (
     BenchmarkBudgetReservation,
+    game_binding_key,
     release_benchmark_budget_reservation,
     reserve_benchmark_game_budget,
 )
+from padrino.economics.budget_reservations import release_budget_slots_by_binding_key
 from padrino.gauntlets.completion import (
     DEFAULT_BALANCE_TOLERANCE_SEATS,
     finalize_gauntlet_if_done,
@@ -768,6 +770,12 @@ async def _reap_stale_games(
 ) -> list[uuid.UUID]:
     async with session_factory() as session, session.begin():
         reset = await games_repo.reset_stale_games(session, now=now)
+        for game_id in reset:
+            await release_budget_slots_by_binding_key(
+                session,
+                game_binding_key(game_id),
+                released_at=now,
+            )
     if reset:
         _logger.info(
             EVENT_SCHEDULER_STALE_RESET,

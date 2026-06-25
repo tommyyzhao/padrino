@@ -74,6 +74,11 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     scheduler_heartbeats as scheduler_heartbeats_repo,
 )
+from padrino.economics.benchmark_admission import (
+    GLOBAL_BENCHMARK_SCOPE_KEY,
+    campaign_scope_key,
+    game_binding_key,
+)
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import DeterministicMockAdapter, NoopMockAdapter
 from padrino.llm.retry import RetryExhausted
@@ -1542,6 +1547,63 @@ async def test_benchmark_budget_gate_bounds_concurrent_game_starts_and_retries_l
     }
     assert gauntlet is not None
     assert gauntlet.status == "PENDING"
+    assert live_slots == 0
+
+
+async def test_game_lease_reaper_releases_orphaned_budget_slots(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids, _cell_id = await _seed_campaign_gauntlet(
+        session_factory,
+        hash_prefix="reaper-orphan-slot",
+        clone_count=1,
+    )
+    game_id = game_ids[0]
+    binding_key = game_binding_key(game_id)
+    async with session_factory() as session, session.begin():
+        gauntlet = await gauntlets_repo.get(session, gauntlet_id)
+        assert gauntlet is not None
+        assert gauntlet.campaign_id is not None
+        game = await games_repo.get(session, game_id)
+        assert game is not None
+        game.status = GAME_STATUS_RUNNING
+        game.leased_by = "crashed-worker"
+        game.lease_expires_at = datetime(2026, 6, 24, 11, 59, tzinfo=UTC)
+        session.add_all(
+            [
+                BudgetReservationSlot(
+                    scope_key=GLOBAL_BENCHMARK_SCOPE_KEY,
+                    slot_index=0,
+                    reserved_at=datetime(2026, 6, 24, 11, 58, tzinfo=UTC),
+                    binding_key=binding_key,
+                ),
+                BudgetReservationSlot(
+                    scope_key=campaign_scope_key(gauntlet.campaign_id),
+                    slot_index=0,
+                    reserved_at=datetime(2026, 6, 24, 11, 58, tzinfo=UTC),
+                    binding_key=binding_key,
+                ),
+            ]
+        )
+
+    reset = await scheduler_module._reap_stale_games(
+        session_factory,
+        now=datetime(2026, 6, 24, 12, tzinfo=UTC),
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+        live_slots = await session.scalar(
+            select(func.count(BudgetReservationSlot.id)).where(
+                BudgetReservationSlot.binding_key == binding_key,
+                BudgetReservationSlot.released_at.is_(None),
+            )
+        )
+
+    assert reset == [game_id]
+    assert game is not None
+    assert game.leased_by is None
+    assert game.lease_expires_at is None
     assert live_slots == 0
 
 

@@ -12,7 +12,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.db.models import BudgetReservationSlot
-from padrino.economics.budget_reservations import claim_budget_slot, release_budget_slot
+from padrino.economics.budget_reservations import (
+    claim_budget_slot,
+    release_budget_slot,
+    release_budget_slots_by_binding_key,
+)
 
 _NOW = datetime(2026, 6, 24, 12, 0, 0, tzinfo=UTC)
 
@@ -194,3 +198,74 @@ async def test_budget_slot_scopes_are_independent(
 
     assert [slot is not None for slot in global_claims] == [True, True, False]
     assert [slot is not None for slot in campaign_claims] == [True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_release_budget_slots_by_binding_key_reclaims_all_live_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A crashed game binding can be released across every budget scope."""
+    binding_key = "game:crashed"
+    async with session_factory() as session, session.begin():
+        global_slot = await claim_budget_slot(
+            session,
+            scope_key="global:benchmark",
+            spent_usd=0.0,
+            budget_usd=1.0,
+            reserve_usd=0.5,
+            now=_NOW,
+            binding_key=binding_key,
+        )
+        campaign_slot = await claim_budget_slot(
+            session,
+            scope_key="campaign:abc",
+            spent_usd=0.0,
+            budget_usd=1.0,
+            reserve_usd=0.5,
+            now=_NOW,
+            binding_key=binding_key,
+        )
+        unrelated_slot = await claim_budget_slot(
+            session,
+            scope_key="global:benchmark",
+            spent_usd=0.0,
+            budget_usd=1.0,
+            reserve_usd=0.5,
+            now=_NOW,
+            binding_key="game:other",
+        )
+        assert global_slot is not None
+        assert campaign_slot is not None
+        assert unrelated_slot is not None
+
+        released = await release_budget_slots_by_binding_key(
+            session,
+            binding_key,
+            released_at=_NOW,
+        )
+
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(
+                        BudgetReservationSlot.binding_key,
+                        BudgetReservationSlot.released_at,
+                    ).order_by(BudgetReservationSlot.binding_key)
+                )
+            )
+            .tuples()
+            .all()
+        )
+
+    assert released == 2
+    assert [
+        (binding_key, released_at is None)
+        for binding_key, released_at in rows
+        if binding_key == "game:crashed"
+    ] == [("game:crashed", False), ("game:crashed", False)]
+    assert [
+        (binding_key, released_at is None)
+        for binding_key, released_at in rows
+        if binding_key == "game:other"
+    ] == [("game:other", True)]

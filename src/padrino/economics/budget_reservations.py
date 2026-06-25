@@ -76,6 +76,14 @@ async def claim_budget_slot(
     if cap <= 0:
         return None
 
+    if binding_key is not None:
+        await release_budget_slots_by_binding_key(
+            session,
+            binding_key,
+            released_at=now,
+            scope_key=scope_key,
+        )
+
     implicit_used = min(_implicit_budget_used(spent_usd, reserve_usd), cap)
     for _ in range(cap + 1):
         live, everything = await _slot_indices(session, scope_key=scope_key)
@@ -116,3 +124,25 @@ async def release_budget_slot(
     row.released_at = released_at
     await session.flush()
     return True
+
+
+async def release_budget_slots_by_binding_key(
+    session: AsyncSession,
+    binding_key: str,
+    *,
+    released_at: datetime,
+    scope_key: str | None = None,
+) -> int:
+    """Release all live reservation slots bound to one caller-owned entity."""
+    stmt = select(BudgetReservationSlot).where(
+        BudgetReservationSlot.binding_key == binding_key,
+        BudgetReservationSlot.released_at.is_(None),
+    )
+    if scope_key is not None:
+        stmt = stmt.where(BudgetReservationSlot.scope_key == scope_key)
+    rows = list((await session.execute(stmt)).scalars().all())
+    for row in rows:
+        row.released_at = released_at
+    if rows:
+        await session.flush()
+    return len(rows)

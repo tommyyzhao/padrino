@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Orphaned benchmark budget slots (US-272): treat
+  `BudgetReservationSlot.binding_key` as the crash-reclaim handle for a game.
+  `claim_budget_slot` releases any prior live row with the same non-None
+  binding key in the same `scope_key` before taking a fresh slot, so
+  reaped/retried games cannot stack reservations. The scheduler game reaper
+  releases all scopes for `game_binding_key(game_id)` in the same transaction
+  as `games_repo.reset_stale_games`, freeing both `global:benchmark` and
+  campaign-owned `campaign:<id>` slots after a worker crash.
 - Campaign budget pauses (US-271): in `runner.scheduler._drive_gauntlet`,
   treat any `child_result.budget_halts` as a gauntlet-level pause and return
   after `gauntlets_repo.mark_pending` before campaign-cell failure accounting.
@@ -3977,3 +3985,37 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2674
   passed / 41 skipped / 10 deselected. Frontend gates not run; US-271 is
   backend scheduler/campaign accounting work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:32 PDT - US-272
+- Added binding-key reclaim for benchmark budget reservations:
+  `release_budget_slots_by_binding_key` releases every live slot for a crashed
+  game binding, while `claim_budget_slot` self-cleans prior live rows in the
+  same scope before taking a fresh slot.
+- Wired the scheduler stale-game reaper to release all budget slots for each
+  expired game lease via `game_binding_key(game_id)`, covering both global and
+  campaign reservation scopes in the same transaction that clears the lease.
+- Added regressions for binding-key release, same-game retry without slot
+  stacking, hard-cap reuse without overshoot, and stale reaping of orphaned
+  global plus campaign slots.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/economics/budget_reservations.py`,
+  `src/padrino/runner/scheduler.py`,
+  `tests/economics/test_budget_reservations.py`,
+  `tests/economics/test_benchmark_budget_admission.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/economics/test_budget_reservations.py::test_release_budget_slots_by_binding_key_reclaims_all_live_rows -q`
+  failed first on the missing helper; focused RED
+  `uv run pytest tests/economics/test_benchmark_budget_admission.py::test_reserve_benchmark_game_budget_releases_prior_live_binding_slots tests/economics/test_benchmark_budget_admission.py::test_reclaimed_binding_capacity_is_reused_without_overshoot -q`
+  failed first with stacked slots and denied retry admission; focused RED
+  `uv run pytest tests/runner/test_scheduler.py::test_game_lease_reaper_releases_orphaned_budget_slots -q`
+  failed first with two live orphaned slots. Focused GREEN same commands -> 1
+  passed / 2 passed / 1 passed. Adjacent GREEN
+  `uv run pytest tests/economics/test_budget_reservations.py tests/economics/test_benchmark_budget_admission.py -q`
+  -> 8 passed; `uv run pytest tests/runner/test_scheduler.py -q` -> 28
+  passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2678 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-272 is backend economics/scheduler
+  crash-recovery work and did not touch `web/dashboard`.

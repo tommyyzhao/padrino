@@ -49,7 +49,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: scheduler.py _run_one_game slot claim (~317-331) + release-in-finally (~357-364) + _reap_stale_games (~763-775); db/repositories/games.py reset_stale_games (~154-176); economics/budget_reservations.py (binding_key write ~65/89, release_budget_slot keys on slot_id only), benchmark_admission.py (binding_key game:<uuid>), game_binding_key helper. Cap math: claim admits only when implicit_used + len(live) < cap (implicit_used = ceil(spent/reserve), summed with live - so orphaned live slots are pure additive waste). campaign_tick reserves+releases its probe slot in the same txn (binding_key campaign-tick:<id>) so it is not part of the leak. NO migration (binding_key column already exists).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-273",
