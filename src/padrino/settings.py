@@ -367,6 +367,10 @@ class Settings(BaseSettings):
     # batches so a large field never inserts thousands of runnable games in one
     # scheduler tick.
     padrino_campaign_materialize_batch_size: int = 10
+    # Campaign cell retry bound (US-260). A campaign-owned gauntlet that
+    # terminally fails after child-game retries requeues its cell until this
+    # count is reached, then records a DEAD_LETTER hole for later reporting.
+    padrino_campaign_cell_max_attempts: int = 1
 
     def build_routing_policy(
         self,

@@ -53,9 +53,35 @@ class MaterializeBatchResult:
     materialized: tuple[MaterializedCampaignCell, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class DeadLetterCampaignCell:
+    """Failure detail for one terminal campaign-pairing cell."""
+
+    cell_id: uuid.UUID
+    campaign_id: uuid.UUID
+    cell_index: int
+    gauntlet_id: uuid.UUID | None
+    attempt_count: int
+    last_error: str | None
+    last_error_kind: str | None
+
+
 def _aware(value: datetime) -> datetime:
     """Treat SQLite's naive datetime reads as UTC for lease comparisons."""
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _format_cell_failure(*, last_error: str, last_error_kind: str | None) -> str:
+    return last_error if last_error_kind is None else f"{last_error_kind}: {last_error}"
+
+
+def _split_cell_failure(last_error: str | None) -> tuple[str | None, str | None]:
+    if last_error is None:
+        return None, None
+    last_error_kind, separator, message = last_error.partition(": ")
+    if not separator:
+        return last_error, None
+    return message, last_error_kind
 
 
 async def get(session: AsyncSession, campaign_id: uuid.UUID) -> Campaign | None:
@@ -265,6 +291,71 @@ async def materialize_next_batch(
     return MaterializeBatchResult(campaign_id=campaign_id, materialized=tuple(materialized))
 
 
+async def record_materialized_cell_failure(
+    session: AsyncSession,
+    *,
+    gauntlet_id: uuid.UUID,
+    last_error: str,
+    last_error_kind: str | None,
+    max_attempts: int,
+    poison: bool,
+) -> CampaignPairing | None:
+    """Record a failed materialized-cell attempt and terminalize when exhausted."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be >= 1")
+    stmt = select(CampaignPairing).where(CampaignPairing.gauntlet_id == gauntlet_id).limit(1)
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update()
+    cell = (await session.execute(stmt)).scalars().first()
+    if cell is None:
+        return None
+    if cell.status == CAMPAIGN_PAIRING_DEAD_LETTER:
+        return cell
+
+    cell.attempt_count += 1
+    cell.last_error = _format_cell_failure(
+        last_error=last_error,
+        last_error_kind=last_error_kind,
+    )
+    if poison or cell.attempt_count >= max_attempts:
+        cell.status = CAMPAIGN_PAIRING_DEAD_LETTER
+    else:
+        cell.status = CAMPAIGN_PAIRING_PENDING
+        cell.gauntlet_id = None
+    await session.flush()
+    return cell
+
+
+async def list_dead_letter_cells(
+    session: AsyncSession,
+    campaign_id: uuid.UUID,
+) -> list[DeadLetterCampaignCell]:
+    """Return campaign cell holes in deterministic cell-index order."""
+    result = await session.execute(
+        select(CampaignPairing)
+        .where(
+            CampaignPairing.campaign_id == campaign_id,
+            CampaignPairing.status == CAMPAIGN_PAIRING_DEAD_LETTER,
+        )
+        .order_by(CampaignPairing.cell_index)
+    )
+    cells: list[DeadLetterCampaignCell] = []
+    for cell in result.scalars():
+        last_error, last_error_kind = _split_cell_failure(cell.last_error)
+        cells.append(
+            DeadLetterCampaignCell(
+                cell_id=cell.id,
+                campaign_id=cell.campaign_id,
+                cell_index=cell.cell_index,
+                gauntlet_id=cell.gauntlet_id,
+                attempt_count=cell.attempt_count,
+                last_error=last_error,
+                last_error_kind=last_error_kind,
+            )
+        )
+    return cells
+
+
 async def _resolve_canonical_active_builds(
     session: AsyncSession,
     *,
@@ -341,12 +432,15 @@ __all__ = [
     "CAMPAIGN_STATUS_PENDING",
     "CAMPAIGN_STATUS_RUNNING",
     "CampaignCreated",
+    "DeadLetterCampaignCell",
     "MaterializeBatchResult",
     "MaterializedCampaignCell",
     "claim_campaign",
     "create_campaign_from_matrix",
     "get",
+    "list_dead_letter_cells",
     "materialize_next_batch",
+    "record_materialized_cell_failure",
     "reset_stale_campaigns",
     "update_heartbeat",
 ]

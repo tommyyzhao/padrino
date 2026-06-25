@@ -213,7 +213,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Cell status DEAD_LETTER from the US-258 schema. POISON classification from US-254 (replay/hash/validation -> immediate dead-letter; transient -> retry). cell-max-attempts is settings-driven. The campaign AUTO-FINALIZES with DEAD_LETTER cells (locked decision: no hard operator block); the report documents the hole (US-268).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-261",

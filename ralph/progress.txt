@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign cell dead-lettering (US-260): keep failed campaign-owned gauntlets
+  mapped through `campaign_pairings.gauntlet_id` into
+  `record_materialized_cell_failure`. Retryable exhausted cells increment
+  `attempt_count` and requeue by clearing `gauntlet_id` until
+  `padrino_campaign_cell_max_attempts`; poison failures or exhausted cells
+  become `DEAD_LETTER`. The schema has only `last_error`, so persist
+  `"kind: message"` and expose parsed failure details via
+  `list_dead_letter_cells` for US-268 reports.
 - Campaign ledger materialization (US-259): resolve generator model ids to a
   single canonical active `AgentBuild` per `ModelConfig.model_name` /
   `litellm_model_id` at campaign creation time, store UUID strings in
@@ -3535,3 +3543,36 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2613 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-259 is backend campaign
   persistence/materialization work and did not touch `web/dashboard`.
+
+## 2026-06-24T19:15 PDT - US-260
+- Added campaign pairing dead-letter helpers:
+  `record_materialized_cell_failure` increments cell attempts, requeues
+  retryable failures until the configured cap, and flips poison/exhausted
+  cells to `DEAD_LETTER`; `list_dead_letter_cells` exposes ordered failure
+  details for campaign reports.
+- Wired campaign-owned gauntlet child-game failures from
+  `runner/scheduler.py` into the pairing ledger, using the existing US-254
+  failure classification and new `padrino_campaign_cell_max_attempts`
+  setting/SchedulerOptions field. Standalone gauntlet failure behavior remains
+  unchanged.
+- Added regression coverage for bounded retry exhaustion, immediate poison
+  dead-lettering, dead-letter exclusion from rematerialization, remaining-cell
+  progress, queryable failure details, and scheduler integration for a
+  campaign-owned failed gauntlet.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/runner/scheduler.py`, `src/padrino/settings.py`,
+  `tests/db/test_campaigns_repo.py`, `tests/runner/test_scheduler.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_campaigns_repo.py::test_campaign_cell_failure_dead_letters_after_bounded_attempts tests/db/test_campaigns_repo.py::test_dead_letter_cells_are_excluded_and_queryable -q`
+  failed first on missing campaign dead-letter APIs; focused RED
+  `uv run pytest tests/runner/test_scheduler.py::test_campaign_owned_failed_gauntlet_dead_letters_cell -q`
+  failed first on missing `campaign_cell_max_attempts`; focused GREEN same
+  commands -> 2 passed / 1 passed. Adjacent GREEN
+  `uv run pytest tests/db/test_campaigns_repo.py -q` -> 7 passed;
+  `uv run pytest tests/runner/test_scheduler.py -q` -> 22 passed. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2617
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-260 is
+  backend campaign/scheduler work and did not touch `web/dashboard`.

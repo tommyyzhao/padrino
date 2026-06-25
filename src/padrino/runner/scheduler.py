@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.db.game_status import is_terminal_game_status
 from padrino.db.models import Game, GauntletRosterSlot
+from padrino.db.repositories import campaigns as campaigns_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
@@ -67,6 +68,7 @@ DEFAULT_STALE_FACTOR: Final[float] = 2.0
 DEFAULT_GAME_MAX_ATTEMPTS: Final[int] = 2
 DEFAULT_GAME_LEASE_TTL_S: Final[float] = 3600.0
 DEFAULT_GAME_RETRY_BACKOFF_S: Final[float] = 0.0
+DEFAULT_CAMPAIGN_CELL_MAX_ATTEMPTS: Final[int] = 1
 
 _FAILURE_KIND_PROVIDER_TRANSIENT: Final[str] = "provider_transient"
 _FAILURE_KIND_REPLAY_HASH_MISMATCH: Final[str] = "replay_hash_mismatch"
@@ -181,6 +183,7 @@ class SchedulerOptions:
     enable_game_lease_reaper: bool = False
     game_lease_reaper_interval_s: float = 30.0
     game_lease_ttl_s: float = DEFAULT_GAME_LEASE_TTL_S
+    campaign_cell_max_attempts: int = DEFAULT_CAMPAIGN_CELL_MAX_ATTEMPTS
 
 
 def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
@@ -190,6 +193,7 @@ def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
         enable_game_lease_reaper=settings.padrino_enable_game_lease_reaper,
         game_lease_reaper_interval_s=settings.padrino_game_lease_reaper_interval_seconds,
         game_lease_ttl_s=settings.padrino_game_lease_ttl_seconds,
+        campaign_cell_max_attempts=settings.padrino_campaign_cell_max_attempts,
     )
 
 
@@ -531,6 +535,12 @@ async def _drive_gauntlet(
             error=str(failure.exception),
             attempts=failure.attempts,
         )
+    await _record_campaign_cell_failures(
+        session_factory,
+        gauntlet_id=gauntlet_id,
+        failures=failures,
+        max_attempts=options.campaign_cell_max_attempts,
+    )
 
     await _rate_completed_pairs_for_gauntlet(
         session_factory,
@@ -549,6 +559,52 @@ async def _drive_gauntlet(
         failed_games=[str(failure.game_id) for failure in failures],
         failed_game_count=len(failures),
     )
+
+
+def _summarize_cell_failures(
+    failures: Sequence[_ScheduledGameFailure],
+) -> tuple[str, str | None, bool]:
+    if len(failures) == 1:
+        failure = failures[0]
+        classification = classify_game_exception(failure.exception)
+        return (
+            _exception_message(failure.exception),
+            classification.last_error_kind,
+            classification.disposition is GameExceptionDisposition.POISON,
+        )
+
+    classifications = [classify_game_exception(failure.exception) for failure in failures]
+    kinds = {classification.last_error_kind for classification in classifications}
+    last_error_kind = next(iter(kinds)) if len(kinds) == 1 else "multiple_failures"
+    poison = any(
+        classification.disposition is GameExceptionDisposition.POISON
+        for classification in classifications
+    )
+    message = "; ".join(
+        f"{failure.game_id}: {_exception_message(failure.exception)}" for failure in failures
+    )
+    return message, last_error_kind, poison
+
+
+async def _record_campaign_cell_failures(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    gauntlet_id: uuid.UUID,
+    failures: Sequence[_ScheduledGameFailure],
+    max_attempts: int,
+) -> None:
+    if not failures:
+        return
+    last_error, last_error_kind, poison = _summarize_cell_failures(failures)
+    async with session_factory() as session, session.begin():
+        await campaigns_repo.record_materialized_cell_failure(
+            session,
+            gauntlet_id=gauntlet_id,
+            last_error=last_error,
+            last_error_kind=last_error_kind,
+            max_attempts=max_attempts,
+            poison=poison,
+        )
 
 
 async def _rate_completed_pairs_for_gauntlet(
@@ -698,6 +754,8 @@ async def run_scheduler(
         raise ValueError("game_max_attempts must be >= 1")
     if opts.game_retry_backoff_s < 0:
         raise ValueError("game_retry_backoff_s must be >= 0")
+    if opts.campaign_cell_max_attempts < 1:
+        raise ValueError("campaign_cell_max_attempts must be >= 1")
     if opts.enable_game_lease_reaper and opts.game_lease_reaper_interval_s <= 0:
         raise ValueError("game_lease_reaper_interval_s must be > 0")
     if opts.game_lease_ttl_s <= 0:

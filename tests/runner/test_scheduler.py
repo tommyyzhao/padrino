@@ -33,10 +33,11 @@ from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
 from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED, GAME_STATUS_RUNNING
-from padrino.db.models import GameEvent, Rating, RatingEvent
+from padrino.db.models import Campaign, CampaignPairing, GameEvent, Rating, RatingEvent
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
+from padrino.db.repositories import campaigns as campaigns_repo
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import (
     games as games_repo,
@@ -147,6 +148,94 @@ async def _seed_gauntlet(
             )
             game_ids.append(g.id)
         return gauntlet.id, game_ids
+
+
+async def _seed_campaign_gauntlet(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    hash_prefix: str,
+    clone_count: int = 1,
+) -> tuple[uuid.UUID, list[uuid.UUID], uuid.UUID]:
+    async with session_factory() as session, session.begin():
+        provider = await providers_repo.create(session, name="p", auth_secret_ref="env:X")
+        mc = await model_configs_repo.create(
+            session,
+            provider_id=provider.id,
+            model_name="m",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        pv = await prompt_versions_repo.create(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            version="v",
+            system_prompt="s",
+            developer_prompt="d",
+            response_schema={"type": "object"},
+            prompt_hash=f"{hash_prefix}-prompt",
+        )
+        league = await leagues_repo.create(
+            session, name="campaign-lane", ruleset_id=mini7_v1.RULESET_ID, ranked=True
+        )
+        builds: list[uuid.UUID] = []
+        for i in range(mini7_v1.PLAYER_COUNT):
+            ab = await agent_builds_repo.create(
+                session,
+                display_name=f"campaign-b-{i}",
+                model_config_id=mc.id,
+                prompt_version_id=pv.id,
+                adapter_version="v",
+                inference_params={},
+                active=True,
+            )
+            builds.append(ab.id)
+        campaign = Campaign(
+            campaign_seed=f"{hash_prefix}-campaign-seed",
+            ruleset_id=mini7_v1.RULESET_ID,
+            league_id=league.id,
+            format="MIRROR",
+            player_count=mini7_v1.PLAYER_COUNT,
+            per_model_game_target=clone_count,
+            status=campaigns_repo.CAMPAIGN_STATUS_RUNNING,
+            sigma_target=2.5,
+            rank_stability_k=10,
+        )
+        session.add(campaign)
+        await session.flush()
+        gauntlet = await gauntlets_repo.create(
+            session,
+            campaign_id=campaign.id,
+            league_id=league.id,
+            ruleset_id=mini7_v1.RULESET_ID,
+            prompt_version_id=pv.id,
+            clone_count=clone_count,
+            gauntlet_seed=f"{hash_prefix}-seed",
+            ranked=True,
+            status="PENDING",
+        )
+        for i, ab_id in enumerate(builds):
+            await gauntlets_repo.add_roster_slot(session, gauntlet.id, i, ab_id)
+        cell = CampaignPairing(
+            campaign_id=campaign.id,
+            cell_index=0,
+            roster_json=[str(build_id) for build_id in builds],
+            status=campaigns_repo.CAMPAIGN_PAIRING_MATERIALIZED,
+            gauntlet_id=gauntlet.id,
+        )
+        session.add(cell)
+        game_ids: list[uuid.UUID] = []
+        for i in range(clone_count):
+            g = await games_repo.create(
+                session,
+                ruleset_id=mini7_v1.RULESET_ID,
+                game_seed=f"{hash_prefix}-g{i}",
+                gauntlet_id=gauntlet.id,
+            )
+            game_ids.append(g.id)
+        await session.flush()
+        return gauntlet.id, game_ids, cell.id
 
 
 class _FakeExecutor:
@@ -682,6 +771,57 @@ async def test_retryable_child_game_failure_retries_with_injected_backoff_and_st
     assert delays == [0.25, 0.5]
     assert game.last_error_kind == "provider_transient"
     assert game.last_error == "provider timeout attempt 3"
+
+
+async def test_campaign_owned_failed_gauntlet_dead_letters_cell(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids, cell_id = await _seed_campaign_gauntlet(
+        session_factory,
+        hash_prefix="campaign-failed-cell",
+        clone_count=1,
+    )
+    game_id = game_ids[0]
+    executor = _AlwaysFailingExecutor(
+        failing_game_id=game_id,
+        exc_factory=lambda attempt: TimeoutError(f"provider timeout attempt {attempt}"),
+    )
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=2,
+        campaign_cell_max_attempts=1,
+    )
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
+    )
+
+    async with session_factory() as session:
+        cell = await session.get(CampaignPairing, cell_id)
+        game = await games_repo.get(session, game_id)
+
+    assert cell is not None
+    assert cell.status == campaigns_repo.CAMPAIGN_PAIRING_DEAD_LETTER
+    assert cell.attempt_count == 1
+    assert cell.last_error == "provider_transient: provider timeout attempt 2"
+    assert game is not None
+    assert game.status == GAME_STATUS_FAILED
+    assert game.last_error_kind == "provider_transient"
+    assert executor.attempts_by_game[game_id] == 2
 
 
 async def test_scheduler_fresh_game_attempt_has_no_resume(

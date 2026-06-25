@@ -329,3 +329,161 @@ async def test_materialize_next_batch_resumes_from_ledger_without_recreating_cel
     assert len(all_gauntlet_ids) == len(set(all_gauntlet_ids)) == 3
     assert gauntlet_count == 3
     assert game_count == 6
+
+
+async def test_campaign_cell_failure_dead_letters_after_bounded_attempts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league_id, _prompt_id, model_ids, _builds = await _seed_campaign_world(session)
+        created = await campaigns.create_campaign_from_matrix(
+            session,
+            campaign_seed="campaign-dead-letter",
+            ruleset_id=mini7_v1.RULESET_ID,
+            league_id=league_id,
+            model_field=model_ids,
+            format="MIRROR",
+            per_model_game_target=4,
+            sigma_target=2.5,
+            rank_stability_k=10,
+        )
+        campaign_id = created.campaign_id
+
+    async with session_factory() as session, session.begin():
+        first = await campaigns.materialize_next_batch(
+            session,
+            campaign_id=campaign_id,
+            batch_size=1,
+            pair_count=1,
+        )
+        gauntlet_id = first.materialized[0].gauntlet_id
+        first_failure = await campaigns.record_materialized_cell_failure(
+            session,
+            gauntlet_id=gauntlet_id,
+            last_error="provider timeout attempt 1",
+            last_error_kind="provider_transient",
+            max_attempts=2,
+            poison=False,
+        )
+
+    assert first_failure is not None
+    assert first_failure.status == campaigns.CAMPAIGN_PAIRING_PENDING
+    assert first_failure.attempt_count == 1
+
+    async with session_factory() as session, session.begin():
+        second = await campaigns.materialize_next_batch(
+            session,
+            campaign_id=campaign_id,
+            batch_size=1,
+            pair_count=1,
+        )
+        second_gauntlet_id = second.materialized[0].gauntlet_id
+        assert second_gauntlet_id != gauntlet_id
+        second_failure = await campaigns.record_materialized_cell_failure(
+            session,
+            gauntlet_id=second_gauntlet_id,
+            last_error="provider timeout attempt 2",
+            last_error_kind="provider_transient",
+            max_attempts=2,
+            poison=False,
+        )
+
+    assert second_failure is not None
+    assert second_failure.status == campaigns.CAMPAIGN_PAIRING_DEAD_LETTER
+    assert second_failure.attempt_count == 2
+    assert second_failure.last_error == "provider_transient: provider timeout attempt 2"
+
+    async with session_factory() as session, session.begin():
+        retry = await campaigns.materialize_next_batch(
+            session,
+            campaign_id=campaign_id,
+            batch_size=1,
+            pair_count=1,
+        )
+        cells = await _campaign_cell_rows(session, campaign_id)
+
+    assert retry.materialized[0].cell_index == 1
+    assert cells[0].status == campaigns.CAMPAIGN_PAIRING_DEAD_LETTER
+
+
+async def test_dead_letter_cells_are_excluded_and_queryable(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league_id, _prompt_id, model_ids, _builds = await _seed_campaign_world(session)
+        created = await campaigns.create_campaign_from_matrix(
+            session,
+            campaign_seed="campaign-dead-letter-excluded",
+            ruleset_id=mini7_v1.RULESET_ID,
+            league_id=league_id,
+            model_field=model_ids,
+            format="MIRROR",
+            per_model_game_target=4,
+            sigma_target=2.5,
+            rank_stability_k=10,
+        )
+        campaign_id = created.campaign_id
+        cells = await _campaign_cell_rows(session, campaign_id)
+        cells[0].status = campaigns.CAMPAIGN_PAIRING_DEAD_LETTER
+        cells[0].attempt_count = 3
+        cells[0].last_error = "replay_hash_mismatch: corrupt event chain"
+        total_cells = len(cells)
+
+    async with session_factory() as session, session.begin():
+        result = await campaigns.materialize_next_batch(
+            session,
+            campaign_id=campaign_id,
+            batch_size=total_cells,
+            pair_count=1,
+        )
+        failures = await campaigns.list_dead_letter_cells(session, campaign_id)
+        cells_after = await _campaign_cell_rows(session, campaign_id)
+
+    assert [item.cell_index for item in result.materialized] == list(range(1, total_cells))
+    assert cells_after[0].status == campaigns.CAMPAIGN_PAIRING_DEAD_LETTER
+    assert all(cell.status == campaigns.CAMPAIGN_PAIRING_MATERIALIZED for cell in cells_after[1:])
+    assert len(failures) == 1
+    assert failures[0].cell_index == 0
+    assert failures[0].attempt_count == 3
+    assert failures[0].last_error == "corrupt event chain"
+    assert failures[0].last_error_kind == "replay_hash_mismatch"
+
+
+async def test_poison_campaign_cell_failure_dead_letters_immediately(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league_id, _prompt_id, model_ids, _builds = await _seed_campaign_world(session)
+        created = await campaigns.create_campaign_from_matrix(
+            session,
+            campaign_seed="campaign-poison-dead-letter",
+            ruleset_id=mini7_v1.RULESET_ID,
+            league_id=league_id,
+            model_field=model_ids,
+            format="MIRROR",
+            per_model_game_target=4,
+            sigma_target=2.5,
+            rank_stability_k=10,
+        )
+        campaign_id = created.campaign_id
+
+    async with session_factory() as session, session.begin():
+        materialized = await campaigns.materialize_next_batch(
+            session,
+            campaign_id=campaign_id,
+            batch_size=1,
+            pair_count=1,
+        )
+        failure = await campaigns.record_materialized_cell_failure(
+            session,
+            gauntlet_id=materialized.materialized[0].gauntlet_id,
+            last_error="replay hash mismatch at sequence 3",
+            last_error_kind="replay_hash_mismatch",
+            max_attempts=3,
+            poison=True,
+        )
+
+    assert failure is not None
+    assert failure.status == campaigns.CAMPAIGN_PAIRING_DEAD_LETTER
+    assert failure.attempt_count == 1
+    assert failure.last_error == "replay_hash_mismatch: replay hash mismatch at sequence 3"
