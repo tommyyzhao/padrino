@@ -77,3 +77,33 @@ groups:
             No games admitted for 20 minutes. Consecutive admission denials
             (daily cap, concurrency cap, or spend cap) trip the
             admission.denied.streak webhook; check the admission.denied logs.
+
+      # Budget burn: benchmark spend is approaching or has reached a configured
+      # cap. Mirrors the budget.burn.threshold webhook, which carries the
+      # concrete scope and cap in its payload.
+      - alert: PadrinoBudgetBurnThreshold
+        expr: padrino_budget_fraction_of_cap >= 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Padrino benchmark budget burn is above threshold"
+          description: >
+            A global or campaign benchmark budget scope is at or above 80% of
+            its configured cap. Check padrino_budget_fraction_of_cap labels and
+            the budget.burn.threshold webhook payload for the affected scope.
+
+      # Cost drift: observed per-call spend is diverging from the stamped
+      # expected cost enough to suggest provider pricing or fallback accounting
+      # changed unexpectedly. Mirrors the cost.drift.threshold webhook.
+      - alert: PadrinoCostDriftThreshold
+        expr: padrino_cost_drift_fraction > 0.25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Padrino LLM call cost drift is above threshold"
+          description: >
+            Observed per-call cost differs from the stamped expected cost by
+            more than 25%. Check the cost.drift.threshold webhook payload and
+            the labelled padrino_cost_drift_fraction series.

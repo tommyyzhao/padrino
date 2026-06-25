@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Budget/cost observability (US-267): keep Prometheus instruments as
+  module-level singletons in `observability.metrics` on the shared `REGISTRY`,
+  with explicit `record_*` helpers. Budget admission is the right boundary to
+  record global/campaign spend and cap fraction because it already has the
+  authoritative spend/cap values. Alert threshold logic stays in
+  `observability.alerts` as injected-value helpers that call
+  `AlertNotifier.fire(key, **details)` on breach and `resolve(key)` on recovery.
 - Immutable LLM-call pricing (US-266): derive `game_runner._pricing_stamp` at
   the same boundary as `LlmCall.cost_usd`. Provider response costs stamp
   `price_basis=PROVIDER_RESPONSE_COST`; fallback-priced calls stamp
@@ -3809,3 +3816,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2644
   passed / 41 skipped / 10 deselected. Frontend gates not run; US-265 is
   backend economics admission work and did not touch `web/dashboard`.
+
+## 2026-06-24T20:35 PDT - US-267
+- Added budget-burn Prometheus gauges for global spend, per-campaign spend,
+  and spend fraction of cap, plus a cost-drift fraction gauge and record
+  helpers in `observability.metrics`.
+- Wired `economics.benchmark_admission` to record global and campaign budget
+  burn metrics at the admission boundary where authoritative spend/cap values
+  are already computed.
+- Added `budget.burn.threshold` and `cost.drift.threshold` alert keys,
+  settings-driven threshold helpers, and matching Prometheus alert-rule entries.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `docs/deployment/alert-rules.yml`,
+  `src/padrino/economics/benchmark_admission.py`,
+  `src/padrino/observability/alerts.py`,
+  `src/padrino/observability/metrics.py`, `src/padrino/settings.py`,
+  `tests/observability/test_alerts.py`,
+  `tests/observability/test_metrics_endpoint.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/observability/test_metrics_endpoint.py::test_record_budget_burn_updates_global_campaign_and_fraction_gauges tests/observability/test_metrics_endpoint.py::test_record_cost_drift_updates_drift_gauge tests/observability/test_alerts.py::test_budget_burn_alert_key_fires_and_resolves tests/observability/test_alerts.py::test_budget_burn_threshold_fires_and_resolves -q`
+  failed first on missing US-267 imports; focused GREEN expanded observability
+  command -> 8 passed. Adjacent GREEN
+  `uv run pytest tests/observability tests/economics/test_benchmark_budget_admission.py -q`
+  -> 56 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2658 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-267 is backend observability work
+  and did not touch `web/dashboard`.

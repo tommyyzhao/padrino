@@ -357,6 +357,11 @@ class Settings(BaseSettings):
     padrino_alert_webhook_timeout_s: float = 5.0
     padrino_scheduler_heartbeat_stale_seconds: float = 120.0
     padrino_admission_denied_streak_threshold: int = 5
+    # Budget-burn and cost-drift paging (US-267). The burn threshold is a
+    # fraction of the configured cap; the drift threshold is an absolute
+    # relative per-call divergence from the stamped expected cost.
+    padrino_budget_burn_alert_fraction_threshold: float = 0.8
+    padrino_cost_drift_alert_fraction_threshold: float = 0.25
     # Benchmark scheduler child-game retry (US-241). This is deliberately
     # single-host/in-process only: the scheduler retries an exception from the
     # child executor this many total attempts before marking that game FAILED.

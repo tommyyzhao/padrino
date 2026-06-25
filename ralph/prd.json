@@ -345,7 +345,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Pattern: observability/metrics.py module-level Counter/Histogram/Gauge on REGISTRY + record_* helpers; observability/alerts.py ALERT_* constants in ALERT_KEYS + AlertNotifier.fire/resolve (existing keys: spend.cap.reached, scheduler.heartbeat.stale, admission.denied.streak). Reuse spend.cap.reached if it already fits, else add a campaign-scoped budget-burn key. Thresholds from settings. Stamped price-table version from US-266 feeds cost-drift.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-268",

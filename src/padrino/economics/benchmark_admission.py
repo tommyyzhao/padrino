@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.db.models import Game, Gauntlet, LlmCall
 from padrino.economics.budget_reservations import claim_budget_slot, release_budget_slot
 from padrino.economics.spend_governor import cumulative_spend_usd
+from padrino.observability.metrics import record_budget_burn
 
 GLOBAL_BENCHMARK_SCOPE_KEY = "global:benchmark"
 BENCHMARK_GAME_BINDING_PREFIX = "game:"
@@ -105,10 +106,17 @@ async def reserve_benchmark_budget(
 ) -> BenchmarkAdmissionDecision:
     """Atomically reserve global and optional per-campaign budget for one game."""
     reserve_usd = settings.padrino_benchmark_admission_reserve_usd
+    global_spent_usd = await cumulative_spend_usd(session)
+    record_budget_burn(
+        scope_type="global",
+        scope_id="benchmark",
+        spent_usd=global_spent_usd,
+        cap_usd=settings.padrino_global_spend_cap_usd,
+    )
     global_slot_id = await claim_budget_slot(
         session,
         scope_key=GLOBAL_BENCHMARK_SCOPE_KEY,
-        spent_usd=await cumulative_spend_usd(session),
+        spent_usd=global_spent_usd,
         budget_usd=settings.padrino_global_spend_cap_usd,
         reserve_usd=reserve_usd,
         now=now,
@@ -122,10 +130,17 @@ async def reserve_benchmark_budget(
 
     campaign_slot_id: uuid.UUID | None = None
     if campaign_id is not None:
+        campaign_spent_usd = await cumulative_campaign_spend_usd(session, campaign_id)
+        record_budget_burn(
+            scope_type="campaign",
+            scope_id=str(campaign_id),
+            spent_usd=campaign_spent_usd,
+            cap_usd=settings.padrino_campaign_spend_cap_usd,
+        )
         campaign_slot_id = await claim_budget_slot(
             session,
             scope_key=campaign_scope_key(campaign_id),
-            spent_usd=await cumulative_campaign_spend_usd(session, campaign_id),
+            spent_usd=campaign_spent_usd,
             budget_usd=settings.padrino_campaign_spend_cap_usd,
             reserve_usd=reserve_usd,
             now=now,
