@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign budget pauses (US-271): in `runner.scheduler._drive_gauntlet`,
+  treat any `child_result.budget_halts` as a gauntlet-level pause and return
+  after `gauntlets_repo.mark_pending` before campaign-cell failure accounting.
+  Mixed budget halt + sibling failure must not call
+  `record_materialized_cell_failure`, increment `attempt_count`, dead-letter,
+  or clear the materialized cell's `gauntlet_id`; the re-drive should finish
+  the same gauntlet/cell.
 - Benchmark partial-phase resume (US-270): keep crash repair in
   `runner.benchmark_durability` over persisted `game_events`, not in pure core.
   Rehydration first verifies the full loaded hash chain with
@@ -3947,3 +3954,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2672 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-270 is backend runner durability
   work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:28 PDT - US-271
+- Fixed `_drive_gauntlet` so any child-game budget halt requeues the gauntlet
+  and returns before campaign-cell failure recording, preventing a budget pause
+  plus sibling failure from consuming campaign cell attempts or unlinking the
+  materialized cell.
+- Added scheduler regressions for the mixed `budget_halts` + `failures` result:
+  a unit spy verifies `record_materialized_cell_failure` is not called and the
+  cell remains `MATERIALIZED`, and an end-to-end campaign redrive proves the
+  default `campaign_cell_max_attempts=1` path never false-dead-letters and does
+  not duplicate materialization.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/scheduler.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_scheduler.py -k 'campaign_budget_halt_short_circuits_before_recording_cell_failure or campaign_budget_halt_with_sibling_failure_preserves_cell_for_redrive or campaign_owned_failed_gauntlet_dead_letters_cell'`
+  failed first because mixed budget halt/failure still recorded the cell
+  failure; focused GREEN same command -> 3 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_scheduler.py` -> 27 passed. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2674
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-271 is
+  backend scheduler/campaign accounting work and did not touch `web/dashboard`.

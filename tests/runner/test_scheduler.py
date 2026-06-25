@@ -43,6 +43,7 @@ from padrino.db.models import (
     Campaign,
     CampaignPairing,
     GameEvent,
+    Gauntlet,
     LlmCall,
     Rating,
     RatingEvent,
@@ -319,6 +320,30 @@ class _BlockingExecutor:
                 status=GAME_STATUS_COMPLETED,
                 terminal_result={"winner": "TOWN", "reason": "stub", "day_terminated": 0},
             )
+
+
+class _BlockingFailureExecutor:
+    """Fake executor that holds one admitted game active, then fails it."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[GameConfig, GamePersistence, bool]] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self._lock = asyncio.Lock()
+
+    async def __call__(
+        self,
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        del adapter
+        async with self._lock:
+            self.calls.append((config, persistence, ranked))
+            self.started.set()
+        await self.release.wait()
+        raise TimeoutError("provider timeout while budget capped")
 
 
 class _FailingExecutor(_FakeExecutor):
@@ -917,6 +942,185 @@ async def test_campaign_owned_failed_gauntlet_dead_letters_cell(
     assert game.status == GAME_STATUS_FAILED
     assert game.last_error_kind == "provider_transient"
     assert executor.attempts_by_game[game_id] == 2
+
+
+async def test_campaign_budget_halt_short_circuits_before_recording_cell_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids, cell_id = await _seed_campaign_gauntlet(
+        session_factory,
+        hash_prefix="campaign-budget-halt-before-failure",
+        clone_count=2,
+    )
+    async with session_factory() as session, session.begin():
+        gauntlet = await gauntlets_repo.get(session, gauntlet_id)
+        assert gauntlet is not None
+        gauntlet.status = "RUNNING"
+
+    async def fake_run_child_games(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        return scheduler_module._ChildGameRunResult(
+            failures=[
+                scheduler_module._ScheduledGameFailure(
+                    game_id=game_ids[0],
+                    exception=TimeoutError("provider timeout during capped sibling"),
+                    attempts=1,
+                )
+            ],
+            budget_halts=[
+                scheduler_module._ScheduledGameBudgetHalt(
+                    game_id=game_ids[1],
+                    reason="campaign_budget_cap_reached",
+                )
+            ],
+        )
+
+    failure_record_calls: list[dict[str, Any]] = []
+    original_record_failure = campaigns_repo.record_materialized_cell_failure
+
+    async def spy_record_failure(*args: Any, **kwargs: Any) -> Any:
+        failure_record_calls.append(dict(kwargs))
+        return await original_record_failure(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler_module, "_run_child_games", fake_run_child_games)
+    monkeypatch.setattr(campaigns_repo, "record_materialized_cell_failure", spy_record_failure)
+
+    budget_halted = await scheduler_module._drive_gauntlet(
+        session_factory,
+        gauntlet_id,
+        semaphore=asyncio.Semaphore(2),
+        adapter_factory=_adapter_factory_noop,
+        game_executor=_FakeExecutor(),
+        options=SchedulerOptions(campaign_cell_max_attempts=2),
+        clock=lambda: datetime(2026, 6, 24, 12, tzinfo=UTC),
+        sleeper=asyncio.sleep,
+        worker_id="campaign-budget-halt-short-circuit",
+    )
+
+    async with session_factory() as session:
+        gauntlet = await gauntlets_repo.get(session, gauntlet_id)
+        cell = await session.get(CampaignPairing, cell_id)
+
+    assert budget_halted is True
+    assert failure_record_calls == []
+    assert gauntlet is not None
+    assert gauntlet.status == "PENDING"
+    assert cell is not None
+    assert cell.status == campaigns_repo.CAMPAIGN_PAIRING_MATERIALIZED
+    assert cell.attempt_count == 0
+    assert cell.gauntlet_id == gauntlet_id
+
+
+async def test_campaign_budget_halt_with_sibling_failure_preserves_cell_for_redrive(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids, cell_id = await _seed_campaign_gauntlet(
+        session_factory,
+        hash_prefix="campaign-budget-halt-redrive",
+        clone_count=2,
+    )
+    async with session_factory() as session, session.begin():
+        session.add(
+            LlmCall(
+                game_id=game_ids[0],
+                public_player_id="P01",
+                phase="DAY_1_DISCUSSION",
+                request_json={},
+                request_prompt_hash="prompt",
+                status="ok",
+                cost_usd=0.5,
+            )
+        )
+
+    first_executor = _BlockingFailureExecutor()
+    capped_options = SchedulerOptions(
+        game_max_attempts=1,
+        campaign_cell_max_attempts=1,
+        padrino_global_spend_cap_usd=10.0,
+        padrino_campaign_spend_cap_usd=1.0,
+        padrino_benchmark_admission_reserve_usd=0.5,
+    )
+    first_drive = asyncio.create_task(
+        scheduler_module._drive_gauntlet(
+            session_factory,
+            gauntlet_id,
+            semaphore=asyncio.Semaphore(2),
+            adapter_factory=_adapter_factory_noop,
+            game_executor=first_executor,
+            options=capped_options,
+            clock=lambda: datetime(2026, 6, 24, 12, tzinfo=UTC),
+            sleeper=asyncio.sleep,
+            worker_id="campaign-budget-halt-redrive-1",
+        )
+    )
+    await asyncio.wait_for(first_executor.started.wait(), timeout=_SCHEDULER_RUN_TIMEOUT_S)
+    await asyncio.sleep(0.05)
+    first_executor.release.set()
+    budget_halted = await asyncio.wait_for(first_drive, timeout=_SCHEDULER_RUN_TIMEOUT_S)
+
+    async with session_factory() as session:
+        cell_after_pause = await session.get(CampaignPairing, cell_id)
+        gauntlet_after_pause = await gauntlets_repo.get(session, gauntlet_id)
+        games_after_pause = await games_repo.list_by_gauntlet(session, gauntlet_id)
+
+    assert budget_halted is True
+    assert len(first_executor.calls) == 1
+    assert cell_after_pause is not None
+    assert cell_after_pause.status == campaigns_repo.CAMPAIGN_PAIRING_MATERIALIZED
+    assert cell_after_pause.attempt_count == 0
+    assert cell_after_pause.gauntlet_id == gauntlet_id
+    assert gauntlet_after_pause is not None
+    assert gauntlet_after_pause.status == "PENDING"
+    assert {game.status for game in games_after_pause} == {
+        GAME_STATUS_CREATED,
+        GAME_STATUS_FAILED,
+    }
+
+    second_executor = _FakeExecutor()
+    open_options = SchedulerOptions(
+        game_max_attempts=1,
+        campaign_cell_max_attempts=1,
+        padrino_global_spend_cap_usd=10.0,
+        padrino_campaign_spend_cap_usd=10.0,
+        padrino_benchmark_admission_reserve_usd=0.5,
+    )
+    completed = await scheduler_module._drive_gauntlet(
+        session_factory,
+        gauntlet_id,
+        semaphore=asyncio.Semaphore(2),
+        adapter_factory=_adapter_factory_noop,
+        game_executor=second_executor,
+        options=open_options,
+        clock=lambda: datetime(2026, 6, 24, 12, 1, tzinfo=UTC),
+        sleeper=asyncio.sleep,
+        worker_id="campaign-budget-halt-redrive-2",
+    )
+
+    async with session_factory() as session:
+        cell_after_redrive = await session.get(CampaignPairing, cell_id)
+        assert cell_after_redrive is not None
+        gauntlet_after_redrive = await gauntlets_repo.get(session, gauntlet_id)
+        campaign = await session.get(Campaign, cell_after_redrive.campaign_id)
+        assert campaign is not None
+        games_after_redrive = await games_repo.list_by_gauntlet(session, gauntlet_id)
+        campaign_gauntlet_count = await session.scalar(
+            select(func.count(Gauntlet.id)).where(Gauntlet.campaign_id == campaign.id)
+        )
+
+    assert completed is False
+    assert len(second_executor.calls) == 1
+    assert cell_after_redrive.status == campaigns_repo.CAMPAIGN_PAIRING_COMPLETED
+    assert cell_after_redrive.attempt_count == 0
+    assert cell_after_redrive.gauntlet_id == gauntlet_id
+    assert gauntlet_after_redrive is not None
+    assert gauntlet_after_redrive.status == "COMPLETED"
+    assert campaign.status == campaigns_repo.CAMPAIGN_STATUS_COMPLETED
+    assert {game.status for game in games_after_redrive} == {
+        GAME_STATUS_COMPLETED,
+        GAME_STATUS_FAILED,
+    }
+    assert campaign_gauntlet_count == 1
 
 
 async def test_scheduler_fresh_game_attempt_has_no_resume(

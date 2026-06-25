@@ -606,16 +606,17 @@ async def _drive_gauntlet(
             error=str(failure.exception),
             attempts=failure.attempts,
         )
+    if child_result.budget_halts:
+        async with session_factory() as session, session.begin():
+            await gauntlets_repo.mark_pending(session, gauntlet_id)
+        return True
+
     await _record_campaign_cell_failures(
         session_factory,
         gauntlet_id=gauntlet_id,
         failures=failures,
         max_attempts=options.campaign_cell_max_attempts,
     )
-    if child_result.budget_halts:
-        async with session_factory() as session, session.begin():
-            await gauntlets_repo.mark_pending(session, gauntlet_id)
-        return True
 
     await _rate_completed_pairs_for_gauntlet(
         session_factory,

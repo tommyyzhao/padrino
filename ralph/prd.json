@@ -33,7 +33,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: runner/scheduler.py _drive_gauntlet (~599-618: _record_campaign_cell_failures at ~609-614 BEFORE the budget_halts branch ~615-618); _run_child_games partitions failures vs budget_halts (~473-501); campaigns.py record_materialized_cell_failure (~383-392) and mark_materialized_cell_completed (~451-468). Default DEFAULT_CAMPAIGN_CELL_MAX_ATTEMPTS=1 (scheduler.py ~80, settings padrino_campaign_cell_max_attempts ~386). Existing budget-halt tests (~1280, ~1344) halt ALL games with no co-occurring failure; the mixed case is the untested window. NO migration.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-272",
