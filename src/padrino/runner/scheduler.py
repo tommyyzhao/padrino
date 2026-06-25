@@ -25,12 +25,15 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 import structlog
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.db.game_status import is_terminal_game_status
 from padrino.db.models import Game, GauntletRosterSlot
 from padrino.db.repositories import games as games_repo
@@ -38,6 +41,7 @@ from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import NoopMockAdapter
+from padrino.llm.retry import DEFAULT_RETRY_ON, RetryExhausted
 from padrino.observability.events import (
     EVENT_SCHEDULER_GAME_FAILED,
     EVENT_SCHEDULER_GAUNTLET_COMPLETED,
@@ -62,6 +66,21 @@ DEFAULT_HEARTBEAT_INTERVAL_S: Final[float] = 5.0
 DEFAULT_STALE_FACTOR: Final[float] = 2.0
 DEFAULT_GAME_MAX_ATTEMPTS: Final[int] = 2
 DEFAULT_GAME_LEASE_TTL_S: Final[float] = 3600.0
+DEFAULT_GAME_RETRY_BACKOFF_S: Final[float] = 0.0
+
+_FAILURE_KIND_PROVIDER_TRANSIENT: Final[str] = "provider_transient"
+_FAILURE_KIND_REPLAY_HASH_MISMATCH: Final[str] = "replay_hash_mismatch"
+_FAILURE_KIND_VALIDATION_ERROR: Final[str] = "validation_error"
+_FAILURE_KIND_CONTRACT_ERROR: Final[str] = "contract_error"
+_FAILURE_KIND_UNKNOWN_RETRYABLE: Final[str] = "unknown_retryable"
+_RETRYABLE_TRANSPORT_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
+    *DEFAULT_RETRY_ON,
+    ConnectionError,
+)
+_RETRYABLE_SCHEDULER_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
+    RetryExhausted,
+    *_RETRYABLE_TRANSPORT_EXCEPTIONS,
+)
 
 
 def _utcnow() -> datetime:
@@ -71,6 +90,63 @@ def _utcnow() -> datetime:
 def default_worker_id() -> str:
     """Return the canonical worker identifier ``"<hostname>:<pid>"``."""
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+class GameExceptionDisposition(StrEnum):
+    """Scheduler retry decision for one child-game exception."""
+
+    RETRYABLE = "RETRYABLE"
+    POISON = "POISON"
+
+
+@dataclass(frozen=True, slots=True)
+class GameExceptionClassification:
+    """Stable scheduler failure classification persisted on failed games."""
+
+    disposition: GameExceptionDisposition
+    last_error_kind: str
+
+
+def classify_game_exception(exc: Exception) -> GameExceptionClassification:
+    """Classify a child-game exception for scheduler retry/dead-letter handling."""
+    if isinstance(exc, ReplayHashMismatchError):
+        return GameExceptionClassification(
+            disposition=GameExceptionDisposition.POISON,
+            last_error_kind=_FAILURE_KIND_REPLAY_HASH_MISMATCH,
+        )
+    if isinstance(exc, ValidationError):
+        return GameExceptionClassification(
+            disposition=GameExceptionDisposition.POISON,
+            last_error_kind=_FAILURE_KIND_VALIDATION_ERROR,
+        )
+    if isinstance(exc, ValueError):
+        return GameExceptionClassification(
+            disposition=GameExceptionDisposition.POISON,
+            last_error_kind=_FAILURE_KIND_VALIDATION_ERROR,
+        )
+    if isinstance(exc, TypeError):
+        return GameExceptionClassification(
+            disposition=GameExceptionDisposition.POISON,
+            last_error_kind=_FAILURE_KIND_CONTRACT_ERROR,
+        )
+    if isinstance(exc, _RETRYABLE_SCHEDULER_EXCEPTIONS):
+        return GameExceptionClassification(
+            disposition=GameExceptionDisposition.RETRYABLE,
+            last_error_kind=_FAILURE_KIND_PROVIDER_TRANSIENT,
+        )
+    return GameExceptionClassification(
+        disposition=GameExceptionDisposition.RETRYABLE,
+        last_error_kind=_FAILURE_KIND_UNKNOWN_RETRYABLE,
+    )
+
+
+def _exception_message(exc: Exception) -> str:
+    message = str(exc)
+    return message if message else repr(exc)
+
+
+def _game_retry_delay_s(*, attempt: int, base_delay_s: float) -> float:
+    return float(base_delay_s * (2 ** (attempt - 1)))
 
 
 # Type aliases for injectable seams.
@@ -101,6 +177,7 @@ class SchedulerOptions:
     heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
     stale_factor: float = DEFAULT_STALE_FACTOR
     game_max_attempts: int = DEFAULT_GAME_MAX_ATTEMPTS
+    game_retry_backoff_s: float = DEFAULT_GAME_RETRY_BACKOFF_S
     enable_game_lease_reaper: bool = False
     game_lease_reaper_interval_s: float = 30.0
     game_lease_ttl_s: float = DEFAULT_GAME_LEASE_TTL_S
@@ -240,7 +317,9 @@ async def _run_child_games(
     game_executor: GameExecutor,
     ranked: bool,
     max_attempts: int,
+    retry_backoff_s: float,
     clock: Clock,
+    sleeper: Sleeper,
     worker_id: str,
     lease_ttl: timedelta,
 ) -> list[_ScheduledGameFailure]:
@@ -268,21 +347,50 @@ async def _run_child_games(
                 return None
             except Exception as exc:
                 last_exception = exc
+                classification = classify_game_exception(exc)
+                if classification.disposition is GameExceptionDisposition.POISON:
+                    async with session_factory() as session, session.begin():
+                        await games_repo.mark_failed(
+                            session,
+                            child.game_id,
+                            completed_at=clock(),
+                            last_error=_exception_message(exc),
+                            last_error_kind=classification.last_error_kind,
+                        )
+                    return _ScheduledGameFailure(
+                        game_id=child.game_id,
+                        exception=exc,
+                        attempts=attempt,
+                    )
                 if attempt < max_attempts:
+                    delay_s = _game_retry_delay_s(
+                        attempt=attempt,
+                        base_delay_s=retry_backoff_s,
+                    )
                     _logger.warning(
                         "scheduler.game.retry",
                         gauntlet_id=str(gauntlet_id),
                         game_id=str(child.game_id),
                         attempt=attempt,
                         max_attempts=max_attempts,
+                        retry_delay_s=delay_s,
+                        last_error_kind=classification.last_error_kind,
                         error_type=type(exc).__name__,
                         error=str(exc),
                     )
+                    await sleeper(delay_s)
                     continue
 
         assert last_exception is not None
+        classification = classify_game_exception(last_exception)
         async with session_factory() as session, session.begin():
-            await games_repo.mark_failed(session, child.game_id, completed_at=clock())
+            await games_repo.mark_failed(
+                session,
+                child.game_id,
+                completed_at=clock(),
+                last_error=_exception_message(last_exception),
+                last_error_kind=classification.last_error_kind,
+            )
         return _ScheduledGameFailure(
             game_id=child.game_id,
             exception=last_exception,
@@ -301,8 +409,15 @@ async def _run_child_games(
             failures.append(result)
             continue
         if isinstance(result, Exception):
+            classification = classify_game_exception(result)
             async with session_factory() as session, session.begin():
-                await games_repo.mark_failed(session, child.game_id, completed_at=clock())
+                await games_repo.mark_failed(
+                    session,
+                    child.game_id,
+                    completed_at=clock(),
+                    last_error=_exception_message(result),
+                    last_error_kind=classification.last_error_kind,
+                )
             failures.append(
                 _ScheduledGameFailure(
                     game_id=child.game_id,
@@ -395,7 +510,9 @@ async def _drive_gauntlet(
             game_executor=game_executor,
             ranked=ranked,
             max_attempts=options.game_max_attempts,
+            retry_backoff_s=options.game_retry_backoff_s,
             clock=clock,
+            sleeper=sleeper,
             worker_id=worker_id,
             lease_ttl=timedelta(seconds=options.game_lease_ttl_s),
         )
@@ -579,6 +696,8 @@ async def run_scheduler(
         raise ValueError("poll_interval_s must be > 0")
     if opts.game_max_attempts < 1:
         raise ValueError("game_max_attempts must be >= 1")
+    if opts.game_retry_backoff_s < 0:
+        raise ValueError("game_retry_backoff_s must be >= 0")
     if opts.enable_game_lease_reaper and opts.game_lease_reaper_interval_s <= 0:
         raise ValueError("game_lease_reaper_interval_s must be > 0")
     if opts.game_lease_ttl_s <= 0:
@@ -643,11 +762,14 @@ __all__ = [
     "DEFAULT_STALE_FACTOR",
     "AdapterFactory",
     "Clock",
+    "GameExceptionClassification",
+    "GameExceptionDisposition",
     "GameExecutor",
     "SchedulerOptions",
     "Sleeper",
     "TickHook",
     "agent_builds_by_seat_for_game",
+    "classify_game_exception",
     "default_worker_id",
     "run_scheduler",
     "scheduler_options_from_settings",

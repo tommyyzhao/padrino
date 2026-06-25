@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Scheduler failure classification (US-254): keep retry/dead-letter policy at
+  the scheduler retry seam via `classify_game_exception`. Replay/hash and
+  validation/contract failures are poison and immediately `mark_failed` with a
+  stable `last_error_kind`; provider/transport timeouts, retry exhaustion, and
+  legacy unknown runtime crashes stay retryable. Backoff goes through the
+  injected scheduler `Sleeper`, and `games_repo.mark_failed` owns
+  `last_error` / `last_error_kind` stamping.
 - Lease-fenced benchmark finalization (US-253): scheduler-created
   `GamePersistence` should carry `worker_id`, injected `lease_clock`, and a
   per-game `db_write_lock`. `_persist_terminated_event` re-reads the `Game`
@@ -3332,3 +3339,30 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2584 passed / 41 skipped /
   10 deselected.
+
+## 2026-06-24T18:22 PDT - US-254
+- Added scheduler exception classification for retryable vs poison child-game
+  failures. `ReplayHashMismatchError`, Pydantic/ValueError validation failures,
+  and TypeError contract failures dead-letter immediately; transport/timeouts,
+  LLM retry exhaustion, and legacy unknown runtime failures remain retryable.
+- Threaded deterministic scheduler backoff through the existing injected
+  `Sleeper` seam and stamped `games.last_error` / `last_error_kind` whenever a
+  game is marked `FAILED`.
+- Added regression coverage for classification, one-attempt poison failure,
+  retryable timeout retries with captured backoff delays, and persisted failure
+  kind recovery.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/games.py`,
+  `src/padrino/runner/scheduler.py`, `tests/runner/test_scheduler.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_scheduler.py::test_scheduler_exception_classification_maps_retryable_and_poison_errors tests/runner/test_scheduler.py::test_poison_child_game_failure_stops_after_one_attempt_and_stamps_row tests/runner/test_scheduler.py::test_retryable_child_game_failure_retries_with_injected_backoff_and_stamps_row -q`
+  failed first on missing classifier/backoff behavior and poison still using
+  bounded retry; focused GREEN same command -> 3 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_scheduler.py -q` -> 21 passed;
+  `uv run pytest tests/db/test_game_claims.py tests/runner/test_benchmark_resume.py tests/runner/test_game_persistence_terminal.py -q`
+  -> 11 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2587 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-254 is backend scheduler-only and
+  did not touch `web/dashboard`.

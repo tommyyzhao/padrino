@@ -14,19 +14,21 @@ import asyncio
 import contextlib
 import re
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 import structlog
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import LogCapture
 
 from padrino.core.engine.event_log import EventLog
 from padrino.core.engine.reducer import initial_state
+from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
@@ -59,6 +61,7 @@ from padrino.db.repositories import (
 )
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import DeterministicMockAdapter, NoopMockAdapter
+from padrino.llm.retry import RetryExhausted
 from padrino.runner import scheduler as scheduler_module
 from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, run_game
 from padrino.runner.scheduler import (
@@ -225,6 +228,35 @@ class _FlakyExecutor(_FakeExecutor):
         if persistence.game_id == self.failing_game_id and attempt <= self.failures_before_success:
             self.calls.append((config, persistence, ranked))
             raise RuntimeError(f"injected child-game failure attempt {attempt}")
+        await super().__call__(config, persistence, adapter, ranked)
+
+
+class _AlwaysFailingExecutor(_FakeExecutor):
+    """Fake executor that raises a generated exception on every attempt."""
+
+    def __init__(
+        self,
+        *,
+        failing_game_id: uuid.UUID,
+        exc_factory: Callable[[int], Exception],
+    ) -> None:
+        super().__init__()
+        self.failing_game_id = failing_game_id
+        self.exc_factory = exc_factory
+        self.attempts_by_game: dict[uuid.UUID, int] = {}
+
+    async def __call__(
+        self,
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        attempt = self.attempts_by_game.get(persistence.game_id, 0) + 1
+        self.attempts_by_game[persistence.game_id] = attempt
+        if persistence.game_id == self.failing_game_id:
+            self.calls.append((config, persistence, ranked))
+            raise self.exc_factory(attempt)
         await super().__call__(config, persistence, adapter, ranked)
 
 
@@ -515,6 +547,141 @@ async def test_child_game_retry_succeeds_before_marking_failed(
     assert game is not None
     assert game.status == GAME_STATUS_COMPLETED
     assert executor.attempts_by_game[game_id] == 2
+
+
+def test_scheduler_exception_classification_maps_retryable_and_poison_errors() -> None:
+    class _Probe(BaseModel):
+        value: int
+
+    with pytest.raises(ValidationError) as validation_error:
+        _Probe.model_validate({"value": "not-an-int"})
+
+    timeout = scheduler_module.classify_game_exception(TimeoutError("upstream timeout"))
+    exhausted = scheduler_module.classify_game_exception(
+        RetryExhausted(attempts=3, last_error=TimeoutError("provider timeout"))
+    )
+    replay_hash = scheduler_module.classify_game_exception(
+        ReplayHashMismatchError(sequence=7, expected="expected", actual="actual")
+    )
+    validation = scheduler_module.classify_game_exception(validation_error.value)
+    unknown = scheduler_module.classify_game_exception(RuntimeError("transient executor crash"))
+
+    assert timeout.disposition is scheduler_module.GameExceptionDisposition.RETRYABLE
+    assert timeout.last_error_kind == "provider_transient"
+    assert exhausted.disposition is scheduler_module.GameExceptionDisposition.RETRYABLE
+    assert exhausted.last_error_kind == "provider_transient"
+    assert replay_hash.disposition is scheduler_module.GameExceptionDisposition.POISON
+    assert replay_hash.last_error_kind == "replay_hash_mismatch"
+    assert validation.disposition is scheduler_module.GameExceptionDisposition.POISON
+    assert validation.last_error_kind == "validation_error"
+    assert unknown.disposition is scheduler_module.GameExceptionDisposition.RETRYABLE
+    assert unknown.last_error_kind == "unknown_retryable"
+
+
+async def test_poison_child_game_failure_stops_after_one_attempt_and_stamps_row(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="poison-replay",
+        clone_count=1,
+    )
+    game_id = game_ids[0]
+    executor = _AlwaysFailingExecutor(
+        failing_game_id=game_id,
+        exc_factory=lambda _attempt: ReplayHashMismatchError(
+            sequence=1,
+            expected="expected",
+            actual="actual",
+        ),
+    )
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=3,
+    )
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+
+    assert game is not None
+    assert game.status == GAME_STATUS_FAILED
+    assert executor.attempts_by_game[game_id] == 1
+    assert game.last_error_kind == "replay_hash_mismatch"
+    assert game.last_error is not None
+    assert "replay hash mismatch" in game.last_error
+
+
+async def test_retryable_child_game_failure_retries_with_injected_backoff_and_stamps_row(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="retry-timeout",
+        clone_count=1,
+    )
+    game_id = game_ids[0]
+    executor = _AlwaysFailingExecutor(
+        failing_game_id=game_id,
+        exc_factory=lambda attempt: TimeoutError(f"provider timeout attempt {attempt}"),
+    )
+    delays: list[float] = []
+
+    async def sleeper(delay_s: float) -> None:
+        delays.append(delay_s)
+        await asyncio.sleep(0)
+
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=3,
+        game_retry_backoff_s=0.25,
+    )
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+            sleeper=sleeper,
+        ),
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+
+    assert game is not None
+    assert game.status == GAME_STATUS_FAILED
+    assert executor.attempts_by_game[game_id] == 3
+    assert delays == [0.25, 0.5]
+    assert game.last_error_kind == "provider_transient"
+    assert game.last_error == "provider timeout attempt 3"
 
 
 async def test_scheduler_fresh_game_attempt_has_no_resume(

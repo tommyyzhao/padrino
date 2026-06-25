@@ -210,6 +210,8 @@ async def mark_failed(
     game_id: uuid.UUID,
     *,
     completed_at: datetime,
+    last_error: str | None = None,
+    last_error_kind: str | None = None,
 ) -> Game | None:
     """Mark a child game as terminally failed without a terminal result."""
     game = await session.get(Game, game_id)
@@ -218,6 +220,8 @@ async def mark_failed(
     game.status = GAME_STATUS_FAILED
     game.terminal_result = None
     game.completed_at = completed_at
+    game.last_error = last_error
+    game.last_error_kind = last_error_kind
     await session.flush()
     return game
 

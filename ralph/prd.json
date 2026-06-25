@@ -105,7 +105,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Site: scheduler.py _run_with_retry (~221-258, bare except Exception today). game_max_attempts default 2 (DEFAULT_GAME_MAX_ATTEMPTS ~62). last_error/last_error_kind columns from US-251. ReplayHashMismatchError comes from replay_event_log. Sleeper is already injectable in run_scheduler (Sleeper type). Feeds campaign dead-letter (US-260).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-255",
