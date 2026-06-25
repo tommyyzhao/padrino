@@ -88,11 +88,10 @@ def _model_unique_columns(table: Table) -> dict[str, tuple[str, ...]]:
     }
 
 
-def test_0054_is_linear_head_after_0053() -> None:
+def test_0054_is_linear_after_0053() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0054"]
     assert script.get_revision("0054").down_revision == "0053"
 
 

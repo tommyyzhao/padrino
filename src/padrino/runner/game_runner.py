@@ -58,7 +58,12 @@ from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
-from padrino.economics.human_cost_governance import price_turn_usd
+from padrino.economics.human_cost_governance import (
+    PRICE_BASIS_FALLBACK_TABLE,
+    PRICE_BASIS_PROVIDER_RESPONSE_COST,
+    fallback_price_table_version,
+    price_turn_usd,
+)
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
@@ -680,24 +685,42 @@ _UNBILLED_RESULT_STATUSES: Final[frozenset[str]] = frozenset(
 )
 
 
-def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float | None:
+@dataclass(frozen=True)
+class _PricingStamp:
+    cost_usd: float | None
+    price_basis: str | None
+    price_table_version: str | None
+
+
+def _pricing_stamp(persistence: GamePersistence, result: AdapterResult) -> _PricingStamp:
     if result.cost_usd is None:
         if result.status in _UNBILLED_RESULT_STATUSES:
-            return None
+            return _PricingStamp(None, None, None)
         if (
             result.raw_response == ""
             and result.input_tokens is None
             and result.output_tokens is None
         ):
-            return None
+            return _PricingStamp(None, None, None)
     settings = persistence.settings or get_settings()
-    return price_turn_usd(
+    cost_usd = price_turn_usd(
         settings,
         response_cost=result.cost_usd,
         model=result.model_id or "default",
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
     )
+    if result.cost_usd is not None:
+        return _PricingStamp(cost_usd, PRICE_BASIS_PROVIDER_RESPONSE_COST, None)
+    return _PricingStamp(
+        cost_usd,
+        PRICE_BASIS_FALLBACK_TABLE,
+        fallback_price_table_version(settings),
+    )
+
+
+def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float | None:
+    return _pricing_stamp(persistence, result).cost_usd
 
 
 async def _persist_llm_call(
@@ -707,6 +730,7 @@ async def _persist_llm_call(
 ) -> None:
     request_json = observation.model_dump(mode="json")
     failure = result.failure
+    pricing = _pricing_stamp(persistence, result)
     async with _persistence_transaction(persistence) as session:
         await llm_calls_repo.record_call(
             session,
@@ -725,7 +749,9 @@ async def _persist_llm_call(
             latency_ms=result.latency_ms,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
-            cost_usd=_priced_cost_usd(persistence, result),
+            cost_usd=pricing.cost_usd,
+            price_basis=pricing.price_basis,
+            price_table_version=pricing.price_table_version,
             provider_response_id=result.provider_response_id,
         )
 

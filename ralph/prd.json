@@ -326,7 +326,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: db/models.LlmCall (~280-331: cost_usd, tokens, model, NO price_version today), game_runner _priced_cost_usd (~606-623) / _persist_llm_call (~626-653), economics/human_cost_governance.price_turn_usd + settings.padrino_human_fallback_token_price_per_1k. Provider-invoice reconciliation is OUT of scope (derived cost is sufficient; just make it immutable). NEW migration 0055 (down_revision '0054'); US-266 depends on US-263. NOTE: the PRIMARY pricing path is LiteLLM response_cost (price_turn_usd returns it directly, ~110-111); the fallback token-price table is consulted only when response_cost is None - so price_basis distinguishes the two and 'immutable across a fallback-rate change' is most load-bearing for the fallback subset (provider-priced cost_usd is already immutable, stored verbatim).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-267",

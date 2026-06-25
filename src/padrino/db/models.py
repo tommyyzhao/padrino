@@ -377,6 +377,8 @@ class LlmCall(Base):
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Numeric(asdecimal=False), nullable=True)
+    price_basis: Mapped[str | None] = mapped_column(String, nullable=True)
+    price_table_version: Mapped[str | None] = mapped_column(String, nullable=True)
     provider_response_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # Who funds this inference (US-151). 'PLATFORM' is the byte-identical default
     # (human play is platform-absorbed in v1); BYOK_OWNER / SPONSOR_POOL are

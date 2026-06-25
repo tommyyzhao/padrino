@@ -33,9 +33,12 @@ like :mod:`padrino.economics.admission`.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import math
 import uuid
 from datetime import UTC, date, datetime, timedelta
+from typing import Final
 
 import structlog
 from sqlalchemy import delete, func, select, update
@@ -54,6 +57,9 @@ from padrino.db.models import (
 from padrino.settings import Settings
 
 _logger = structlog.get_logger("padrino.economics.human_cost_governance")
+
+PRICE_BASIS_PROVIDER_RESPONSE_COST: Final = "PROVIDER_RESPONSE_COST"
+PRICE_BASIS_FALLBACK_TABLE: Final = "FALLBACK_TABLE"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,6 +121,24 @@ def price_turn_usd(
     in_tok = input_tokens or 0
     out_tok = output_tokens or 0
     return (in_tok / 1000.0) * in_price + (out_tok / 1000.0) * out_price
+
+
+def fallback_price_table_version(settings: Settings) -> str:
+    """Return a content hash for the configured fallback token-price table."""
+    table = {
+        str(model): [float(input_price), float(output_price)]
+        for model, (
+            input_price,
+            output_price,
+        ) in settings.padrino_human_fallback_token_price_per_1k.items()
+    }
+    canonical_json = json.dumps(
+        table,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
 async def human_eligible_pool(session: AsyncSession, ruleset_id: str) -> list[str]:
