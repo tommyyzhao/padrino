@@ -362,11 +362,13 @@ class Settings(BaseSettings):
     padrino_enable_game_lease_reaper: bool = False
     padrino_game_lease_reaper_interval_seconds: float = 30.0
     padrino_game_lease_ttl_seconds: float = 3600.0
-    # Campaign materialization (US-259). Campaigns persist the full pairing
-    # ledger at creation time, then materialize child gauntlets/games in bounded
-    # batches so a large field never inserts thousands of runnable games in one
-    # scheduler tick.
+    # Campaign materialization (US-259/US-262). Campaigns persist the full
+    # pairing ledger at creation time, then the gated scheduler tick
+    # materializes child gauntlets/games in bounded batches so a large field
+    # never inserts thousands of runnable games in one scheduler tick.
+    padrino_enable_campaign_tick: bool = False
     padrino_campaign_materialize_batch_size: int = 10
+    padrino_campaign_lease_ttl_seconds: float = 3600.0
     # Campaign cell retry bound (US-260). A campaign-owned gauntlet that
     # terminally fails after child-game retries requeues its cell until this
     # count is reached, then records a DEAD_LETTER hole for later reporting.

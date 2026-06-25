@@ -253,7 +253,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Seam: run_scheduler tick_hook (~533-534), TickHook = Callable[[datetime], Awaitable[None]] (~82). Composer: scheduler/bootstrap.build_scheduled_gauntlet_tick_hook (~28-79; composes matchmaking/retention behind settings flags). Single worker near-term: the campaign claim/heartbeat make a restart resume the same campaign. Game-grain drain is US-252; materialization US-259; completion US-261.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-263",

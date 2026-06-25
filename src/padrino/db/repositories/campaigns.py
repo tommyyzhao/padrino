@@ -206,6 +206,39 @@ async def claim_campaign(
     return campaign
 
 
+async def claim_or_heartbeat_campaign(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    lease_ttl: timedelta,
+    worker_id: str,
+) -> Campaign | None:
+    """Return this worker's running campaign, or claim a new runnable one."""
+    stmt = (
+        select(Campaign)
+        .where(
+            Campaign.status == CAMPAIGN_STATUS_RUNNING,
+            Campaign.leased_by == worker_id,
+        )
+        .order_by(Campaign.created_at, Campaign.id)
+        .limit(1)
+    )
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update(skip_locked=True)
+    campaign = (await session.execute(stmt)).scalars().first()
+    if campaign is None:
+        return await claim_campaign(
+            session,
+            now=now,
+            lease_ttl=lease_ttl,
+            worker_id=worker_id,
+        )
+    campaign.heartbeat_at = now
+    campaign.lease_expires_at = now + lease_ttl
+    await session.flush()
+    return campaign
+
+
 async def update_heartbeat(
     session: AsyncSession,
     campaign_id: uuid.UUID,
@@ -519,6 +552,7 @@ __all__ = [
     "MaterializedCampaignCell",
     "campaign_progress",
     "claim_campaign",
+    "claim_or_heartbeat_campaign",
     "create_campaign_from_matrix",
     "finalize_campaign_if_done",
     "get",

@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign TickHook composition (US-262): keep campaign orchestration in
+  `scheduler.campaign_tick.run_campaign_tick` and wire it through
+  `scheduler.bootstrap.build_scheduled_gauntlet_tick_hook` behind
+  `padrino_enable_campaign_tick`, so it composes with scheduled-gauntlet,
+  matchmaking, evaluator, and retention jobs. The hook should use only the
+  scheduler-provided `now`: first `reset_stale_campaigns`, then
+  `claim_or_heartbeat_campaign` for one worker-held campaign, then
+  `materialize_next_batch` with the settings batch size and one mirror pair per
+  cell. The ordinary gauntlet scheduler remains the only child-game runner.
 - Gauntlet/campaign completion (US-261): use
   `gauntlets.completion.finalize_gauntlet_if_done` as the single completion
   gate. A gauntlet completes only after every child `Game.status` is terminal
@@ -3618,3 +3627,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2622 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-261 is backend
   gauntlet/campaign scheduler work and did not touch `web/dashboard`.
+
+## 2026-06-24T19:37 PDT - US-262
+- Added `scheduler.campaign_tick.run_campaign_tick`, which reaps stale campaign
+  leases, claims or heartbeats one worker-held campaign using the injected
+  scheduler tick time, materializes a bounded batch of campaign cells, and
+  finalizes campaigns once every cell is terminal.
+- Wired the campaign tick into
+  `scheduler.bootstrap.build_scheduled_gauntlet_tick_hook` behind
+  `padrino_enable_campaign_tick`, preserving the existing scheduled-gauntlet /
+  behavioral-evaluation / continuous-matchmaking / retention hook composition.
+- Added `campaigns.claim_or_heartbeat_campaign` so a worker keeps draining the
+  same campaign across ticks while extending its lease.
+- Added story coverage for composed-hook behavior, disabled gate behavior,
+  bounded multi-tick materialization plus finalization, and injected-clock
+  heartbeat/stale reset behavior.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/scheduler/__init__.py`, `src/padrino/scheduler/bootstrap.py`,
+  `src/padrino/scheduler/campaign_tick.py`, `src/padrino/settings.py`,
+  `tests/scheduler/test_campaign_tick.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/scheduler/test_campaign_tick.py -q` failed first on the
+  missing `padrino.scheduler.campaign_tick`; focused GREEN same command -> 4
+  passed. Adjacent GREEN
+  `uv run pytest tests/scheduler/test_campaign_tick.py tests/db/test_campaigns_repo.py tests/runner/test_scheduler.py -q`
+  -> 35 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2627 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-262 is backend scheduler/campaign
+  work and did not touch `web/dashboard`.
