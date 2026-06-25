@@ -17,7 +17,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Template: runner/human_durability.rehydrate_active_human_games (lines ~137-192) + replay_state_from_rows (~107-128). GameResume fields (game_runner.py ~113-128): state, event_log, phase, deadline_at, buffer_snapshot. _resume_phase at game_runner.py ~681-688. events repo: db/repositories/events.list_events / persisted_sequences_from. Benchmark games have NO human_game_runtime row, so rehydration must read game_events directly. This is the #1 fix foundation; US-250 wires it into the scheduler.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-250",

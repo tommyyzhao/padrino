@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Benchmark rehydration (US-249): keep benchmark resume as pure replay over
+  `game_events` rows via `events_repo.list_events` +
+  `runner.human_durability.replay_state_from_rows`; then derive the resume
+  phase with `game_runner._resume_phase` / `format_phase_id`. Verify non-empty
+  logs before deciding to skip `GameCreated`-only tails so tampered rows still
+  raise `ReplayHashMismatchError` instead of being silently ignored.
 - Model detail ruleset fallback (US-248): keep `/models/[id]` ruleset
   discovery in its own failure boundary. Use `publicRulesets()` +
   `canonicalTeamRulesets()` when available, but fall back to the shipped
@@ -3151,3 +3157,23 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed / 48 skipped / 10 deselected.
 - Learning: pass grep args to `web/dashboard/tests/e2e/run.mjs` without an
   extra literal `--`; otherwise Playwright treats `-g` as a test file pattern.
+
+## 2026-06-24T17:08 PDT - US-249
+- Added `runner.benchmark_durability.rehydrate_benchmark_game`, which rebuilds
+  `GameResume` for AI-only benchmark games from persisted `game_events` using
+  the shared `replay_state_from_rows` helper and runner resume-phase logic.
+- Added regression coverage for no-event, `GameCreated`-only, terminal,
+  populated-resume, and tampered-hash-chain cases.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/benchmark_durability.py`,
+  `tests/runner/test_benchmark_durability.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_benchmark_durability.py` failed first on the
+  missing `padrino.runner.benchmark_durability` module; focused GREEN same
+  command -> 5 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2563 passed / 41 skipped /
+  10 deselected. A prior exact pytest run hit a transient shared SQLite schema
+  cascade (`no such table: lobby_seats`); an immediate diagnostic full run and
+  the repeated exact gate both passed.
