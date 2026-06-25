@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign reporting (US-268): keep the operator/publication data source in
+  `gauntlets.campaign_report` as frozen Pydantic models. Sum campaign spend
+  only from persisted `LlmCall.cost_usd` rows joined through
+  `Gauntlet.campaign_id`; do not reprice with current settings. Progress comes
+  from `campaign_pairings` status counts, documented holes reuse
+  `campaigns.list_dead_letter_cells`, per-model convergence reuses
+  `ratings.model_rollup`, and rank stability is a read-side rollback over the
+  last `Campaign.rank_stability_k` `RatingEvent` updates.
 - Budget/cost observability (US-267): keep Prometheus instruments as
   module-level singletons in `observability.metrics` on the shared `REGISTRY`,
   with explicit `record_*` helpers. Budget admission is the right boundary to
@@ -3844,3 +3852,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2658 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-267 is backend observability work
   and did not touch `web/dashboard`.
+
+## 2026-06-24T20:46 PDT - US-268
+- Added `gauntlets.campaign_report` typed report models plus
+  `build_campaign_report`, covering campaign spend, progress counts, ETA,
+  dead-letter holes, per-ruleset/per-faction rating convergence, and per-model
+  rollup convergence.
+- Added `padrino campaign report <campaign-id> --format json|summary` for
+  operator-facing JSON and compact human-readable output.
+- Added regression coverage for report shape, dead-letter parsing, convergence
+  fields, CLI JSON/summary output, and immutable historical cost after fallback
+  rate changes.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/gauntlets/campaign_report.py`,
+  `src/padrino/cli.py`, `tests/gauntlets/test_campaign_report.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_campaign_report.py` failed first on the
+  missing `padrino.gauntlets.campaign_report` module; focused GREEN same
+  command -> 4 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2663 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-268 is backend CLI/report work and
+  did not touch `web/dashboard`.

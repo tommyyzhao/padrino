@@ -364,7 +364,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Convergence inputs: ratings/model_rollup (sigma, games, conservative_score) + ratings/public_leaderboard (provisional, rank, sample_count). Cost from stamped LlmCall (US-266). Progress from campaign_pairings cell statuses (US-258/261). DEAD_LETTER holes from US-260. rank_stability_k from the campaign row (US-258). NO frontend (out of scope). This feeds US-269.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-269",
