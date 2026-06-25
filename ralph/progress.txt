@@ -4080,3 +4080,24 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2682 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-274 is backend publish-gate work
   and did not touch `web/dashboard`.
+
+## 2026-06-25T07:49 PDT - US-275
+- Closed the pure-core firewall gap by adding `os`, `pathlib`, and
+  `subprocess` to the repo-wide `FORBIDDEN_TOP_LEVEL` denylist in
+  `tests/core/test_purity.py`.
+- Added a regression assertion for those filesystem/process escape hatches and
+  extended the pairing-specific purity guard with the same module names.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/core/test_purity.py`, `tests/core/test_pairing.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_purity.py::test_forbidden_top_level_closes_filesystem_and_process_escape_hatches -q`
+  failed first because the denylist lacked `os`/`pathlib`/`subprocess`;
+  focused GREEN `uv run pytest tests/core/test_purity.py -q` -> 59 passed,
+  and
+  `uv run pytest tests/core/test_pairing.py::test_pairing_module_has_only_pure_imports_and_required_building_blocks -q`
+  -> 1 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2683 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-275 is backend test-only purity
+  firewall work and did not touch `web/dashboard`.

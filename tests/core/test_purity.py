@@ -24,6 +24,9 @@ FORBIDDEN_TOP_LEVEL: frozenset[str] = frozenset(
         "secrets",
         "asyncio",
         "datetime",
+        "os",
+        "pathlib",
+        "subprocess",
         "time",
         "sqlalchemy",
         "litellm",
@@ -53,6 +56,11 @@ ALLOWED_FORBIDDEN_IMPORTS: dict[str, frozenset[str]] = {
 
 # Attribute names that read the wall clock — banned even in allowlisted modules.
 WALLCLOCK_ATTRS: frozenset[str] = frozenset({"now", "utcnow", "today"})
+
+
+def test_forbidden_top_level_closes_filesystem_and_process_escape_hatches() -> None:
+    assert {"os", "subprocess", "pathlib"}.issubset(FORBIDDEN_TOP_LEVEL)
+    assert all(_is_forbidden(module) for module in ("os", "os.path", "subprocess", "pathlib"))
 
 
 def _iter_core_modules() -> list[Path]:

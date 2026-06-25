@@ -98,7 +98,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: tests/core/test_purity.py FORBIDDEN_TOP_LEVEL (~21-39, rglob-scans all core modules); tests/core/test_pairing.py purity guard (~171-181, denylist lacks os); tests/core/test_no_wallclock.py (~41-49, call-expression only). Verified: `import os` passes both today; `import asyncio` already fails test_purity.py. Test-only change, NO source change to core, NO migration.",
-      "passes": false
+      "passes": true
     }
   ]
 }
