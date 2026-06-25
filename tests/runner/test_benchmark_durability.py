@@ -70,6 +70,28 @@ def _phase_started_body() -> dict[str, Any]:
     }
 
 
+def _public_message_body(*, sequence: int = 3, actor_player_id: str = "P01") -> dict[str, Any]:
+    return {
+        "event_type": "PublicMessageSubmitted",
+        "sequence": sequence,
+        "phase": _PHASE_ID,
+        "visibility": "PUBLIC",
+        "actor_player_id": actor_player_id,
+        "payload": {"text": "hello", "round_index": 1},
+    }
+
+
+def _phase_resolved_body(*, sequence: int = 4) -> dict[str, Any]:
+    return {
+        "event_type": "PhaseResolved",
+        "sequence": sequence,
+        "phase": _PHASE_ID,
+        "visibility": "SYSTEM",
+        "actor_player_id": None,
+        "payload": {"resolved_phase": _PHASE_ID},
+    }
+
+
 def _game_terminated_body() -> dict[str, Any]:
     return {
         "event_type": "GameTerminated",
@@ -176,6 +198,69 @@ async def test_rehydrate_benchmark_rebuilds_resume_from_persisted_tail(
     assert resume.phase == _PHASE_ID
     assert resume.deadline_at is None
     assert resume.buffer_snapshot == {}
+
+
+async def test_rehydrate_benchmark_truncates_partial_phase_tail(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id_str = str(uuid.uuid4())
+    bodies = [
+        _game_created_body(game_id_str),
+        _roles_assigned_body(),
+        _phase_started_body(),
+        _public_message_body(),
+    ]
+    async with session_factory() as session, session.begin():
+        game_id = await _create_game(session)
+        await _persist_bodies(session, game_id, bodies)
+        rows = await events_repo.list_events(session, game_id)
+        phase_started_hash = rows[2].event_hash
+
+    async with session_factory() as session:
+        resume = await rehydrate_benchmark_game(session, game_id)
+        rows_after = await events_repo.list_events(session, game_id)
+
+    assert resume is not None
+    assert [row.event_type for row in rows_after] == [
+        "GameCreated",
+        "RolesAssigned",
+        "PhaseStarted",
+    ]
+    assert rows_after[-1].event_hash == phase_started_hash
+    assert resume.event_log.events[-1].event_hash == phase_started_hash
+    assert resume.event_log.head_hash == phase_started_hash
+    assert resume.phase == _PHASE_ID
+    assert replay_state_from_rows(rows_after)[1].head_hash == phase_started_hash
+
+
+async def test_rehydrate_benchmark_does_not_truncate_resolved_phase(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id_str = str(uuid.uuid4())
+    bodies = [
+        _game_created_body(game_id_str),
+        _roles_assigned_body(),
+        _phase_started_body(),
+        _public_message_body(),
+        _phase_resolved_body(),
+    ]
+    async with session_factory() as session, session.begin():
+        game_id = await _create_game(session)
+        await _persist_bodies(session, game_id, bodies)
+
+    async with session_factory() as session:
+        resume = await rehydrate_benchmark_game(session, game_id)
+        rows_after = await events_repo.list_events(session, game_id)
+
+    assert resume is not None
+    assert [row.event_type for row in rows_after] == [
+        "GameCreated",
+        "RolesAssigned",
+        "PhaseStarted",
+        "PublicMessageSubmitted",
+        "PhaseResolved",
+    ]
+    assert resume.event_log.head_hash == rows_after[-1].event_hash
 
 
 async def test_rehydrate_benchmark_raises_on_tampered_event_row(

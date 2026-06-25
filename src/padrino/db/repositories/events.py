@@ -12,7 +12,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.db.models import GameEvent
@@ -92,6 +93,23 @@ async def list_events_after(
     )
     result = await session.execute(stmt)
     return list(result.scalars())
+
+
+async def delete_events_after(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+    *,
+    after_sequence: int,
+) -> int:
+    """Delete events whose sequence is greater than ``after_sequence``."""
+    stmt = delete(GameEvent).where(
+        GameEvent.game_id == game_id,
+        GameEvent.sequence > after_sequence,
+    )
+    result = await session.execute(stmt)
+    await session.flush()
+    assert isinstance(result, CursorResult)
+    return result.rowcount or 0
 
 
 async def max_persisted_sequence(

@@ -13,9 +13,29 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.observations import format_phase_id
+from padrino.db.models import GameEvent
 from padrino.db.repositories import events as events_repo
 from padrino.runner.game_runner import GameResume, _resume_phase, _ruleset_for
 from padrino.runner.human_durability import replay_state_from_rows
+
+
+def _partial_phase_boundary_index(rows: list[GameEvent]) -> int | None:
+    """Return the latest unresolved phase-start index that has a durable tail."""
+    for index in range(len(rows) - 1, -1, -1):
+        row = rows[index]
+        if row.event_type != "PhaseStarted":
+            continue
+        if index == len(rows) - 1:
+            return None
+        phase = row.phase
+        has_resolution = any(
+            later.phase == phase and later.event_type == "PhaseResolved"
+            for later in rows[index + 1 :]
+        )
+        if has_resolution:
+            return None
+        return index
+    return None
 
 
 async def rehydrate_benchmark_game(
@@ -39,6 +59,17 @@ async def rehydrate_benchmark_game(
         return None
     if state.terminal_result is not None:
         return None
+
+    partial_boundary_index = _partial_phase_boundary_index(rows)
+    if partial_boundary_index is not None:
+        await events_repo.delete_events_after(
+            session,
+            game_id,
+            after_sequence=rows[partial_boundary_index].sequence,
+        )
+        await session.commit()
+        rows = await events_repo.list_events(session, game_id)
+        state, event_log = replay_state_from_rows(rows)
 
     ruleset = _ruleset_for(state.ruleset_id)
     phase, _already_started = _resume_phase(state, event_log, ruleset)

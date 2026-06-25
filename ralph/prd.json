@@ -17,7 +17,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: game_runner.py _resume_phase/_phase_started_without_resolution (~765-791), drive_game_loop phase re-run (~1250-1314), _persist_stored_event per-event commit (~292-298); benchmark_durability.py rehydrate (~33-49); events repo for delete-by-sequence-above. The US-256 crash hook fires via phase_snapshot with an `if not crashed` guard at tests/runner/test_benchmark_resume.py ~213 - it lands at the first PhaseStarted snapshot BEFORE the tick; the new test must inject the crash inside the per-seat submission persist loop after N submissions. Option (a) truncate-to-boundary is required (it restores byte-identical replay). NO migration. Also apply the same partial-phase truncation to the human-lane rehydration if it shares the path.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-271",

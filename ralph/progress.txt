@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Benchmark partial-phase resume (US-270): keep crash repair in
+  `runner.benchmark_durability` over persisted `game_events`, not in pure core.
+  Rehydration first verifies the full loaded hash chain with
+  `replay_state_from_rows`; only then, for non-terminal logs whose latest
+  `PhaseStarted` has durable tail rows but no matching `PhaseResolved`, delete
+  rows after that `PhaseStarted` and rebuild the returned `GameResume` from the
+  truncated prefix. Boundary crashes remain a no-op; resolved phases and
+  tampered rows are never silently truncated.
 - Campaign publish gate (US-269): keep publication readiness in
   `gauntlets.publish_gate` as a typed read-side checklist. Build on
   `gauntlets.campaign_report` for documented holes, but re-check canonical
@@ -3912,3 +3920,30 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2669 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-269 is backend publication
   readiness work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:10 PDT - US-270
+- Fixed benchmark game rehydration to detect a non-terminal partial phase tail
+  and truncate persisted `game_events` back to the latest unresolved
+  `PhaseStarted` before returning `GameResume`, preserving byte-identical
+  resume after a mid-phase process crash.
+- Added an event repository `delete_events_after` helper and regression tests
+  for direct partial-tail truncation, resolved-phase no-op behavior, replay
+  tamper preservation, PhaseStarted-boundary byte identity, and a crash after
+  two durable `VoteSubmitted` rows followed by byte-identical resume.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/events.py`,
+  `src/padrino/runner/benchmark_durability.py`,
+  `tests/runner/test_benchmark_durability.py`,
+  `tests/runner/test_benchmark_resume.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_truncates_partial_phase_tail tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_does_not_truncate_resolved_phase tests/runner/test_benchmark_resume.py::test_mid_phase_crash_truncates_partial_submissions_and_matches_reference -q`
+  failed first on the untruncated partial tail; focused GREEN
+  `uv run pytest tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_truncates_partial_phase_tail tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_does_not_truncate_resolved_phase tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_raises_on_tampered_event_row tests/runner/test_benchmark_resume.py::test_interrupted_and_resumed_benchmark_game_matches_uninterrupted_hash_chain tests/runner/test_benchmark_resume.py::test_mid_phase_crash_truncates_partial_submissions_and_matches_reference -q`
+  -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_benchmark_durability.py tests/runner/test_benchmark_resume.py -q`
+  -> 10 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2672 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-270 is backend runner durability
+  work and did not touch `web/dashboard`.
