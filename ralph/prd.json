@@ -292,7 +292,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: economics/admission.admit (gates only matchmaking+judge_sampling today), economics/spend_governor.can_start_game (TOCTOU ~25-48), the scheduler executor / campaign drive (US-262). Per-campaign spend join: LlmCall -> Game.gauntlet_id -> Gauntlet.campaign_id (campaign_id from US-258, available transitively via US-262 -> US-259 -> US-258; no campaign_id on Game/LlmCall directly). Settings: padrino_global_spend_cap_usd (~254, default 200.0) for global; add a per-campaign cap setting. Game-grain halt; never kills active games; no intra-game kill; no per-model $ sub-budgets (out of scope). Reservation primitive = US-263. Per-campaign scope ties to US-262's campaign drive.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-265",

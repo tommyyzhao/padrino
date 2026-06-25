@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Benchmark budget admission (US-264): keep the authoritative benchmark spend
+  gate in `economics.benchmark_admission`. At game grain, lease the game, claim
+  a `global:benchmark` slot and, for campaign-owned games, a `campaign:<id>`
+  slot, then release those live slots when the game executor exits so charged
+  `LlmCall` spend becomes the lasting budget usage. A denial is a retryable
+  pause, not a child-game failure: reset the game to `CREATED`, return the
+  gauntlet to `PENDING`, and skip that gauntlet/campaign only long enough for
+  other budget-open work to proceed.
 - Budget reservation slots (US-263): keep generic benchmark/campaign budget
   enforcement in `economics.budget_reservations` over
   `budget_reservation_slots`. Encode scope and any time/owner partition in the
@@ -3693,3 +3701,45 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2627 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-262 is backend scheduler/campaign
   work and did not touch `web/dashboard`.
+
+## 2026-06-24T20:13 PDT - US-264
+- Added `economics.benchmark_admission` as the benchmark game-grain budget
+  gate. It computes global spend from all `LlmCall` rows, computes
+  per-campaign spend through `LlmCall -> Game -> Gauntlet.campaign_id`, claims
+  `global:benchmark` plus optional `campaign:<id>` reservation slots, and
+  releases live slots after the game executor exits.
+- Wired scheduler child-game starts through the atomic reservation gate. Budget
+  denial now resets the leased game back to `CREATED`, leaves already-admitted
+  games running to completion, marks the gauntlet `PENDING` for retry, and uses
+  a short-lived skip set so a capped campaign-owned gauntlet does not starve
+  later pending gauntlets that still have budget.
+- Wired campaign ticks through a one-game budget probe before materializing a
+  cell batch, so a per-campaign cap pauses only that campaign while another
+  campaign under cap can continue. The actual hard start gate remains in the
+  scheduler.
+- Added settings `padrino_campaign_spend_cap_usd` and
+  `padrino_benchmark_admission_reserve_usd`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/economics/benchmark_admission.py`,
+  `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/db/repositories/gauntlets.py`,
+  `src/padrino/runner/scheduler.py`,
+  `src/padrino/scheduler/campaign_tick.py`, `src/padrino/settings.py`,
+  `tests/economics/test_benchmark_budget_admission.py`,
+  `tests/runner/test_scheduler.py`, `tests/scheduler/test_campaign_tick.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/economics/test_benchmark_budget_admission.py tests/runner/test_scheduler.py::test_benchmark_budget_gate_bounds_concurrent_game_starts_and_retries_later tests/scheduler/test_campaign_tick.py::test_campaign_tick_skips_campaign_at_cap_and_materializes_different_campaign tests/scheduler/test_campaign_tick.py::test_campaign_tick_resumes_after_budget_slot_is_released -q`
+  failed first on missing `padrino.economics.benchmark_admission`; focused
+  GREEN same command -> 4 passed. Added per-campaign scheduler regression
+  GREEN
+  `uv run pytest tests/runner/test_scheduler.py::test_campaign_budget_halt_skips_to_next_campaign_gauntlet -q`
+  -> 1 passed. Adjacent GREEN
+  `uv run pytest tests/economics/test_budget_reservations.py tests/economics/test_benchmark_budget_admission.py tests/scheduler/test_campaign_tick.py tests/runner/test_scheduler.py -q`
+  -> 36 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2642 passed / 41 skipped /
+  10 deselected. An earlier full pytest attempt was interrupted during a slow
+  human-lane test; the isolated test passed and the full rerun was green.
+  Frontend gates not run; US-264 is backend scheduler/campaign economics work
+  and did not touch `web/dashboard`.

@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.rulesets import mini7_v1
-from padrino.db.models import Campaign, CampaignPairing, Gauntlet
+from padrino.db.models import Campaign, CampaignPairing, Game, Gauntlet, LlmCall
 from padrino.db.repositories import (
     agent_builds,
     campaigns,
@@ -19,6 +19,7 @@ from padrino.db.repositories import (
     prompt_versions,
     providers,
 )
+from padrino.economics.budget_reservations import claim_budget_slot, release_budget_slot
 from padrino.scheduler.bootstrap import build_scheduled_gauntlet_tick_hook
 from padrino.scheduler.campaign_tick import run_campaign_tick
 from padrino.settings import Settings
@@ -251,6 +252,133 @@ async def test_campaign_tick_materializes_bounded_batches_and_finalizes(
     assert campaign.status == campaigns.CAMPAIGN_STATUS_COMPLETED
     assert campaign.completed_at is not None
     assert _aware(campaign.completed_at) == _NOW + timedelta(seconds=matrix_size + 1)
+
+
+async def test_campaign_tick_skips_campaign_at_cap_and_materializes_different_campaign(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        capped_id, _capped_size = await _seed_campaign(
+            session,
+            campaign_seed="capped",
+            per_model_game_target=4,
+        )
+        open_id, _open_size = await _seed_campaign(
+            session,
+            campaign_seed="open",
+            per_model_game_target=4,
+        )
+        first = await campaigns.materialize_next_batch(
+            session,
+            campaign_id=capped_id,
+            batch_size=1,
+            pair_count=1,
+        )
+        game = (
+            (
+                await session.execute(
+                    select(Game)
+                    .where(Game.gauntlet_id == first.materialized[0].gauntlet_id)
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        session.add(
+            LlmCall(
+                game_id=game.id,
+                public_player_id="P01",
+                phase="DAY_1_DISCUSSION",
+                request_json={},
+                request_prompt_hash="prompt",
+                status="ok",
+                cost_usd=1.0,
+            )
+        )
+
+    result = await run_campaign_tick(
+        session_factory,
+        now=_NOW,
+        settings=Settings(
+            padrino_enable_campaign_tick=True,
+            padrino_campaign_materialize_batch_size=1,
+            padrino_global_spend_cap_usd=10.0,
+            padrino_campaign_spend_cap_usd=1.0,
+            padrino_benchmark_admission_reserve_usd=0.5,
+        ),
+        worker_id="campaign-worker",
+    )
+
+    async with session_factory() as session:
+        capped_cells = await _cell_rows(session, capped_id)
+        open_cells = await _cell_rows(session, open_id)
+
+    assert result.campaign_id == open_id
+    assert [item.cell_index for item in result.materialized] == [0]
+    assert [cell.status for cell in capped_cells].count(
+        campaigns.CAMPAIGN_PAIRING_MATERIALIZED
+    ) == 1
+    assert [cell.status for cell in open_cells].count(campaigns.CAMPAIGN_PAIRING_MATERIALIZED) == 1
+
+
+async def test_campaign_tick_resumes_after_budget_slot_is_released(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        campaign_id, _matrix_size = await _seed_campaign(
+            session,
+            campaign_seed="release-resume",
+            per_model_game_target=4,
+        )
+        slot_id = await claim_budget_slot(
+            session,
+            scope_key=f"campaign:{campaign_id}",
+            spent_usd=0.0,
+            budget_usd=0.5,
+            reserve_usd=0.5,
+            now=_NOW,
+        )
+        assert slot_id is not None
+
+    settings = Settings(
+        padrino_enable_campaign_tick=True,
+        padrino_campaign_materialize_batch_size=1,
+        padrino_global_spend_cap_usd=10.0,
+        padrino_campaign_spend_cap_usd=0.5,
+        padrino_benchmark_admission_reserve_usd=0.5,
+    )
+    blocked = await run_campaign_tick(
+        session_factory,
+        now=_NOW,
+        settings=settings,
+        worker_id="campaign-worker",
+    )
+
+    async with session_factory() as session, session.begin():
+        cells_after_block = await _cell_rows(session, campaign_id)
+        released = await release_budget_slot(session, slot_id, released_at=_NOW)
+        assert released is True
+
+    resumed = await run_campaign_tick(
+        session_factory,
+        now=_NOW + timedelta(seconds=1),
+        settings=settings,
+        worker_id="campaign-worker",
+    )
+
+    async with session_factory() as session:
+        cells_after_resume = await _cell_rows(session, campaign_id)
+
+    assert blocked.campaign_id is None
+    assert [cell.status for cell in cells_after_block] == [
+        campaigns.CAMPAIGN_PAIRING_PENDING
+    ] * len(cells_after_block)
+    assert resumed.campaign_id == campaign_id
+    assert [item.cell_index for item in resumed.materialized] == [0]
+    assert [cell.status for cell in cells_after_resume].count(
+        campaigns.CAMPAIGN_PAIRING_MATERIALIZED
+    ) == 1
 
 
 async def test_campaign_tick_uses_injected_clock_for_heartbeat_and_stale_reset(

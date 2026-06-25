@@ -252,6 +252,12 @@ class Settings(BaseSettings):
     # across all house-funded games.  $200 is the operator-approved budget;
     # override via PADRINO_GLOBAL_SPEND_CAP_USD.
     padrino_global_spend_cap_usd: float = 200.0
+    # Benchmark campaign admission (US-264). Benchmark games reserve one
+    # estimated spend slice before start against the global cap and, for
+    # campaign-owned games, this per-campaign cap. Released in-flight slots stop
+    # counting once the game finishes; charged LlmCall spend remains immutable.
+    padrino_campaign_spend_cap_usd: float = 200.0
+    padrino_benchmark_admission_reserve_usd: float = 0.5
 
     # Admission / queue policy (US-096). Daily and concurrency caps that bound
     # how many games run independently of spend.  Defaults are conservative:

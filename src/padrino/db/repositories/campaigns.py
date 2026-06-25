@@ -174,6 +174,7 @@ async def claim_campaign(
     now: datetime,
     lease_ttl: timedelta,
     worker_id: str,
+    exclude_campaign_ids: set[uuid.UUID] | None = None,
 ) -> Campaign | None:
     """Claim the oldest runnable campaign for one worker."""
     stmt = (
@@ -193,6 +194,8 @@ async def claim_campaign(
         .order_by(Campaign.created_at, Campaign.id)
         .limit(1)
     )
+    if exclude_campaign_ids:
+        stmt = stmt.where(Campaign.id.notin_(exclude_campaign_ids))
     if session.get_bind().dialect.name == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
     campaign = (await session.execute(stmt)).scalars().first()
@@ -212,6 +215,7 @@ async def claim_or_heartbeat_campaign(
     now: datetime,
     lease_ttl: timedelta,
     worker_id: str,
+    exclude_campaign_ids: set[uuid.UUID] | None = None,
 ) -> Campaign | None:
     """Return this worker's running campaign, or claim a new runnable one."""
     stmt = (
@@ -223,6 +227,8 @@ async def claim_or_heartbeat_campaign(
         .order_by(Campaign.created_at, Campaign.id)
         .limit(1)
     )
+    if exclude_campaign_ids:
+        stmt = stmt.where(Campaign.id.notin_(exclude_campaign_ids))
     if session.get_bind().dialect.name == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
     campaign = (await session.execute(stmt)).scalars().first()
@@ -232,6 +238,7 @@ async def claim_or_heartbeat_campaign(
             now=now,
             lease_ttl=lease_ttl,
             worker_id=worker_id,
+            exclude_campaign_ids=exclude_campaign_ids,
         )
     campaign.heartbeat_at = now
     campaign.lease_expires_at = now + lease_ttl
@@ -249,6 +256,21 @@ async def update_heartbeat(
     if campaign is None:
         return
     campaign.heartbeat_at = now
+    await session.flush()
+
+
+async def pause_campaign(
+    session: AsyncSession,
+    campaign_id: uuid.UUID,
+) -> None:
+    """Return a budget-paused non-terminal campaign to the pending queue."""
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None or campaign.status == CAMPAIGN_STATUS_COMPLETED:
+        return
+    campaign.status = CAMPAIGN_STATUS_PENDING
+    campaign.leased_by = None
+    campaign.lease_expires_at = None
+    campaign.heartbeat_at = None
     await session.flush()
 
 
@@ -559,6 +581,7 @@ __all__ = [
     "list_dead_letter_cells",
     "mark_materialized_cell_completed",
     "materialize_next_batch",
+    "pause_campaign",
     "record_materialized_cell_failure",
     "reset_stale_campaigns",
     "update_heartbeat",

@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 import structlog
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import LogCapture
 
@@ -32,8 +32,21 @@ from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
-from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED, GAME_STATUS_RUNNING
-from padrino.db.models import Campaign, CampaignPairing, GameEvent, Rating, RatingEvent
+from padrino.db.game_status import (
+    GAME_STATUS_COMPLETED,
+    GAME_STATUS_CREATED,
+    GAME_STATUS_FAILED,
+    GAME_STATUS_RUNNING,
+)
+from padrino.db.models import (
+    BudgetReservationSlot,
+    Campaign,
+    CampaignPairing,
+    GameEvent,
+    LlmCall,
+    Rating,
+    RatingEvent,
+)
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -274,6 +287,38 @@ class _FakeExecutor:
         finally:
             async with self._lock:
                 self.in_flight -= 1
+
+
+class _BlockingExecutor:
+    """Fake executor that holds admitted games active until the test releases them."""
+
+    def __init__(self, *, expected_started: int) -> None:
+        self.calls: list[tuple[GameConfig, GamePersistence, bool]] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self._expected_started = expected_started
+        self._lock = asyncio.Lock()
+
+    async def __call__(
+        self,
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        del adapter
+        async with self._lock:
+            self.calls.append((config, persistence, ranked))
+            if len(self.calls) == self._expected_started:
+                self.started.set()
+        await self.release.wait()
+        async with persistence.session_factory() as session, session.begin():
+            await games_repo.update_status(
+                session,
+                persistence.game_id,
+                status=GAME_STATUS_COMPLETED,
+                terminal_result={"winner": "TOWN", "reason": "stub", "day_terminated": 0},
+            )
 
 
 class _FailingExecutor(_FakeExecutor):
@@ -1225,6 +1270,138 @@ async def test_concurrency_cap_honored_via_injected_semaphore(
 
     assert len(executor.calls) == len(game_ids)
     assert executor.peak_concurrency <= 2
+
+
+async def test_benchmark_budget_gate_bounds_concurrent_game_starts_and_retries_later(
+    tmp_path: Path,
+) -> None:
+    from padrino.db.base import Base, create_engine, create_session_factory
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'scheduler-budget.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = create_session_factory(engine)
+
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="budget-global",
+        clone_count=4,
+    )
+    executor = _BlockingExecutor(expected_started=2)
+    options = SchedulerOptions(
+        game_max_attempts=1,
+        padrino_global_spend_cap_usd=1.0,
+        padrino_campaign_spend_cap_usd=100.0,
+        padrino_benchmark_admission_reserve_usd=0.5,
+    )
+
+    try:
+        drive = asyncio.create_task(
+            scheduler_module._drive_gauntlet(
+                session_factory,
+                gauntlet_id,
+                semaphore=asyncio.Semaphore(4),
+                adapter_factory=_adapter_factory_noop,
+                game_executor=executor,
+                options=options,
+                clock=lambda: datetime(2026, 6, 24, 12, tzinfo=UTC),
+                sleeper=asyncio.sleep,
+                worker_id="budget-worker",
+            )
+        )
+        await asyncio.wait_for(executor.started.wait(), timeout=_SCHEDULER_RUN_TIMEOUT_S)
+        await asyncio.sleep(0.05)
+
+        assert len(executor.calls) == 2
+
+        executor.release.set()
+        budget_halted = await asyncio.wait_for(drive, timeout=_SCHEDULER_RUN_TIMEOUT_S)
+
+        started_game_ids = {call[1].game_id for call in executor.calls}
+        async with session_factory() as session:
+            games = await games_repo.list_by_gauntlet(session, gauntlet_id)
+            gauntlet = await gauntlets_repo.get(session, gauntlet_id)
+            live_slots = await session.scalar(
+                select(func.count(BudgetReservationSlot.id)).where(
+                    BudgetReservationSlot.scope_key == "global:benchmark",
+                    BudgetReservationSlot.released_at.is_(None),
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    assert budget_halted is True
+    assert started_game_ids.issubset(set(game_ids))
+    assert {game.status for game in games if game.id in started_game_ids} == {GAME_STATUS_COMPLETED}
+    assert {game.status for game in games if game.id not in started_game_ids} == {
+        GAME_STATUS_CREATED
+    }
+    assert gauntlet is not None
+    assert gauntlet.status == "PENDING"
+    assert live_slots == 0
+
+
+async def test_campaign_budget_halt_skips_to_next_campaign_gauntlet(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    capped_gauntlet_id, capped_game_ids, _capped_cell_id = await _seed_campaign_gauntlet(
+        session_factory,
+        hash_prefix="campaign-budget-capped",
+        clone_count=1,
+    )
+    open_gauntlet_id, open_game_ids, _open_cell_id = await _seed_campaign_gauntlet(
+        session_factory,
+        hash_prefix="campaign-budget-open",
+        clone_count=1,
+    )
+    async with session_factory() as session, session.begin():
+        session.add(
+            LlmCall(
+                game_id=capped_game_ids[0],
+                public_player_id="P01",
+                phase="DAY_1_DISCUSSION",
+                request_json={},
+                request_prompt_hash="prompt",
+                status="ok",
+                cost_usd=1.0,
+            )
+        )
+
+    executor = _FakeExecutor()
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=1,
+        padrino_global_spend_cap_usd=10.0,
+        padrino_campaign_spend_cap_usd=1.0,
+        padrino_benchmark_admission_reserve_usd=0.5,
+    )
+
+    await _drive_scheduler_until(
+        session_factory,
+        open_gauntlet_id,
+        "COMPLETED",
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
+    )
+
+    async with session_factory() as session:
+        capped_gauntlet = await gauntlets_repo.get(session, capped_gauntlet_id)
+        capped_games = await games_repo.list_by_gauntlet(session, capped_gauntlet_id)
+
+    assert {call[1].game_id for call in executor.calls} == set(open_game_ids)
+    assert capped_gauntlet is not None
+    assert capped_gauntlet.status == "PENDING"
+    assert {game.status for game in capped_games} == {GAME_STATUS_CREATED}
 
 
 async def test_crash_recovery_resets_stale_running_gauntlet(

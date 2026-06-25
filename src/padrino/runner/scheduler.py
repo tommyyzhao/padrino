@@ -34,12 +34,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.replay import ReplayHashMismatchError
-from padrino.db.game_status import is_terminal_game_status
+from padrino.db.game_status import GAME_STATUS_CREATED, is_terminal_game_status
 from padrino.db.models import Game, GauntletRosterSlot
 from padrino.db.repositories import campaigns as campaigns_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
+from padrino.economics.benchmark_admission import (
+    BenchmarkBudgetReservation,
+    release_benchmark_budget_reservation,
+    reserve_benchmark_game_budget,
+)
 from padrino.gauntlets.completion import (
     DEFAULT_BALANCE_TOLERANCE_SEATS,
     finalize_gauntlet_if_done,
@@ -190,6 +195,9 @@ class SchedulerOptions:
     game_lease_ttl_s: float = DEFAULT_GAME_LEASE_TTL_S
     campaign_cell_max_attempts: int = DEFAULT_CAMPAIGN_CELL_MAX_ATTEMPTS
     gauntlet_balance_tolerance_seats: int = DEFAULT_GAUNTLET_BALANCE_TOLERANCE_SEATS
+    padrino_global_spend_cap_usd: float = 200.0
+    padrino_campaign_spend_cap_usd: float = 200.0
+    padrino_benchmark_admission_reserve_usd: float = 0.5
 
 
 def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
@@ -201,6 +209,9 @@ def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
         game_lease_ttl_s=settings.padrino_game_lease_ttl_seconds,
         campaign_cell_max_attempts=settings.padrino_campaign_cell_max_attempts,
         gauntlet_balance_tolerance_seats=settings.padrino_gauntlet_balance_tolerance_seats,
+        padrino_global_spend_cap_usd=settings.padrino_global_spend_cap_usd,
+        padrino_campaign_spend_cap_usd=settings.padrino_campaign_spend_cap_usd,
+        padrino_benchmark_admission_reserve_usd=(settings.padrino_benchmark_admission_reserve_usd),
     )
 
 
@@ -215,6 +226,18 @@ class _ScheduledGameFailure:
     game_id: uuid.UUID
     exception: Exception
     attempts: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ScheduledGameBudgetHalt:
+    game_id: uuid.UUID
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildGameRunResult:
+    failures: list[_ScheduledGameFailure]
+    budget_halts: list[_ScheduledGameBudgetHalt]
 
 
 async def _gauntlet_context(
@@ -275,10 +298,13 @@ async def _run_one_game(
     worker_id: str,
     clock: Clock,
     lease_ttl: timedelta,
+    options: SchedulerOptions,
+    budget_admission_lock: asyncio.Lock,
     resume: GameResume | None = None,
-) -> None:
+) -> _ScheduledGameBudgetHalt | None:
+    reservation: BenchmarkBudgetReservation | None = None
     async with semaphore:
-        async with session_factory() as session, session.begin():
+        async with budget_admission_lock, session_factory() as session, session.begin():
             game = await games_repo.lease_game_for_worker(
                 session,
                 game_id,
@@ -287,7 +313,22 @@ async def _run_one_game(
                 worker_id=worker_id,
             )
             if game is None:
-                return
+                return None
+            decision = await reserve_benchmark_game_budget(
+                session,
+                options,
+                game_id=game_id,
+                now=clock(),
+            )
+            if not decision.allowed:
+                game.status = GAME_STATUS_CREATED
+                game.leased_by = None
+                game.lease_expires_at = None
+                if game.attempt_count is not None and game.attempt_count > 0:
+                    game.attempt_count -= 1
+                return _ScheduledGameBudgetHalt(game_id=game_id, reason=decision.reason)
+            assert decision.reservation is not None
+            reservation = decision.reservation
             game_seed = game.game_seed
             ruleset_id = game.ruleset_id
 
@@ -314,7 +355,15 @@ async def _run_one_game(
         try:
             await game_executor(config, persistence, adapter, ranked)
         finally:
+            if reservation is not None:
+                async with session_factory() as session, session.begin():
+                    await release_benchmark_budget_reservation(
+                        session,
+                        reservation,
+                        released_at=clock(),
+                    )
             structlog.contextvars.unbind_contextvars("gauntlet_id", "game_id")
+    return None
 
 
 async def _run_child_games(
@@ -333,14 +382,19 @@ async def _run_child_games(
     sleeper: Sleeper,
     worker_id: str,
     lease_ttl: timedelta,
-) -> list[_ScheduledGameFailure]:
-    async def _run_with_retry(child: _ScheduledGame) -> _ScheduledGameFailure | None:
+    options: SchedulerOptions,
+) -> _ChildGameRunResult:
+    budget_admission_lock = asyncio.Lock()
+
+    async def _run_with_retry(
+        child: _ScheduledGame,
+    ) -> _ScheduledGameFailure | _ScheduledGameBudgetHalt | None:
         last_exception: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
                 async with session_factory() as session:
                     resume = await rehydrate_benchmark_game(session, child.game_id)
-                await _run_one_game(
+                budget_halt = await _run_one_game(
                     session_factory,
                     gauntlet_id=gauntlet_id,
                     game_id=child.game_id,
@@ -354,7 +408,11 @@ async def _run_child_games(
                     clock=clock,
                     lease_ttl=lease_ttl,
                     resume=resume,
+                    options=options,
+                    budget_admission_lock=budget_admission_lock,
                 )
+                if budget_halt is not None:
+                    return budget_halt
                 return None
             except Exception as exc:
                 last_exception = exc
@@ -413,11 +471,15 @@ async def _run_child_games(
         return_exceptions=True,
     )
     failures: list[_ScheduledGameFailure] = []
+    budget_halts: list[_ScheduledGameBudgetHalt] = []
     for child, result in zip(child_games, results, strict=True):
         if result is None:
             continue
         if isinstance(result, _ScheduledGameFailure):
             failures.append(result)
+            continue
+        if isinstance(result, _ScheduledGameBudgetHalt):
+            budget_halts.append(result)
             continue
         if isinstance(result, Exception):
             classification = classify_game_exception(result)
@@ -436,7 +498,7 @@ async def _run_child_games(
                     attempts=max_attempts,
                 )
             )
-    return failures
+    return _ChildGameRunResult(failures=failures, budget_halts=budget_halts)
 
 
 async def _heartbeat_loop(
@@ -475,11 +537,11 @@ async def _drive_gauntlet(
     clock: Clock,
     sleeper: Sleeper,
     worker_id: str,
-) -> None:
+) -> bool:
     """Run every child game of one gauntlet and finalize on success."""
     ctx = await _gauntlet_context(session_factory, gauntlet_id)
     if ctx is None:
-        return
+        return False
     gauntlet_seed, league_id, child_games = ctx
 
     _logger.info(
@@ -511,7 +573,7 @@ async def _drive_gauntlet(
     ranked = any(child.agent_builds_by_seat for child in child_games)
 
     try:
-        failures = await _run_child_games(
+        child_result = await _run_child_games(
             session_factory,
             gauntlet_id=gauntlet_id,
             child_games=child_games,
@@ -526,6 +588,7 @@ async def _drive_gauntlet(
             sleeper=sleeper,
             worker_id=worker_id,
             lease_ttl=timedelta(seconds=options.game_lease_ttl_s),
+            options=options,
         )
     finally:
         if hb_stop is not None and hb_task is not None:
@@ -533,6 +596,7 @@ async def _drive_gauntlet(
             await hb_task
         scheduler_inflight_gauntlets.dec()
 
+    failures = child_result.failures
     for failure in failures:
         _logger.error(
             EVENT_SCHEDULER_GAME_FAILED,
@@ -548,6 +612,10 @@ async def _drive_gauntlet(
         failures=failures,
         max_attempts=options.campaign_cell_max_attempts,
     )
+    if child_result.budget_halts:
+        async with session_factory() as session, session.begin():
+            await gauntlets_repo.mark_pending(session, gauntlet_id)
+        return True
 
     await _rate_completed_pairs_for_gauntlet(
         session_factory,
@@ -564,7 +632,7 @@ async def _drive_gauntlet(
             completed_at=completed_at,
         )
     if finalized is None:
-        return
+        return False
     await _record_campaign_cell_completion(
         session_factory,
         gauntlet_id=gauntlet_id,
@@ -578,6 +646,7 @@ async def _drive_gauntlet(
         failed_games=[str(failure.game_id) for failure in failures],
         failed_game_count=len(failures),
     )
+    return False
 
 
 async def _record_campaign_cell_completion(
@@ -742,9 +811,14 @@ async def _claim_next_pending(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     clock: Clock,
+    exclude_ids: set[uuid.UUID] | None = None,
 ) -> uuid.UUID | None:
     async with session_factory() as session, session.begin():
-        gauntlet = await gauntlets_repo.claim_oldest_pending(session, now=clock())
+        gauntlet = await gauntlets_repo.claim_oldest_pending(
+            session,
+            now=clock(),
+            exclude_ids=exclude_ids,
+        )
         if gauntlet is None:
             return None
         return gauntlet.id
@@ -816,6 +890,7 @@ async def run_scheduler(
     )
 
     last_game_reaped_at: datetime | None = None
+    budget_paused_gauntlet_ids: set[uuid.UUID] = set()
     while not stop_event.is_set():
         tick_now = tick_clock()
         _logger.info(EVENT_SCHEDULER_TICK, worker_id=wid)
@@ -834,12 +909,17 @@ async def run_scheduler(
         ):
             await _reap_stale_games(session_factory, now=tick_now)
             last_game_reaped_at = tick_now
-        gauntlet_id = await _claim_next_pending(session_factory, clock=tick_clock)
+        gauntlet_id = await _claim_next_pending(
+            session_factory,
+            clock=tick_clock,
+            exclude_ids=budget_paused_gauntlet_ids,
+        )
         if gauntlet_id is None:
+            budget_paused_gauntlet_ids.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=opts.poll_interval_s)
             continue
-        await _drive_gauntlet(
+        budget_halted = await _drive_gauntlet(
             session_factory,
             gauntlet_id,
             semaphore=sem,
@@ -850,6 +930,8 @@ async def run_scheduler(
             sleeper=tick_sleeper,
             worker_id=wid,
         )
+        if budget_halted:
+            budget_paused_gauntlet_ids.add(gauntlet_id)
 
 
 __all__ = [
