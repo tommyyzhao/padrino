@@ -9,7 +9,7 @@ string comparison:
 
     ``"spend_cap_reached"``     — cumulative spend >= global cap
     ``"daily_cap_reached"``     — games started today >= max_games_per_day
-    ``"concurrency_cap_reached"`` — active (non-COMPLETED) games >= max_concurrent_games
+    ``"concurrency_cap_reached"`` — active (non-terminal) games >= max_concurrent_games
     ``"admitted"``              — all checks passed
 """
 
@@ -22,6 +22,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.db.game_status import GAME_TERMINAL_STATUSES
 from padrino.db.models import Game
 from padrino.economics.spend_governor import can_start_game
 from padrino.settings import Settings
@@ -79,8 +80,8 @@ async def admit(
         )
         return AdmitDecision(allowed=False, reason="daily_cap_reached")
 
-    # 3. Concurrency: non-COMPLETED games are considered active
-    stmt_concurrent = select(func.count(Game.id)).where(Game.status != "COMPLETED")
+    # 3. Concurrency: only non-terminal games are considered active.
+    stmt_concurrent = select(func.count(Game.id)).where(~Game.status.in_(GAME_TERMINAL_STATUSES))
     concurrent_count: int = (await session.execute(stmt_concurrent)).scalar_one()
 
     if concurrent_count >= settings.padrino_max_concurrent_games:

@@ -8,6 +8,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.db.game_status import (
+    GAME_STATUS_COMPLETED,
+    GAME_STATUS_CREATED,
+    GAME_STATUS_FAILED,
+    GAME_STATUS_RUNNING,
+)
 from padrino.db.models import Game, LlmCall
 from padrino.economics.admission import AdmitDecision, admit
 from padrino.settings import Settings
@@ -33,7 +39,7 @@ def _settings(
 async def _seed_game(
     session: AsyncSession,
     *,
-    status: str = "COMPLETED",
+    status: str = GAME_STATUS_COMPLETED,
     created_at: datetime | None = None,
 ) -> uuid.UUID:
     game = Game(
@@ -158,12 +164,12 @@ async def test_daily_cap_boundary_exactly_at_cap(
 
 @pytest.mark.asyncio
 async def test_denied_concurrency_cap(session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """Active (non-COMPLETED) game count >= max_concurrent → concurrency_cap_reached."""
+    """Active non-terminal game count >= max_concurrent → concurrency_cap_reached."""
     async with session_factory() as session, session.begin():
         for _ in range(3):
             await _seed_game(
                 session,
-                status="CREATED",
+                status=GAME_STATUS_CREATED,
                 created_at=_YESTERDAY_START,
             )
 
@@ -179,11 +185,46 @@ async def test_concurrency_cap_ignores_completed(
     """COMPLETED games are not counted as active."""
     async with session_factory() as session, session.begin():
         for _ in range(5):
-            await _seed_game(session, status="COMPLETED", created_at=_YESTERDAY_START)
+            await _seed_game(session, status=GAME_STATUS_COMPLETED, created_at=_YESTERDAY_START)
 
     async with session_factory() as session:
         decision = await admit(session, _settings(max_concurrent=3), now=_NOW)
     assert decision.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_concurrency_cap_ignores_failed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """FAILED games are terminal and must not consume concurrency slots."""
+    async with session_factory() as session, session.begin():
+        for _ in range(5):
+            await _seed_game(session, status=GAME_STATUS_FAILED, created_at=_YESTERDAY_START)
+
+    async with session_factory() as session:
+        decision = await admit(session, _settings(max_concurrent=3), now=_NOW)
+    assert decision == AdmitDecision(allowed=True, reason="admitted")
+
+
+@pytest.mark.asyncio
+async def test_concurrency_cap_counts_only_non_terminal_games(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Terminal games free slots while RUNNING games still consume them."""
+    async with session_factory() as session, session.begin():
+        await _seed_game(session, status=GAME_STATUS_COMPLETED, created_at=_YESTERDAY_START)
+        await _seed_game(session, status=GAME_STATUS_FAILED, created_at=_YESTERDAY_START)
+
+    async with session_factory() as session:
+        decision = await admit(session, _settings(max_concurrent=1), now=_NOW)
+    assert decision == AdmitDecision(allowed=True, reason="admitted")
+
+    async with session_factory() as session, session.begin():
+        await _seed_game(session, status=GAME_STATUS_RUNNING, created_at=_YESTERDAY_START)
+
+    async with session_factory() as session:
+        decision = await admit(session, _settings(max_concurrent=1), now=_NOW)
+    assert decision == AdmitDecision(allowed=False, reason="concurrency_cap_reached")
 
 
 @pytest.mark.asyncio
@@ -195,7 +236,7 @@ async def test_concurrency_cap_boundary(
         for _ in range(2):
             await _seed_game(
                 session,
-                status="CREATED",
+                status=GAME_STATUS_CREATED,
                 created_at=_YESTERDAY_START,
             )
 
@@ -233,10 +274,10 @@ async def test_daily_takes_priority_over_concurrency(
     """When both daily and concurrency caps are exceeded, daily_cap_reached is returned."""
     async with session_factory() as session, session.begin():
         for _ in range(3):
-            # same game is both today's game AND active (not COMPLETED)
+            # same game is both today's game AND active (non-terminal)
             await _seed_game(
                 session,
-                status="CREATED",
+                status=GAME_STATUS_CREATED,
                 created_at=_TODAY_START + timedelta(hours=1),
             )
 

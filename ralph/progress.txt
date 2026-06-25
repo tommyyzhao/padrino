@@ -3,6 +3,10 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Admission active-game predicates (US-265): treat active as "not in
+  `db.game_status.GAME_TERMINAL_STATUSES`" so `FAILED` games do not consume
+  concurrency. Keep completed-only export, rating, and public-detail guards
+  explicit about `COMPLETED`; those are not active-cap predicates.
 - Benchmark budget admission (US-264): keep the authoritative benchmark spend
   gate in `economics.benchmark_admission`. At game grain, lease the game, claim
   a `global:benchmark` slot and, for campaign-owned games, a `campaign:<id>`
@@ -3743,3 +3747,25 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   human-lane test; the isolated test passed and the full rerun was green.
   Frontend gates not run; US-264 is backend scheduler/campaign economics work
   and did not touch `web/dashboard`.
+
+## 2026-06-24T20:18 PDT - US-265
+- Fixed `economics.admission.admit` concurrency accounting to count only
+  non-terminal games by using `GAME_TERMINAL_STATUSES`; `FAILED` games no
+  longer consume continuous-matchmaking concurrency slots.
+- Added admission regression coverage proving `FAILED` games are ignored,
+  `COMPLETED` plus `FAILED` terminal rows admit a new game, and `RUNNING` rows
+  still consume the cap.
+- Audited sibling `status != "COMPLETED"` predicates. Remaining matches are
+  completed-only export, ratings, and game-detail guards rather than
+  active/concurrency predicates, so no additional story change was needed.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/economics/admission.py`,
+  `tests/economics/test_admission.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/economics/test_admission.py -q` failed first on the
+  `FAILED` active-count bug; focused GREEN same command -> 14 passed. Full
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2644
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-265 is
+  backend economics admission work and did not touch `web/dashboard`.

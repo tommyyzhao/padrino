@@ -308,7 +308,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Bug confirmed: admission.py ~83 select(func.count(Game.id)).where(Game.status != 'COMPLETED') ignores FAILED. Fix: use GAME_TERMINAL_STATUSES (db/game_status.py: {COMPLETED, FAILED}). Small independent correctness fix; complements US-264's hard cap. Grep for sibling status!='COMPLETED' predicates.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-266",
