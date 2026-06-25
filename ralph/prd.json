@@ -139,7 +139,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Adapter: llm/mock.DeterministicMockAdapter (deterministic per (phase_id, public_player_id)). Hash rule: event_hash = sha256(prev + canonical_json(event_without_hash_or_timestamp)) (AGENTS.md hard rule 4). This is the byte-identical-resume CI proof from the plan. Depends on US-250 (resume wiring) and US-253 (fence so finalize is once-only).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-257",

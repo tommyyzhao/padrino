@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Benchmark resume byte-stability (US-256): prove replay determinism with the
+  same `game_id` and `game_seed` on both paths. Run an in-memory reference,
+  crash a persisted run after a durable `PhaseStarted` via `drive_game_loop`'s
+  `phase_snapshot`, rehydrate with `rehydrate_benchmark_game`, then resume via
+  `run_game` and compare the complete event-hash sequence, final hash, and
+  chain digest. Also assert exactly one `GameCreated` and contiguous persisted
+  sequences so the test catches sequence-0 restarts.
 - Scheduled gauntlet seeds (US-255): derive recurring scheduled gauntlet seeds
   from stable occurrence data only:
   `derive_scheduled_gauntlet_seed(schedule_id, scheduled_fire_at=row.next_run_at)`
@@ -3398,3 +3405,21 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2590
   passed / 41 skipped / 10 deselected. Frontend gates not run; US-255 is
   backend scheduler-only and did not touch `web/dashboard`.
+
+## 2026-06-24 - US-256
+- Added a benchmark replay-determinism regression that runs a fixed-seed
+  `DeterministicMockAdapter` game uninterrupted, then crashes a persisted run
+  after the `DAY_1_DISCUSSION_ROUND_1` `PhaseStarted` row is durable,
+  rehydrates via `rehydrate_benchmark_game`, and resumes via `run_game`.
+- The test asserts terminal result, final `event_hash`, full event-hash-chain
+  digest, persisted hash sequence, contiguous DB sequences, and exactly one
+  `GameCreated` / resume-phase `PhaseStarted`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/runner/test_benchmark_resume.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/runner/test_benchmark_resume.py` -> 2 passed. Full
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2591
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-256 is
+  backend runner-only and did not touch `web/dashboard`.

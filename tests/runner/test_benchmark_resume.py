@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,7 +20,13 @@ from padrino.db.models import Game, GameEvent
 from padrino.db.repositories import events as events_repo
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.runner.benchmark_durability import rehydrate_benchmark_game
-from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
+from padrino.runner.game_runner import (
+    GameConfig,
+    GameOutcome,
+    GamePersistence,
+    drive_game_loop,
+    run_game,
+)
 from tests.conftest import make_town_win_script
 
 _GAME_SEED = "us250-benchmark-resume-seed"
@@ -111,6 +119,15 @@ def _town_win_adapter() -> DeterministicMockAdapter:
     )
 
 
+def _event_hash_chain_digest(outcome: GameOutcome) -> str:
+    joined = "\n".join(stored.event_hash for stored in outcome.event_log.events)
+    return hashlib.sha256(joined.encode()).hexdigest()
+
+
+class _SimulatedCrashAfterPhaseStart(Exception):
+    """Raised by the test hook after the phase start row is durable."""
+
+
 async def test_run_game_resume_continues_persisted_phase_without_duplicate_setup(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -165,3 +182,82 @@ async def test_run_game_resume_continues_persisted_phase_without_duplicate_setup
     assert rows[3].event_type == "PhaseResolved"
     replayed = replay_event_log(outcome.event_log.events)
     assert replayed.head_hash == outcome.event_log.head_hash
+
+
+async def test_interrupted_and_resumed_benchmark_game_matches_uninterrupted_hash_chain(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        game = Game(
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed=_GAME_SEED,
+            status=GAME_STATUS_RUNNING,
+        )
+        session.add(game)
+        await session.flush()
+        game_id = game.id
+
+    config = GameConfig(game_id=str(game_id), game_seed=_GAME_SEED, timeout_s=1.0)
+    reference = await run_game(config, _town_win_adapter(), ranked=False)
+    reference_final_hash = reference.event_log.events[-1].event_hash
+    reference_chain_digest = _event_hash_chain_digest(reference)
+
+    crashed = False
+
+    async def crash_after_phase_start(
+        _state: Any,
+        _event_log: EventLog,
+        phase_id: str,
+    ) -> None:
+        nonlocal crashed
+        if not crashed and phase_id == _RESUME_PHASE:
+            crashed = True
+            raise _SimulatedCrashAfterPhaseStart
+
+    with pytest.raises(_SimulatedCrashAfterPhaseStart):
+        await drive_game_loop(
+            config,
+            _town_win_adapter(),
+            ranked=False,
+            persistence=GamePersistence(session_factory=session_factory, game_id=game_id),
+            phase_snapshot=crash_after_phase_start,
+        )
+
+    async with session_factory() as session:
+        resume = await rehydrate_benchmark_game(session, game_id)
+    assert resume is not None
+    assert resume.phase == _RESUME_PHASE
+
+    resumed = await run_game(
+        config,
+        _town_win_adapter(),
+        ranked=False,
+        persistence=GamePersistence(session_factory=session_factory, game_id=game_id),
+        resume=resume,
+    )
+
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(GameEvent)
+                    .where(GameEvent.game_id == game_id)
+                    .order_by(GameEvent.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert resumed.final_state.terminal_result == reference.final_state.terminal_result
+    assert resumed.event_log.events[-1].event_hash == reference_final_hash
+    assert _event_hash_chain_digest(resumed) == reference_chain_digest
+    assert [row.sequence for row in rows] == list(range(len(rows)))
+    assert sum(row.event_type == "GameCreated" for row in rows) == 1
+    assert sum(row.event_type == "PhaseStarted" and row.phase == _RESUME_PHASE for row in rows) == 1
+
+    persisted_hashes = tuple(row.event_hash for row in rows)
+    resumed_hashes = tuple(stored.event_hash for stored in resumed.event_log.events)
+    reference_hashes = tuple(stored.event_hash for stored in reference.event_log.events)
+    assert persisted_hashes == resumed_hashes == reference_hashes
+    assert replay_event_log(resumed.event_log.events).head_hash == reference_final_hash
