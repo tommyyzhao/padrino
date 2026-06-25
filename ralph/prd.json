@@ -67,7 +67,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: gauntlets/completion.py finalize_gauntlet_if_done (~417-421 internal flush+commit); runner/scheduler.py _drive_gauntlet finalize vs _record_campaign_cell_completion (~626-668); db/repositories/campaigns.py mark_materialized_cell_completed (~451-468, only MATERIALIZED->COMPLETED transition), finalize_campaign_if_done (~471-490, done==total over CAMPAIGN_PAIRING_TERMINAL_STATUSES={COMPLETED,DEAD_LETTER}); campaign_tick.py (~68 claim/heartbeat, ~104 finalize). Depends on US-271 (both touch _drive_gauntlet's campaign-cell handling; build on its committed ordering). Option B (reconciliation in the tick) is the lower-blast-radius choice and self-heals existing stuck cells. NO migration.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-274",

@@ -101,6 +101,10 @@ async def run_campaign_tick(
                 decision.reservation,
                 released_at=now,
             )
+            await campaigns_repo.reconcile_completed_materialized_cells(
+                session,
+                campaign_id=campaign.id,
+            )
             finalized = await campaigns_repo.finalize_campaign_if_done(
                 session,
                 campaign.id,

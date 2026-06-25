@@ -254,6 +254,116 @@ async def test_campaign_tick_materializes_bounded_batches_and_finalizes(
     assert _aware(campaign.completed_at) == _NOW + timedelta(seconds=matrix_size + 1)
 
 
+async def test_campaign_tick_reconciles_orphaned_completed_gauntlet_cell(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        campaign_id, _matrix_size = await _seed_campaign(
+            session,
+            campaign_seed="orphan-reconcile",
+            per_model_game_target=4,
+        )
+        batch = await campaigns.materialize_next_batch(
+            session,
+            campaign_id=campaign_id,
+            batch_size=1,
+            pair_count=1,
+        )
+        orphan = batch.materialized[0]
+        gauntlet = await session.get(Gauntlet, orphan.gauntlet_id)
+        assert gauntlet is not None
+        gauntlet.status = "COMPLETED"
+        gauntlet.completed_at = _NOW - timedelta(seconds=1)
+        cells = await _cell_rows(session, campaign_id)
+        for cell in cells:
+            if cell.id != orphan.cell_id:
+                cell.status = campaigns.CAMPAIGN_PAIRING_COMPLETED
+
+    result = await run_campaign_tick(
+        session_factory,
+        now=_NOW,
+        settings=Settings(
+            padrino_enable_campaign_tick=True,
+            padrino_campaign_materialize_batch_size=1,
+        ),
+        worker_id="campaign-worker",
+    )
+
+    async with session_factory() as session:
+        orphan_after = await session.get(CampaignPairing, orphan.cell_id)
+        campaign = await session.get(Campaign, campaign_id)
+        progress = await campaigns.campaign_progress(session, campaign_id)
+
+    assert result.campaign_id == campaign_id
+    assert result.materialized == ()
+    assert result.finalized_campaign_id == campaign_id
+    assert orphan_after is not None
+    assert orphan_after.status == campaigns.CAMPAIGN_PAIRING_COMPLETED
+    assert progress is not None
+    assert progress.done == progress.total
+    assert campaign is not None
+    assert campaign.status == campaigns.CAMPAIGN_STATUS_COMPLETED
+    assert campaign.completed_at is not None
+    assert _aware(campaign.completed_at) == _NOW
+
+
+async def test_campaign_tick_normal_completion_finalizes_once_without_duplicate_work(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        campaign_id, _matrix_size = await _seed_campaign(
+            session,
+            campaign_seed="normal-finalize-once",
+            per_model_game_target=4,
+        )
+        batch = await campaigns.materialize_next_batch(
+            session,
+            campaign_id=campaign_id,
+            batch_size=1,
+            pair_count=1,
+        )
+        for cell in await _cell_rows(session, campaign_id):
+            cell.status = campaigns.CAMPAIGN_PAIRING_COMPLETED
+        first_gauntlet_id = batch.materialized[0].gauntlet_id
+
+    settings = Settings(
+        padrino_enable_campaign_tick=True,
+        padrino_campaign_materialize_batch_size=1,
+    )
+    first = await run_campaign_tick(
+        session_factory,
+        now=_NOW,
+        settings=settings,
+        worker_id="campaign-worker",
+    )
+    second = await run_campaign_tick(
+        session_factory,
+        now=_NOW + timedelta(seconds=1),
+        settings=settings,
+        worker_id="campaign-worker",
+    )
+
+    async with session_factory() as session:
+        campaign = await session.get(Campaign, campaign_id)
+        cells = await _cell_rows(session, campaign_id)
+        gauntlet_count = await session.scalar(
+            select(func.count(Gauntlet.id)).where(Gauntlet.campaign_id == campaign_id)
+        )
+
+    assert first.finalized_campaign_id == campaign_id
+    assert second.campaign_id is None
+    assert second.finalized_campaign_id is None
+    assert campaign is not None
+    assert campaign.status == campaigns.CAMPAIGN_STATUS_COMPLETED
+    assert campaign.completed_at is not None
+    assert _aware(campaign.completed_at) == _NOW
+    assert [cell.status for cell in cells] == [campaigns.CAMPAIGN_PAIRING_COMPLETED] * len(cells)
+    assert [cell.gauntlet_id for cell in cells if cell.gauntlet_id is not None] == [
+        first_gauntlet_id
+    ]
+    assert gauntlet_count == 1
+
+
 async def test_campaign_tick_skips_campaign_at_cap_and_materializes_different_campaign(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -16,7 +16,14 @@ from padrino.core.scheduling.pairing import (
     derive_campaign_cell_seed,
     generate_pairing_matrix,
 )
-from padrino.db.models import AgentBuild, Campaign, CampaignPairing, ModelConfig, PromptVersion
+from padrino.db.models import (
+    AgentBuild,
+    Campaign,
+    CampaignPairing,
+    Gauntlet,
+    ModelConfig,
+    PromptVersion,
+)
 from padrino.gauntlets.scheduler import create_paired_gauntlet
 
 CAMPAIGN_STATUS_PENDING = "PENDING"
@@ -468,6 +475,32 @@ async def mark_materialized_cell_completed(
     return cell
 
 
+async def reconcile_completed_materialized_cells(
+    session: AsyncSession,
+    *,
+    campaign_id: uuid.UUID,
+) -> tuple[CampaignPairing, ...]:
+    """Complete materialized campaign cells whose child gauntlets already completed."""
+    stmt = (
+        select(CampaignPairing)
+        .join(Gauntlet, CampaignPairing.gauntlet_id == Gauntlet.id)
+        .where(
+            CampaignPairing.campaign_id == campaign_id,
+            CampaignPairing.status == CAMPAIGN_PAIRING_MATERIALIZED,
+            Gauntlet.status == "COMPLETED",
+        )
+        .order_by(CampaignPairing.cell_index)
+    )
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update(of=CampaignPairing)
+    cells = tuple((await session.execute(stmt)).scalars().all())
+    for cell in cells:
+        cell.status = CAMPAIGN_PAIRING_COMPLETED
+    if cells:
+        await session.flush()
+    return cells
+
+
 async def finalize_campaign_if_done(
     session: AsyncSession,
     campaign_id: uuid.UUID,
@@ -582,6 +615,7 @@ __all__ = [
     "mark_materialized_cell_completed",
     "materialize_next_batch",
     "pause_campaign",
+    "reconcile_completed_materialized_cells",
     "record_materialized_cell_failure",
     "reset_stale_campaigns",
     "update_heartbeat",

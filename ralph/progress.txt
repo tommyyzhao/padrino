@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign orphan-cell healing (US-273): keep the recovery pass in
+  `scheduler.campaign_tick`, not in pure core and not by changing
+  `finalize_gauntlet_if_done`'s commit contract. Before
+  `finalize_campaign_if_done`, call
+  `campaigns.reconcile_completed_materialized_cells` to flip only
+  `MATERIALIZED` cells whose linked `Gauntlet.status == "COMPLETED"` to
+  `COMPLETED`. The pass is idempotent and self-heals the crash window between
+  gauntlet completion and campaign-cell completion without creating duplicate
+  gauntlets.
 - Orphaned benchmark budget slots (US-272): treat
   `BudgetReservationSlot.binding_key` as the crash-reclaim handle for a game.
   `claim_budget_slot` releases any prior live row with the same non-None
@@ -4019,3 +4028,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2678 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-272 is backend economics/scheduler
   crash-recovery work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:38 PDT - US-273
+- Added a campaign tick reconciliation pass that completes orphaned
+  `MATERIALIZED` campaign cells when their linked gauntlet is already
+  `COMPLETED`, then lets the existing `finalize_campaign_if_done` path close
+  the campaign in the same tick transaction.
+- Added regressions for the exact gauntlet-completed/cell-still-materialized
+  crash window, including campaign auto-finalization after reconciliation and
+  an idempotent normal-completion path that finalizes once without duplicate
+  materialization.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/scheduler/campaign_tick.py`,
+  `tests/scheduler/test_campaign_tick.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/scheduler/test_campaign_tick.py -q` failed first
+  because the orphaned cell stayed `MATERIALIZED` and the campaign did not
+  finalize; focused GREEN same command -> 8 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_scheduler.py::test_campaign_owned_failed_gauntlet_dead_letters_cell tests/runner/test_scheduler.py::test_campaign_budget_halt_short_circuits_before_recording_cell_failure tests/runner/test_scheduler.py::test_campaign_budget_halt_with_sibling_failure_preserves_cell_for_redrive -q`
+  -> 3 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2680 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-273 is backend campaign scheduler
+  recovery work and did not touch `web/dashboard`.
