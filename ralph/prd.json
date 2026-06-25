@@ -271,7 +271,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Template: economics/human_cost_governance._claim_inference_slot (~417-461: floor(budget/reserve) slots, implicit-used rounding, begin_nested + unique constraint + IntegrityError retry, fail-closed None). HumanInferenceReservation columns (models.py ~379-418: scope_key, reservation_day, slot_index, reserved_at, lobby_id/member_id, released_at; unique uq_human_inference_reservation_slot). TOCTOU confirmed in spend_governor (~25-48). This is the primitive; US-264 wires the BENCHMARK admission path. Independent of P1/P3.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-264",

@@ -260,11 +260,10 @@ def _model_unique_columns(table: Table) -> dict[str, tuple[str, ...]]:
     }
 
 
-def test_0053_is_linear_head_after_0052() -> None:
+def test_0053_is_linear_after_0052() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0053"]
     assert script.get_revision("0053").down_revision == "0052"
 
 
@@ -282,7 +281,7 @@ def test_0053_adds_campaign_tables_and_gauntlet_campaign_fk(sqlite_db: Path) -> 
 
     gauntlet_id = _insert_existing_gauntlet(sqlite_db)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0053")
 
     assert _table_names(sqlite_db) - before_tables == {CAMPAIGN_TABLE, PAIRING_TABLE}
     assert _column_names(sqlite_db, CAMPAIGN_TABLE) == CAMPAIGN_COLUMNS

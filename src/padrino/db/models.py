@@ -6,9 +6,9 @@ Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``game_events``, ``llm_calls``,
 ``rating_contexts``, ``ratings``, ``rating_events``, the ranked human-lane
 siblings ``human_rating`` / ``human_rating_event``, the
-non-canonical context sibling rating tables, and the browser-human identity
-layer ``principals`` / ``human_sessions`` (Wave 9, US-127), plus human-lane
-cost admission slots.
+non-canonical context sibling rating tables, generic budget reservation slots,
+and the browser-human identity layer ``principals`` / ``human_sessions`` (Wave
+9, US-127), plus human-lane cost admission slots.
 """
 
 from __future__ import annotations
@@ -472,6 +472,35 @@ class HumanInferenceReservation(Base):
     lobby_member_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("lobby_members.id", ondelete="SET NULL"), nullable=True
     )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BudgetReservationSlot(Base):
+    """Generic atomic budget reservation slot (US-263).
+
+    ``scope_key`` is intentionally opaque so callers can encode a global,
+    campaign, or future partitioned budget namespace without schema changes.
+    Released rows no longer consume live budget but keep their physical
+    ``slot_index`` under the unique constraint, so a later claim picks a fresh
+    index while the live-slot count stays capped.
+    """
+
+    __tablename__ = "budget_reservation_slots"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_key",
+            "slot_index",
+            name="uq_budget_reservation_slot",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    scope_key: Mapped[str] = mapped_column(String, nullable=False)
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    binding_key: Mapped[str | None] = mapped_column(String, nullable=True)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

@@ -41,6 +41,7 @@ EXPECTED_TABLES = {
     "behavioral_evaluations",
     "campaigns",
     "campaign_pairings",
+    "budget_reservation_slots",
 }
 
 

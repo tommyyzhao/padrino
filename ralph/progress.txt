@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Budget reservation slots (US-263): keep generic benchmark/campaign budget
+  enforcement in `economics.budget_reservations` over
+  `budget_reservation_slots`. Encode scope and any time/owner partition in the
+  opaque `scope_key`; divide the ceiling into `floor(budget / reserve)` slots;
+  round already-charged spend up into implicit low slots; claim the next unused
+  physical `slot_index` inside `session.begin_nested()` and retry
+  `IntegrityError`. A released row remains physical under the unique
+  `(scope_key, slot_index)` key, but no longer counts as live capacity.
 - Campaign TickHook composition (US-262): keep campaign orchestration in
   `scheduler.campaign_tick.run_campaign_tick` and wire it through
   `scheduler.bootstrap.build_scheduled_gauntlet_tick_hook` behind
@@ -508,6 +516,33 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 - Disconnect grace + silent AI takeover (US-150): a dropped human gets a short reconnect grace window; on expiry a curated AI silently takes the seat so the game continues, invisibly in anonymous mode. TWO modules, no schema change, no new deps. (1) PURE `core/disconnect.py` (data-in/data-out with an INJECTED `now` — never reads a clock): `SeatPresence{public_player_id, connected, disconnected_at}` + `is_within_grace(presence, *, now, grace_seconds)` (connected -> always within; disconnected within window -> reconnectable; a disconnected seat with NO drop instant treated as just-dropped) + `seats_past_grace(presences, *, now, grace_seconds) -> [seat_id]` (the disconnected seats whose window expired, in input order — a reconnect BEFORE expiry flips `connected=True` so the seat is never listed: "reconnect returns the seat") + `project_presence_for_viewer(presences, *, viewer_seat_id, identity_mode) -> [{seat_id, connected}]` (the IDENTITY-BLIND presence frame: in ANONYMOUS mode — the fail-closed default via `observation_privacy.is_anonymous`, so None coerces anonymous — it carries ONLY the viewer's OWN seat; other seats' presence/reconnecting state is NEVER exposed because an AI never disconnects, so any per-seat presence signal would out a human; TRANSPARENT may show all; each entry is `{seat_id, connected}` ONLY — never a drop timestamp or human/AI marker). `core/disconnect.py` imports `datetime` for pure grace ARITHMETIC (timedelta only) — add it to `tests/core/test_purity.py::ALLOWED_FORBIDDEN_IMPORTS` ("disconnect.py": frozenset({"datetime"})) EXACTLY like `scheduling/__init__.py`; the `test_allowed_datetime_modules_make_no_wallclock_calls` guard then enforces no `.now()/.utcnow()/.today()` (the module uses `value.replace(tzinfo=UTC)` for the SQLite-naive coercion — `replace` is not a wall-clock attr). (2) IMPURE `runner/disconnect_takeover.py::take_over_seat(*, mux, event_log, state, seat_id, replacement_adapter, replacement_agent_build_ref, reason="disconnect_grace_expired") -> TakeoverResult{event, replaced_adapter}`: REUSES US-139's `SeatMultiplexAdapter.swap_seat(seat, adapter)` (rebinds the dispatch table between ticks, returns the replaced human adapter, KeyError on an unknown seat — a takeover replaces an existing occupant) + US-122's `SeatTakenOver` event appended to the hash-chained `EventLog` with `day`/`phase` read from `state.current_phase` (pure logical values via `core.observations.format_phase_id` — NO wall clock/random in the payload). The takeover is REVEAL-ONLY: `SeatTakenOver` is SYSTEM-visibility so it NEVER lands on a PUBLIC/live frame (no mid-game leak); it surfaces only at the endgame reveal where `reducer.compute_seat_provenance(typed_events)` derives HUMAN_THEN_AI for the seat (requires the seat marked seat_kind=HUMAN in RolesAssigned, i.e. the US-149 launch handoff). New setting `padrino_human_reconnect_grace_seconds: float = 90.0` (wall-clock value consumed only in the impure runner; the pure decision reads it as plain data). Test `tests/runner/test_disconnect_takeover.py` (12): pure grace decisions (connected always within, recent-within/old-past, seats_past_grace lists only expired, reconnect-returns-seat, naive-timestamp coercion); identity-blind projection (anonymous shows only viewer's own seat, None fails closed, other-seat reconnecting never exposed, transparent shows all); runner orchestration reuses the US-139 `_TakeoverMux` + `_FakeClock` + `make_town_win_script`: a HUMAN seat is taken over mid-DAY_1_VOTE (swap on the real mux, `seats_past_grace` decides), the game still reaches TOWN, no PUBLIC frame carries SeatTakenOver, the committed log (incl. the appended SeatTakenOver) replays bit-for-bit, and `take_over_seat` on a hand-built HUMAN-marked RolesAssigned+state yields a SYSTEM-visibility pure-data event + HUMAN_THEN_AI provenance + KeyError on an unknown seat.
 
 ---
+
+## 2026-06-24T19:49 PDT - US-263
+- Added Alembic `0054` and the `BudgetReservationSlot` ORM model for generic
+  finite budget reservations with nullable `binding_key` / `released_at` and a
+  unique `(scope_key, slot_index)` constraint.
+- Added `economics.budget_reservations.claim_budget_slot` /
+  `release_budget_slot`, including concurrent unique-constraint retry,
+  fail-closed exhaustion, release/reuse, and independent-scope coverage.
+- Added dedicated 0054 migration/model tests and updated migration smoke table
+  inventories; adjusted the older 0053 migration test to target revision `0053`
+  instead of the moving head.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0054_budget_reservation_slots.py`,
+  `src/padrino/economics/budget_reservations.py`,
+  `tests/db/test_migration_0053_campaigns.py`,
+  `tests/db/test_migration_0054_budget_reservations.py`,
+  `tests/db/test_migrations.py`,
+  `tests/economics/test_budget_reservations.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED collection failures for missing model/module;
+  focused GREEN `uv run pytest tests/economics/test_budget_reservations.py
+  tests/db/test_migration_0054_budget_reservations.py -q`; affected DB tests
+  `uv run pytest tests/db/test_migration_0053_campaigns.py
+  tests/db/test_migration_0054_budget_reservations.py -q`; `uv run ruff check
+  .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest
+  -m "not integration"` -> 2636 passed / 41 skipped / 10 deselected.
 
 ## 2026-06-21T22:31 PDT - US-222
 - Moved non-canonical PLACEMENT rating writes out of the terminal
