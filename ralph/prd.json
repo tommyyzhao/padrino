@@ -383,7 +383,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Uncertainty-based publish criteria (locked decision): games>=target AND sigma<=target AND non-provisional AND rank-stable over last K. Inputs: report (US-268), ratings provisional/sigma/rank, hash-chain verify (replay_event_log), anonymity guards (FORBIDDEN_PAYLOAD_KEYS / identity-blind), _should_apply_ratings (FAILED excluded), CANONICAL_TEAM firewall (RatingContextKind.CANONICAL_TEAM, public_leaderboard ~550/739/785). DEAD_LETTER holes are documented, not blockers. The gate gates PUBLICATION, not finalization (auto-finalize stays).",
-      "passes": false
+      "passes": true
     }
   ]
 }

@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign publish gate (US-269): keep publication readiness in
+  `gauntlets.publish_gate` as a typed read-side checklist. Build on
+  `gauntlets.campaign_report` for documented holes, but re-check canonical
+  publishability from `Rating` rows joined to the canonical
+  `CANONICAL_TEAM` `RatingContext` and from campaign-completed games only.
+  Dead-letter cells are `documented_holes`, not blockers; blockers cover hash
+  replay, identity/rating side-channel keys in PUBLIC payloads, excluded
+  rating events, per-model coverage, sigma/rank stability, and immutable
+  `LlmCall` cost stamps.
 - Campaign reporting (US-268): keep the operator/publication data source in
   `gauntlets.campaign_report` as frozen Pydantic models. Sum campaign spend
   only from persisted `LlmCall.cost_usd` rows joined through
@@ -3875,3 +3884,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2663 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-268 is backend CLI/report work and
   did not touch `web/dashboard`.
+
+## 2026-06-24T20:58 PDT - US-269
+- Added `gauntlets.publish_gate.evaluate_publish_gate`, returning a frozen
+  `PublishGateResult` with `ready_to_publish`, itemized blockers, and
+  non-blocking documented dead-letter holes.
+- The gate verifies campaign game hash chains, audits PUBLIC event payloads for
+  identity/rating side-channel keys, rejects canonical rating events attached
+  to excluded FAILED / non-completed cells, checks immutable `LlmCall` cost
+  stamps, and evaluates per-model canonical coverage plus sigma/rank stability
+  using `CANONICAL_TEAM` rating rows only.
+- Added regression coverage for the fully-ready path, specific blocker
+  messages, dead-letter/FAILED exclusion without blocking publication,
+  PLACEMENT results not counting toward canonical publishability, and
+  finalized-but-not-yet-publishable campaigns remaining finalized.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/gauntlets/publish_gate.py`,
+  `tests/gauntlets/test_publish_gate.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_publish_gate.py -q` failed first on the
+  missing `padrino.gauntlets.publish_gate` module; focused GREEN same command
+  -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/gauntlets/test_publish_gate.py tests/gauntlets/test_campaign_report.py -q`
+  -> 9 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2669 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-269 is backend publication
+  readiness work and did not touch `web/dashboard`.
