@@ -25,7 +25,11 @@ CAMPAIGN_STATUS_COMPLETED = "COMPLETED"
 
 CAMPAIGN_PAIRING_PENDING = "PENDING"
 CAMPAIGN_PAIRING_MATERIALIZED = "MATERIALIZED"
+CAMPAIGN_PAIRING_COMPLETED = "COMPLETED"
 CAMPAIGN_PAIRING_DEAD_LETTER = "DEAD_LETTER"
+CAMPAIGN_PAIRING_TERMINAL_STATUSES = frozenset(
+    {CAMPAIGN_PAIRING_COMPLETED, CAMPAIGN_PAIRING_DEAD_LETTER}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +68,15 @@ class DeadLetterCampaignCell:
     attempt_count: int
     last_error: str | None
     last_error_kind: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignProgress:
+    """Campaign-pairing terminal-cell progress as ``done of total``."""
+
+    campaign_id: uuid.UUID
+    done: int
+    total: int
 
 
 def _aware(value: datetime) -> datetime:
@@ -356,6 +369,72 @@ async def list_dead_letter_cells(
     return cells
 
 
+async def campaign_progress(
+    session: AsyncSession,
+    campaign_id: uuid.UUID,
+) -> CampaignProgress | None:
+    """Return terminal cell progress for one campaign, or ``None`` if unknown."""
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None:
+        return None
+    statuses = list(
+        (
+            await session.execute(
+                select(CampaignPairing.status).where(CampaignPairing.campaign_id == campaign_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return CampaignProgress(
+        campaign_id=campaign_id,
+        done=sum(1 for status in statuses if status in CAMPAIGN_PAIRING_TERMINAL_STATUSES),
+        total=len(statuses),
+    )
+
+
+async def mark_materialized_cell_completed(
+    session: AsyncSession,
+    *,
+    gauntlet_id: uuid.UUID,
+) -> CampaignPairing | None:
+    """Mark the campaign cell for ``gauntlet_id`` completed when one exists."""
+    stmt = select(CampaignPairing).where(CampaignPairing.gauntlet_id == gauntlet_id).limit(1)
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update()
+    cell = (await session.execute(stmt)).scalars().first()
+    if cell is None:
+        return None
+    if cell.status in CAMPAIGN_PAIRING_TERMINAL_STATUSES:
+        return cell
+    if cell.status == CAMPAIGN_PAIRING_MATERIALIZED:
+        cell.status = CAMPAIGN_PAIRING_COMPLETED
+        await session.flush()
+    return cell
+
+
+async def finalize_campaign_if_done(
+    session: AsyncSession,
+    campaign_id: uuid.UUID,
+    *,
+    now: datetime,
+) -> Campaign | None:
+    """Auto-finalize a campaign once every pairing cell is terminal."""
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None or campaign.status == CAMPAIGN_STATUS_COMPLETED:
+        return None
+    progress = await campaign_progress(session, campaign_id)
+    if progress is None or progress.total == 0 or progress.done != progress.total:
+        return None
+    campaign.status = CAMPAIGN_STATUS_COMPLETED
+    campaign.completed_at = now
+    campaign.leased_by = None
+    campaign.lease_expires_at = None
+    campaign.heartbeat_at = None
+    await session.flush()
+    return campaign
+
+
 async def _resolve_canonical_active_builds(
     session: AsyncSession,
     *,
@@ -425,20 +504,26 @@ async def _prompt_version_for_roster(
 
 
 __all__ = [
+    "CAMPAIGN_PAIRING_COMPLETED",
     "CAMPAIGN_PAIRING_DEAD_LETTER",
     "CAMPAIGN_PAIRING_MATERIALIZED",
     "CAMPAIGN_PAIRING_PENDING",
+    "CAMPAIGN_PAIRING_TERMINAL_STATUSES",
     "CAMPAIGN_STATUS_COMPLETED",
     "CAMPAIGN_STATUS_PENDING",
     "CAMPAIGN_STATUS_RUNNING",
     "CampaignCreated",
+    "CampaignProgress",
     "DeadLetterCampaignCell",
     "MaterializeBatchResult",
     "MaterializedCampaignCell",
+    "campaign_progress",
     "claim_campaign",
     "create_campaign_from_matrix",
+    "finalize_campaign_if_done",
     "get",
     "list_dead_letter_cells",
+    "mark_materialized_cell_completed",
     "materialize_next_batch",
     "record_materialized_cell_failure",
     "reset_stale_campaigns",

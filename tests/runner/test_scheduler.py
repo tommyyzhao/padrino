@@ -597,6 +597,56 @@ async def test_child_game_failure_isolated_and_logged(
     assert failure_events[0]["attempts"] == 1
 
 
+async def test_drive_gauntlet_does_not_complete_with_non_terminal_child(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="non-terminal-child",
+        clone_count=2,
+    )
+    created_game_id, completed_game_id = game_ids
+
+    async def executor(
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        del config, adapter, ranked
+        if persistence.game_id == created_game_id:
+            return
+        async with persistence.session_factory() as session, session.begin():
+            await games_repo.update_status(
+                session,
+                persistence.game_id,
+                status=GAME_STATUS_COMPLETED,
+                terminal_result={"winner": "TOWN", "reason": "stub", "day_terminated": 0},
+            )
+
+    await scheduler_module._drive_gauntlet(
+        session_factory,
+        gauntlet_id,
+        semaphore=asyncio.Semaphore(2),
+        adapter_factory=_adapter_factory_noop,
+        game_executor=executor,
+        options=SchedulerOptions(game_max_attempts=1),
+        clock=lambda: datetime(2026, 6, 24, 12, tzinfo=UTC),
+        sleeper=asyncio.sleep,
+        worker_id="test-worker",
+    )
+
+    async with session_factory() as session:
+        gauntlet = await gauntlets_repo.get(session, gauntlet_id)
+        games = await games_repo.list_by_gauntlet(session, gauntlet_id)
+
+    assert gauntlet is not None
+    assert gauntlet.status != GAME_STATUS_COMPLETED
+    statuses = {game.id: game.status for game in games}
+    assert statuses[created_game_id] == GAME_STATUS_RUNNING
+    assert statuses[completed_game_id] == GAME_STATUS_COMPLETED
+
+
 async def test_child_game_retry_succeeds_before_marking_failed(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

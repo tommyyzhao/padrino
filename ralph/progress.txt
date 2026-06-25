@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Gauntlet/campaign completion (US-261): use
+  `gauntlets.completion.finalize_gauntlet_if_done` as the single completion
+  gate. A gauntlet completes only after every child `Game.status` is terminal
+  (`COMPLETED` or `FAILED`) and, when all children succeeded, persisted
+  `ModelSeatCounts` are within the settings-driven
+  `padrino_gauntlet_balance_tolerance_seats`. Any failed child exempts the
+  balance gate, and diagnostics/provisional counts are computed over
+  `COMPLETED` child games only. Campaign cells use explicit terminal ledger
+  statuses (`COMPLETED` / `DEAD_LETTER`) and `finalize_campaign_if_done`
+  auto-completes the campaign once `campaign_progress.done == total`.
 - Campaign cell dead-lettering (US-260): keep failed campaign-owned gauntlets
   mapped through `campaign_pairings.gauntlet_id` into
   `record_materialized_cell_failure`. Retryable exhausted cells increment
@@ -3576,3 +3586,35 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2617
   passed / 41 skipped / 10 deselected. Frontend gates not run; US-260 is
   backend campaign/scheduler work and did not touch `web/dashboard`.
+
+## 2026-06-24T19:27 PDT - US-261
+- Tightened gauntlet finalization so scheduler-driven and direct completion now
+  require all child games to be terminal (`COMPLETED` or `FAILED`) and run the
+  per-model faction balance gate over successful child games with persisted
+  seat rows. `CREATED` / `RUNNING` children leave the gauntlet unfinished.
+- Added `TerminalProgress` / `gauntlet_child_progress`, surfaced progress on
+  `GET /gauntlets/{id}`, and changed diagnostics/provisional collection to use
+  only successful `COMPLETED` children while permanently failed children remain
+  terminal for overall completion.
+- Added campaign cell `COMPLETED` terminal status plus `campaign_progress`,
+  `mark_materialized_cell_completed`, and `finalize_campaign_if_done`; scheduler
+  now marks successful campaign cells completed and auto-finalizes campaigns
+  when every cell is `COMPLETED` or `DEAD_LETTER`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/gauntlets.py`,
+  `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/gauntlets/completion.py`,
+  `src/padrino/runner/scheduler.py`, `src/padrino/settings.py`,
+  `tests/db/test_campaigns_repo.py`, `tests/gauntlets/test_completion.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_completion.py::test_failed_children_are_terminal_but_created_or_running_children_block_completion tests/gauntlets/test_completion.py::test_fully_completed_imbalanced_gauntlet_waits_for_balance tests/gauntlets/test_completion.py::test_failed_child_exempts_surviving_completed_games_from_balance_gate tests/db/test_campaigns_repo.py::test_campaign_progress_counts_terminal_cells_and_auto_finalizes tests/runner/test_scheduler.py::test_drive_gauntlet_does_not_complete_with_non_terminal_child -q`
+  failed first on missing progress/finalization helpers; focused GREEN same
+  command -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/gauntlets/test_completion.py tests/db/test_campaigns_repo.py tests/runner/test_scheduler.py tests/api/test_gauntlet_routes.py -q`
+  -> 63 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2622 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-261 is backend
+  gauntlet/campaign scheduler work and did not touch `web/dashboard`.

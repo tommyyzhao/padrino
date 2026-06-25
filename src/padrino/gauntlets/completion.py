@@ -1,9 +1,10 @@
 """Gauntlet completion + leaderboard provisional-flag logic.
 
-Once every child game of a gauntlet has emitted a ``GameTerminated`` event,
+Once every child game of a gauntlet has reached a terminal row status and the
+successful child games satisfy the faction-balance gate,
 :func:`finalize_gauntlet_if_done` flips the gauntlet status to ``COMPLETED``,
-stamps ``completed_at``, and returns aggregate diagnostics plus the
-provisional flag for each agent build that played in the gauntlet.
+stamps ``completed_at``, and returns aggregate diagnostics plus the provisional
+flag for each agent build that played in the gauntlet.
 
 Provisional thresholds (per ``prd.md`` §10):
 
@@ -15,7 +16,7 @@ Counts are league-scoped: per-agent_build totals span every terminal game
 under the gauntlet's league, not just the gauntlet's own clones, so the
 leaderboard view of "enough games played" is consistent across gauntlets.
 
-Aggregate diagnostics are scoped to the gauntlet's child games only.
+Aggregate diagnostics are scoped to the gauntlet's successful child games only.
 
 This module sits in the impure ``padrino.gauntlets`` layer and is therefore
 permitted to read the wall clock for ``completed_at``.
@@ -33,6 +34,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction
+from padrino.core.rulesets import get_ruleset
+from padrino.db.game_status import (
+    GAME_STATUS_COMPLETED,
+    GAME_STATUS_FAILED,
+    is_terminal_game_status,
+)
 from padrino.db.models import Game, GameEvent, GameSeat, Gauntlet
 from padrino.diagnostics.submissions import (
     INVALID_EVENT_TYPE,
@@ -40,12 +47,23 @@ from padrino.diagnostics.submissions import (
     SUBMISSION_EVENT_TYPES,
     TIMEOUT_EVENT_TYPE,
 )
+from padrino.gauntlets.evaluation import ModelSeatCounts
 
 PROVISIONAL_TOTAL_GAMES: Final[int] = 30
 PROVISIONAL_MAFIA_GAMES: Final[int] = 5
 PROVISIONAL_TOWN_GAMES: Final[int] = 15
+DEFAULT_BALANCE_TOLERANCE_SEATS: Final[int] = 4
 
-_COMPLETED_STATUS: Final[str] = "COMPLETED"
+_COMPLETED_STATUS: Final[str] = GAME_STATUS_COMPLETED
+_FAILED_STATUS: Final[str] = GAME_STATUS_FAILED
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalProgress:
+    """Generic ``done of total`` progress over terminal rows."""
+
+    done: int
+    total: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,12 +113,55 @@ async def _all_games_terminal(
     ids = list(game_ids)
     if not ids:
         return False
+    stmt = select(Game.id, Game.status).where(Game.id.in_(ids))
+    rows = list((await session.execute(stmt)).all())
+    if {row[0] for row in rows} != set(ids):
+        return False
+    return all(is_terminal_game_status(str(status)) for _game_id, status in rows)
+
+
+async def gauntlet_child_progress(
+    session: AsyncSession,
+    gauntlet_id: uuid.UUID,
+) -> TerminalProgress | None:
+    """Return terminal-child progress for one gauntlet, or ``None`` if unknown."""
+    gauntlet = await session.get(Gauntlet, gauntlet_id)
+    if gauntlet is None:
+        return None
+    statuses = list(
+        (await session.execute(select(Game.status).where(Game.gauntlet_id == gauntlet_id)))
+        .scalars()
+        .all()
+    )
+    return TerminalProgress(
+        done=sum(1 for status in statuses if is_terminal_game_status(str(status))),
+        total=len(statuses),
+    )
+
+
+async def _child_game_statuses(
+    session: AsyncSession,
+    game_ids: Iterable[uuid.UUID],
+) -> dict[uuid.UUID, str]:
+    ids = list(game_ids)
+    if not ids:
+        return {}
+    stmt = select(Game.id, Game.status).where(Game.id.in_(ids))
+    return {game_id: str(status) for game_id, status in (await session.execute(stmt)).all()}
+
+
+async def _completed_game_ids(
+    session: AsyncSession,
+    game_ids: Iterable[uuid.UUID],
+) -> list[uuid.UUID]:
+    ids = list(game_ids)
+    if not ids:
+        return []
     stmt = select(Game.id).where(
         Game.id.in_(ids),
         Game.status == _COMPLETED_STATUS,
     )
-    rows = (await session.execute(stmt)).scalars().all()
-    return set(rows) == set(ids)
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def _league_terminal_game_ids(
@@ -154,6 +215,95 @@ async def _provisional_for_agent_builds(
         )
         for ab_id, c in counters.items()
     }
+
+
+async def _model_seat_counts(
+    session: AsyncSession,
+    game_ids: Iterable[uuid.UUID],
+) -> list[ModelSeatCounts]:
+    ids = list(game_ids)
+    if not ids:
+        return []
+    stmt = select(GameSeat.agent_build_id, GameSeat.faction).where(GameSeat.game_id.in_(ids))
+    counters: dict[uuid.UUID, dict[str, int]] = {}
+    for agent_build_id, faction in (await session.execute(stmt)).all():
+        if agent_build_id is None:
+            continue
+        bucket = counters.setdefault(
+            agent_build_id,
+            {Faction.TOWN.value: 0, Faction.MAFIA.value: 0},
+        )
+        if faction in bucket:
+            bucket[str(faction)] += 1
+    return [
+        ModelSeatCounts(
+            agent_build_id=agent_build_id,
+            town_seats=counts[Faction.TOWN.value],
+            mafia_seats=counts[Faction.MAFIA.value],
+            total_seats=counts[Faction.TOWN.value] + counts[Faction.MAFIA.value],
+        )
+        for agent_build_id, counts in counters.items()
+        if counts[Faction.TOWN.value] + counts[Faction.MAFIA.value] > 0
+    ]
+
+
+def _faction_totals_for_ruleset(ruleset_id: str) -> tuple[int, int]:
+    ruleset = get_ruleset(ruleset_id)
+    town = 0
+    mafia = 0
+    for role, count in ruleset.ROLE_COUNTS.items():
+        faction = ruleset.faction_for(role)
+        if faction is Faction.TOWN:
+            town += count
+        elif faction is Faction.MAFIA:
+            mafia += count
+    return town, mafia
+
+
+def _seat_counts_within_tolerance(
+    counts: Iterable[ModelSeatCounts],
+    *,
+    town_per_game: int,
+    mafia_per_game: int,
+    player_count: int,
+    tolerance_seats: int,
+) -> bool:
+    tolerance_numerator = tolerance_seats * player_count
+    for entry in counts:
+        town_diff = abs(entry.town_seats * player_count - entry.total_seats * town_per_game)
+        mafia_diff = abs(entry.mafia_seats * player_count - entry.total_seats * mafia_per_game)
+        if town_diff > tolerance_numerator or mafia_diff > tolerance_numerator:
+            return False
+    return True
+
+
+async def _balance_gate_satisfied(
+    session: AsyncSession,
+    *,
+    gauntlet: Gauntlet,
+    child_ids: Iterable[uuid.UUID],
+    balance_tolerance_seats: int,
+) -> bool:
+    statuses = await _child_game_statuses(session, child_ids)
+    if any(status == _FAILED_STATUS for status in statuses.values()):
+        return True
+    completed_ids = [game_id for game_id, status in statuses.items() if status == _COMPLETED_STATUS]
+    if not completed_ids:
+        return True
+    seat_counts = await _model_seat_counts(session, completed_ids)
+    if not seat_counts:
+        return True
+    town_per_game, mafia_per_game = _faction_totals_for_ruleset(gauntlet.ruleset_id)
+    player_count = town_per_game + mafia_per_game
+    if player_count <= 0:
+        return True
+    return _seat_counts_within_tolerance(
+        seat_counts,
+        town_per_game=town_per_game,
+        mafia_per_game=mafia_per_game,
+        player_count=player_count,
+        tolerance_seats=balance_tolerance_seats,
+    )
 
 
 async def diagnostics_for_games(
@@ -211,15 +361,22 @@ async def diagnostics_for_games(
 async def finalize_gauntlet_if_done(
     session: AsyncSession,
     gauntlet_id: uuid.UUID,
+    *,
+    balance_tolerance_seats: int = DEFAULT_BALANCE_TOLERANCE_SEATS,
+    completed_at: datetime | None = None,
 ) -> GauntletFinalized | None:
     """Mark a gauntlet ``COMPLETED`` and return diagnostics, or return ``None``.
 
     Returns ``None`` when the gauntlet does not exist, is already in
-    ``COMPLETED`` status, has no child games, or has at least one child game
-    that has not emitted a ``GameTerminated`` event yet. The first call after
-    every child game has terminated does the status flip and returns the
-    finalized payload; subsequent calls are no-ops that return ``None``.
+    ``COMPLETED`` status, has no child games, has at least one child game
+    whose row status is still non-terminal, or fails the balance gate. The
+    first call after every child game has terminalized does the status flip and
+    returns the finalized payload; subsequent calls are no-ops that return
+    ``None``.
     """
+    if balance_tolerance_seats < 0:
+        raise ValueError("balance_tolerance_seats must be >= 0")
+
     gauntlet = await session.get(Gauntlet, gauntlet_id)
     if gauntlet is None or gauntlet.status == "COMPLETED":
         return None
@@ -230,8 +387,19 @@ async def finalize_gauntlet_if_done(
         return None
     if not await _all_games_terminal(session, child_ids):
         return None
+    if not await _balance_gate_satisfied(
+        session,
+        gauntlet=gauntlet,
+        child_ids=child_ids,
+        balance_tolerance_seats=balance_tolerance_seats,
+    ):
+        return None
 
-    seats_stmt = select(GameSeat.agent_build_id).where(GameSeat.game_id.in_(child_ids)).distinct()
+    completed_ids = await _completed_game_ids(session, child_ids)
+
+    seats_stmt = (
+        select(GameSeat.agent_build_id).where(GameSeat.game_id.in_(completed_ids)).distinct()
+    )
     # ``agent_build_id`` is nullable since Wave 9 (human seats). Gauntlet games
     # are AI-only, but filter defensively so the rating path never sees a None.
     agent_build_ids = [
@@ -243,30 +411,34 @@ async def finalize_gauntlet_if_done(
         league_id=gauntlet.league_id,
         agent_build_ids=agent_build_ids,
     )
-    diagnostics = await diagnostics_for_games(session, child_ids)
+    diagnostics = await diagnostics_for_games(session, completed_ids)
 
-    completed_at = datetime.now(UTC)
+    finalized_at = completed_at if completed_at is not None else datetime.now(UTC)
     gauntlet.status = "COMPLETED"
-    gauntlet.completed_at = completed_at
+    gauntlet.completed_at = finalized_at
+    gauntlet.heartbeat_at = None
     await session.flush()
     await session.commit()
 
     return GauntletFinalized(
         gauntlet_id=gauntlet_id,
         status="COMPLETED",
-        completed_at=completed_at,
+        completed_at=finalized_at,
         provisional_by_agent_build=provisional_by_ab,
         diagnostics=diagnostics,
     )
 
 
 __all__ = [
+    "DEFAULT_BALANCE_TOLERANCE_SEATS",
     "PROVISIONAL_MAFIA_GAMES",
     "PROVISIONAL_TOTAL_GAMES",
     "PROVISIONAL_TOWN_GAMES",
     "AgentBuildProvisional",
     "GauntletDiagnostics",
     "GauntletFinalized",
+    "TerminalProgress",
     "diagnostics_for_games",
     "finalize_gauntlet_if_done",
+    "gauntlet_child_progress",
 ]

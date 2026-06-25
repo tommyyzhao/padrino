@@ -15,15 +15,17 @@ Validates :func:`padrino.gauntlets.completion.finalize_gauntlet_if_done`:
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.hashing import GENESIS_HASH, compute_event_hash
 from padrino.core.enums import Faction
 from padrino.core.rulesets import mini7_v1
-from padrino.db.models import Gauntlet
+from padrino.db.models import GameSeat, Gauntlet
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -45,7 +47,7 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     providers as providers_repo,
 )
-from padrino.gauntlets.completion import finalize_gauntlet_if_done
+from padrino.gauntlets.completion import finalize_gauntlet_if_done, gauntlet_child_progress
 from padrino.gauntlets.scheduler import create_gauntlet
 
 
@@ -180,6 +182,37 @@ async def _terminate_game(
     )
 
 
+async def _fail_game(session: AsyncSession, *, game_id: uuid.UUID) -> None:
+    await games_repo.mark_failed(
+        session,
+        game_id,
+        completed_at=datetime(2026, 6, 24, 12, tzinfo=UTC),
+        last_error="terminal provider failure",
+        last_error_kind="provider_transient",
+    )
+
+
+async def _rewrite_game_factions(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    mafia_indices: tuple[int, int],
+) -> None:
+    rows = list(
+        (
+            await session.execute(
+                select(GameSeat).where(GameSeat.game_id == game_id).order_by(GameSeat.seat_index)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for seat in rows:
+        faction = Faction.MAFIA if seat.seat_index in mafia_indices else Faction.TOWN
+        seat.faction = faction.value
+        seat.role = "MAFIA_GOON" if faction is Faction.MAFIA else "VILLAGER"
+
+
 async def test_returns_none_when_some_games_not_terminal(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -211,6 +244,55 @@ async def test_returns_none_when_some_games_not_terminal(
         assert g is not None
         assert g.status == "PENDING"
         assert g.completed_at is None
+
+
+async def test_failed_children_are_terminal_but_created_or_running_children_block_completion(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league_id, pv_id, roster = await _seed_world(session, ph="terminal-statuses")
+
+    async with session_factory() as session:
+        gauntlet = await create_gauntlet(
+            session,
+            league_id=league_id,
+            ruleset_id=mini7_v1.RULESET_ID,
+            prompt_version_id=pv_id,
+            clone_count=4,
+            gauntlet_seed="terminal-statuses",
+            roster=roster,
+        )
+
+    completed_id, failed_id, created_id, running_id = gauntlet.game_ids
+    async with session_factory() as session, session.begin():
+        await _seed_seats_for_game(session, game_id=completed_id, roster=roster)
+        await _terminate_game(session, game_id=completed_id)
+        await _fail_game(session, game_id=failed_id)
+        await games_repo.update_status(session, running_id, status="RUNNING")
+
+    async with session_factory() as session:
+        progress = await gauntlet_child_progress(session, gauntlet.gauntlet_id)
+        result = await finalize_gauntlet_if_done(session, gauntlet.gauntlet_id)
+
+    assert progress is not None
+    assert progress.done == 2
+    assert progress.total == 4
+    assert result is None
+
+    async with session_factory() as session, session.begin():
+        await _fail_game(session, game_id=created_id)
+        await _fail_game(session, game_id=running_id)
+
+    async with session_factory() as session:
+        progress = await gauntlet_child_progress(session, gauntlet.gauntlet_id)
+        result = await finalize_gauntlet_if_done(session, gauntlet.gauntlet_id)
+
+    assert progress is not None
+    assert progress.done == 4
+    assert progress.total == 4
+    assert result is not None
+    assert result.status == "COMPLETED"
+    assert result.diagnostics.games_completed == 1
 
 
 async def test_returns_none_when_gauntlet_is_unknown(
@@ -255,6 +337,84 @@ async def test_marks_completed_when_all_games_terminal(
         assert g is not None
         assert g.status == "COMPLETED"
         assert g.completed_at is not None
+
+
+async def test_fully_completed_imbalanced_gauntlet_waits_for_balance(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league_id, pv_id, roster = await _seed_world(session, ph="balance-gate")
+
+    async with session_factory() as session:
+        gauntlet = await create_gauntlet(
+            session,
+            league_id=league_id,
+            ruleset_id=mini7_v1.RULESET_ID,
+            prompt_version_id=pv_id,
+            clone_count=7,
+            gauntlet_seed="balance-gate",
+            roster=roster,
+        )
+
+    async with session_factory() as session, session.begin():
+        for gid in gauntlet.game_ids:
+            await _seed_seats_for_game(session, game_id=gid, roster=roster)
+            await _terminate_game(session, game_id=gid)
+
+    async with session_factory() as session:
+        result = await finalize_gauntlet_if_done(session, gauntlet.gauntlet_id)
+
+    assert result is None
+    async with session_factory() as session:
+        row = await session.get(Gauntlet, gauntlet.gauntlet_id)
+    assert row is not None
+    assert row.status == "PENDING"
+
+    async with session_factory() as session, session.begin():
+        for index, gid in enumerate(gauntlet.game_ids):
+            await _rewrite_game_factions(
+                session,
+                game_id=gid,
+                mafia_indices=(index, (index + 1) % mini7_v1.PLAYER_COUNT),
+            )
+
+    async with session_factory() as session:
+        result = await finalize_gauntlet_if_done(session, gauntlet.gauntlet_id)
+
+    assert result is not None
+    assert result.status == "COMPLETED"
+
+
+async def test_failed_child_exempts_surviving_completed_games_from_balance_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league_id, pv_id, roster = await _seed_world(session, ph="failed-balance-exempt")
+
+    async with session_factory() as session:
+        gauntlet = await create_gauntlet(
+            session,
+            league_id=league_id,
+            ruleset_id=mini7_v1.RULESET_ID,
+            prompt_version_id=pv_id,
+            clone_count=7,
+            gauntlet_seed="failed-balance-exempt",
+            roster=roster,
+        )
+
+    *completed_ids, failed_id = gauntlet.game_ids
+    async with session_factory() as session, session.begin():
+        for gid in completed_ids:
+            await _seed_seats_for_game(session, game_id=gid, roster=roster)
+            await _terminate_game(session, game_id=gid)
+        await _fail_game(session, game_id=failed_id)
+
+    async with session_factory() as session:
+        result = await finalize_gauntlet_if_done(session, gauntlet.gauntlet_id)
+
+    assert result is not None
+    assert result.status == "COMPLETED"
+    assert result.diagnostics.games_completed == len(completed_ids)
 
 
 async def test_idempotent_when_already_completed(

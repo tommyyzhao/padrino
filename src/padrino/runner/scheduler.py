@@ -40,6 +40,10 @@ from padrino.db.repositories import campaigns as campaigns_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
+from padrino.gauntlets.completion import (
+    DEFAULT_BALANCE_TOLERANCE_SEATS,
+    finalize_gauntlet_if_done,
+)
 from padrino.llm.adapter import LlmAdapter
 from padrino.llm.mock import NoopMockAdapter
 from padrino.llm.retry import DEFAULT_RETRY_ON, RetryExhausted
@@ -69,6 +73,7 @@ DEFAULT_GAME_MAX_ATTEMPTS: Final[int] = 2
 DEFAULT_GAME_LEASE_TTL_S: Final[float] = 3600.0
 DEFAULT_GAME_RETRY_BACKOFF_S: Final[float] = 0.0
 DEFAULT_CAMPAIGN_CELL_MAX_ATTEMPTS: Final[int] = 1
+DEFAULT_GAUNTLET_BALANCE_TOLERANCE_SEATS: Final[int] = DEFAULT_BALANCE_TOLERANCE_SEATS
 
 _FAILURE_KIND_PROVIDER_TRANSIENT: Final[str] = "provider_transient"
 _FAILURE_KIND_REPLAY_HASH_MISMATCH: Final[str] = "replay_hash_mismatch"
@@ -184,6 +189,7 @@ class SchedulerOptions:
     game_lease_reaper_interval_s: float = 30.0
     game_lease_ttl_s: float = DEFAULT_GAME_LEASE_TTL_S
     campaign_cell_max_attempts: int = DEFAULT_CAMPAIGN_CELL_MAX_ATTEMPTS
+    gauntlet_balance_tolerance_seats: int = DEFAULT_GAUNTLET_BALANCE_TOLERANCE_SEATS
 
 
 def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
@@ -194,6 +200,7 @@ def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
         game_lease_reaper_interval_s=settings.padrino_game_lease_reaper_interval_seconds,
         game_lease_ttl_s=settings.padrino_game_lease_ttl_seconds,
         campaign_cell_max_attempts=settings.padrino_campaign_cell_max_attempts,
+        gauntlet_balance_tolerance_seats=settings.padrino_gauntlet_balance_tolerance_seats,
     )
 
 
@@ -549,8 +556,20 @@ async def _drive_gauntlet(
     )
 
     completed_at = clock()
-    async with session_factory() as session, session.begin():
-        await gauntlets_repo.mark_completed(session, gauntlet_id, now=completed_at)
+    async with session_factory() as session:
+        finalized = await finalize_gauntlet_if_done(
+            session,
+            gauntlet_id,
+            balance_tolerance_seats=options.gauntlet_balance_tolerance_seats,
+            completed_at=completed_at,
+        )
+    if finalized is None:
+        return
+    await _record_campaign_cell_completion(
+        session_factory,
+        gauntlet_id=gauntlet_id,
+        completed_at=completed_at,
+    )
 
     _logger.info(
         EVENT_SCHEDULER_GAUNTLET_COMPLETED,
@@ -559,6 +578,25 @@ async def _drive_gauntlet(
         failed_games=[str(failure.game_id) for failure in failures],
         failed_game_count=len(failures),
     )
+
+
+async def _record_campaign_cell_completion(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    gauntlet_id: uuid.UUID,
+    completed_at: datetime,
+) -> None:
+    async with session_factory() as session, session.begin():
+        cell = await campaigns_repo.mark_materialized_cell_completed(
+            session,
+            gauntlet_id=gauntlet_id,
+        )
+        if cell is not None:
+            await campaigns_repo.finalize_campaign_if_done(
+                session,
+                cell.campaign_id,
+                now=completed_at,
+            )
 
 
 def _summarize_cell_failures(
@@ -756,6 +794,8 @@ async def run_scheduler(
         raise ValueError("game_retry_backoff_s must be >= 0")
     if opts.campaign_cell_max_attempts < 1:
         raise ValueError("campaign_cell_max_attempts must be >= 1")
+    if opts.gauntlet_balance_tolerance_seats < 0:
+        raise ValueError("gauntlet_balance_tolerance_seats must be >= 0")
     if opts.enable_game_lease_reaper and opts.game_lease_reaper_interval_s <= 0:
         raise ValueError("game_lease_reaper_interval_s must be > 0")
     if opts.game_lease_ttl_s <= 0:
@@ -815,6 +855,7 @@ async def run_scheduler(
 __all__ = [
     "DEFAULT_GAME_LEASE_TTL_S",
     "DEFAULT_GAME_MAX_ATTEMPTS",
+    "DEFAULT_GAUNTLET_BALANCE_TOLERANCE_SEATS",
     "DEFAULT_HEARTBEAT_INTERVAL_S",
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_STALE_FACTOR",

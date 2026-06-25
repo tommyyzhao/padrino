@@ -234,7 +234,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Bug confirmed: _drive_gauntlet (~309-392) marks COMPLETED despite FAILED children (mark_completed at ~382-384, no failure gate); completion._all_games_terminal checks status==COMPLETED only (~100). ModelSeatCounts (gauntlets/evaluation ~101-109: town_seats/mafia_seats/total_seats). DEAD_LETTER cells (US-260) are terminal-for-completion. Campaign auto-finalize is the locked decision (no hard block).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-262",

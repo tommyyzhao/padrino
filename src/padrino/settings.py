@@ -371,6 +371,12 @@ class Settings(BaseSettings):
     # terminally fails after child-game retries requeues its cell until this
     # count is reached, then records a DEAD_LETTER hole for later reporting.
     padrino_campaign_cell_max_attempts: int = 1
+    # Gauntlet/campaign completion balance gate (US-261). Fully successful
+    # gauntlets must keep each model's observed faction exposure within this
+    # many seats of the ruleset-expected split before the gauntlet finalizes.
+    # Gauntlets with any permanently FAILED child are exempt so a documented
+    # hole does not block campaign progress.
+    padrino_gauntlet_balance_tolerance_seats: int = 4
 
     def build_routing_policy(
         self,

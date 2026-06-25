@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.rulesets import mini7_v1
 from padrino.core.scheduling.pairing import PairingFormat, derive_campaign_cell_seed
-from padrino.db.models import CampaignPairing, Game, Gauntlet
+from padrino.db.models import Campaign, CampaignPairing, Game, Gauntlet
 from padrino.db.repositories import (
     agent_builds,
     campaigns,
@@ -487,3 +487,63 @@ async def test_poison_campaign_cell_failure_dead_letters_immediately(
     assert failure.status == campaigns.CAMPAIGN_PAIRING_DEAD_LETTER
     assert failure.attempt_count == 1
     assert failure.last_error == "replay_hash_mismatch: replay hash mismatch at sequence 3"
+
+
+async def test_campaign_progress_counts_terminal_cells_and_auto_finalizes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        league_id, _prompt_id, model_ids, _builds = await _seed_campaign_world(
+            session,
+            model_count=mini7_v1.PLAYER_COUNT,
+        )
+        created = await campaigns.create_campaign_from_matrix(
+            session,
+            campaign_seed="campaign-terminal-progress",
+            ruleset_id=mini7_v1.RULESET_ID,
+            league_id=league_id,
+            model_field=model_ids,
+            format="MIRROR",
+            per_model_game_target=2,
+            sigma_target=2.5,
+            rank_stability_k=10,
+        )
+        campaign_id = created.campaign_id
+        cells = await _campaign_cell_rows(session, campaign_id)
+        for cell in cells[:-1]:
+            cell.status = campaigns.CAMPAIGN_PAIRING_COMPLETED
+        cells[0].status = campaigns.CAMPAIGN_PAIRING_DEAD_LETTER
+
+    async with session_factory() as session, session.begin():
+        progress = await campaigns.campaign_progress(session, campaign_id)
+        finalized = await campaigns.finalize_campaign_if_done(
+            session,
+            campaign_id,
+            now=_NOW,
+        )
+        row = await session.get(Campaign, campaign_id)
+
+    assert progress is not None
+    assert progress.done == len(cells) - 1
+    assert progress.total == len(cells)
+    assert finalized is None
+    assert row is not None
+    assert row.status != campaigns.CAMPAIGN_STATUS_COMPLETED
+    assert row.completed_at is None
+
+    async with session_factory() as session, session.begin():
+        cells = await _campaign_cell_rows(session, campaign_id)
+        cells[-1].status = campaigns.CAMPAIGN_PAIRING_COMPLETED
+        progress = await campaigns.campaign_progress(session, campaign_id)
+        finalized = await campaigns.finalize_campaign_if_done(
+            session,
+            campaign_id,
+            now=_NOW,
+        )
+
+    assert progress is not None
+    assert progress.done == progress.total == len(cells)
+    assert finalized is not None
+    assert finalized.status == campaigns.CAMPAIGN_STATUS_COMPLETED
+    assert finalized.completed_at is not None
+    assert _aware(finalized.completed_at) == _NOW
