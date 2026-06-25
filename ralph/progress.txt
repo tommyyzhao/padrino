@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign schema migrations (US-258): when adding campaign-owned gauntlet
+  metadata, create the referenced `campaigns` table and cheap
+  `campaign_pairings` ledger before `batch_alter_table("gauntlets")` adds the
+  nullable `campaign_id` FK/index. On downgrade, drop the child ledger table,
+  then drop the gauntlet FK/index/column before dropping `campaigns`. The newest
+  revision owns the single-head assertion; older revision tests should assert
+  only their down-chain position.
 - Campaign pairing matrices (US-257): keep the generator pure under
   `core/scheduling/pairing.py`. Generate deterministic full-field cyclic rounds
   for coverage/opponent diversity, assign each cell's group to seats by
@@ -3452,3 +3459,41 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2601 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-257 is pure backend core work and
   did not touch `web/dashboard`.
+
+## 2026-06-24T18:56 PDT - US-258
+- Added Alembic revision `0053_campaigns` after `0052`, creating `campaigns`
+  and `campaign_pairings` before batch-adding nullable `gauntlets.campaign_id`
+  plus `ix_gauntlets_campaign_id`. The pairing ledger has
+  `uq_campaign_pairing_cell` over `(campaign_id, cell_index)` and nullable
+  `gauntlet_id` for incremental materialization in US-259.
+- Added matching `Campaign` / `CampaignPairing` ORM models, `Gauntlet.campaign_id`,
+  and the gauntlet campaign index declaration. Added the new tables to the
+  migration smoke `EXPECTED_TABLES` set and updated the `0052` test so `0053`
+  owns the single-head assertion.
+- Added a dedicated SQLite migration/model agreement test covering upgrade
+  deltas, FK/index/unique metadata, nullable standalone gauntlets, downgrade
+  cleanup, and duplicate campaign-cell rejection. Added ORM and dialect
+  portability coverage for the new models.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0053_campaigns.py`,
+  `tests/db/test_migration_0053_campaigns.py`,
+  `tests/db/test_migration_0052_game_leases.py`,
+  `tests/db/test_migrations.py`, `tests/db/test_dialect_portability.py`,
+  `tests/db/test_models.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0053_campaigns.py -q` failed first on
+  missing `Campaign` / `CampaignPairing`; focused GREEN
+  `uv run pytest tests/db/test_migration_0053_campaigns.py tests/db/test_models.py::test_gauntlet_round_trip -q`
+  -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/db/test_models.py tests/db/test_dialect_portability.py tests/db/test_migration_0053_campaigns.py -q`
+  -> 32 passed; migration smoke
+  `uv run pytest tests/db/test_migration_0053_campaigns.py tests/db/test_migration_0052_game_leases.py tests/db/test_migrations.py tests/db/test_migrations_all_dialects.py -q`
+  -> 15 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2607 passed / 41 skipped /
+  10 deselected. A first full pytest attempt hit the previously observed shared
+  in-memory SQLite fixture cascade (`no such table: lobby_seats`); the named
+  runner failure passed in isolation and the immediate exact full-gate rerun
+  passed. Frontend gates not run; US-258 is backend schema-only and did not
+  touch `web/dashboard`.

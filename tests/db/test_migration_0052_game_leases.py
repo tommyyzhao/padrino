@@ -128,11 +128,10 @@ def _model_index_columns(table: Table) -> dict[str, tuple[str, ...]]:
     }
 
 
-def test_0052_is_linear_head_after_0051() -> None:
+def test_0052_is_linear_after_0051() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0052"]
     assert script.get_revision("0052").down_revision == "0051"
 
 

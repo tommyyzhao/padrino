@@ -175,7 +175,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Chain: 0052 (US-251) -> 0053 here. Gauntlet model at db/models.py ~142-159 (no campaign_id today). campaign_pairings is a cheap LEDGER (one row per pairing cell); games/gauntlets materialize incrementally (US-259). status DEAD_LETTER for exhausted cells (US-260). Convergence-target columns (sigma_target, rank_stability_k) feed US-269 publish gate. owner/lease columns mirror the gauntlet heartbeat pattern for crash-safe campaign claim (US-259).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-259",

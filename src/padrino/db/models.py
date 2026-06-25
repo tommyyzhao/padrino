@@ -1,8 +1,9 @@
 """SQLAlchemy 2.x ORM models for Padrino's core schema (prd.md §12).
 
 Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
-``agent_builds``, ``leagues``, ``gauntlets``, ``gauntlet_roster_slots``,
-``games``, ``game_seats``, ``game_events``, ``llm_calls``,
+``agent_builds``, ``leagues``, ``campaigns``, ``campaign_pairings``,
+``gauntlets``, ``gauntlet_roster_slots``, ``games``, ``game_seats``,
+``game_events``, ``llm_calls``,
 ``rating_contexts``, ``ratings``, ``rating_events``, the ranked human-lane
 siblings ``human_rating`` / ``human_rating_event``, the
 non-canonical context sibling rating tables, and the browser-human identity
@@ -140,10 +141,38 @@ class League(Base):
     )
 
 
-class Gauntlet(Base):
-    __tablename__ = "gauntlets"
+class Campaign(Base):
+    __tablename__ = "campaigns"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    campaign_seed: Mapped[str] = mapped_column(String, nullable=False)
+    ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
+    league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    format: Mapped[str] = mapped_column(String, nullable=False)
+    player_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    per_model_game_target: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    leased_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sigma_target: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
+    rank_stability_k: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class Gauntlet(Base):
+    __tablename__ = "gauntlets"
+    __table_args__ = (Index("ix_gauntlets_campaign_id", "campaign_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("campaigns.id"), nullable=True
+    )
     league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
     ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
     prompt_version_id: Mapped[uuid.UUID] = mapped_column(
@@ -158,6 +187,26 @@ class Gauntlet(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CampaignPairing(Base):
+    __tablename__ = "campaign_pairings"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "cell_index", name="uq_campaign_pairing_cell"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    campaign_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("campaigns.id"), nullable=False)
+    cell_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    roster_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gauntlet_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("gauntlets.id"), nullable=True
+    )
 
 
 class GauntletRosterSlot(Base):
