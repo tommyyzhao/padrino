@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Additive game-table migrations (US-251): when a new Alembic revision adds
+  nullable `games` columns plus an index, keep the migration and `Game` model
+  byte-aligned with a dedicated per-revision test. Upgrade the prior head,
+  assert the added column/index delta, seed an existing row to prove NULL
+  backfill, downgrade to the prior head, and assert model column/index metadata
+  matches the migration.
 - Benchmark resume threading (US-250): keep benchmark scheduler resume state on
   `GamePersistence.resume`. `_run_with_retry` should rehydrate the current
   `game_events` tail before each child-game attempt, `_run_one_game` should
@@ -3210,4 +3216,38 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 20 passed. Full gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2569 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-24T17:38 PDT - US-251
+- Added Alembic revision `0052_game_leases` after `0051`, using
+  `batch_alter_table("games")` to add nullable `leased_by`,
+  `lease_expires_at`, `attempt_count`, `last_error`, and `last_error_kind`,
+  plus `ix_games_status_lease_expires_at`.
+- Added matching nullable `Game` ORM columns and the same `(status,
+  lease_expires_at)` index declaration.
+- Added a dedicated migration/model agreement test that upgrades from `0051`,
+  seeds an existing game row, upgrades to head, asserts the exact added columns,
+  NULL defaults, index columns, model metadata, and downgrade cleanup.
+- Updated the older `0051` migration test to stop claiming `0051` is the head;
+  `0052` now owns the single-head assertion.
+- Stabilized the scheduler retry-resume regression by running its injected
+  resumed game unranked; that test verifies resume/event-chain behavior, while
+  rating writes are covered by separate scheduler and rating integration tests.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0052_game_leases.py`,
+  `tests/db/test_migration_0051_lobby_integrity_ack.py`,
+  `tests/db/test_migration_0052_game_leases.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0052_game_leases.py` failed first on
+  missing `0052` head/columns/model metadata; focused GREEN same command -> 3
+  passed. Adjacent GREEN
+  `uv run pytest tests/db/test_migration_0050_hot_path_indexes.py tests/db/test_migration_0051_lobby_integrity_ack.py tests/db/test_migration_0052_game_leases.py tests/db/test_migrations.py`
+  -> 12 passed. Order-flake reproduction GREEN
+  `uv run pytest tests/release/test_audit_script.py tests/release/test_metadata.py tests/runner/test_scheduler.py::test_scheduler_retry_rehydrates_started_benchmark_game -q`
+  -> 223 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2573 passed / 41 skipped /
   10 deselected.

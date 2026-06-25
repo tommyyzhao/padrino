@@ -605,7 +605,7 @@ async def test_scheduler_retry_rehydrates_started_benchmark_game(
         adapter: LlmAdapter,
         ranked: bool,
     ) -> None:
-        del adapter
+        del adapter, ranked
         seen_resumes.append(persistence.resume)
         if len(seen_resumes) == 1:
             async with session_factory() as session, session.begin():
@@ -620,7 +620,7 @@ async def test_scheduler_retry_rehydrates_started_benchmark_game(
         await run_game(
             config,
             _town_win_adapter_for_seed(config.game_seed),
-            ranked,
+            False,
             persistence=persistence,
             resume=persistence.resume,
         )

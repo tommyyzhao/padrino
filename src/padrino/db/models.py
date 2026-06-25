@@ -27,6 +27,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     Uuid,
     text,
@@ -175,6 +176,7 @@ class Game(Base):
     __tablename__ = "games"
     __table_args__ = (
         Index("ix_games_pair_id", "pair_id"),
+        Index("ix_games_status_lease_expires_at", "status", "lease_expires_at"),
         Index(
             "ix_games_completed_at_is_broadcastable",
             "completed_at",
@@ -214,6 +216,13 @@ class Game(Base):
     identity_mode: Mapped[str] = mapped_column(
         String, nullable=False, default="ANONYMOUS", server_default="ANONYMOUS"
     )
+    leased_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_kind: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class GameSeat(Base):

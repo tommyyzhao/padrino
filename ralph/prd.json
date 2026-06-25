@@ -50,7 +50,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Current head = 0051_lobby_integrity_acknowledged (down chain 0049->0050->0051). Game model at db/models.py ~187-216 has NO lease columns today. batch_alter_table idiom used in 0051/0047/0015. All-nullable additive so a re-run of an in-flight game is safe. Index (status, lease_expires_at) feeds US-252's claim + reaper.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-252",

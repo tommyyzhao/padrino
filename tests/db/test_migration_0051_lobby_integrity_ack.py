@@ -95,11 +95,10 @@ def _insert_existing_lobby(db_path: Path) -> str:
     return lobby_id
 
 
-def test_0051_is_linear_head_after_0050() -> None:
+def test_0051_is_linear_after_0050() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0051"]
     assert script.get_revision("0051").down_revision == "0050"
 
 
