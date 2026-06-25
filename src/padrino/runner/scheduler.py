@@ -24,7 +24,7 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -61,6 +61,7 @@ DEFAULT_POLL_INTERVAL_S: Final[float] = 1.0
 DEFAULT_HEARTBEAT_INTERVAL_S: Final[float] = 5.0
 DEFAULT_STALE_FACTOR: Final[float] = 2.0
 DEFAULT_GAME_MAX_ATTEMPTS: Final[int] = 2
+DEFAULT_GAME_LEASE_TTL_S: Final[float] = 3600.0
 
 
 def _utcnow() -> datetime:
@@ -102,6 +103,7 @@ class SchedulerOptions:
     game_max_attempts: int = DEFAULT_GAME_MAX_ATTEMPTS
     enable_game_lease_reaper: bool = False
     game_lease_reaper_interval_s: float = 30.0
+    game_lease_ttl_s: float = DEFAULT_GAME_LEASE_TTL_S
 
 
 def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
@@ -110,6 +112,7 @@ def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
         game_max_attempts=settings.padrino_scheduler_game_max_attempts,
         enable_game_lease_reaper=settings.padrino_enable_game_lease_reaper,
         game_lease_reaper_interval_s=settings.padrino_game_lease_reaper_interval_seconds,
+        game_lease_ttl_s=settings.padrino_game_lease_ttl_seconds,
     )
 
 
@@ -181,11 +184,20 @@ async def _run_one_game(
     adapter_factory: AdapterFactory,
     game_executor: GameExecutor,
     ranked: bool,
+    worker_id: str,
+    clock: Clock,
+    lease_ttl: timedelta,
     resume: GameResume | None = None,
 ) -> None:
     async with semaphore:
-        async with session_factory() as session:
-            game = await games_repo.get(session, game_id)
+        async with session_factory() as session, session.begin():
+            game = await games_repo.lease_game_for_worker(
+                session,
+                game_id,
+                now=clock(),
+                lease_ttl=lease_ttl,
+                worker_id=worker_id,
+            )
             if game is None:
                 return
             game_seed = game.game_seed
@@ -203,6 +215,9 @@ async def _run_one_game(
             agent_builds=agent_builds_by_seat,
             league_id=league_id,
             resume=resume,
+            worker_id=worker_id,
+            lease_clock=clock,
+            db_write_lock=asyncio.Lock(),
         )
         structlog.contextvars.bind_contextvars(
             gauntlet_id=str(gauntlet_id),
@@ -226,6 +241,8 @@ async def _run_child_games(
     ranked: bool,
     max_attempts: int,
     clock: Clock,
+    worker_id: str,
+    lease_ttl: timedelta,
 ) -> list[_ScheduledGameFailure]:
     async def _run_with_retry(child: _ScheduledGame) -> _ScheduledGameFailure | None:
         last_exception: Exception | None = None
@@ -243,6 +260,9 @@ async def _run_child_games(
                     adapter_factory=adapter_factory,
                     game_executor=game_executor,
                     ranked=ranked,
+                    worker_id=worker_id,
+                    clock=clock,
+                    lease_ttl=lease_ttl,
                     resume=resume,
                 )
                 return None
@@ -328,6 +348,7 @@ async def _drive_gauntlet(
     options: SchedulerOptions,
     clock: Clock,
     sleeper: Sleeper,
+    worker_id: str,
 ) -> None:
     """Run every child game of one gauntlet and finalize on success."""
     ctx = await _gauntlet_context(session_factory, gauntlet_id)
@@ -343,18 +364,24 @@ async def _drive_gauntlet(
     )
     scheduler_inflight_gauntlets.inc()
 
-    hb_stop = asyncio.Event()
-    hb_task = asyncio.create_task(
-        _heartbeat_loop(
-            session_factory,
-            gauntlet_id,
-            interval_s=options.heartbeat_interval_s,
-            clock=clock,
-            sleeper=sleeper,
-            stop=hb_stop,
-        ),
-        name=f"scheduler-heartbeat-{gauntlet_id}",
-    )
+    async with session_factory() as session:
+        sqlite_single_writer = session.get_bind().dialect.name == "sqlite"
+
+    hb_stop: asyncio.Event | None = None
+    hb_task: asyncio.Task[None] | None = None
+    if not sqlite_single_writer:
+        hb_stop = asyncio.Event()
+        hb_task = asyncio.create_task(
+            _heartbeat_loop(
+                session_factory,
+                gauntlet_id,
+                interval_s=options.heartbeat_interval_s,
+                clock=clock,
+                sleeper=sleeper,
+                stop=hb_stop,
+            ),
+            name=f"scheduler-heartbeat-{gauntlet_id}",
+        )
     ranked = any(child.agent_builds_by_seat for child in child_games)
 
     try:
@@ -369,10 +396,13 @@ async def _drive_gauntlet(
             ranked=ranked,
             max_attempts=options.game_max_attempts,
             clock=clock,
+            worker_id=worker_id,
+            lease_ttl=timedelta(seconds=options.game_lease_ttl_s),
         )
     finally:
-        hb_stop.set()
-        await hb_task
+        if hb_stop is not None and hb_task is not None:
+            hb_stop.set()
+            await hb_task
         scheduler_inflight_gauntlets.dec()
 
     for failure in failures:
@@ -551,6 +581,8 @@ async def run_scheduler(
         raise ValueError("game_max_attempts must be >= 1")
     if opts.enable_game_lease_reaper and opts.game_lease_reaper_interval_s <= 0:
         raise ValueError("game_lease_reaper_interval_s must be > 0")
+    if opts.game_lease_ttl_s <= 0:
+        raise ValueError("game_lease_ttl_s must be > 0")
 
     sem = semaphore or asyncio.Semaphore(concurrency)
     executor = game_executor or _default_game_executor
@@ -599,10 +631,12 @@ async def run_scheduler(
             options=opts,
             clock=tick_clock,
             sleeper=tick_sleeper,
+            worker_id=wid,
         )
 
 
 __all__ = [
+    "DEFAULT_GAME_LEASE_TTL_S",
     "DEFAULT_GAME_MAX_ATTEMPTS",
     "DEFAULT_HEARTBEAT_INTERVAL_S",
     "DEFAULT_POLL_INTERVAL_S",

@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Lease-fenced benchmark finalization (US-253): scheduler-created
+  `GamePersistence` should carry `worker_id`, injected `lease_clock`, and a
+  per-game `db_write_lock`. `_persist_terminated_event` re-reads the `Game`
+  row inside the terminal transaction after the existing COMPLETED skip and
+  aborts before `GameTerminated` / ratings if the lease is missing, expired, or
+  reassigned. Keep SQLite scheduler tests from polling the single in-memory
+  connection while a full persisted game is writing events.
 - Game-grain leases (US-252): keep game-claim/reaper logic in
   `db/repositories/games.py` with injected `now`/TTL/worker id. PostgreSQL
   claim paths should add `with_for_update(skip_locked=True)` only for that
@@ -3290,3 +3297,38 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   10 deselected. An earlier full pytest attempt was interrupted after
   2450 passed while quiet at a human-lane takeover test; the isolated test and
   immediate repeated exact full gate both passed.
+
+## 2026-06-24T18:11 PDT - US-253
+- Threaded scheduler `worker_id` and an injected lease clock through
+  `_drive_gauntlet` / `_run_child_games` / `_run_one_game` into
+  `GamePersistence`, with a configurable per-game lease TTL.
+- Added `games_repo.lease_game_for_worker` so the scheduler claims a specific
+  child game for the current worker immediately before execution.
+- Added the finalize fence inside `_persist_terminated_event`'s terminal
+  transaction: after the existing COMPLETED short-circuit, it verifies the same
+  worker still owns an unexpired lease before writing `GameTerminated`, status,
+  or rating rows.
+- Added a per-game persistence write lock for scheduler-created
+  `GamePersistence` so SQLite's single shared test connection does not
+  interleave event / LLM-call writes; adjusted the resume scheduler regression
+  to stop from the successful executor path instead of DB-polling during a full
+  persisted game.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/games.py`,
+  `src/padrino/runner/game_runner.py`, `src/padrino/runner/scheduler.py`,
+  `src/padrino/settings.py`,
+  `tests/runner/test_game_persistence_terminal.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_game_persistence_terminal.py::test_terminal_finalize_fence_blocks_stolen_lease_without_writes tests/runner/test_game_persistence_terminal.py::test_terminal_finalize_valid_lease_writes_terminal_event_and_ratings tests/runner/test_game_persistence_terminal.py::test_terminal_lease_fence_read_and_event_write_share_transaction tests/runner/test_scheduler.py::test_scheduler_threads_worker_id_and_clock_to_game_persistence -q`
+  failed first on the missing finalize fence and worker/clock plumbing; focused
+  GREEN `uv run pytest tests/runner/test_scheduler.py tests/runner/test_game_persistence_terminal.py -q`
+  -> 25 passed. SQLite race regression GREEN
+  `for i in 1 2 3 4 5 6 7 8 9 10; do uv run pytest tests/runner/test_game_runner.py tests/runner/test_scheduler.py::test_scheduler_retry_rehydrates_started_benchmark_game -q || exit 1; done`
+  -> 10/10 passed. Adjacent GREEN
+  `uv run pytest tests/db/test_game_claims.py tests/runner/test_benchmark_resume.py tests/db/test_event_persistence.py -q`
+  -> 9 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2584 passed / 41 skipped /
+  10 deselected.

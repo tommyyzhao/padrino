@@ -361,6 +361,7 @@ class Settings(BaseSettings):
     # expired per-game leases on a continuous injected-clock tick.
     padrino_enable_game_lease_reaper: bool = False
     padrino_game_lease_reaper_interval_seconds: float = 30.0
+    padrino_game_lease_ttl_seconds: float = 3600.0
 
     def build_routing_policy(
         self,

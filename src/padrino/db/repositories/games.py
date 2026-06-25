@@ -9,7 +9,12 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.db.game_status import GAME_STATUS_CREATED, GAME_STATUS_FAILED, GAME_STATUS_RUNNING
+from padrino.db.game_status import (
+    GAME_STATUS_CREATED,
+    GAME_STATUS_FAILED,
+    GAME_STATUS_RUNNING,
+    is_terminal_game_status,
+)
 from padrino.db.models import Game, GameSeat
 
 
@@ -80,6 +85,35 @@ async def claim_oldest_pending_game(
         stmt = stmt.with_for_update(skip_locked=True)
     game = (await session.execute(stmt)).scalars().first()
     if game is None:
+        return None
+    game.status = GAME_STATUS_RUNNING
+    game.leased_by = worker_id
+    game.lease_expires_at = now + lease_ttl
+    game.attempt_count = (game.attempt_count or 0) + 1
+    await session.flush()
+    return game
+
+
+async def lease_game_for_worker(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+    *,
+    now: datetime,
+    lease_ttl: timedelta,
+    worker_id: str,
+) -> Game | None:
+    """Claim or refresh one specific runnable game for ``worker_id``."""
+    stmt = select(Game).where(Game.id == game_id).limit(1)
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update()
+    game = (await session.execute(stmt)).scalars().first()
+    if game is None or is_terminal_game_status(game.status):
+        return None
+    if game.status not in (GAME_STATUS_CREATED, GAME_STATUS_RUNNING):
+        return None
+    expires_at = game.lease_expires_at
+    held_by_other = game.leased_by is not None and game.leased_by != worker_id
+    if held_by_other and (expires_at is None or _aware(expires_at) > _aware(now)):
         return None
     game.status = GAME_STATUS_RUNNING
     game.leased_by = worker_id

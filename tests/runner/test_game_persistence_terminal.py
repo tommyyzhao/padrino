@@ -9,12 +9,13 @@ three — nothing is partially persisted.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.reducer import initial_state
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
@@ -44,6 +45,7 @@ from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
 from tests.conftest import make_town_win_script
 
 _GAME_SEED = "seed-us049-terminal"
+_LEASE_NOW = datetime(2026, 6, 24, 12, tzinfo=UTC)
 
 
 def _split_factions() -> tuple[list[str], list[str], str, str]:
@@ -267,6 +269,294 @@ async def test_completed_game_terminal_persist_skip_writes_no_extra_ratings(
 
     await game_runner._persist_terminated_event(
         persistence,
+        stored,
+        state,
+        ranked=True,
+        day_terminated=2,
+    )
+
+    async with session_factory() as session:
+        game = await session.get(Game, game_id)
+        game_events = list((await session.execute(select(GameEvent))).scalars().all())
+        rating_events = list((await session.execute(select(RatingEvent))).scalars().all())
+
+    assert game is not None
+    assert game.status == "COMPLETED"
+    assert game.terminal_result == terminal_result
+    assert game_events == []
+    assert rating_events == []
+
+
+async def test_terminal_finalize_fence_blocks_stolen_lease_without_writes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, builds_by_seat = await _seed_ranked_setup(
+        session_factory, hash_prefix="us253-stolen"
+    )
+    async with session_factory() as session, session.begin():
+        game = await session.get(Game, game_id)
+        assert game is not None
+        game.leased_by = "new-worker"
+        game.lease_expires_at = _LEASE_NOW + timedelta(minutes=5)
+
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "event_type": "GameTerminated",
+            "sequence": 0,
+            "phase": "DAY_2_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "TOWN", "reason": "NO_MAFIA_ALIVE"},
+        }
+    )
+    state = initial_state().model_copy(
+        update={
+            "ruleset_id": mini7_v1.RULESET_ID,
+            "game_id": str(game_id),
+            "game_seed": _GAME_SEED,
+            "seats": tuple(assign_roles(_GAME_SEED, mini7_v1)),
+            "terminal_result": "TOWN",
+            "terminal_reason": "NO_MAFIA_ALIVE",
+        }
+    )
+
+    await game_runner._persist_terminated_event(
+        GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds=builds_by_seat,
+            league_id=league_id,
+            worker_id="old-worker",
+            lease_clock=lambda: _LEASE_NOW,
+        ),
+        stored,
+        state,
+        ranked=True,
+        day_terminated=2,
+    )
+
+    async with session_factory() as session:
+        game = await session.get(Game, game_id)
+        terminal_events = list(
+            (
+                await session.execute(
+                    select(GameEvent).where(
+                        GameEvent.game_id == game_id,
+                        GameEvent.event_type == "GameTerminated",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rating_events = list((await session.execute(select(RatingEvent))).scalars().all())
+
+    assert game is not None
+    assert game.status == "RUNNING"
+    assert game.terminal_result is None
+    assert terminal_events == []
+    assert rating_events == []
+
+
+async def test_terminal_finalize_valid_lease_writes_terminal_event_and_ratings(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, builds_by_seat = await _seed_ranked_setup(
+        session_factory, hash_prefix="us253-valid"
+    )
+    async with session_factory() as session, session.begin():
+        game = await session.get(Game, game_id)
+        assert game is not None
+        game.leased_by = "live-worker"
+        game.lease_expires_at = _LEASE_NOW + timedelta(minutes=5)
+
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "event_type": "GameTerminated",
+            "sequence": 0,
+            "phase": "DAY_2_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "TOWN", "reason": "NO_MAFIA_ALIVE"},
+        }
+    )
+    state = initial_state().model_copy(
+        update={
+            "ruleset_id": mini7_v1.RULESET_ID,
+            "game_id": str(game_id),
+            "game_seed": _GAME_SEED,
+            "seats": tuple(assign_roles(_GAME_SEED, mini7_v1)),
+            "terminal_result": "TOWN",
+            "terminal_reason": "NO_MAFIA_ALIVE",
+        }
+    )
+
+    await game_runner._persist_terminated_event(
+        GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds=builds_by_seat,
+            league_id=league_id,
+            worker_id="live-worker",
+            lease_clock=lambda: _LEASE_NOW,
+        ),
+        stored,
+        state,
+        ranked=True,
+        day_terminated=2,
+    )
+
+    async with session_factory() as session:
+        game = await session.get(Game, game_id)
+        terminal_event = (
+            await session.execute(
+                select(GameEvent).where(
+                    GameEvent.game_id == game_id,
+                    GameEvent.event_type == "GameTerminated",
+                )
+            )
+        ).scalar_one()
+        rating_events = list((await session.execute(select(RatingEvent))).scalars().all())
+
+    assert game is not None
+    assert game.status == "COMPLETED"
+    assert game.terminal_result == {
+        "winner": "TOWN",
+        "reason": "NO_MAFIA_ALIVE",
+        "day_terminated": 2,
+    }
+    assert terminal_event.event_hash == game.event_hash_head
+    assert len(rating_events) == 14
+
+
+async def test_terminal_lease_fence_read_and_event_write_share_transaction(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _league_id, game_id, _builds_by_seat = await _seed_ranked_setup(
+        session_factory, hash_prefix="us253-atomic"
+    )
+    async with session_factory() as session, session.begin():
+        game = await session.get(Game, game_id)
+        assert game is not None
+        game.leased_by = "atomic-worker"
+        game.lease_expires_at = _LEASE_NOW + timedelta(minutes=5)
+
+    observed_gets: list[tuple[int, bool]] = []
+    observed_appends: list[tuple[int, bool]] = []
+    real_get = games_repo.get
+    real_append = game_runner._append_event_row
+
+    async def spy_get(session: AsyncSession, target_game_id: uuid.UUID) -> Game | None:
+        game = await real_get(session, target_game_id)
+        if target_game_id == game_id:
+            observed_gets.append((id(session), session.in_transaction()))
+        return game
+
+    async def spy_append(
+        session: AsyncSession,
+        persistence: GamePersistence,
+        stored: StoredEvent,
+    ) -> None:
+        observed_appends.append((id(session), session.in_transaction()))
+        await real_append(session, persistence, stored)
+
+    monkeypatch.setattr(games_repo, "get", spy_get)
+    monkeypatch.setattr(game_runner, "_append_event_row", spy_append)
+
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "event_type": "GameTerminated",
+            "sequence": 0,
+            "phase": "DAY_2_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "TOWN", "reason": "NO_MAFIA_ALIVE"},
+        }
+    )
+    state = initial_state().model_copy(
+        update={
+            "ruleset_id": mini7_v1.RULESET_ID,
+            "game_id": str(game_id),
+            "game_seed": _GAME_SEED,
+            "seats": tuple(assign_roles(_GAME_SEED, mini7_v1)),
+            "terminal_result": "TOWN",
+            "terminal_reason": "NO_MAFIA_ALIVE",
+        }
+    )
+
+    await game_runner._persist_terminated_event(
+        GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            worker_id="atomic-worker",
+            lease_clock=lambda: _LEASE_NOW,
+        ),
+        stored,
+        state,
+        ranked=False,
+        day_terminated=2,
+    )
+
+    assert observed_gets
+    assert observed_appends
+    assert observed_gets[0] == observed_appends[0]
+
+
+async def test_completed_skip_precedes_lease_fence_and_writes_no_extra_ratings(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    league_id, game_id, builds_by_seat = await _seed_ranked_setup(
+        session_factory, hash_prefix="us253-completed-fence"
+    )
+    terminal_result = {"winner": "TOWN", "reason": "NO_MAFIA_ALIVE", "day_terminated": 2}
+    async with session_factory() as session, session.begin():
+        await games_repo.update_status(
+            session,
+            game_id,
+            status="COMPLETED",
+            terminal_result=terminal_result,
+        )
+
+    async def fail_rating_update(*args: object, **kwargs: object) -> None:
+        raise AssertionError("completed game must not apply ratings again")
+
+    monkeypatch.setattr(game_runner, "update_ratings_for_game", fail_rating_update)
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "event_type": "GameTerminated",
+            "sequence": 0,
+            "phase": "DAY_2_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "TOWN", "reason": "NO_MAFIA_ALIVE"},
+        }
+    )
+    state = initial_state().model_copy(
+        update={
+            "ruleset_id": mini7_v1.RULESET_ID,
+            "game_id": str(game_id),
+            "game_seed": _GAME_SEED,
+            "seats": tuple(assign_roles(_GAME_SEED, mini7_v1)),
+            "terminal_result": "TOWN",
+            "terminal_reason": "NO_MAFIA_ALIVE",
+        }
+    )
+
+    await game_runner._persist_terminated_event(
+        GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds=builds_by_seat,
+            league_id=league_id,
+            worker_id="wrong-worker",
+            lease_clock=lambda: _LEASE_NOW,
+        ),
         stored,
         state,
         ranked=True,

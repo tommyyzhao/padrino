@@ -28,7 +28,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, cast
 
@@ -148,6 +149,11 @@ class GamePersistence:
 
     ``ranked`` carries a persisted league binding for executors that call
     :func:`drive_game_loop` indirectly, such as the human-lane worker.
+
+    ``worker_id`` and ``lease_clock`` are the benchmark scheduler's lease fence:
+    when ``worker_id`` is present, terminal persistence re-reads the ``games``
+    row inside the finalize transaction and proceeds only while that same
+    worker still holds an unexpired per-game lease.
     """
 
     session_factory: async_sessionmaker[AsyncSession]
@@ -157,6 +163,9 @@ class GamePersistence:
     ranked: bool = False
     resume: GameResume | None = None
     settings: Settings | None = None
+    worker_id: str | None = None
+    lease_clock: Callable[[], Any] | None = None
+    db_write_lock: asyncio.Lock | None = field(default=None, repr=False, compare=False)
 
 
 class GameConfig(BaseModel):
@@ -262,11 +271,24 @@ async def _append_event_row(
     )
 
 
+@asynccontextmanager
+async def _persistence_transaction(
+    persistence: GamePersistence,
+) -> AsyncIterator[AsyncSession]:
+    lock = persistence.db_write_lock
+    if lock is None:
+        async with persistence.session_factory() as session, session.begin():
+            yield session
+        return
+    async with lock, persistence.session_factory() as session, session.begin():
+        yield session
+
+
 async def _persist_stored_event(
     persistence: GamePersistence,
     stored: StoredEvent,
 ) -> None:
-    async with persistence.session_factory() as session, session.begin():
+    async with _persistence_transaction(persistence) as session:
         await _append_event_row(session, persistence, stored)
 
 
@@ -333,7 +355,7 @@ async def _persist_roles_assigned(
             }
         )
 
-    async with persistence.session_factory() as session, session.begin():
+    async with _persistence_transaction(persistence) as session:
         await _append_event_row(session, persistence, stored)
         for spec in seat_specs:
             await games_repo.add_seat(
@@ -478,6 +500,59 @@ async def _apply_placement_after_finalization(
         )
 
 
+def _lease_fence_allows_finalize(
+    persistence: GamePersistence,
+    game: Any | None,
+) -> bool:
+    worker_id = persistence.worker_id
+    if worker_id is None:
+        return True
+    if game is None:
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            reason="missing_game",
+        )
+        return False
+    lease_clock = persistence.lease_clock
+    if lease_clock is None:
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            reason="missing_lease_clock",
+        )
+        return False
+    if game.leased_by != worker_id:
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            leased_by=game.leased_by,
+            reason="worker_mismatch",
+        )
+        return False
+    expires_at = game.lease_expires_at
+    if expires_at is None:
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            reason="missing_lease_expiry",
+        )
+        return False
+    if games_repo._aware(expires_at) <= games_repo._aware(lease_clock()):
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            reason="lease_expired",
+        )
+        return False
+    return True
+
+
 async def _persist_terminated_event(
     persistence: GamePersistence,
     stored: StoredEvent,
@@ -495,13 +570,15 @@ async def _persist_terminated_event(
         "reason": state.terminal_reason,
         "day_terminated": day_terminated,
     }
-    async with persistence.session_factory() as session, session.begin():
+    async with _persistence_transaction(persistence) as session:
         game = await games_repo.get(session, persistence.game_id)
         if game is not None and game.status == GAME_STATUS_COMPLETED:
             _logger.info(
                 "Game already terminated and completed; skipping rating application and status updates.",
                 game_id=str(persistence.game_id),
             )
+            return
+        if not _lease_fence_allows_finalize(persistence, game):
             return
         apply_human_ratings = await _should_apply_human_ratings(session, persistence, ranked, state)
         apply_placement = _should_apply_placement(persistence, ranked, state, game)
@@ -630,7 +707,7 @@ async def _persist_llm_call(
 ) -> None:
     request_json = observation.model_dump(mode="json")
     failure = result.failure
-    async with persistence.session_factory() as session, session.begin():
+    async with _persistence_transaction(persistence) as session:
         await llm_calls_repo.record_call(
             session,
             game_id=persistence.game_id,

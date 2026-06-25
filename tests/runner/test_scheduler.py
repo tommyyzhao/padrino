@@ -553,6 +553,65 @@ async def test_scheduler_fresh_game_attempt_has_no_resume(
     assert executor.calls[0][1].resume is None
 
 
+async def test_scheduler_threads_worker_id_and_clock_to_game_persistence(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    base = datetime(2026, 6, 24, 12, tzinfo=UTC)
+    gauntlet_id, _game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="worker-fence",
+        clone_count=1,
+    )
+    seen: list[tuple[str | None, datetime | None]] = []
+
+    async def executor(
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        del config, adapter, ranked
+        seen.append(
+            (
+                persistence.worker_id,
+                persistence.lease_clock() if persistence.lease_clock is not None else None,
+            )
+        )
+        async with persistence.session_factory() as session, session.begin():
+            game = await games_repo.get(session, persistence.game_id)
+            assert game is not None
+            assert game.leased_by == "worker-fence-test"
+            assert game.lease_expires_at is not None
+            await games_repo.update_status(
+                session,
+                persistence.game_id,
+                status=GAME_STATUS_COMPLETED,
+                terminal_result={"winner": "TOWN", "reason": "stub", "day_terminated": 0},
+            )
+
+    stop = asyncio.Event()
+    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+            clock=lambda: base,
+            worker_id="worker-fence-test",
+        ),
+    )
+
+    assert seen == [("worker-fence-test", base)]
+
+
 async def test_default_game_executor_threads_persistence_resume(
     monkeypatch: pytest.MonkeyPatch,
     session_factory: async_sessionmaker[AsyncSession],
@@ -591,7 +650,7 @@ async def test_default_game_executor_threads_persistence_resume(
 async def test_scheduler_retry_rehydrates_started_benchmark_game(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    gauntlet_id, game_ids = await _seed_gauntlet(
+    _gauntlet_id, game_ids = await _seed_gauntlet(
         session_factory,
         hash_prefix="retry-resume",
         clone_count=1,
@@ -624,6 +683,7 @@ async def test_scheduler_retry_rehydrates_started_benchmark_game(
             persistence=persistence,
             resume=persistence.resume,
         )
+        stop.set()
 
     stop = asyncio.Event()
     options = SchedulerOptions(
@@ -633,12 +693,8 @@ async def test_scheduler_retry_rehydrates_started_benchmark_game(
         game_max_attempts=2,
     )
 
-    await _drive_scheduler_until(
-        session_factory,
-        gauntlet_id,
-        GAME_STATUS_COMPLETED,
-        stop=stop,
-        run=run_scheduler(
+    await asyncio.wait_for(
+        run_scheduler(
             session_factory,
             concurrency=1,
             stop_event=stop,
@@ -646,6 +702,7 @@ async def test_scheduler_retry_rehydrates_started_benchmark_game(
             game_executor=executor,
             options=options,
         ),
+        timeout=_SCHEDULER_RUN_TIMEOUT_S,
     )
 
     async with session_factory() as session:
@@ -762,6 +819,7 @@ def test_scheduler_options_are_settings_driven() -> None:
         padrino_scheduler_game_max_attempts=5,
         padrino_enable_game_lease_reaper=True,
         padrino_game_lease_reaper_interval_seconds=17.0,
+        padrino_game_lease_ttl_seconds=900.0,
     )
 
     options = scheduler_options_from_settings(settings)
@@ -769,6 +827,7 @@ def test_scheduler_options_are_settings_driven() -> None:
     assert options.game_max_attempts == 5
     assert options.enable_game_lease_reaper is True
     assert options.game_lease_reaper_interval_s == 17.0
+    assert options.game_lease_ttl_s == 900.0
 
 
 def test_failed_game_status_literal_is_only_hardcoded_in_shared_status_module() -> None:

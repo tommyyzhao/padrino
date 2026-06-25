@@ -86,7 +86,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Site: game_runner.py _persist_terminated_event (~481-584; COMPLETED-skip ~499-505). worker_id is currently used ONLY for the scheduler heartbeat/tick (scheduler.py ~517, 527-531) and is NOT yet threaded to the finalize site - US-253 must add the plumbing: run_scheduler -> _drive_gauntlet -> _run_child_games -> _run_one_game -> GamePersistence (new worker_id field) -> _persist_terminated_event. The fence must be inside the finalize transaction to be non-TOCTOU. Lease columns from US-251, claim from US-252. Single-worker near-term, but this makes resurrection safe.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-254",
