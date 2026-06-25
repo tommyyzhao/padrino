@@ -83,7 +83,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: gauntlets/publish_gate.py _cost_stamp_blockers (~362-396, the two top blocker arms at ~380-396), evaluate_publish_gate ready_to_publish = not blockers (~183); game_runner.py _pricing_stamp (~695-704) + _UNBILLED_RESULT_STATUSES (~683-685); db/repositories/llm_calls.record_call inserts every result (no status filter); tick.py exhausted->ActionTimedOut (~164-191); tests/runner/test_llm_call_cost_persistence.py (~345-379 asserts the unbilled None/None shape). The five publish-gate tests seed only billed cost_usd=0.01 rows - none seed the unbilled shape. NO migration.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-275",

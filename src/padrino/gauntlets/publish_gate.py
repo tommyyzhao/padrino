@@ -378,6 +378,8 @@ async def _cost_stamp_blockers(
     )
     blockers: list[PublishGateBlocker] = []
     for call in rows:
+        if call.cost_usd is None and call.price_basis is None:
+            continue
         if call.cost_usd is None:
             blockers.append(
                 _blocker(

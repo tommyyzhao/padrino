@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Publish-gate LLM cost stamps (US-274): `cost_usd is None` together with
+  `price_basis is None` is the canonical legitimately-unbilled turn shape
+  persisted by `game_runner._pricing_stamp` for provider/exhaustion failures
+  and empty no-token responses. `_cost_stamp_blockers` should skip exactly that
+  symmetric None/None shape, while still blocking asymmetric rows where either
+  the billed cost or the price basis is missing and preserving existing
+  `price_basis` validation for billed calls.
 - Campaign orphan-cell healing (US-273): keep the recovery pass in
   `scheduler.campaign_tick`, not in pure core and not by changing
   `finalize_gauntlet_if_done`'s commit contract. Before
@@ -4053,3 +4060,23 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2680 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-273 is backend campaign scheduler
   recovery work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:44 PDT - US-274
+- Fixed `_cost_stamp_blockers` so canonical unbilled LLM calls
+  (`cost_usd=None` and `price_basis=None`) do not permanently block campaign
+  publication.
+- Added publish-gate regressions proving a mixed billed/unbilled completed game
+  remains publishable, while incomplete asymmetric cost stamps still emit
+  `cost_stamp_missing`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/gauntlets/publish_gate.py`,
+  `tests/gauntlets/test_publish_gate.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_publish_gate.py` failed first because an
+  exhausted unbilled LLM call still produced publish blockers; focused GREEN
+  same command -> 7 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2682 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-274 is backend publish-gate work
+  and did not touch `web/dashboard`.

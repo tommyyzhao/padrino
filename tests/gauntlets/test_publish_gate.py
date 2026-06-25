@@ -323,6 +323,58 @@ async def test_publish_gate_ready_when_all_checks_pass(
     assert result.documented_holes == ()
 
 
+async def test_publish_gate_ready_with_mixed_billed_and_unbilled_llm_calls(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _seed_ready_world(session_factory)
+
+    async with session_factory() as session, session.begin():
+        call = await session.get(LlmCall, world.llm_call_ids[0])
+        assert call is not None
+        call.status = "exhausted"
+        call.raw_response = ""
+        call.parsed_response = None
+        call.input_tokens = None
+        call.output_tokens = None
+        call.cost_usd = None
+        call.price_basis = None
+        call.price_table_version = None
+
+    async with session_factory() as session:
+        result = await evaluate_publish_gate(session, world.campaign_id)
+
+    assert result.ready_to_publish is True
+    assert result.blockers == ()
+
+
+async def test_publish_gate_still_blocks_incomplete_llm_cost_stamps(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _seed_ready_world(session_factory)
+
+    async with session_factory() as session, session.begin():
+        billed_without_basis = await session.get(LlmCall, world.llm_call_ids[0])
+        assert billed_without_basis is not None
+        billed_without_basis.cost_usd = 0.01
+        billed_without_basis.price_basis = None
+        billed_without_basis.price_table_version = None
+
+        basis_without_cost = await session.get(LlmCall, world.llm_call_ids[1])
+        assert basis_without_cost is not None
+        basis_without_cost.cost_usd = None
+        basis_without_cost.price_basis = PRICE_BASIS_FALLBACK_TABLE
+        basis_without_cost.price_table_version = "publish-gate-table-v1"
+
+    async with session_factory() as session:
+        result = await evaluate_publish_gate(session, world.campaign_id)
+
+    assert result.ready_to_publish is False
+    messages = _messages(result)
+    assert any("missing price_basis" in message for message in messages)
+    assert any("missing cost_usd" in message for message in messages)
+    assert all(blocker.code == "cost_stamp_missing" for blocker in result.blockers)
+
+
 async def test_publish_gate_reports_specific_blockers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
