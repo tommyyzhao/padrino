@@ -68,7 +68,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Template: gauntlets repo claim_oldest_pending (~101-135, .with_for_update(skip_locked=True) PostgreSQL-only) + reset_stale_running (~183-206). Lease columns from US-251. The reaper must be a CONTINUOUS tick in run_scheduler (the gauntlet recovery runs at startup; this must run mid-loop). Single-host: ONE worker near-term, but the claim/reaper make a restart crash-safe. Clock injected per AGENTS.md hard rule 1.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-253",

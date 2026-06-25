@@ -30,7 +30,7 @@ from padrino.core.engine.reducer import initial_state
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
-from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED
+from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED, GAME_STATUS_RUNNING
 from padrino.db.models import GameEvent, Rating, RatingEvent
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
@@ -757,12 +757,18 @@ async def test_failed_game_is_not_reselected_by_scheduler(
     assert [call[1].game_id for call in executor.calls] == [runnable_game_id]
 
 
-def test_scheduler_retry_options_are_settings_driven() -> None:
-    settings = Settings(padrino_scheduler_game_max_attempts=5)
+def test_scheduler_options_are_settings_driven() -> None:
+    settings = Settings(
+        padrino_scheduler_game_max_attempts=5,
+        padrino_enable_game_lease_reaper=True,
+        padrino_game_lease_reaper_interval_seconds=17.0,
+    )
 
     options = scheduler_options_from_settings(settings)
 
     assert options.game_max_attempts == 5
+    assert options.enable_game_lease_reaper is True
+    assert options.game_lease_reaper_interval_s == 17.0
 
 
 def test_failed_game_status_literal_is_only_hardcoded_in_shared_status_module() -> None:
@@ -931,6 +937,76 @@ async def test_worker_heartbeat_is_written_each_tick(
     assert len(beats) == 1
     assert beats[0].worker_id == "test-worker:42"
     assert beats[0].beat_at.tzinfo is not None
+
+
+async def test_continuous_game_reaper_runs_during_loop_with_injected_clock(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    base = datetime(2026, 6, 24, 12, tzinfo=UTC)
+    current = base
+    async with session_factory() as session, session.begin():
+        game = await games_repo.create(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed="continuous-game-reaper",
+            status=GAME_STATUS_RUNNING,
+        )
+        game.leased_by = "dead-worker"
+        game.lease_expires_at = base + timedelta(seconds=5)
+        game_id = game.id
+
+    def clock() -> datetime:
+        return current
+
+    async def _wait_for_worker_heartbeat() -> None:
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            async with session_factory() as session:
+                beats = await scheduler_heartbeats_repo.list_(session)
+            if beats:
+                return
+        raise AssertionError("scheduler did not start ticking")
+
+    async def _wait_for_game_lease_clear() -> None:
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            async with session_factory() as session:
+                row = await games_repo.get(session, game_id)
+            if row is not None and row.leased_by is None and row.lease_expires_at is None:
+                return
+        raise AssertionError("scheduler did not reap the stale game lease")
+
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        enable_game_lease_reaper=True,
+        game_lease_reaper_interval_s=1.0,
+    )
+    task = asyncio.create_task(
+        run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            options=options,
+            clock=clock,
+            worker_id="game-reaper-test",
+        )
+    )
+
+    try:
+        await _wait_for_worker_heartbeat()
+        async with session_factory() as session:
+            before_advance = await games_repo.get(session, game_id)
+        assert before_advance is not None
+        assert before_advance.leased_by == "dead-worker"
+
+        current = base + timedelta(seconds=6)
+        await _wait_for_game_lease_clear()
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=2.0)
 
 
 async def test_heartbeat_is_written_while_gauntlet_in_flight(

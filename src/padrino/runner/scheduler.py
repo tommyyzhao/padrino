@@ -100,11 +100,17 @@ class SchedulerOptions:
     heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
     stale_factor: float = DEFAULT_STALE_FACTOR
     game_max_attempts: int = DEFAULT_GAME_MAX_ATTEMPTS
+    enable_game_lease_reaper: bool = False
+    game_lease_reaper_interval_s: float = 30.0
 
 
 def scheduler_options_from_settings(settings: Settings) -> SchedulerOptions:
     """Build scheduler options from operator settings."""
-    return SchedulerOptions(game_max_attempts=settings.padrino_scheduler_game_max_attempts)
+    return SchedulerOptions(
+        game_max_attempts=settings.padrino_scheduler_game_max_attempts,
+        enable_game_lease_reaper=settings.padrino_enable_game_lease_reaper,
+        game_lease_reaper_interval_s=settings.padrino_game_lease_reaper_interval_seconds,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +450,35 @@ async def _recover_stale_running(
     return reset
 
 
+async def _reap_stale_games(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime,
+) -> list[uuid.UUID]:
+    async with session_factory() as session, session.begin():
+        reset = await games_repo.reset_stale_games(session, now=now)
+    if reset:
+        _logger.info(
+            EVENT_SCHEDULER_STALE_RESET,
+            game_ids=[str(g) for g in reset],
+        )
+    return reset
+
+
+def _game_reaper_due(
+    *,
+    enabled: bool,
+    last_reaped_at: datetime | None,
+    now: datetime,
+    interval_s: float,
+) -> bool:
+    if not enabled:
+        return False
+    if last_reaped_at is None:
+        return True
+    return (now - last_reaped_at).total_seconds() >= interval_s
+
+
 async def _write_worker_heartbeat(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -514,6 +549,8 @@ async def run_scheduler(
         raise ValueError("poll_interval_s must be > 0")
     if opts.game_max_attempts < 1:
         raise ValueError("game_max_attempts must be >= 1")
+    if opts.enable_game_lease_reaper and opts.game_lease_reaper_interval_s <= 0:
+        raise ValueError("game_lease_reaper_interval_s must be > 0")
 
     sem = semaphore or asyncio.Semaphore(concurrency)
     executor = game_executor or _default_game_executor
@@ -529,15 +566,25 @@ async def run_scheduler(
         clock=tick_clock,
     )
 
+    last_game_reaped_at: datetime | None = None
     while not stop_event.is_set():
+        tick_now = tick_clock()
         _logger.info(EVENT_SCHEDULER_TICK, worker_id=wid)
         await _write_worker_heartbeat(
             session_factory,
             worker_id=wid,
-            beat_at=tick_clock(),
+            beat_at=tick_now,
         )
         if tick_hook is not None:
-            await tick_hook(tick_clock())
+            await tick_hook(tick_now)
+        if _game_reaper_due(
+            enabled=opts.enable_game_lease_reaper,
+            last_reaped_at=last_game_reaped_at,
+            now=tick_now,
+            interval_s=opts.game_lease_reaper_interval_s,
+        ):
+            await _reap_stale_games(session_factory, now=tick_now)
+            last_game_reaped_at = tick_now
         gauntlet_id = await _claim_next_pending(session_factory, clock=tick_clock)
         if gauntlet_id is None:
             with contextlib.suppress(TimeoutError):

@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.repositories import (
     agent_builds,
+    games,
     gauntlets,
     leagues,
     model_configs,
@@ -135,6 +136,21 @@ async def _seed_pending_gauntlets(factory: object, count: int) -> list[uuid.UUID
     return ids
 
 
+async def _seed_pending_games(factory: object, count: int) -> list[uuid.UUID]:
+    """Create ``count`` CREATED games and return their ids."""
+    ids: list[uuid.UUID] = []
+    async with factory() as session:  # type: ignore[operator]
+        for i in range(count):
+            game = await games.create(
+                session,
+                ruleset_id="mini7_v1",
+                game_seed=f"game-seed-{i}",
+            )
+            ids.append(game.id)
+        await session.commit()
+    return ids
+
+
 @pytest.mark.postgres
 async def test_two_concurrent_claimers_get_distinct_rows(
     postgres_engine: AsyncEngine,
@@ -182,3 +198,29 @@ async def test_single_pending_row_one_claimer_gets_none(
     results = sorted([a, b], key=lambda x: (x is not None, str(x)))
     assert results[0] is None
     assert results[1] == only_id
+
+
+@pytest.mark.postgres
+async def test_two_concurrent_game_claimers_get_distinct_rows(
+    postgres_engine: AsyncEngine,
+) -> None:
+    """Two concurrent game-grain claimers never receive the same game row."""
+    factory = create_session_factory(postgres_engine)
+    await _seed_pending_games(factory, count=2)
+
+    async def claim(worker_id: str) -> uuid.UUID | None:
+        async with factory() as session:
+            game = await games.claim_oldest_pending_game(
+                session,
+                now=_NOW,
+                lease_ttl=timedelta(minutes=5),
+                worker_id=worker_id,
+            )
+            await session.commit()
+            return None if game is None else game.id
+
+    a, b = await asyncio.gather(claim("worker-a"), claim("worker-b"))
+
+    claimed = {x for x in (a, b) if x is not None}
+    assert len(claimed) == 2
+    assert a != b

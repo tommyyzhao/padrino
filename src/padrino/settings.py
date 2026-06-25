@@ -355,6 +355,12 @@ class Settings(BaseSettings):
     # single-host/in-process only: the scheduler retries an exception from the
     # child executor this many total attempts before marking that game FAILED.
     padrino_scheduler_game_max_attempts: int = 2
+    # Benchmark game-grain lease reaper (US-252). Disabled by default so the
+    # existing gauntlet scheduler loop is byte-compatible unless the operator
+    # opts into DB-as-queue game claims. When enabled, the scheduler clears
+    # expired per-game leases on a continuous injected-clock tick.
+    padrino_enable_game_lease_reaper: bool = False
+    padrino_game_lease_reaper_interval_seconds: float = 30.0
 
     def build_routing_policy(
         self,

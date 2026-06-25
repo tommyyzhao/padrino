@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Game-grain leases (US-252): keep game-claim/reaper logic in
+  `db/repositories/games.py` with injected `now`/TTL/worker id. PostgreSQL
+  claim paths should add `with_for_update(skip_locked=True)` only for that
+  dialect; SQLite remains the single-writer path. `reset_stale_games` clears
+  `leased_by`/`lease_expires_at`, and `claim_oldest_pending_game` must treat
+  cleared RUNNING rows as reclaimable so resumed benchmark games keep their
+  event-log state instead of being reset to CREATED.
 - Additive game-table migrations (US-251): when a new Alembic revision adds
   nullable `games` columns plus an index, keep the migration and `Game` model
   byte-aligned with a dedicated per-revision test. Upgrade the prior head,
@@ -3251,3 +3258,35 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2573 passed / 41 skipped /
   10 deselected.
+
+## 2026-06-24T17:54 PDT - US-252
+- Added `games_repo.claim_oldest_pending_game`, which claims CREATED games or
+  reclaimable RUNNING games, stamps `leased_by` / `lease_expires_at`, bumps
+  `attempt_count`, and uses PostgreSQL-only `FOR UPDATE SKIP LOCKED`.
+- Added `games_repo.reset_stale_games`, clearing expired RUNNING game leases
+  with an injected clock, and wired an opt-in continuous scheduler reaper via
+  `padrino_enable_game_lease_reaper` /
+  `padrino_game_lease_reaper_interval_seconds`.
+- Added SQLite and PostgreSQL claim coverage plus a scheduler-loop regression
+  proving a lease that is fresh at startup is reaped only after the injected
+  clock advances during the loop.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/games.py`,
+  `src/padrino/runner/scheduler.py`, `src/padrino/settings.py`,
+  `tests/db/test_game_claims.py`,
+  `tests/db/test_scheduler_claim_skip_locked.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_game_claims.py tests/runner/test_scheduler.py::test_scheduler_options_are_settings_driven tests/runner/test_scheduler.py::test_continuous_game_reaper_runs_during_loop_with_injected_clock -q`
+  failed first on the missing game claim/reset helpers and scheduler options;
+  focused GREEN same command -> 5 passed. PostgreSQL GREEN
+  `uv run pytest tests/db/test_scheduler_claim_skip_locked.py::test_two_concurrent_game_claimers_get_distinct_rows tests/db/test_scheduler_claim_skip_locked.py::test_two_concurrent_claimers_get_distinct_rows -q`
+  -> 2 passed. Adjacent GREEN
+  `uv run pytest tests/db/test_game_claims.py tests/db/test_scheduler_claim_skip_locked.py tests/runner/test_scheduler.py -q`
+  -> 23 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2579 passed / 41 skipped /
+  10 deselected. An earlier full pytest attempt was interrupted after
+  2450 passed while quiet at a human-lane takeover test; the isolated test and
+  immediate repeated exact full gate both passed.
