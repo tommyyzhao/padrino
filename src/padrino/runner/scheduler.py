@@ -49,7 +49,8 @@ from padrino.observability.events import (
 )
 from padrino.observability.metrics import scheduler_inflight_gauntlets
 from padrino.ratings.openskill_service import update_ratings_for_completed_pair
-from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
+from padrino.runner.benchmark_durability import rehydrate_benchmark_game
+from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, run_game
 
 if TYPE_CHECKING:
     from padrino.settings import Settings
@@ -88,7 +89,7 @@ async def _default_game_executor(
     adapter: LlmAdapter,
     ranked: bool,
 ) -> None:
-    await run_game(config, adapter, ranked, persistence=persistence)
+    await run_game(config, adapter, ranked, persistence=persistence, resume=persistence.resume)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +175,7 @@ async def _run_one_game(
     adapter_factory: AdapterFactory,
     game_executor: GameExecutor,
     ranked: bool,
+    resume: GameResume | None = None,
 ) -> None:
     async with semaphore:
         async with session_factory() as session:
@@ -194,6 +196,7 @@ async def _run_one_game(
             game_id=game_id,
             agent_builds=agent_builds_by_seat,
             league_id=league_id,
+            resume=resume,
         )
         structlog.contextvars.bind_contextvars(
             gauntlet_id=str(gauntlet_id),
@@ -222,6 +225,8 @@ async def _run_child_games(
         last_exception: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
+                async with session_factory() as session:
+                    resume = await rehydrate_benchmark_game(session, child.game_id)
                 await _run_one_game(
                     session_factory,
                     gauntlet_id=gauntlet_id,
@@ -232,6 +237,7 @@ async def _run_child_games(
                     adapter_factory=adapter_factory,
                     game_executor=game_executor,
                     ranked=ranked,
+                    resume=resume,
                 )
                 return None
             except Exception as exc:

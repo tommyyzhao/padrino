@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Benchmark resume threading (US-250): keep benchmark scheduler resume state on
+  `GamePersistence.resume`. `_run_with_retry` should rehydrate the current
+  `game_events` tail before each child-game attempt, `_run_one_game` should
+  pass that `GameResume` through persistence, and `_default_game_executor` /
+  `run_game` should forward it to `drive_game_loop`. This preserves injected
+  `GameExecutor` compatibility while letting fakes inspect `persistence.resume`.
 - Benchmark rehydration (US-249): keep benchmark resume as pure replay over
   `game_events` rows via `events_repo.list_events` +
   `runner.human_durability.replay_state_from_rows`; then derive the resume
@@ -3177,3 +3183,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   10 deselected. A prior exact pytest run hit a transient shared SQLite schema
   cascade (`no such table: lobby_seats`); an immediate diagnostic full run and
   the repeated exact gate both passed.
+
+## 2026-06-24T17:18 PDT - US-250
+- Threaded `GameResume` through the benchmark `run_game` wrapper into
+  `drive_game_loop`, including a fallback from `GamePersistence.resume`.
+- Updated the scheduler retry seam to rehydrate benchmark games from
+  `game_events` before each child-game attempt and store the result on
+  `GamePersistence.resume`; the default executor forwards it into `run_game`.
+- Added regression coverage for run-game resume continuation without duplicate
+  setup rows, scheduler fresh-attempt `resume=None`, retry rehydration after a
+  persisted crash prefix, default-executor resume forwarding, and the completed
+  terminal-persist skip avoiding extra rating writes.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/game_runner.py`,
+  `src/padrino/runner/scheduler.py`,
+  `tests/runner/test_benchmark_resume.py`,
+  `tests/runner/test_scheduler.py`,
+  `tests/runner/test_game_persistence_terminal.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_benchmark_resume.py tests/runner/test_scheduler.py::test_scheduler_fresh_game_attempt_has_no_resume tests/runner/test_scheduler.py::test_default_game_executor_threads_persistence_resume tests/runner/test_scheduler.py::test_scheduler_retry_rehydrates_started_benchmark_game tests/runner/test_game_persistence_terminal.py::test_completed_game_terminal_persist_skip_writes_no_extra_ratings`
+  failed first on the missing `run_game(..., resume=...)`, missing default
+  executor forwarding, and missing retry rehydration; focused GREEN same
+  command -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_scheduler.py tests/runner/test_benchmark_resume.py tests/runner/test_game_persistence_terminal.py`
+  -> 20 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2569 passed / 41 skipped /
+  10 deselected.

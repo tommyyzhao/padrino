@@ -17,18 +17,25 @@ import uuid
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
+import pytest
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import LogCapture
 
+from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.reducer import initial_state
+from padrino.core.engine.role_assignment import assign_roles
+from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
 from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED
-from padrino.db.models import Rating, RatingEvent
+from padrino.db.models import GameEvent, Rating, RatingEvent
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
+from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import (
     games as games_repo,
 )
@@ -51,14 +58,16 @@ from padrino.db.repositories import (
     scheduler_heartbeats as scheduler_heartbeats_repo,
 )
 from padrino.llm.adapter import LlmAdapter
-from padrino.llm.mock import NoopMockAdapter
-from padrino.runner.game_runner import GameConfig, GamePersistence
+from padrino.llm.mock import DeterministicMockAdapter, NoopMockAdapter
+from padrino.runner import scheduler as scheduler_module
+from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, run_game
 from padrino.runner.scheduler import (
     SchedulerOptions,
     run_scheduler,
     scheduler_options_from_settings,
 )
 from padrino.settings import Settings
+from tests.conftest import make_town_win_script
 
 
 async def _seed_gauntlet(
@@ -221,6 +230,97 @@ class _FlakyExecutor(_FakeExecutor):
 
 def _adapter_factory_noop() -> LlmAdapter:
     return NoopMockAdapter()
+
+
+def _game_created_body(game_id: uuid.UUID, game_seed: str) -> dict[str, Any]:
+    return {
+        "event_type": "GameCreated",
+        "sequence": 0,
+        "phase": "SETUP",
+        "visibility": "SYSTEM",
+        "actor_player_id": None,
+        "payload": {
+            "ruleset_id": mini7_v1.RULESET_ID,
+            "game_id": str(game_id),
+            "game_seed": game_seed,
+            "player_count": mini7_v1.PLAYER_COUNT,
+        },
+    }
+
+
+def _roles_assigned_body(game_seed: str) -> dict[str, Any]:
+    return {
+        "event_type": "RolesAssigned",
+        "sequence": 1,
+        "phase": "SETUP",
+        "visibility": "SYSTEM",
+        "actor_player_id": None,
+        "payload": {
+            "assignments": [
+                {
+                    "public_player_id": seat.public_player_id,
+                    "seat_index": seat.seat_index,
+                    "role": seat.role.value,
+                    "faction": seat.faction.value,
+                }
+                for seat in assign_roles(game_seed, mini7_v1)
+            ]
+        },
+    }
+
+
+def _phase_started_body() -> dict[str, Any]:
+    return {
+        "event_type": "PhaseStarted",
+        "sequence": 2,
+        "phase": "DAY_1_DISCUSSION_ROUND_1",
+        "visibility": "SYSTEM",
+        "actor_player_id": None,
+        "payload": {"phase_kind": "DAY_DISCUSSION", "day": 1, "round": 1},
+    }
+
+
+async def _persist_resume_prefix(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    game_seed: str,
+) -> None:
+    event_log = EventLog()
+    for body in (
+        _game_created_body(game_id, game_seed),
+        _roles_assigned_body(game_seed),
+        _phase_started_body(),
+    ):
+        stored = event_log.append(body)
+        await events_repo.append_event(
+            session,
+            game_id=game_id,
+            sequence=stored.sequence,
+            event_type=stored.body["event_type"],
+            phase=stored.body["phase"],
+            visibility=stored.body["visibility"],
+            actor_player_id=stored.body["actor_player_id"],
+            payload=stored.body["payload"],
+            prev_event_hash=stored.prev_event_hash,
+            event_hash=stored.event_hash,
+        )
+
+
+def _town_win_adapter_for_seed(game_seed: str) -> DeterministicMockAdapter:
+    seats = assign_roles(game_seed, mini7_v1)
+    mafia = [s.public_player_id for s in seats if s.faction is Faction.MAFIA]
+    town = [s.public_player_id for s in seats if s.faction is Faction.TOWN]
+    doctor = next(s.public_player_id for s in seats if s.role is Role.DOCTOR)
+    detective = next(s.public_player_id for s in seats if s.role is Role.DETECTIVE)
+    return DeterministicMockAdapter(
+        make_town_win_script(
+            mafia_ids=mafia,
+            town_ids=town,
+            doctor_id=doctor,
+            detective_id=detective,
+        )
+    )
 
 
 # US-118 flake burn-down: the scheduler tests previously polled the gauntlet
@@ -415,6 +515,161 @@ async def test_child_game_retry_succeeds_before_marking_failed(
     assert game is not None
     assert game.status == GAME_STATUS_COMPLETED
     assert executor.attempts_by_game[game_id] == 2
+
+
+async def test_scheduler_fresh_game_attempt_has_no_resume(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, _game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="fresh-resume",
+        clone_count=1,
+    )
+    executor = _FakeExecutor()
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=1,
+    )
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
+    )
+
+    assert len(executor.calls) == 1
+    assert executor.calls[0][1].resume is None
+
+
+async def test_default_game_executor_threads_persistence_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seen: dict[str, GameResume | None] = {}
+    resume = GameResume(state=initial_state(), event_log=EventLog(), phase="SETUP")
+    persistence = GamePersistence(
+        session_factory=session_factory,
+        game_id=uuid.uuid4(),
+        resume=resume,
+    )
+
+    async def fake_run_game(
+        config: GameConfig,
+        adapter: LlmAdapter,
+        ranked: bool,
+        *,
+        persistence: GamePersistence | None = None,
+        resume: GameResume | None = None,
+    ) -> None:
+        del config, adapter, ranked, persistence
+        seen["resume"] = resume
+
+    monkeypatch.setattr(scheduler_module, "run_game", fake_run_game)
+
+    await scheduler_module._default_game_executor(
+        GameConfig(game_id="G-DEFAULT-RESUME", game_seed="seed"),
+        persistence,
+        NoopMockAdapter(),
+        ranked=False,
+    )
+
+    assert seen["resume"] is resume
+
+
+async def test_scheduler_retry_rehydrates_started_benchmark_game(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gauntlet_id, game_ids = await _seed_gauntlet(
+        session_factory,
+        hash_prefix="retry-resume",
+        clone_count=1,
+    )
+    game_id = game_ids[0]
+    seen_resumes: list[GameResume | None] = []
+
+    async def executor(
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+        ranked: bool,
+    ) -> None:
+        del adapter
+        seen_resumes.append(persistence.resume)
+        if len(seen_resumes) == 1:
+            async with session_factory() as session, session.begin():
+                await _persist_resume_prefix(
+                    session,
+                    game_id=persistence.game_id,
+                    game_seed=config.game_seed,
+                )
+            raise RuntimeError("simulated crash after persisted phase start")
+
+        assert persistence.resume is not None
+        await run_game(
+            config,
+            _town_win_adapter_for_seed(config.game_seed),
+            ranked,
+            persistence=persistence,
+            resume=persistence.resume,
+        )
+
+    stop = asyncio.Event()
+    options = SchedulerOptions(
+        poll_interval_s=0.01,
+        heartbeat_interval_s=0.05,
+        stale_factor=2.0,
+        game_max_attempts=2,
+    )
+
+    await _drive_scheduler_until(
+        session_factory,
+        gauntlet_id,
+        GAME_STATUS_COMPLETED,
+        stop=stop,
+        run=run_scheduler(
+            session_factory,
+            concurrency=1,
+            stop_event=stop,
+            adapter_factory=_adapter_factory_noop,
+            game_executor=executor,
+            options=options,
+        ),
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+        rows = list(
+            (
+                await session.execute(
+                    select(GameEvent)
+                    .where(GameEvent.game_id == game_id)
+                    .order_by(GameEvent.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert game is not None
+    assert game.status == GAME_STATUS_COMPLETED
+    assert [resume is None for resume in seen_resumes] == [True, False]
+    assert seen_resumes[1] is not None
+    assert seen_resumes[1].phase == "DAY_1_DISCUSSION_ROUND_1"
+    assert [row.sequence for row in rows] == list(range(len(rows)))
+    assert sum(row.event_type == "GameCreated" for row in rows) == 1
+    assert sum(row.event_type == "RolesAssigned" for row in rows) == 1
 
 
 async def test_child_game_exhausts_bounded_attempts_and_writes_no_ratings(

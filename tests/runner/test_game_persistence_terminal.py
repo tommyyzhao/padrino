@@ -14,6 +14,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.core.engine.event_log import EventLog
+from padrino.core.engine.reducer import initial_state
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
@@ -213,3 +215,71 @@ async def test_terminal_rollback_when_ratings_fail_leaves_no_partial_writes(
         rating_events = (await session.execute(select(RatingEvent))).scalars().all()
         assert ratings == []
         assert rating_events == []
+
+
+async def test_completed_game_terminal_persist_skip_writes_no_extra_ratings(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    league_id, game_id, builds_by_seat = await _seed_ranked_setup(
+        session_factory, hash_prefix="us250-completed-skip"
+    )
+    terminal_result = {"winner": "TOWN", "reason": "NO_MAFIA_ALIVE", "day_terminated": 2}
+    async with session_factory() as session, session.begin():
+        await games_repo.update_status(
+            session,
+            game_id,
+            status="COMPLETED",
+            terminal_result=terminal_result,
+        )
+
+    async def fail_rating_update(*args: object, **kwargs: object) -> None:
+        raise AssertionError("completed game must not apply ratings again")
+
+    monkeypatch.setattr(game_runner, "update_ratings_for_game", fail_rating_update)
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "event_type": "GameTerminated",
+            "sequence": 0,
+            "phase": "DAY_2_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "TOWN", "reason": "NO_MAFIA_ALIVE"},
+        }
+    )
+    state = initial_state().model_copy(
+        update={
+            "ruleset_id": mini7_v1.RULESET_ID,
+            "game_id": str(game_id),
+            "game_seed": _GAME_SEED,
+            "seats": tuple(assign_roles(_GAME_SEED, mini7_v1)),
+            "terminal_result": "TOWN",
+            "terminal_reason": "NO_MAFIA_ALIVE",
+        }
+    )
+    persistence = GamePersistence(
+        session_factory=session_factory,
+        game_id=game_id,
+        agent_builds=builds_by_seat,
+        league_id=league_id,
+    )
+
+    await game_runner._persist_terminated_event(
+        persistence,
+        stored,
+        state,
+        ranked=True,
+        day_terminated=2,
+    )
+
+    async with session_factory() as session:
+        game = await session.get(Game, game_id)
+        game_events = list((await session.execute(select(GameEvent))).scalars().all())
+        rating_events = list((await session.execute(select(RatingEvent))).scalars().all())
+
+    assert game is not None
+    assert game.status == "COMPLETED"
+    assert game.terminal_result == terminal_result
+    assert game_events == []
+    assert rating_events == []

@@ -35,7 +35,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: run_game (game_runner.py ~1272, add resume kw), drive_game_loop already accepts resume (~1019), scheduler _default_game_executor (~85-91) + _run_with_retry (~221-258). Bug confirmed: benchmark re-drive restarts at sequence 0 -> uq_game_event_sequence collision (models.py ~261). Rehydration helper is US-249. This makes the existing game_max_attempts retry actually work for crashes.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-251",

@@ -1275,6 +1275,7 @@ async def run_game(
     ranked: bool,
     *,
     persistence: GamePersistence | None = None,
+    resume: GameResume | None = None,
 ) -> GameOutcome:
     """Run a benchmark game with the standard tick barrier.
 
@@ -1282,12 +1283,16 @@ async def run_game(
     scheduler jobs, and tests. Human-lane games call :func:`drive_game_loop`
     with their own tick runner instead of using this benchmark shortcut.
     """
+    effective_resume = resume
+    if effective_resume is None and persistence is not None:
+        effective_resume = persistence.resume
     return await drive_game_loop(
         config,
         adapter,
         ranked,
         persistence=persistence,
         tick_runner=_default_tick_runner,
+        resume=effective_resume,
     )
 
 
