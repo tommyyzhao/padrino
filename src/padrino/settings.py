@@ -362,6 +362,11 @@ class Settings(BaseSettings):
     padrino_enable_game_lease_reaper: bool = False
     padrino_game_lease_reaper_interval_seconds: float = 30.0
     padrino_game_lease_ttl_seconds: float = 3600.0
+    # Campaign materialization (US-259). Campaigns persist the full pairing
+    # ledger at creation time, then materialize child gauntlets/games in bounded
+    # batches so a large field never inserts thousands of runnable games in one
+    # scheduler tick.
+    padrino_campaign_materialize_batch_size: int = 10
 
     def build_routing_policy(
         self,

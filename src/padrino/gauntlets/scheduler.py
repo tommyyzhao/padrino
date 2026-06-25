@@ -160,6 +160,49 @@ async def create_gauntlet(
     return GauntletCreated(gauntlet_id=gauntlet.id, game_ids=tuple(game_ids))
 
 
+async def _create_paired_gauntlet_rows(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    ruleset_id: str,
+    prompt_version_id: uuid.UUID,
+    pair_count: int,
+    gauntlet_seed: str,
+    roster: list[uuid.UUID],
+    campaign_id: uuid.UUID | None = None,
+) -> GauntletCreated:
+    from padrino.db.repositories import games as games_repo
+
+    clone_count = pair_count * 2
+    gauntlet = await gauntlets_repo.create(
+        session,
+        league_id=league_id,
+        ruleset_id=ruleset_id,
+        prompt_version_id=prompt_version_id,
+        clone_count=clone_count,
+        gauntlet_seed=gauntlet_seed,
+        ranked=True,
+        campaign_id=campaign_id,
+    )
+    for slot_index, agent_build_id in enumerate(roster):
+        await gauntlets_repo.add_roster_slot(session, gauntlet.id, slot_index, agent_build_id)
+    game_ids: list[uuid.UUID] = []
+    for pair_index in range(pair_count):
+        pair_id = derive_pair_id(gauntlet_seed, pair_index)
+        game_seed = derive_game_seed(gauntlet_seed, pair_index)
+        for pair_leg in (0, 1):
+            game = await games_repo.create(
+                session,
+                ruleset_id=ruleset_id,
+                game_seed=game_seed,
+                gauntlet_id=gauntlet.id,
+                pair_id=pair_id,
+                pair_leg=pair_leg,
+            )
+            game_ids.append(game.id)
+    return GauntletCreated(gauntlet_id=gauntlet.id, game_ids=tuple(game_ids))
+
+
 async def create_paired_gauntlet(
     session: AsyncSession,
     *,
@@ -169,6 +212,7 @@ async def create_paired_gauntlet(
     pair_count: int,
     gauntlet_seed: str,
     roster: list[uuid.UUID],
+    campaign_id: uuid.UUID | None = None,
 ) -> GauntletCreated:
     """Create a gauntlet whose child games are deterministic mirror pairs.
 
@@ -187,45 +231,39 @@ async def create_paired_gauntlet(
             f"pair_count must be in [{MIN_CLONE_COUNT}, {MAX_PAIR_COUNT}], got {pair_count}"
         )
 
-    from padrino.db.repositories import games as games_repo
-
-    clone_count = pair_count * 2
-    async with session.begin():
-        gauntlet = await gauntlets_repo.create(
+    if session.in_transaction():
+        created = await _create_paired_gauntlet_rows(
             session,
             league_id=league_id,
             ruleset_id=ruleset_id,
             prompt_version_id=prompt_version_id,
-            clone_count=clone_count,
+            pair_count=pair_count,
             gauntlet_seed=gauntlet_seed,
-            ranked=True,
+            roster=roster,
+            campaign_id=campaign_id,
         )
-        for slot_index, agent_build_id in enumerate(roster):
-            await gauntlets_repo.add_roster_slot(session, gauntlet.id, slot_index, agent_build_id)
-        game_ids: list[uuid.UUID] = []
-        for pair_index in range(pair_count):
-            pair_id = derive_pair_id(gauntlet_seed, pair_index)
-            game_seed = derive_game_seed(gauntlet_seed, pair_index)
-            for pair_leg in (0, 1):
-                game = await games_repo.create(
-                    session,
-                    ruleset_id=ruleset_id,
-                    game_seed=game_seed,
-                    gauntlet_id=gauntlet.id,
-                    pair_id=pair_id,
-                    pair_leg=pair_leg,
-                )
-                game_ids.append(game.id)
+    else:
+        async with session.begin():
+            created = await _create_paired_gauntlet_rows(
+                session,
+                league_id=league_id,
+                ruleset_id=ruleset_id,
+                prompt_version_id=prompt_version_id,
+                pair_count=pair_count,
+                gauntlet_seed=gauntlet_seed,
+                roster=roster,
+                campaign_id=campaign_id,
+            )
 
     _logger.info(
         EVENT_GAUNTLET_CREATED,
-        gauntlet_id=str(gauntlet.id),
+        gauntlet_id=str(created.gauntlet_id),
         league_id=str(league_id),
         ruleset_id=ruleset_id,
-        clone_count=clone_count,
-        games=[str(gid) for gid in game_ids],
+        clone_count=pair_count * 2,
+        games=[str(gid) for gid in created.game_ids],
     )
-    return GauntletCreated(gauntlet_id=gauntlet.id, game_ids=tuple(game_ids))
+    return created
 
 
 __all__ = [

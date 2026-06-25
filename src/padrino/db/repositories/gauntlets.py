@@ -31,8 +31,10 @@ async def create(
     gauntlet_seed: str,
     ranked: bool,
     status: str = "PENDING",
+    campaign_id: uuid.UUID | None = None,
 ) -> Gauntlet:
     obj = Gauntlet(
+        campaign_id=campaign_id,
         league_id=league_id,
         ruleset_id=ruleset_id,
         prompt_version_id=prompt_version_id,

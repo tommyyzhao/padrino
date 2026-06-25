@@ -194,7 +194,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Repos to mirror: gauntlets repo create/claim_oldest_pending/update_heartbeat/reset_stale_running (~24-206). create_paired_gauntlet from gauntlets/scheduler (signature: league_id, ruleset_id, prompt_version_id, pair_count, gauntlet_seed: str, roster: list[agent_build_id UUID]; mirror pair, pair_leg 0/1, derives per-pair game_seeds from gauntlet_seed). KEY GAP to close: the US-257 generator emits MODEL IDS, but create_paired_gauntlet needs agent_build_id UUIDs AND a prompt_version_id - resolve model_id -> canonical active agent_build at create_campaign_from_matrix time, store the resolved UUID roster on the cell's roster_json, and source prompt_version_id from the chosen AgentBuilds (a 'model id' is NOT an agent_build_id in this codebase: ModelConfig vs AgentBuild are distinct, one model -> potentially many builds). Generator is US-257. INCREMENTAL: the ledger holds all cells, but gauntlets/games are created in bounded batches - never thousands up front (locked decision). Resume reads the ledger, not in-flight rows. Clock injected. game-grain claim from US-252 drains the materialized games.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-260",

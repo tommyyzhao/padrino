@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Campaign ledger materialization (US-259): resolve generator model ids to a
+  single canonical active `AgentBuild` per `ModelConfig.model_name` /
+  `litellm_model_id` at campaign creation time, store UUID strings in
+  `campaign_pairings.roster_json`, and keep child gauntlet creation behind a
+  bounded `materialize_next_batch` that locks only PENDING cells, passes
+  `derive_campaign_cell_seed(campaign_seed, cell_index)` to
+  `create_paired_gauntlet`, then flips the cell to MATERIALIZED with
+  `gauntlet_id`. Resumes should read cell statuses from the ledger, not infer
+  from child rows.
 - Campaign schema migrations (US-258): when adding campaign-owned gauntlet
   metadata, create the referenced `campaigns` table and cheap
   `campaign_pairings` ledger before `batch_alter_table("gauntlets")` adds the
@@ -3497,3 +3506,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   runner failure passed in isolation and the immediate exact full-gate rerun
   passed. Frontend gates not run; US-258 is backend schema-only and did not
   touch `web/dashboard`.
+
+## 2026-06-24T19:07 PDT - US-259
+- Added `db/repositories/campaigns.py` with campaign creation from the pure
+  pairing matrix, active model-id -> agent-build UUID resolution, campaign
+  claim/lease/heartbeat/reset helpers, and bounded ledger materialization.
+- Refactored `create_paired_gauntlet` so it can run inside an existing
+  transaction and stamp `gauntlets.campaign_id`; materialization now creates
+  child paired gauntlets/games from PENDING cells and links the cell row.
+- Added campaign repository coverage for creation without child rows,
+  stale-lease reclaim, bounded materialization, and resume-from-ledger, plus a
+  PostgreSQL `SKIP LOCKED` campaign-claim regression.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/db/repositories/gauntlets.py`,
+  `src/padrino/gauntlets/scheduler.py`, `src/padrino/settings.py`,
+  `tests/db/test_campaigns_repo.py`,
+  `tests/db/test_scheduler_claim_skip_locked.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_campaigns_repo.py -q` failed first on missing
+  `padrino.db.repositories.campaigns`; focused GREEN same command -> 4 passed.
+  Adjacent GREEN
+  `uv run pytest tests/db/test_campaigns_repo.py tests/db/test_scheduler_claim_skip_locked.py tests/gauntlets/test_paired_scheduler.py -q`
+  -> 10 passed; `uv run pytest tests/db/test_repositories.py tests/db/test_models.py -q`
+  -> 35 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2613 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-259 is backend campaign
+  persistence/materialization work and did not touch `web/dashboard`.
