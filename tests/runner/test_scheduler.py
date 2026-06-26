@@ -545,6 +545,17 @@ _SCHEDULER_MAX_POLLS = 600
 # rather than hang the whole suite. Comfortably larger than the watcher budget.
 _SCHEDULER_RUN_TIMEOUT_S = 60.0
 
+# Poll cadence the TEST gives the scheduler itself (SchedulerOptions.poll_interval_s).
+# A tight 0.01s scheduler poll generates enormous event-loop churn under
+# ``pytest --cov`` per-line tracing on the slow, heavily-loaded macOS runner, which
+# starves the scheduler's own drive/finalize coroutines (and contends on the single
+# shared in-memory SQLite connection) — leaving a gauntlet stuck RUNNING after all
+# its child games already ran. A 0.05s poll matches the watcher cadence and the
+# file's "poll less often -> the scheduler progresses faster" philosophy; the drive
+# budget (~30s watcher / 60s hard ceiling) is orders of magnitude over a correct
+# run (~1.5s), so coarser polling only removes churn with no happy-path cost.
+_SCHED_TEST_POLL_S = 0.05
+
 
 async def _drive_scheduler_until(
     session_factory: async_sessionmaker[AsyncSession],
@@ -588,7 +599,9 @@ async def test_pending_gauntlet_runs_and_finalizes_to_completed(
     executor = _FakeExecutor()
     stop = asyncio.Event()
 
-    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    options = SchedulerOptions(
+        poll_interval_s=_SCHED_TEST_POLL_S, heartbeat_interval_s=0.05, stale_factor=2.0
+    )
     await _drive_scheduler_until(
         session_factory,
         gauntlet_id,
@@ -625,7 +638,7 @@ async def test_child_game_failure_isolated_and_logged(
     executor = _FailingExecutor(failing_game_id=failing_game_id)
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=1,
@@ -734,7 +747,7 @@ async def test_child_game_retry_succeeds_before_marking_failed(
     executor = _FlakyExecutor(failing_game_id=game_id, failures_before_success=1)
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=2,
@@ -811,7 +824,7 @@ async def test_poison_child_game_failure_stops_after_one_attempt_and_stamps_row(
     )
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=3,
@@ -864,7 +877,7 @@ async def test_retryable_child_game_failure_retries_with_injected_backoff_and_st
 
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=3,
@@ -913,7 +926,7 @@ async def test_campaign_owned_failed_gauntlet_dead_letters_cell(
     )
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=2,
@@ -1139,7 +1152,7 @@ async def test_scheduler_fresh_game_attempt_has_no_resume(
     executor = _FakeExecutor()
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=1,
@@ -1201,7 +1214,9 @@ async def test_scheduler_threads_worker_id_and_clock_to_game_persistence(
             )
 
     stop = asyncio.Event()
-    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    options = SchedulerOptions(
+        poll_interval_s=_SCHED_TEST_POLL_S, heartbeat_interval_s=0.05, stale_factor=2.0
+    )
 
     await _drive_scheduler_until(
         session_factory,
@@ -1298,7 +1313,7 @@ async def test_scheduler_retry_rehydrates_started_benchmark_game(
 
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=2,
@@ -1352,7 +1367,7 @@ async def test_child_game_exhausts_bounded_attempts_and_writes_no_ratings(
     executor = _FlakyExecutor(failing_game_id=game_id, failures_before_success=99)
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=3,
@@ -1405,7 +1420,9 @@ async def test_failed_game_is_not_reselected_by_scheduler(
         )
     executor = _FakeExecutor()
     stop = asyncio.Event()
-    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    options = SchedulerOptions(
+        poll_interval_s=_SCHED_TEST_POLL_S, heartbeat_interval_s=0.05, stale_factor=2.0
+    )
 
     await _drive_scheduler_until(
         session_factory,
@@ -1460,7 +1477,9 @@ async def test_concurrency_cap_honored_via_injected_semaphore(
     semaphore = asyncio.Semaphore(2)
     stop = asyncio.Event()
 
-    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    options = SchedulerOptions(
+        poll_interval_s=_SCHED_TEST_POLL_S, heartbeat_interval_s=0.05, stale_factor=2.0
+    )
     await _drive_scheduler_until(
         session_factory,
         gauntlet_id,
@@ -1636,7 +1655,7 @@ async def test_campaign_budget_halt_skips_to_next_campaign_gauntlet(
     executor = _FakeExecutor()
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         game_max_attempts=1,
@@ -1685,7 +1704,9 @@ async def test_crash_recovery_resets_stale_running_gauntlet(
     executor = _FakeExecutor()
     stop = asyncio.Event()
 
-    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    options = SchedulerOptions(
+        poll_interval_s=_SCHED_TEST_POLL_S, heartbeat_interval_s=0.05, stale_factor=2.0
+    )
     await _drive_scheduler_until(
         session_factory,
         gauntlet_id,
@@ -1717,7 +1738,9 @@ async def test_stop_event_finishes_in_flight_gauntlet_before_returning(
     )
     executor = _FakeExecutor(delay_s=0.1)
     stop = asyncio.Event()
-    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    options = SchedulerOptions(
+        poll_interval_s=_SCHED_TEST_POLL_S, heartbeat_interval_s=0.05, stale_factor=2.0
+    )
 
     # Signal stop as soon as the gauntlet flips to RUNNING (mid-flight).
     await _drive_scheduler_until(
@@ -1771,7 +1794,9 @@ async def test_worker_heartbeat_is_written_each_tick(
 ) -> None:
     """The scheduler must write its per-worker heartbeat to ``scheduler_heartbeats``."""
     stop = asyncio.Event()
-    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    options = SchedulerOptions(
+        poll_interval_s=_SCHED_TEST_POLL_S, heartbeat_interval_s=0.05, stale_factor=2.0
+    )
 
     async def _signal() -> None:
         # Allow a couple of tick iterations so the heartbeat row exists.
@@ -1837,7 +1862,7 @@ async def test_continuous_game_reaper_runs_during_loop_with_injected_clock(
 
     stop = asyncio.Event()
     options = SchedulerOptions(
-        poll_interval_s=0.01,
+        poll_interval_s=_SCHED_TEST_POLL_S,
         heartbeat_interval_s=0.05,
         stale_factor=2.0,
         enable_game_lease_reaper=True,
@@ -1875,7 +1900,9 @@ async def test_heartbeat_is_written_while_gauntlet_in_flight(
     # Use enough delay so the heartbeat task fires at least once.
     executor = _FakeExecutor(delay_s=0.2)
     stop = asyncio.Event()
-    options = SchedulerOptions(poll_interval_s=0.01, heartbeat_interval_s=0.05, stale_factor=2.0)
+    options = SchedulerOptions(
+        poll_interval_s=_SCHED_TEST_POLL_S, heartbeat_interval_s=0.05, stale_factor=2.0
+    )
 
     observed_heartbeats: list[datetime] = []
 
