@@ -269,3 +269,73 @@ async def test_release_budget_slots_by_binding_key_reclaims_all_live_rows(
         for binding_key, released_at in rows
         if binding_key == "game:other"
     ] == [("game:other", True)]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_release_of_same_slot_is_idempotent_and_never_raises(
+    tmp_path: Path,
+) -> None:
+    """Two release callers racing on the SAME slot must not raise StaleDataError.
+
+    The stale-game reaper releases a game's slot by binding_key while that game's
+    own ``finally`` releases it by id; under concurrent sessions the old
+    load-modify-flush ORM path raised ``StaleDataError`` (UPDATE matched 0 rows),
+    failing the game. The atomic conditional ``UPDATE ... WHERE released_at IS
+    NULL`` is idempotent and concurrency-safe.
+    """
+    from padrino.db.base import Base, create_engine, create_session_factory
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'release-race.sqlite'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = create_session_factory(engine)
+
+    try:
+        async with session_factory() as session, session.begin():
+            slot_id = await claim_budget_slot(
+                session,
+                scope_key="global:benchmark",
+                spent_usd=0.0,
+                budget_usd=2.0,
+                reserve_usd=0.5,
+                now=_NOW,
+                binding_key="game:racing",
+            )
+        assert slot_id is not None
+
+        ready = asyncio.Event()
+
+        async def release_by_id() -> bool:
+            await ready.wait()
+            async with session_factory() as session, session.begin():
+                return await release_budget_slot(session, slot_id, released_at=_NOW)
+
+        async def release_by_binding() -> int:
+            await ready.wait()
+            async with session_factory() as session, session.begin():
+                return await release_budget_slots_by_binding_key(
+                    session, "game:racing", released_at=_NOW, scope_key="global:benchmark"
+                )
+
+        tasks = [
+            asyncio.create_task(release_by_id()),
+            asyncio.create_task(release_by_binding()),
+        ]
+        ready.set()
+        await asyncio.gather(*tasks)  # must not raise StaleDataError
+
+        # Released exactly once; live capacity is freed.
+        async with session_factory() as session:
+            assert await _live_slot_count(session, "global:benchmark") == 0
+
+        # A redundant release is a no-op (idempotent), never an error.
+        async with session_factory() as session, session.begin():
+            assert await release_budget_slot(session, slot_id, released_at=_NOW) is False
+            assert (
+                await release_budget_slots_by_binding_key(
+                    session, "game:racing", released_at=_NOW, scope_key="global:benchmark"
+                )
+                == 0
+            )
+    finally:
+        await engine.dispose()

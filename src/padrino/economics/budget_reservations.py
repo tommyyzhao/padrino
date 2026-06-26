@@ -6,7 +6,8 @@ import math
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -117,13 +118,24 @@ async def release_budget_slot(
 
     Returns ``True`` only when an unreleased row was updated. The physical row is
     retained so the unique ``slot_index`` is never reused.
+
+    Uses an atomic conditional Core ``UPDATE ... WHERE released_at IS NULL`` rather
+    than load-modify-flush: the ORM unit-of-work path raises ``StaleDataError`` when
+    a concurrent release (the stale-game reaper vs. a game's own finally) already
+    touched the row, so two release callers racing on the same slot would fail a
+    game spuriously. A conditional UPDATE is idempotent and concurrency-safe.
     """
-    row = await session.get(BudgetReservationSlot, slot_id)
-    if row is None or row.released_at is not None:
-        return False
-    row.released_at = released_at
-    await session.flush()
-    return True
+    result = await session.execute(
+        update(BudgetReservationSlot)
+        .where(
+            BudgetReservationSlot.id == slot_id,
+            BudgetReservationSlot.released_at.is_(None),
+        )
+        .values(released_at=released_at)
+        .execution_options(synchronize_session=False)
+    )
+    assert isinstance(result, CursorResult)
+    return (result.rowcount or 0) > 0
 
 
 async def release_budget_slots_by_binding_key(
@@ -133,16 +145,19 @@ async def release_budget_slots_by_binding_key(
     released_at: datetime,
     scope_key: str | None = None,
 ) -> int:
-    """Release all live reservation slots bound to one caller-owned entity."""
-    stmt = select(BudgetReservationSlot).where(
+    """Release all live reservation slots bound to one caller-owned entity.
+
+    Atomic conditional Core ``UPDATE`` (see :func:`release_budget_slot`) so a
+    concurrent release on the same row never raises ``StaleDataError``.
+    """
+    stmt = update(BudgetReservationSlot).where(
         BudgetReservationSlot.binding_key == binding_key,
         BudgetReservationSlot.released_at.is_(None),
     )
     if scope_key is not None:
         stmt = stmt.where(BudgetReservationSlot.scope_key == scope_key)
-    rows = list((await session.execute(stmt)).scalars().all())
-    for row in rows:
-        row.released_at = released_at
-    if rows:
-        await session.flush()
-    return len(rows)
+    result = await session.execute(
+        stmt.values(released_at=released_at).execution_options(synchronize_session=False)
+    )
+    assert isinstance(result, CursorResult)
+    return result.rowcount or 0
