@@ -87,6 +87,8 @@ async function mockStandardPlaySurface(
     publicFrames = PUBLIC_FRAMES,
     liveBatches,
     observationFrames = OBSERVATION_FRAMES,
+    observationBatches,
+    onObservationRequest,
     onAction,
     onChat
   }: {
@@ -94,6 +96,8 @@ async function mockStandardPlaySurface(
     publicFrames?: Record<string, unknown>[];
     liveBatches?: LiveBatch[];
     observationFrames?: Record<string, unknown>[];
+    observationBatches?: LiveBatch[];
+    onObservationRequest?: (url: string) => void;
     onAction?: (payload: Record<string, unknown>) => void;
     onChat?: (payload: Record<string, unknown>) => void;
   } = {}
@@ -135,15 +139,20 @@ async function mockStandardPlaySurface(
     }
   });
 
-  let firstObs = true;
+  let obsIndex = 0;
   await page.route(`**/human/games/${gameId}/observation/stream*`, async (route) => {
-    if (firstObs) {
-      firstObs = false;
+    onObservationRequest?.(route.request().url());
+    const batches = observationBatches ?? [observationFrames];
+    const batch = batches[obsIndex];
+    obsIndex += 1;
+    if (batch) {
+      const frames = Array.isArray(batch) ? batch : batch.frames;
+      if (!Array.isArray(batch) && batch.wait) await batch.wait;
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
         headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
-        body: observationSseBody(observationFrames)
+        body: observationSseBody(frames)
       });
     } else {
       await route.abort('failed');
@@ -189,6 +198,106 @@ async function expectTouchSized(locator: ReturnType<Page['getByTestId']>): Promi
   const box = await locator.boundingBox();
   expect(box).not.toBeNull();
   expect(box?.height).toBeGreaterThanOrEqual(44);
+}
+
+async function installControlledEventSource(
+  page: Page,
+  observationFrames: Record<string, unknown>[] = OBSERVATION_FRAMES
+): Promise<void> {
+  await page.addInitScript((frames) => {
+    type ControlledWindow = Window & {
+      __padrinoLiveSources: ControlledEventSource[];
+      __padrinoEmitLive: (index: number, frame: Record<string, unknown>) => void;
+      __padrinoFailLive: (index: number) => void;
+      __padrinoLiveUrls: () => string[];
+    };
+
+    class ControlledEventSource {
+      readonly url: string;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      readyState = 0;
+
+      constructor(url: string) {
+        this.url = url;
+        const win = window as unknown as ControlledWindow;
+        if (url.includes('/observation/stream')) {
+          setTimeout(() => {
+            this.readyState = 1;
+            this.onopen?.(new Event('open'));
+            for (const frame of frames as Record<string, unknown>[]) {
+              this.onmessage?.({
+                data: JSON.stringify(frame),
+                lastEventId: String(frame['sequence'] ?? '')
+              } as MessageEvent);
+            }
+          }, 0);
+          return;
+        }
+
+        win.__padrinoLiveSources.push(this);
+        setTimeout(() => {
+          if (this.readyState === 2) return;
+          this.readyState = 1;
+          this.onopen?.(new Event('open'));
+        }, 0);
+      }
+
+      emit(frame: Record<string, unknown>): void {
+        if (this.readyState === 2) return;
+        this.onmessage?.({
+          data: JSON.stringify(frame),
+          lastEventId: String(frame['sequence'] ?? '')
+        } as MessageEvent);
+      }
+
+      fail(): void {
+        if (this.readyState === 2) return;
+        this.readyState = 2;
+        this.onerror?.(new Event('error'));
+      }
+
+      close(): void {
+        this.readyState = 2;
+      }
+    }
+
+    const win = window as unknown as ControlledWindow;
+    win.__padrinoLiveSources = [];
+    win.__padrinoEmitLive = (index, frame) => win.__padrinoLiveSources[index]?.emit(frame);
+    win.__padrinoFailLive = (index) => win.__padrinoLiveSources[index]?.fail();
+    win.__padrinoLiveUrls = () => win.__padrinoLiveSources.map((source) => source.url);
+    (window as unknown as { EventSource: typeof EventSource }).EventSource =
+      ControlledEventSource as unknown as typeof EventSource;
+  }, observationFrames);
+}
+
+async function emitControlledLive(
+  page: Page,
+  index: number,
+  frame: Record<string, unknown>
+): Promise<void> {
+  await page.evaluate(
+    ([sourceIndex, liveFrame]) => {
+      (
+        window as unknown as Window & {
+          __padrinoEmitLive: (index: number, frame: Record<string, unknown>) => void;
+        }
+      ).__padrinoEmitLive(sourceIndex as number, liveFrame as Record<string, unknown>);
+    },
+    [index, frame]
+  );
+}
+
+async function failControlledLive(page: Page, index: number): Promise<void> {
+  await page.evaluate((sourceIndex) => {
+    (
+      window as unknown as Window & {
+        __padrinoFailLive: (index: number) => void;
+      }
+    ).__padrinoFailLive(sourceIndex as number);
+  }, index);
 }
 
 test.describe('play surface (US-155)', () => {
@@ -818,5 +927,140 @@ test.describe('play surface responsive layout (US-282)', () => {
       timeout: 15_000
     });
     expect(chatPayload).toMatchObject({ channel: 'PUBLIC', text: 'hello from mobile' });
+  });
+});
+
+test.describe('play connection reliability (US-285)', () => {
+  test('live-tail indicator reflects disconnect and recovery on a phone-width viewport', async ({
+    page
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installControlledEventSource(page);
+    await mockStandardPlaySurface(page, { liveBatches: [] });
+
+    await page.goto(`/play/${GAME_ID}`);
+
+    const indicator = page.getByTestId('play-connection-indicator');
+    await expect(indicator).toHaveAttribute('data-state', 'live', { timeout: 15_000 });
+    await emitControlledLive(page, 0, mkFrame(1, 'PhaseStarted', 'DAY_1_VOTE', null, {}));
+    await expect(page.getByTestId('play-phase')).toContainText('DAY_1_VOTE', {
+      timeout: 15_000
+    });
+
+    await failControlledLive(page, 0);
+    await expect(indicator).toHaveAttribute('data-state', 'reconnecting', {
+      timeout: 15_000
+    });
+
+    await page.waitForFunction(() => {
+      return (
+        window as unknown as Window & {
+          __padrinoLiveSources: unknown[];
+        }
+      ).__padrinoLiveSources.length >= 2;
+    });
+    await emitControlledLive(
+      page,
+      1,
+      mkFrame(2, 'PublicMessageSubmitted', 'DAY_1_VOTE', SEAT_OTHER, {
+        text: 'Recovered stream message.'
+      })
+    );
+
+    await expect(indicator).toHaveAttribute('data-state', 'live', { timeout: 15_000 });
+    await page.getByTestId('play-mobile-tab-chat').click();
+    await expect(page.getByTestId('play-chat-line')).toContainText('Recovered stream message.', {
+      timeout: 15_000
+    });
+
+    const urls = await page.evaluate(() =>
+      (
+        window as unknown as Window & {
+          __padrinoLiveUrls: () => string[];
+        }
+      ).__padrinoLiveUrls()
+    );
+    expect(new URL(urls[0]).searchParams.has('after')).toBe(false);
+    expect(new URL(urls[1]).searchParams.get('after')).toBe('1');
+    await expectIdentityBlind(page.getByTestId('play-shell'));
+  });
+
+  test('return-after-away notice is non-leaky', async ({ page }) => {
+    await mockStandardPlaySurface(page, {
+      observationFrames: [
+        {
+          type: 'observation',
+          phase: 'DAY_1_VOTE',
+          you: { player_id: SEAT_ME, alive: true },
+          alive_players: [SEAT_ME, SEAT_OTHER],
+          legal_actions: { allowed_action_types: ['VOTE', 'ABSTAIN'], legal_targets: [SEAT_OTHER] },
+          return_notice: {
+            kind: 'away_resuming',
+            message: 'You were away. Resuming from the latest table state.'
+          }
+        },
+        { type: 'phase_deadline', phase: 'DAY_1_VOTE', deadline_at: '2099-01-01T00:02:00Z' }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    const notice = page.getByTestId('play-return-notice');
+    await expect(notice).toBeVisible({ timeout: 15_000 });
+    await expect(notice).toContainText('You were away');
+    const noticeText = ((await notice.textContent()) ?? '').toLowerCase();
+    expect(noticeText).not.toContain('ai');
+    expect(noticeText).not.toContain('human');
+    expect(noticeText).not.toContain('takeover');
+    await expectIdentityBlind(notice);
+  });
+
+  test('observation recovery re-fetches a snapshot without sequence resume', async ({ page }) => {
+    let releaseSnapshot!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const observationUrls: string[] = [];
+
+    await mockStandardPlaySurface(page, {
+      observationBatches: [
+        OBSERVATION_FRAMES,
+        {
+          wait: snapshotGate,
+          frames: [
+            {
+              type: 'observation',
+              phase: 'DAY_1_VOTE',
+              you: { player_id: SEAT_ME, alive: true },
+              alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
+              legal_actions: {
+                allowed_action_types: ['VOTE', 'ABSTAIN'],
+                legal_targets: [SEAT_THIRD]
+              }
+            },
+            {
+              type: 'phase_deadline',
+              phase: 'DAY_1_VOTE',
+              deadline_at: '2099-01-01T00:03:00Z'
+            }
+          ]
+        }
+      ],
+      onObservationRequest: (url) => observationUrls.push(url)
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-vote-target')).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => observationUrls.length, { timeout: 15_000 }).toBeGreaterThan(1);
+    releaseSnapshot();
+
+    await page.getByTestId('play-vote-target').selectOption(SEAT_THIRD);
+    await expect(page.getByTestId('play-vote-target')).toHaveValue(SEAT_THIRD, {
+      timeout: 15_000
+    });
+    for (const rawUrl of observationUrls) {
+      const url = new URL(rawUrl);
+      expect(url.pathname).toContain(`/human/games/${GAME_ID}/observation/stream`);
+      expect(url.searchParams.has('after')).toBe(false);
+    }
   });
 });

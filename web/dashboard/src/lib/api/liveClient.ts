@@ -9,13 +9,15 @@
 // and is paired with idempotency keys so a network retry never double-acts.
 //
 // `EventSource` is injected so the transport is unit-testable without a real
-// network: a fake EventSource drives `onmessage` / `onerror` synchronously.
+// network: a fake EventSource drives `onopen` / `onmessage` / `onerror`
+// synchronously.
 
 import type { LiveEventFrame } from './types';
 
 /** Minimal structural type of the browser `EventSource` we depend on. */
 export interface LiveEventSource {
   readonly url: string;
+  onopen: (() => void) | null;
   onmessage: ((event: { data: string; lastEventId?: string }) => void) | null;
   onerror: ((event: unknown) => void) | null;
   close(): void;
@@ -23,6 +25,8 @@ export interface LiveEventSource {
 
 /** Factory that opens an SSE connection to a resume-aware URL. */
 export type EventSourceFactory = (url: string) => LiveEventSource;
+export type LiveConnectionState = 'live' | 'reconnecting' | 'offline';
+export type ReconnectScheduler = (reconnect: () => void, delayMs: number) => void;
 
 export interface LiveClientOptions {
   /** Builds the resume-aware live-tail URL for a sequence cursor (`after`). */
@@ -33,9 +37,25 @@ export interface LiveClientOptions {
   onFrame: (frame: LiveEventFrame) => void;
   /** Called when the stream errors; the client auto-reconnects by sequence. */
   onError?: (error: unknown) => void;
-  /** Optional reconnect scheduler (defaults to `setTimeout`, 0ms). */
-  scheduleReconnect?: (reconnect: () => void) => void;
+  /** Called when a stream opens successfully. */
+  onOpen?: () => void;
+  /** Called whenever the transport state changes. */
+  onStateChange?: (state: LiveConnectionState) => void;
+  /** Optional reconnect scheduler (defaults to `setTimeout(delayMs)`). */
+  scheduleReconnect?: ReconnectScheduler;
+  /** First reconnect delay after a drop. */
+  reconnectBaseDelayMs?: number;
+  /** Maximum reconnect delay after exponential growth and jitter. */
+  reconnectMaxDelayMs?: number;
+  /** Fractional positive jitter added to each reconnect delay. */
+  reconnectJitterRatio?: number;
+  /** Random source for reconnect jitter (defaults to `Math.random`). */
+  random?: () => number;
 }
+
+const DEFAULT_RECONNECT_BASE_DELAY_MS = 500;
+const DEFAULT_RECONNECT_MAX_DELAY_MS = 10_000;
+const DEFAULT_RECONNECT_JITTER_RATIO = 0.25;
 
 function defaultEventSourceFactory(url: string): LiveEventSource {
   // `EventSource` is a browser global; cast through the structural type so the
@@ -57,6 +77,9 @@ export class LiveClient {
   private source: LiveEventSource | null = null;
   private lastSequence: number | null = null;
   private closed = false;
+  private connectionState: LiveConnectionState = 'offline';
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: LiveClientOptions, lastSequence: number | null = null) {
     this.opts = opts;
@@ -69,17 +92,29 @@ export class LiveClient {
     return this.lastSequence;
   }
 
+  /** Current transport state for UI indicators. */
+  get state(): LiveConnectionState {
+    return this.connectionState;
+  }
+
   /** Open the stream from the current cursor. */
   start(): void {
     this.closed = false;
+    this.reconnectAttempt = 0;
+    this.setState('reconnecting');
     this.connect();
   }
 
   /** Close the stream and stop reconnecting. */
   close(): void {
     this.closed = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.source?.close();
     this.source = null;
+    this.setState('offline');
   }
 
   private connect(): void {
@@ -87,8 +122,15 @@ export class LiveClient {
     const url = this.opts.buildUrl(this.lastSequence);
     const source = this.factory(url);
     this.source = source;
+    source.onopen = () => this.handleOpen(source);
     source.onmessage = (event) => this.handleMessage(event);
-    source.onerror = (error) => this.handleError(error);
+    source.onerror = (error) => this.handleError(source, error);
+  }
+
+  private handleOpen(source: LiveEventSource): void {
+    if (this.closed || this.source !== source) return;
+    this.opts.onOpen?.();
+    this.setState('live');
   }
 
   private handleMessage(event: { data: string; lastEventId?: string }): void {
@@ -107,20 +149,50 @@ export class LiveClient {
       return;
     }
     this.lastSequence = frame.sequence;
+    this.reconnectAttempt = 0;
     this.opts.onFrame(frame);
   }
 
-  private handleError(error: unknown): void {
+  private handleError(source: LiveEventSource, error: unknown): void {
+    if (this.closed || this.source !== source) return;
     this.opts.onError?.(error);
-    this.source?.close();
+    source.close();
     this.source = null;
     if (this.closed) return;
-    const reconnect = () => this.connect();
+    this.setState('reconnecting');
+    const delayMs = this.nextReconnectDelayMs();
+    const reconnect = () => {
+      this.reconnectTimer = null;
+      this.connect();
+    };
     if (this.opts.scheduleReconnect) {
-      this.opts.scheduleReconnect(reconnect);
+      this.opts.scheduleReconnect(reconnect, delayMs);
     } else {
-      setTimeout(reconnect, 0);
+      this.reconnectTimer = setTimeout(reconnect, delayMs);
     }
+  }
+
+  private nextReconnectDelayMs(): number {
+    const baseDelay = Math.max(1, this.opts.reconnectBaseDelayMs ?? DEFAULT_RECONNECT_BASE_DELAY_MS);
+    const maxDelay = Math.max(
+      baseDelay,
+      this.opts.reconnectMaxDelayMs ?? DEFAULT_RECONNECT_MAX_DELAY_MS
+    );
+    const jitterRatio = Math.max(
+      0,
+      this.opts.reconnectJitterRatio ?? DEFAULT_RECONNECT_JITTER_RATIO
+    );
+    const random = this.opts.random ?? Math.random;
+    const exponential = Math.min(maxDelay, baseDelay * 2 ** this.reconnectAttempt);
+    this.reconnectAttempt += 1;
+    const jitter = exponential * jitterRatio * Math.min(1, Math.max(0, random()));
+    return Math.max(1, Math.min(maxDelay, Math.round(exponential + jitter)));
+  }
+
+  private setState(state: LiveConnectionState): void {
+    if (this.connectionState === state) return;
+    this.connectionState = state;
+    this.opts.onStateChange?.(state);
   }
 }
 

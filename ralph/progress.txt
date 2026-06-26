@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Live connection reliability (US-285): keep the live-tail contract in
+  `LiveClient` as the only sequence-resumable stream (`?after=<lastSequence>`)
+  with `onOpen` / `onStateChange` and bounded jittered backoff. Keep the
+  per-seat observation SSE route-local and snapshot-only: on error it reopens
+  the same URL with no `after` cursor. Return-after-away copy should come from
+  the observation shell as `return_notice.kind == "away_resuming"` and must not
+  include seat kind, model, provider, or takeover terminology.
 - Game-feel feedback (US-284): keep stream-derived announcements in the pure
   dashboard play reducer (`PhaseStarted` -> `derivePhaseBanner`) and expose
   them through `PlaySession`; keep recoverable vote confirmation and accepted
@@ -4238,6 +4245,45 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
   passed / 41 skipped / 10 deselected.
+
+## 2026-06-26T00:10 PDT - US-285
+- Added LiveClient connection state (`live` / `reconnecting` / `offline`) plus
+  `onOpen` / `onStateChange`, capped exponential reconnect backoff with jitter,
+  and stale-source guards while preserving resume-by-sequence duplicate
+  filtering.
+- Exposed the state through `PlaySession` and rendered an identity-blind
+  connection indicator on `/play/[gameId]`, including phone-width Playwright
+  coverage for disconnect and recovery.
+- Added a non-leaky `return_notice` on the seat observation snapshot for a
+  player whose seat was already resumed by the server after the disconnect
+  grace window, and rendered that notice without AI/human/model/takeover copy.
+- Kept observation SSE out of the sequence-resume contract: the play route
+  re-fetches the same snapshot URL with bounded retry and tests assert no
+  `after` cursor on observation recovery.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_observation.py`,
+  `tests/api/test_seat_observation_stream.py`,
+  `web/dashboard/src/lib/api/liveClient.ts`,
+  `web/dashboard/src/lib/api/liveClient.test.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/playSession.svelte.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- liveClient.test.ts` failed first on missing
+  open/state/backoff behavior; focused RED
+  `uv run pytest tests/api/test_seat_observation_stream.py::test_return_after_takeover_gets_non_leaky_resume_notice`
+  failed first on missing `return_notice`. Focused GREEN:
+  `pnpm -C web/dashboard test -- liveClient.test.ts` -> 63 passed;
+  focused pytest -> 1 passed; `pnpm -C web/dashboard test:e2e -- play.spec.ts
+  -g "play connection reliability"` -> 16 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2697
+  passed / 41 skipped / 10 deselected. Frontend gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
+  0 warnings; `pnpm -C web/dashboard test` -> 63 passed;
+  `pnpm -C web/dashboard test:e2e` -> 50 passed / 3 skipped.
 
 ## 2026-06-25T23:08 PDT - US-279
 - Added a transient `/play/match` loading/queue screen. The home `Play vs AI`

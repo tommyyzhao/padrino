@@ -528,12 +528,19 @@ export interface LegalActionsView {
   action_descriptions?: Record<string, string>;
 }
 
+/** Non-leaky notice shown to a player returning after the server resumed their seat. */
+export interface ReturnNoticeView {
+  kind: 'away_resuming';
+  message: string;
+}
+
 /** The seat's own identity-mode-aware observation projection frame (US-136). */
 export interface SeatObservationFrame {
   type: 'observation';
   phase?: string;
   alive_players?: string[];
   legal_actions?: LegalActionsView;
+  return_notice?: ReturnNoticeView;
   [key: string]: unknown;
 }
 

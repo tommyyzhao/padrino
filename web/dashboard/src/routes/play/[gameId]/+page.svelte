@@ -57,11 +57,15 @@
   let actionBusy = $state(false);
   let actionNote = $state<string | null>(null);
   let error = $state<string | null>(null);
+  let returnNotice = $state<string | null>(null);
   let helpOpen = $state(false);
   let eliminationDismissed = $state(false);
   let mobilePanel = $state<'board' | 'chat' | 'actions'>('board');
 
   let obsSse: EventSource | null = null;
+  let obsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let obsReconnectAttempt = 0;
+  let observationClosed = false;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
 
   const secondsRemaining = $derived(secondsUntil(deadlineIso, nowMs));
@@ -79,6 +83,7 @@
   const phaseBanner = $derived(session?.phaseBanner ?? null);
   const terminal = $derived(session?.terminal ?? false);
   const winner = $derived(session?.winner ?? null);
+  const connectionState = $derived(session?.connectionState ?? 'offline');
   const selectedNightActionType = $derived(nightActionType(legal));
   const selectedNightActionLabel = $derived(
     selectedNightActionType ? actionTypeLabel(selectedNightActionType) : 'Night action'
@@ -96,6 +101,12 @@
   function isDayVotePhaseId(value: string): boolean {
     const normalized = value.toUpperCase();
     return normalized.startsWith('DAY_') && normalized.endsWith('_VOTE');
+  }
+
+  function connectionLabel(value: 'live' | 'reconnecting' | 'offline'): string {
+    if (value === 'live') return 'Live';
+    if (value === 'reconnecting') return 'Reconnecting';
+    return 'Offline';
   }
 
   function seatSpriteUrl(publicPlayerId: string): string {
@@ -117,6 +128,7 @@
     if (frame.type === 'observation') {
       const obs = frame as SeatObservationFrame;
       if (obs.legal_actions) legal = obs.legal_actions;
+      if (obs.return_notice?.kind === 'away_resuming') returnNotice = obs.return_notice.message;
       const you = obs['you'] as { player_id?: string } | undefined;
       if (you?.player_id) mySeatId = you.player_id;
     } else if (frame.type === 'phase_deadline') {
@@ -126,11 +138,19 @@
   }
 
   function connectObservation(): void {
-    if (!gameId) return;
+    if (!gameId || observationClosed) return;
+    if (obsReconnectTimer) {
+      clearTimeout(obsReconnectTimer);
+      obsReconnectTimer = null;
+    }
     obsSse?.close();
     const url = padrino.client.seatObservationUrl(gameId);
-    obsSse = new EventSource(url, { withCredentials: true });
-    obsSse.onmessage = (evt: MessageEvent) => {
+    const source = new EventSource(url, { withCredentials: true });
+    obsSse = source;
+    source.onopen = () => {
+      obsReconnectAttempt = 0;
+    };
+    source.onmessage = (evt: MessageEvent) => {
       try {
         const frame = JSON.parse(evt.data as string) as SeatStreamFrame;
         handleObservationFrame(frame);
@@ -138,11 +158,24 @@
         // ignore malformed frames
       }
     };
-    obsSse.onerror = () => {
-      // The observation stream is a per-snapshot half-open stream; on error we
-      // simply re-fetch the snapshot on the next phase tick rather than spin.
-      obsSse?.close();
+    source.onerror = () => {
+      if (obsSse !== source || observationClosed) return;
+      // Observation is a point-in-time seat snapshot, not a sequence stream:
+      // recovery reopens the same URL with no `after` cursor.
+      source.close();
+      obsSse = null;
+      scheduleObservationReconnect();
     };
+  }
+
+  function scheduleObservationReconnect(): void {
+    if (observationClosed || obsReconnectTimer !== null) return;
+    const delayMs = Math.min(5_000, 500 * 2 ** obsReconnectAttempt);
+    obsReconnectAttempt += 1;
+    obsReconnectTimer = setTimeout(() => {
+      obsReconnectTimer = null;
+      connectObservation();
+    }, delayMs);
   }
 
   function reviewVote(): void {
@@ -220,6 +253,7 @@
 
   onMount(() => {
     if (!gameId) return;
+    observationClosed = false;
     padrino.setHumanSession(true);
     session = createPlaySession({ client: padrino.client, gameId });
     session.start();
@@ -231,8 +265,10 @@
   });
 
   onDestroy(() => {
+    observationClosed = true;
     session?.close();
     obsSse?.close();
+    if (obsReconnectTimer) clearTimeout(obsReconnectTimer);
     if (tickTimer) clearInterval(tickTimer);
   });
 </script>
@@ -256,6 +292,20 @@
       data-bucket={bucket}
     >
       {countdownLabel(bucket)}
+    </span>
+    <span
+      class={`rounded px-2 py-0.5 font-mono text-xs ${
+        connectionState === 'live'
+          ? 'bg-emerald-50 text-emerald-800'
+          : connectionState === 'reconnecting'
+            ? 'bg-amber-50 text-amber-900'
+            : 'bg-red-50 text-red-800'
+      }`}
+      data-testid="play-connection-indicator"
+      data-state={connectionState}
+      role="status"
+    >
+      {connectionLabel(connectionState)}
     </span>
   </div>
   <Button variant="outline" testid="play-help-open" onclick={() => (helpOpen = true)}>
@@ -332,6 +382,16 @@
   >
     <span class="font-semibold">{phaseBanner.message}.</span>
     <span class="ml-2 font-mono text-xs">{phaseBanner.phase}</span>
+  </div>
+{/if}
+
+{#if returnNotice}
+  <div
+    class="mb-4 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-slate-950"
+    data-testid="play-return-notice"
+    role="status"
+  >
+    {returnNotice}
   </div>
 {/if}
 

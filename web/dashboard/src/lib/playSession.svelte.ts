@@ -7,7 +7,7 @@
 // votes / chat are exposed as `$derived` reads. The reducer is pure and unit
 // tested separately; this file is the thin reactive shell.
 
-import { LiveClient, type EventSourceFactory } from './api/liveClient';
+import { LiveClient, type EventSourceFactory, type LiveConnectionState } from './api/liveClient';
 import type { PadrinoClient } from './api/client';
 import {
   applyFrame,
@@ -28,6 +28,7 @@ export interface PlaySessionOptions {
 
 export function createPlaySession(opts: PlaySessionOptions) {
   let state = $state<PlayState>(emptyPlayState());
+  let connectionState = $state<LiveConnectionState>('offline');
 
   const live = new LiveClient({
     buildUrl: (after) => opts.client.liveTailUrl(opts.gameId, after),
@@ -35,6 +36,9 @@ export function createPlaySession(opts: PlaySessionOptions) {
     onFrame: (frame: LiveEventFrame) => {
       // The reducer ignores resume-overlap frames, so reconnect is idempotent.
       state = applyFrame(state, frame);
+    },
+    onStateChange: (next: LiveConnectionState) => {
+      connectionState = next;
     }
   });
 
@@ -72,6 +76,9 @@ export function createPlaySession(opts: PlaySessionOptions) {
     },
     get lastSequence(): number | null {
       return state.lastSequence;
+    },
+    get connectionState(): LiveConnectionState {
+      return connectionState;
     }
   };
 }

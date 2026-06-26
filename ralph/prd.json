@@ -171,7 +171,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check + e2e). Identity-blind throughout; works on a phone-width viewport."
       ],
       "notes": "Sites: web/dashboard/src/lib/liveClient.ts (ADD onOpen/onStateChange + backoff+jitter; today LiveClientOptions exposes only onFrame/onError and the injected LiveEventSource omits onopen), play/[gameId]/+page.svelte (indicator + return notice + the SEPARATE obsSse EventSource at ~line 110, half-open/non-resumable), the reconnect-by-sequence contract (LiveClient ?after=), the 90s grace/AI-takeover (server-side, identity-blind - do NOT change). Depends on US-282. Split: backoff/dedup logic -> vitest (liveClient.test.ts); indicator/notice render -> Playwright e2e route-mocked.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-286",
