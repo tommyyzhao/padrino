@@ -33,7 +33,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: api/routes/human.py (ADD POST /human/match), api/lobby_launch.py (launch_lobby is lobby-keyed; reuse - do NOT hand-roll Game/GameSeat materialization), api/routes/lobbies.py (mirror its launch route: enforce_consent + release_admission_for_lobby + re-admit ACTION_LAUNCH), core/lobby/autofill.py (autofill_empty_seats - the CORRECT fill primitive, preserves the HUMAN seat), economics/human_cost_governance.py (admission caps/breaker + human_eligible_pool curated pool). NAME 'match' (the existing 'guest quickplay'/POST /human/guest mints a SESSION, not a game). Do NOT use matchmaker.next_match (seats all seats) and do NOT route through scientific continuous_matchmaking. Casual + anonymous + firewall-safe.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-278",

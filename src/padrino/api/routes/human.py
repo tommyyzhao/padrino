@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,7 @@ from padrino.api.human_auth import (
     HUMAN_SESSION_COOKIE,
     HumanPrincipalContext,
     generate_session_token,
+    get_human_context,
     require_human,
 )
 from padrino.api.human_chat import submit_chat
@@ -43,6 +44,7 @@ from padrino.api.human_chat_moderation import (
     build_message_guard_from_settings,
 )
 from padrino.api.human_consent import (
+    CONSENT_REQUIRED_DETAIL,
     client_ip_hash,
     enforce_consent,
     has_current_consent,
@@ -51,6 +53,11 @@ from padrino.api.human_consent import (
 )
 from padrino.api.human_observation import build_seat_observation_snapshot, stream_snapshot
 from padrino.api.human_turing import get_own_result, submit_guess
+from padrino.api.lobby_launch import (
+    AutoFillPoolError,
+    LobbyNotLaunchableError,
+    launch_lobby,
+)
 from padrino.api.oauth import (
     OAuthError,
     build_authorization_request,
@@ -62,11 +69,26 @@ from padrino.api.oauth import (
 )
 from padrino.api.reveal import build_participant_reveal
 from padrino.core.engine.actions import Action
+from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStatus
 from padrino.core.reveal import EndgameReveal
-from padrino.db.models import HumanPlayerStats
+from padrino.core.rulesets import get_ruleset
+from padrino.db.models import HumanPlayerStats, Principal
 from padrino.db.repositories import human_principals as principals_repo
+from padrino.db.repositories import leagues as leagues_repo
+from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
+from padrino.economics.human_cost_governance import (
+    ACTION_CREATE,
+    ACTION_LAUNCH,
+    HumanAdmitDecision,
+    admit_human,
+    bind_admission_slots,
+    release_admission_for_lobby,
+    release_inference_reservations_for_lobby,
+    rollback_admission_decision,
+)
+from padrino.settings import Settings
 
 router = APIRouter()
 
@@ -74,6 +96,8 @@ OAUTH_STATE_COOKIE = "padrino_oauth_state"
 OAUTH_VERIFIER_COOKIE = "padrino_oauth_verifier"
 _OAUTH_FLOW_TTL_SECONDS = 600
 _OAUTH_FLOW_PRUNE_SAMPLE_MODULUS = 16
+_SOLO_MATCH_RULESET_ID = "mini7_v1"
+_ADMISSION_DENIED_STATUS = status.HTTP_429_TOO_MANY_REQUESTS
 
 
 class GuestSummary(BaseModel):
@@ -103,6 +127,12 @@ class ConsentStatus(BaseModel):
 
     consented: bool
     required_versions: dict[str, str]
+
+
+class MatchResponse(BaseModel):
+    """Result of a solo instant match handoff."""
+
+    game_id: uuid.UUID
 
 
 class HumanRoleWinRate(BaseModel):
@@ -253,6 +283,154 @@ async def post_consent(
         source_ip_hash=client_ip_hash(request),
     )
     return ConsentStatus(consented=True, required_versions=versions)
+
+
+@router.post(
+    "/human/match",
+    response_model=MatchResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_match(
+    request: Request,
+    ctx: HumanPrincipalContext | None = Depends(get_human_context),
+    session: AsyncSession = Depends(get_session),
+) -> MatchResponse | JSONResponse:
+    """Create a one-human casual lobby, auto-fill AI seats, and launch it.
+
+    This is the solo "Play vs AI" handoff. It deliberately reuses the lobby
+    launch path rather than hand-rolling game materialization, so auto-fill,
+    role assignment, human-lane ownership, anonymity, and rating segregation
+    stay identical to private friend lobbies.
+    """
+    settings = _get_auth_settings(request)
+    if ctx is None:
+        _principal, raw_token = await _create_guest_session(
+            session,
+            settings=settings,
+            now=datetime.now(UTC),
+        )
+        await session.commit()
+        return _consent_required_response(raw_token=raw_token, settings=settings)
+
+    await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
+
+    create_admission = await _admit_or_429(
+        session,
+        settings=settings,
+        principal_id=ctx.principal_id,
+        action=ACTION_CREATE,
+    )
+    now = datetime.now(UTC)
+    ruleset = get_ruleset(_SOLO_MATCH_RULESET_ID)
+    league = await leagues_repo.get_or_create_humans_included(
+        session,
+        ruleset_id=_SOLO_MATCH_RULESET_ID,
+        ranked=False,
+    )
+    lobby = await lobbies_repo.create_lobby(
+        session,
+        ruleset_id=_SOLO_MATCH_RULESET_ID,
+        identity_mode=IdentityMode.ANONYMOUS.value,
+        theme_pack_id=None,
+        lobby_seed=secrets.token_hex(16),
+        invite_token=secrets.token_urlsafe(24),
+        integrity_acknowledged=False,
+        host_principal_id=ctx.principal_id,
+        league_id=league.id,
+        now=now,
+    )
+    host_member = await lobbies_repo.add_member(
+        session,
+        lobby_id=lobby.id,
+        principal_id=ctx.principal_id,
+        is_host=True,
+        now=now,
+    )
+    await bind_admission_slots(
+        session,
+        create_admission,
+        lobby_id=lobby.id,
+        lobby_member_id=host_member.id,
+    )
+    await lobbies_repo.add_seat(
+        session,
+        lobby_id=lobby.id,
+        seat_index=0,
+        seat_kind=LobbySeatKind.HUMAN,
+        member_id=host_member.id,
+    )
+    for seat_index in range(1, ruleset.PLAYER_COUNT):
+        await lobbies_repo.add_seat(
+            session,
+            lobby_id=lobby.id,
+            seat_index=seat_index,
+            seat_kind=LobbySeatKind.AI,
+        )
+    await lobbies_repo.set_lobby_status(
+        session,
+        lobby_id=lobby.id,
+        status=LobbyStatus.LOCKED.value,
+        now=now,
+    )
+
+    await release_admission_for_lobby(session, lobby_id=lobby.id, released_at=now)
+    launch_admission = await _admit_or_429(
+        session,
+        settings=settings,
+        principal_id=ctx.principal_id,
+        action=ACTION_LAUNCH,
+    )
+    try:
+        result = await launch_lobby(session, lobby_id=lobby.id)
+    except (LobbyNotLaunchableError, AutoFillPoolError) as exc:
+        await rollback_admission_decision(session, launch_admission)
+        detail = "autofill_pool_exhausted" if isinstance(exc, AutoFillPoolError) else str(exc)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
+
+    if result.created:
+        await bind_admission_slots(
+            session,
+            launch_admission,
+            lobby_id=lobby.id,
+            lobby_member_id=host_member.id,
+        )
+        await release_inference_reservations_for_lobby(
+            session,
+            lobby_id=lobby.id,
+            released_at=now,
+        )
+    else:
+        await rollback_admission_decision(session, launch_admission)
+
+    await session.commit()
+    return MatchResponse(game_id=result.game_id)
+
+
+async def _admit_or_429(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    principal_id: uuid.UUID,
+    action: str,
+) -> HumanAdmitDecision:
+    decision = await admit_human(
+        session,
+        settings,
+        principal_id=principal_id,
+        action=action,
+    )
+    if not decision.allowed:
+        raise HTTPException(status_code=_ADMISSION_DENIED_STATUS, detail=decision.reason)
+    return decision
+
+
+def _consent_required_response(*, raw_token: str, settings: Settings) -> JSONResponse:
+    response = JSONResponse(
+        status_code=status.HTTP_412_PRECONDITION_FAILED,
+        content={"detail": CONSENT_REQUIRED_DETAIL},
+    )
+    _set_human_session_cookie(response, raw_token=raw_token, settings=settings)
+    return response
 
 
 class ActionSubmission(BaseModel):
@@ -547,6 +725,46 @@ async def get_turing_guess(
     )
 
 
+async def _create_guest_session(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    now: datetime,
+) -> tuple[Principal, str]:
+    raw_token = generate_session_token()
+    expires_at = now + timedelta(hours=settings.padrino_human_session_ttl_hours)
+    principal = await principals_repo.create_principal(
+        session,
+        kind=principals_repo.PRINCIPAL_KIND_GUEST,
+    )
+    await principals_repo.create_session(
+        session,
+        principal_id=principal.id,
+        raw_token=raw_token,
+        kind=principals_repo.SESSION_KIND_GUEST,
+        issued_at=now,
+        expires_at=expires_at,
+    )
+    return principal, raw_token
+
+
+def _set_human_session_cookie(
+    response: Response,
+    *,
+    raw_token: str,
+    settings: Settings,
+) -> None:
+    response.set_cookie(
+        key=HUMAN_SESSION_COOKIE,
+        value=raw_token,
+        max_age=settings.padrino_human_session_ttl_hours * 3600,
+        httponly=True,
+        secure=settings.padrino_human_session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+
+
 @router.post(
     "/human/guest",
     response_model=GuestSummary,
@@ -559,31 +777,9 @@ async def create_guest(
 ) -> GuestSummary:
     """Create a guest principal + session and set the human session cookie."""
     settings = _get_auth_settings(request)
-    raw_token = generate_session_token()
     now = datetime.now(UTC)
-    expires_at = now + timedelta(hours=settings.padrino_human_session_ttl_hours)
-
-    principal = await principals_repo.create_principal(
-        session, kind=principals_repo.PRINCIPAL_KIND_GUEST
-    )
-    await principals_repo.create_session(
-        session,
-        principal_id=principal.id,
-        raw_token=raw_token,
-        kind=principals_repo.SESSION_KIND_GUEST,
-        issued_at=now,
-        expires_at=expires_at,
-    )
-
-    response.set_cookie(
-        key=HUMAN_SESSION_COOKIE,
-        value=raw_token,
-        max_age=settings.padrino_human_session_ttl_hours * 3600,
-        httponly=True,
-        secure=settings.padrino_human_session_cookie_secure,
-        samesite="lax",
-        path="/",
-    )
+    principal, raw_token = await _create_guest_session(session, settings=settings, now=now)
+    _set_human_session_cookie(response, raw_token=raw_token, settings=settings)
     return GuestSummary(
         principal_id=principal.id,
         kind=principal.kind,

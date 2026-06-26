@@ -4132,3 +4132,29 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2689 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-276 is backend-only and did not
   touch `web/dashboard`.
+
+## 2026-06-25T22:44 PDT - US-277
+- Added `POST /human/match` as the solo instant-match path. The route mints a
+  guest session when no human cookie exists, enforces current consent before any
+  lobby/game rows are materialized, composes a one-human `mini7_v1` casual
+  lobby, locks it, releases create-time admission slots, and reuses
+  `launch_lobby` so AI autofill, role assignment, anonymity, and human-lane
+  materialization stay on the existing launch handoff.
+- Added route coverage for no-consent refusal/session minting, successful
+  single-human launch, same-seed deterministic AI autofill, daily cap and global
+  breaker denial, exact one-slot admission consumption, counts-only response
+  shape, anonymous identity mode, dormant Humans-Included league binding, and
+  zero scientific `Rating` / `RatingEvent` rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/human.py`,
+  `tests/api/test_human_match.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_match.py` failed first with
+  `/human/match` 404s; focused GREEN same command -> 6 passed. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; final `uv run pytest -m "not integration"` ->
+  2696 passed / 41 skipped / 10 deselected. The first full pytest run hit an
+  unrelated transient scheduler timing failure; the exact test passed in
+  isolation and the full rerun passed. Frontend gates not run; US-277 is
+  backend-only and did not touch `web/dashboard`.
