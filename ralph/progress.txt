@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Play-surface help/action metadata (US-281): keep the in-game rules drawer on
+  `/play/[gameId]` backed by the shared `HowToPlayPanel`, and derive action
+  helper copy from the seat observation `legal_actions` payload via optional
+  `LegalActionsView.action_descriptions`. The frontend fallback should use the
+  actual currently allowed action type so new rulesets still render useful
+  copy without a hardcoded UI action table.
 - How-to-play onboarding (US-280): keep the rules explainer as a shared
   `HowToPlayPanel` rendered by both `/how-to-play` and the home pre-match
   modal. Gate first-time `Play vs AI` with the localStorage key
@@ -4269,5 +4275,36 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
   0 warnings; `pnpm -C web/dashboard test:e2e` -> 36 passed / 3 skipped.
   Backend gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:28 PDT - US-281
+- Added an in-game `Rules` drawer to `/play/[gameId]` that opens without
+  leaving the match, reuses the shared identity-blind `HowToPlayPanel`, closes
+  in-place, and remains scrollable on a 390px-wide viewport.
+- Added optional legal-action description metadata to the dashboard
+  `LegalActionsView` contract plus pure `actionTypeDescription` derivation.
+  Server/ruleset-provided descriptions are used when present; otherwise the
+  fallback is generated from the currently allowed action type.
+- Rendered the current night action's description beside the target selector
+  and covered the NAR roleblock path with route-mocked Playwright fixtures.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/playSurface.ts`,
+  `web/dashboard/src/lib/api/playSurface.test.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- src/lib/api/playSurface.test.ts` failed first
+  on missing `actionTypeDescription`; focused RED
+  `pnpm -C web/dashboard test:e2e -- play.spec.ts` failed first on the missing
+  drawer trigger and action-description element. Focused GREEN after
+  implementation: `pnpm -C web/dashboard test -- src/lib/api/playSurface.test.ts`
+  -> 58 passed; `pnpm -C web/dashboard test:e2e -- play.spec.ts` -> 3 passed.
+  Frontend gates: `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`
+  -> 0 errors / 0 warnings; `pnpm -C web/dashboard test` -> 58 passed;
+  `pnpm -C web/dashboard test:e2e` -> 37 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
   passed / 41 skipped / 10 deselected.

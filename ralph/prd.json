@@ -101,7 +101,7 @@
         "Reducer/derivation of action descriptions (if any pure logic) is unit-tested via vitest over synthetic legal-action payloads."
       ],
       "notes": "Sites: play/[gameId]/+page.svelte + lib components, the legal_actions/observation payload already streamed per seat, core ruleset action definitions. Reuse existing legal_actions. Render/viewport -> Playwright e2e (route-mocked); pure logic -> vitest. Independent of the match flow.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-282",

@@ -525,6 +525,7 @@ export type SeatStreamFrameType = 'observation' | 'phase_deadline';
 export interface LegalActionsView {
   allowed_action_types: string[];
   legal_targets: string[];
+  action_descriptions?: Record<string, string>;
 }
 
 /** The seat's own identity-mode-aware observation projection frame (US-136). */

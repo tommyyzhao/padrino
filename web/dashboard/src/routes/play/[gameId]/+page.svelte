@@ -13,11 +13,13 @@
   import { onMount, onDestroy } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import Button from '$lib/components/Button.svelte';
+  import HowToPlayPanel from '$lib/components/HowToPlayPanel.svelte';
   import { padrino } from '$lib/clientStore.svelte';
   import { createPlaySession, type PlaySession } from '$lib/playSession.svelte';
   import { newIdempotencyKey } from '$lib/api/liveClient';
   import {
     actionTypeLabel,
+    actionTypeDescription,
     composerStatusFromChat,
     countdownBucket,
     countdownLabel,
@@ -54,6 +56,7 @@
   let actionBusy = $state(false);
   let actionNote = $state<string | null>(null);
   let error = $state<string | null>(null);
+  let helpOpen = $state(false);
 
   let obsSse: EventSource | null = null;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -74,6 +77,9 @@
   const selectedNightActionType = $derived(nightActionType(legal));
   const selectedNightActionLabel = $derived(
     selectedNightActionType ? actionTypeLabel(selectedNightActionType) : 'Night action'
+  );
+  const selectedNightActionDescription = $derived(
+    actionTypeDescription(legal, selectedNightActionType)
   );
 
   function seatSpriteUrl(publicPlayerId: string): string {
@@ -207,22 +213,49 @@
   <a class="text-sm underline" href="/">← Home</a>
 </div>
 
-<div class="mb-2 flex items-center gap-3">
-  <h1 class="text-xl font-semibold" data-testid="play-title">Play</h1>
-  <span
-    class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
-    data-testid="play-phase"
-  >
-    {phase}
-  </span>
-  <span
-    class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
-    data-testid="play-countdown"
-    data-bucket={bucket}
-  >
-    {countdownLabel(bucket)}
-  </span>
+<div class="mb-2 flex flex-wrap items-center gap-3">
+  <div class="flex flex-wrap items-center gap-3">
+    <h1 class="text-xl font-semibold" data-testid="play-title">Play</h1>
+    <span
+      class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
+      data-testid="play-phase"
+    >
+      {phase}
+    </span>
+    <span
+      class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
+      data-testid="play-countdown"
+      data-bucket={bucket}
+    >
+      {countdownLabel(bucket)}
+    </span>
+  </div>
+  <Button variant="outline" testid="play-help-open" onclick={() => (helpOpen = true)}>
+    Rules
+  </Button>
 </div>
+
+{#if helpOpen}
+  <div
+    class="fixed inset-0 z-50 overflow-y-auto bg-background/95"
+    data-testid="play-help-drawer"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="how-to-play-title"
+  >
+    <div
+      class="ml-auto flex h-full w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-border bg-background p-4 shadow-lg sm:p-5"
+    >
+      <div class="flex items-center justify-between gap-3">
+        <p class="text-sm font-semibold">Rules</p>
+        <Button variant="ghost" testid="play-help-close" onclick={() => (helpOpen = false)}>
+          Close
+        </Button>
+      </div>
+      <HowToPlayPanel class="border-0 p-0 shadow-none sm:p-0" />
+    </div>
+  </div>
+{/if}
 
 <p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="play-composition">
   {#if composition}
@@ -305,6 +338,15 @@
             <span class="font-medium" data-testid="play-night-action-type">
               {selectedNightActionLabel}
             </span>
+            {#if selectedNightActionDescription}
+              <span
+                class="text-xs text-muted-foreground"
+                title={selectedNightActionDescription}
+                data-testid="play-night-action-description"
+              >
+                {selectedNightActionDescription}
+              </span>
+            {/if}
             <select
               class="rounded border border-border bg-background px-2 py-1 text-sm"
               data-testid="play-night-target"

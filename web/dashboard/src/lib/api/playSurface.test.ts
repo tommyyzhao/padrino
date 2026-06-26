@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   actionAllowed,
+  actionTypeDescription,
   actionTypeLabel,
   composerStatusFromChat,
   countdownBucket,
@@ -80,6 +81,30 @@ describe('legal-action gating', () => {
       expect(nightActionType(legal)).toBe(type);
       expect(actionTypeLabel(type)).toMatch(/\S/);
     }
+  });
+
+  it('describes legal actions from the server-provided action metadata when present', () => {
+    const legal: LegalActionsView = {
+      allowed_action_types: ['PHASE_SHIFT'],
+      legal_targets: ['p2'],
+      action_descriptions: {
+        PHASE_SHIFT: 'Delay the selected target using this custom ruleset action.'
+      }
+    };
+
+    expect(actionTypeDescription(legal, 'PHASE_SHIFT')).toBe(
+      'Delay the selected target using this custom ruleset action.'
+    );
+  });
+
+  it('falls back to a description derived from the actual allowed action type', () => {
+    const legal: LegalActionsView = {
+      allowed_action_types: ['CLEAN'],
+      legal_targets: ['p2']
+    };
+
+    expect(actionTypeDescription(legal, 'CLEAN')).toContain('Clean');
+    expect(actionTypeDescription(legal, 'ROLEBLOCK')).toBeNull();
   });
 
   it('does not treat vote or noop phases as night actions just because targets exist', () => {

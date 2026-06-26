@@ -171,6 +171,17 @@ test.describe('play surface (US-155)', () => {
     await page.goto(`/play/${GAME_ID}`);
     await expect(page.getByTestId('play-title')).toBeVisible();
 
+    await page.getByTestId('play-help-open').click();
+    const help = page.getByTestId('play-help-drawer');
+    await expect(help).toBeVisible();
+    await expect(help.getByTestId('how-to-play-panel')).toContainText('How to play Mafia');
+    await expect(help.getByTestId('how-to-play-day')).toContainText('vote');
+    await expect(help.getByTestId('how-to-play-win')).toContainText('Town wins');
+    await expect(help.getByTestId('how-to-play-spot-ai')).toContainText('Spot the AI');
+    await expectIdentityBlind(help);
+    await page.getByTestId('play-help-close').click();
+    await expect(help).toHaveCount(0);
+
     // Composition is counts-only.
     await expect(page.getByTestId('play-composition')).toContainText('2 humans');
     await expect(page.getByTestId('play-composition')).toContainText('5 AI');
@@ -260,7 +271,10 @@ test.describe('play surface (US-155)', () => {
         alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
         legal_actions: {
           allowed_action_types: ['ROLEBLOCK'],
-          legal_targets: [SEAT_OTHER, SEAT_THIRD]
+          legal_targets: [SEAT_OTHER, SEAT_THIRD],
+          action_descriptions: {
+            ROLEBLOCK: 'Block one legal target from completing their night action.'
+          }
         }
       },
       { type: 'phase_deadline', phase: 'NIGHT_1_ACTIONS', deadline_at: '2099-01-01T00:02:00Z' }
@@ -301,6 +315,9 @@ test.describe('play surface (US-155)', () => {
     await page.goto(`/play/${NAR_GAME_ID}`);
     await expect(page.getByTestId('play-night-panel')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('play-night-action-type')).toContainText('Roleblock');
+    await expect(page.getByTestId('play-night-action-description')).toContainText(
+      'Block one legal target from completing their night action.'
+    );
 
     await page.getByTestId('play-night-target').selectOption(SEAT_THIRD);
     await page.getByTestId('play-night-submit').click();
@@ -310,5 +327,66 @@ test.describe('play surface (US-155)', () => {
 
     expect(actionPayload).not.toBeNull();
     expect(actionPayload?.['action']).toMatchObject({ type: 'ROLEBLOCK', target: SEAT_THIRD });
+  });
+
+  test('help drawer renders identity-blind rules on a phone-width viewport', async ({ page }) => {
+    const isApi = (route: import('@playwright/test').Route) => {
+      const t = route.request().resourceType();
+      return t === 'fetch' || t === 'xhr';
+    };
+
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    await page.route(`**/public/games/${GAME_ID}/composition`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          game_id: GAME_ID,
+          ruleset_id: 'mini7_v1',
+          composition: { human_count: 2, ai_count: 5, total: 7 }
+        })
+      });
+    });
+
+    let firstLive = true;
+    await page.route(`**/public/games/${GAME_ID}/live*`, async (route) => {
+      if (firstLive) {
+        firstLive = false;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: buildSseBody(PUBLIC_FRAMES)
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    let firstObs = true;
+    await page.route(`**/human/games/${GAME_ID}/observation/stream*`, async (route) => {
+      if (firstObs) {
+        firstObs = false;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: observationSseBody()
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await page.getByTestId('play-help-open').click();
+    const help = page.getByTestId('play-help-drawer');
+    await expect(help).toBeVisible();
+    await expect(help.getByTestId('how-to-play-panel')).toBeVisible();
+    await expect(help.getByTestId('how-to-play-night')).toBeVisible();
+    await expect(help).toHaveCSS('overflow-y', 'auto');
+    await expectIdentityBlind(help);
   });
 });
