@@ -135,7 +135,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check + e2e)."
       ],
       "notes": "Sites: play/[gameId]/+page.svelte play-state reducer (already ingests VoteSubmitted) - render what it tracks; SSE live-tail provides vote frames. Depends on US-282. Split: derivation -> vitest (playState.test.ts); render/live-update -> Playwright e2e route-mocked (no live human game exists in the smoke harness).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-284",

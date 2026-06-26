@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyFrame, applyFrames, emptyPlayState } from './playState';
+import { applyFrame, applyFrames, deriveVoteTally, emptyPlayState } from './playState';
 import type { LiveEventFrame } from './types';
 
 function frame(
@@ -44,6 +44,41 @@ describe('play-state reducer', () => {
     state = applyFrame(state, frame(4, 'PhaseStarted', {}, { phase: 'NIGHT_1' }));
     expect(state.phase).toBe('NIGHT_1');
     expect(state.votes).toEqual({});
+  });
+
+  it('derives voter target rows and running target counts from VoteSubmitted frames', () => {
+    let state = applyFrames(emptyPlayState(), [
+      frame(1, 'PhaseStarted', {}, { phase: 'DAY_1_VOTE' }),
+      frame(2, 'VoteSubmitted', { target: 'p3', is_abstain: false }, { actor_player_id: 'p1', phase: 'DAY_1_VOTE' }),
+      frame(3, 'VoteSubmitted', { target: 'p3', is_abstain: false }, { actor_player_id: 'p2', phase: 'DAY_1_VOTE' }),
+      frame(4, 'VoteSubmitted', { target: null, is_abstain: true }, { actor_player_id: 'p4', phase: 'DAY_1_VOTE' })
+    ]);
+
+    expect(deriveVoteTally(state.votes)).toEqual({
+      rows: [
+        { voter: 'p1', target: 'p3' },
+        { voter: 'p2', target: 'p3' },
+        { voter: 'p4', target: null }
+      ],
+      counts: [{ target: 'p3', count: 2 }]
+    });
+
+    state = applyFrame(
+      state,
+      frame(5, 'VoteSubmitted', { target: 'p2', is_abstain: false }, { actor_player_id: 'p4', phase: 'DAY_1_VOTE' })
+    );
+
+    expect(deriveVoteTally(state.votes)).toEqual({
+      rows: [
+        { voter: 'p1', target: 'p3' },
+        { voter: 'p2', target: 'p3' },
+        { voter: 'p4', target: 'p2' }
+      ],
+      counts: [
+        { target: 'p3', count: 2 },
+        { target: 'p2', count: 1 }
+      ]
+    });
   });
 
   it('marks a seat dead on PlayerEliminated', () => {

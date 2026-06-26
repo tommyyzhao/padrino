@@ -17,6 +17,7 @@
   import { padrino } from '$lib/clientStore.svelte';
   import { createPlaySession, type PlaySession } from '$lib/playSession.svelte';
   import { newIdempotencyKey } from '$lib/api/liveClient';
+  import { deriveVoteTally } from '$lib/api/playState';
   import {
     actionTypeLabel,
     actionTypeDescription,
@@ -82,6 +83,13 @@
   const selectedNightActionDescription = $derived(
     actionTypeDescription(legal, selectedNightActionType)
   );
+  const voteTally = $derived(deriveVoteTally(session?.votes ?? {}));
+  const showVoteTally = $derived(isDayVotePhaseId(phase));
+
+  function isDayVotePhaseId(value: string): boolean {
+    const normalized = value.toUpperCase();
+    return normalized.startsWith('DAY_') && normalized.endsWith('_VOTE');
+  }
 
   function seatSpriteUrl(publicPlayerId: string): string {
     return spriteUrl(padrino.baseUrl, themePackId, spriteByKey[publicPlayerId] ?? null);
@@ -505,6 +513,62 @@
     class={`${mobilePanel === 'actions' ? 'flex' : 'hidden'} flex-col gap-3 md:flex`}
     data-testid="play-info-panel"
   >
+    {#if showVoteTally}
+      <Card>
+        <h2 class="mb-2 text-sm font-semibold">Vote tally</h2>
+        <div class="flex flex-col gap-3" data-testid="play-vote-tally-panel">
+          <div>
+            <h3 class="mb-1 text-xs font-medium text-muted-foreground">Running counts</h3>
+            {#if voteTally.counts.length === 0}
+              <p class="text-xs text-muted-foreground" data-testid="play-vote-counts-empty">
+                No votes yet.
+              </p>
+            {:else}
+              <ul class="flex flex-col gap-1" data-testid="play-vote-counts">
+                {#each voteTally.counts as count (count.target)}
+                  <li
+                    class="flex items-center justify-between gap-3 rounded border border-border px-2 py-1 text-xs"
+                    data-testid="play-vote-count-row"
+                    data-target={count.target}
+                    data-count={String(count.count)}
+                  >
+                    <span class="font-mono">{count.target.slice(0, 8)}</span>
+                    <span class="font-semibold">{count.count}</span>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+
+          <div>
+            <h3 class="mb-1 text-xs font-medium text-muted-foreground">Current votes</h3>
+            {#if voteTally.rows.length === 0}
+              <p class="text-xs text-muted-foreground" data-testid="play-vote-voters-empty">
+                No submitted votes.
+              </p>
+            {:else}
+              <ul class="flex flex-col gap-1" data-testid="play-vote-voters">
+                {#each voteTally.rows as vote (vote.voter)}
+                  <li
+                    class="flex items-center justify-between gap-3 text-xs"
+                    data-testid="play-vote-voter-row"
+                    data-voter={vote.voter}
+                    data-target={vote.target ?? ''}
+                  >
+                    <span class="font-mono">{vote.voter.slice(0, 8)}</span>
+                    <span class="text-muted-foreground">to</span>
+                    <span class="font-mono">
+                      {vote.target === null ? 'Abstain' : vote.target.slice(0, 8)}
+                    </span>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        </div>
+      </Card>
+    {/if}
+
     <Card>
       <h2 class="mb-2 text-sm font-semibold">This game</h2>
       <p class="text-xs text-muted-foreground">

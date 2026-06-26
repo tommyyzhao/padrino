@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Live play vote tally (US-283): keep current vote presentation derived from
+  the pure play-state reducer via `deriveVoteTally(state.votes)`. The play
+  route should render it only for public `DAY_*_VOTE` phase ids, use truncated
+  public seat ids only, and test live updates with route-mocked SSE batches
+  gated by a Promise so assertions can observe the pre-update and post-update
+  states deterministically.
 - Responsive play surface (US-282): keep `/play/[gameId]` as a single
   identity-blind DOM whose mobile behavior is panel-gated with a `md:hidden`
   tab strip (`Seats` / `Chat` / `Actions`) while the
@@ -4338,6 +4344,35 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   command -> 6 passed. Frontend gates: `pnpm -C web/dashboard lint`;
   `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
   `pnpm -C web/dashboard test:e2e` -> 40 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:48 PDT - US-283
+- Added a pure `deriveVoteTally` helper on the dashboard play-state reducer to
+  turn current-phase `VoteSubmitted` state into voter-to-target rows plus
+  running elimination-target counts, with abstains retained as rows but excluded
+  from counts.
+- Rendered a day-vote-only tally panel on `/play/[gameId]` that uses only
+  identity-blind public seat ids, lives inside the existing responsive actions
+  surface on mobile, updates from live-tail frames, and hides when the public
+  phase leaves `DAY_*_VOTE`.
+- Extended route-mocked Playwright coverage with Promise-gated SSE batches so
+  the first rendered count and the later live update are both asserted
+  deterministically.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/playState.ts`,
+  `web/dashboard/src/lib/api/playState.test.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- src/lib/api/playState.test.ts` failed first
+  on missing `deriveVoteTally`; focused GREEN same command -> 59 passed.
+  Focused e2e `node tests/e2e/run.mjs -g "play vote tally"` -> 3 passed.
+  Frontend gates: `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`
+  -> 0 errors / 0 warnings; `pnpm -C web/dashboard test` -> 59 passed;
+  `pnpm -C web/dashboard test:e2e` -> 43 passed / 3 skipped. Backend gates:
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
   passed / 41 skipped / 10 deselected.

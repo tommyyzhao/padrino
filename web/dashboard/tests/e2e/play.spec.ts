@@ -26,6 +26,10 @@ const SEAT_ME = 'p1seataa-0000-0000-0000-000000000001';
 const SEAT_OTHER = 'p2seatbb-0000-0000-0000-000000000002';
 const SEAT_THIRD = 'p3seatcc-0000-0000-0000-000000000003';
 
+type LiveBatch =
+  | Record<string, unknown>[]
+  | { frames: Record<string, unknown>[]; wait?: Promise<void> };
+
 function mkFrame(
   seq: number,
   eventType: string,
@@ -81,12 +85,14 @@ async function mockStandardPlaySurface(
   {
     gameId = GAME_ID,
     publicFrames = PUBLIC_FRAMES,
+    liveBatches,
     observationFrames = OBSERVATION_FRAMES,
     onAction,
     onChat
   }: {
     gameId?: string;
     publicFrames?: Record<string, unknown>[];
+    liveBatches?: LiveBatch[];
     observationFrames?: Record<string, unknown>[];
     onAction?: (payload: Record<string, unknown>) => void;
     onChat?: (payload: Record<string, unknown>) => void;
@@ -110,15 +116,19 @@ async function mockStandardPlaySurface(
     });
   });
 
-  let firstLive = true;
+  let liveIndex = 0;
   await page.route(`**/public/games/${gameId}/live*`, async (route) => {
-    if (firstLive) {
-      firstLive = false;
+    const batches = liveBatches ?? [publicFrames];
+    const batch = batches[liveIndex];
+    liveIndex += 1;
+    if (batch) {
+      const frames = Array.isArray(batch) ? batch : batch.frames;
+      if (!Array.isArray(batch) && batch.wait) await batch.wait;
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
         headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
-        body: buildSseBody(publicFrames)
+        body: buildSseBody(frames)
       });
     } else {
       await route.abort('failed');
@@ -493,6 +503,103 @@ test.describe('play surface (US-155)', () => {
     await expect(help.getByTestId('how-to-play-night')).toBeVisible();
     await expect(help).toHaveCSS('overflow-y', 'auto');
     await expectIdentityBlind(help);
+  });
+});
+
+test.describe('play vote tally (US-283)', () => {
+  test('renders and live-updates voter rows and running target counts without identity leaks', async ({
+    page
+  }) => {
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+
+    await mockStandardPlaySurface(page, {
+      liveBatches: [
+        PUBLIC_FRAMES,
+        {
+          wait: updateGate,
+          frames: [
+            mkFrame(4, 'VoteSubmitted', 'DAY_1_VOTE', SEAT_THIRD, {
+              target: SEAT_ME,
+              is_abstain: false
+            })
+          ]
+        }
+      ],
+      observationFrames: [
+        {
+          type: 'observation',
+          phase: 'DAY_1_VOTE',
+          you: { player_id: SEAT_ME, alive: true },
+          alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
+          legal_actions: { allowed_action_types: ['VOTE', 'ABSTAIN'], legal_targets: [SEAT_OTHER] }
+        },
+        { type: 'phase_deadline', phase: 'DAY_1_VOTE', deadline_at: '2099-01-01T00:02:00Z' }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+
+    const tally = page.getByTestId('play-vote-tally-panel');
+    await expect(tally).toBeVisible({ timeout: 15_000 });
+    await expectIdentityBlind(tally);
+
+    const targetRow = page.locator(
+      `[data-testid="play-vote-count-row"][data-target="${SEAT_ME}"]`
+    );
+    const firstVoterRow = page.locator(
+      `[data-testid="play-vote-voter-row"][data-voter="${SEAT_OTHER}"]`
+    );
+    await expect(targetRow).toHaveAttribute('data-count', '1');
+    await expect(firstVoterRow).toHaveAttribute('data-target', SEAT_ME);
+
+    releaseUpdate();
+
+    await expect(targetRow).toHaveAttribute('data-count', '2', { timeout: 15_000 });
+    await expect(
+      page.locator(`[data-testid="play-vote-voter-row"][data-voter="${SEAT_THIRD}"]`)
+    ).toHaveAttribute('data-target', SEAT_ME);
+  });
+
+  test('is reachable on a phone-width actions panel', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page);
+
+    await page.goto(`/play/${GAME_ID}`);
+    await page.getByTestId('play-mobile-tab-actions').click();
+
+    const tally = page.getByTestId('play-vote-tally-panel');
+    await expect(tally).toBeVisible({ timeout: 15_000 });
+    await expect(tally).toBeInViewport();
+    await expect(page.getByTestId('play-vote-count-row')).toHaveCount(1);
+  });
+
+  test('hides when the live stream leaves the day vote phase', async ({ page }) => {
+    let releaseNight!: () => void;
+    const nightGate = new Promise<void>((resolve) => {
+      releaseNight = resolve;
+    });
+
+    await mockStandardPlaySurface(page, {
+      liveBatches: [
+        PUBLIC_FRAMES,
+        {
+          wait: nightGate,
+          frames: [mkFrame(4, 'PhaseStarted', 'NIGHT_1_ACTIONS', null, {})]
+        }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-vote-tally-panel')).toBeVisible({ timeout: 15_000 });
+
+    releaseNight();
+
+    await expect(page.getByTestId('play-vote-tally-panel')).toHaveCount(0, {
+      timeout: 15_000
+    });
   });
 });
 

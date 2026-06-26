@@ -49,6 +49,24 @@ export interface PlayState {
   terminal: boolean;
 }
 
+/** One seat's current day-vote choice. `target === null` means abstain. */
+export interface VoteTallyRow {
+  voter: string;
+  target: string | null;
+}
+
+/** Current votes against one elimination target. Abstains are not counted. */
+export interface VoteTargetCount {
+  target: string;
+  count: number;
+}
+
+/** Identity-blind current vote view: voter rows plus target counts. */
+export interface VoteTally {
+  rows: VoteTallyRow[];
+  counts: VoteTargetCount[];
+}
+
 export function emptyPlayState(): PlayState {
   return {
     lastSequence: null,
@@ -139,6 +157,24 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
     winner,
     terminal
   };
+}
+
+export function deriveVoteTally(votes: Record<string, string | null>): VoteTally {
+  const rows = Object.entries(votes)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([voter, target]) => ({ voter, target }));
+
+  const countsByTarget: Record<string, number> = {};
+  for (const target of Object.values(votes)) {
+    if (target === null) continue;
+    countsByTarget[target] = (countsByTarget[target] ?? 0) + 1;
+  }
+
+  const counts = Object.entries(countsByTarget)
+    .map(([target, count]) => ({ target, count }))
+    .sort((a, b) => b.count - a.count || a.target.localeCompare(b.target));
+
+  return { rows, counts };
 }
 
 /** Fold a batch of released frames in order. */
