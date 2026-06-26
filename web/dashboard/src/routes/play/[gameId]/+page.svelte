@@ -58,6 +58,7 @@
   let actionNote = $state<string | null>(null);
   let error = $state<string | null>(null);
   let helpOpen = $state(false);
+  let eliminationDismissed = $state(false);
   let mobilePanel = $state<'board' | 'chat' | 'actions'>('board');
 
   let obsSse: EventSource | null = null;
@@ -66,6 +67,7 @@
   const secondsRemaining = $derived(secondsUntil(deadlineIso, nowMs));
   const bucket = $derived(countdownBucket(secondsRemaining));
   const voteTarget = $state<{ value: string | null }>({ value: null });
+  let pendingVoteTarget = $state<string | null | undefined>(undefined);
   const nightTarget = $state<{ value: string | null }>({ value: null });
 
   // Seat board: derived from the released frame stream (identity-blind). The
@@ -74,6 +76,7 @@
   const board = $derived(session?.seats ?? []);
   const chat = $derived(session?.chat ?? []);
   const phase = $derived(session?.phase ?? '—');
+  const phaseBanner = $derived(session?.phaseBanner ?? null);
   const terminal = $derived(session?.terminal ?? false);
   const winner = $derived(session?.winner ?? null);
   const selectedNightActionType = $derived(nightActionType(legal));
@@ -85,6 +88,10 @@
   );
   const voteTally = $derived(deriveVoteTally(session?.votes ?? {}));
   const showVoteTally = $derived(isDayVotePhaseId(phase));
+  const mySeat = $derived(
+    mySeatId ? (board.find((seat) => seat.public_player_id === mySeatId) ?? null) : null
+  );
+  const isEliminated = $derived(mySeat ? !mySeat.alive : false);
 
   function isDayVotePhaseId(value: string): boolean {
     const normalized = value.toUpperCase();
@@ -138,18 +145,30 @@
     };
   }
 
+  function reviewVote(): void {
+    actionNote = null;
+    error = null;
+    pendingVoteTarget = voteTarget.value;
+  }
+
+  function cancelVote(): void {
+    pendingVoteTarget = undefined;
+  }
+
   async function submitVote(): Promise<void> {
     if (!gameId) return;
+    if (pendingVoteTarget === undefined) return;
     actionBusy = true;
     actionNote = null;
     error = null;
     try {
-      const target = voteTarget.value;
+      const target = pendingVoteTarget;
       await padrino.client.submitAction(gameId, {
         action: target ? { type: 'VOTE', target } : { type: 'ABSTAIN' },
         idempotency_key: newIdempotencyKey()
       });
-      actionNote = target ? 'Vote submitted.' : 'Abstained.';
+      pendingVoteTarget = undefined;
+      actionNote = target ? 'Vote accepted.' : 'Abstain accepted.';
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -170,7 +189,7 @@
         action: target ? { type, target } : { type: 'NOOP' },
         idempotency_key: newIdempotencyKey()
       });
-      actionNote = `${actionTypeLabel(type)} submitted.`;
+      actionNote = `${actionTypeLabel(type)} accepted.`;
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -266,6 +285,31 @@
   </div>
 {/if}
 
+{#if isEliminated && !eliminationDismissed}
+  <div
+    class="fixed inset-0 z-40 flex items-center justify-center bg-background/85 p-4"
+    data-testid="play-eliminated-modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="play-eliminated-title"
+  >
+    <div class="w-full max-w-sm rounded-md border border-border bg-card p-4 shadow-lg">
+      <h2 class="text-base font-semibold" id="play-eliminated-title">You have been eliminated</h2>
+      <p class="mt-2 text-sm text-muted-foreground">
+        You can keep watching the table, but your seat can no longer submit actions.
+      </p>
+      <Button
+        class="mt-4 min-h-11"
+        variant="outline"
+        testid="play-eliminated-dismiss"
+        onclick={() => (eliminationDismissed = true)}
+      >
+        Continue watching
+      </Button>
+    </div>
+  </div>
+{/if}
+
 <p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="play-composition">
   {#if composition}
     {composition.human_count} humans · {composition.ai_count} AI · {composition.total} seats
@@ -273,6 +317,23 @@
     —
   {/if}
 </p>
+
+{#if phaseBanner}
+  <div
+    class={`mb-4 rounded-md border px-4 py-3 text-sm ${
+      phaseBanner.kind === 'night'
+        ? 'border-slate-300 bg-slate-50 text-slate-950'
+        : 'border-amber-300 bg-amber-50 text-slate-950'
+    }`}
+    data-testid="play-phase-banner"
+    data-phase={phaseBanner.phase}
+    data-kind={phaseBanner.kind}
+    role="status"
+  >
+    <span class="font-semibold">{phaseBanner.message}.</span>
+    <span class="ml-2 font-mono text-xs">{phaseBanner.phase}</span>
+  </div>
+{/if}
 
 {#if terminal}
   <div
@@ -347,12 +408,20 @@
       {:else}
         <ul class="flex flex-col gap-1" data-testid="play-seat-grid">
           {#each board as seat (seat.public_player_id)}
+            {@const isSelf = mySeatId === seat.public_player_id}
             <li
               class={'flex items-center gap-2 rounded px-1 py-0.5 text-xs ' +
-                (seat.alive ? '' : 'text-muted-foreground line-through')}
+                (seat.alive ? '' : 'text-muted-foreground line-through ') +
+                (isSelf && !seat.alive
+                  ? 'border border-red-300 bg-red-50 px-2 py-1 text-red-900'
+                  : isSelf
+                    ? 'border border-border bg-muted px-2 py-1'
+                    : '')}
               data-testid="play-seat-row"
               data-player-id={seat.public_player_id}
               data-alive={String(seat.alive)}
+              data-self={String(isSelf)}
+              data-state={isSelf && !seat.alive ? 'dead-self' : seat.alive ? 'alive' : 'dead'}
             >
               <img
                 class="h-5 w-5 rounded"
@@ -398,10 +467,42 @@
               class="min-h-11"
               testid="play-vote-submit"
               disabled={actionBusy}
-              onclick={() => void submitVote()}
+              onclick={reviewVote}
             >
-              {actionBusy ? 'Submitting…' : 'Submit vote'}
+              Review vote
             </Button>
+            {#if pendingVoteTarget !== undefined}
+              <div
+                class="rounded-md border border-border bg-muted p-3 text-sm"
+                data-testid="play-vote-confirm"
+                role="group"
+                aria-label="Confirm vote"
+              >
+                <p class="text-xs text-muted-foreground">Confirm your vote before it is sent.</p>
+                <p class="mt-1 font-mono text-sm" data-testid="play-vote-confirm-target">
+                  {pendingVoteTarget === null ? 'Abstain' : pendingVoteTarget.slice(0, 8)}
+                </p>
+                <div class="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    class="min-h-11"
+                    testid="play-vote-confirm-submit"
+                    disabled={actionBusy}
+                    onclick={() => void submitVote()}
+                  >
+                    {actionBusy ? 'Submitting…' : 'Confirm'}
+                  </Button>
+                  <Button
+                    class="min-h-11"
+                    variant="outline"
+                    testid="play-vote-confirm-cancel"
+                    disabled={actionBusy}
+                    onclick={cancelVote}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            {/if}
           </div>
         {:else if isNightActionPhase(legal)}
           <div class="flex flex-col gap-2" data-testid="play-night-panel">
@@ -444,7 +545,13 @@
           </p>
         {/if}
         {#if actionNote}
-          <p class="mt-2 text-xs text-emerald-600" data-testid="play-action-note">{actionNote}</p>
+          <p
+            class="mt-2 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-900"
+            data-testid="play-action-note"
+            role="status"
+          >
+            {actionNote}
+          </p>
         {/if}
         {#if error}
           <p class="mt-2 text-xs text-red-500" data-testid="play-action-error">{error}</p>

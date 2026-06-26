@@ -153,7 +153,7 @@
         "All feedback is identity-blind and works on a phone-width viewport; tests assert mobile + no identity leak. All frontend gates pass (pnpm -C web/dashboard lint + check + e2e)."
       ],
       "notes": "Sites: play/[gameId]/+page.svelte + components; phase/elimination/vote frames arrive via SSE + the reducer. Depends on US-282. Keep votes recoverable (no irreversible one-click). Pure phase/elimination derivation -> vitest; render -> Playwright e2e route-mocked (no live human game in the harness).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-285",

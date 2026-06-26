@@ -318,7 +318,9 @@ test.describe('play surface (US-155)', () => {
     await expect(page.getByTestId('play-vote-panel')).toBeVisible({ timeout: 15_000 });
     await page.getByTestId('play-vote-target').selectOption(SEAT_OTHER);
     await page.getByTestId('play-vote-submit').click();
-    await expect(page.getByTestId('play-action-note')).toContainText('Vote submitted', {
+    await expect(page.getByTestId('play-vote-confirm')).toBeVisible();
+    await page.getByTestId('play-vote-confirm-submit').click();
+    await expect(page.getByTestId('play-action-note')).toContainText('Vote accepted', {
       timeout: 15_000
     });
     expect(actionPosted).toBe(true);
@@ -436,7 +438,7 @@ test.describe('play surface (US-155)', () => {
 
     await page.getByTestId('play-night-target').selectOption(SEAT_THIRD);
     await page.getByTestId('play-night-submit').click();
-    await expect(page.getByTestId('play-action-note')).toContainText('Roleblock submitted', {
+    await expect(page.getByTestId('play-action-note')).toContainText('Roleblock accepted', {
       timeout: 15_000
     });
 
@@ -600,6 +602,135 @@ test.describe('play vote tally (US-283)', () => {
     await expect(page.getByTestId('play-vote-tally-panel')).toHaveCount(0, {
       timeout: 15_000
     });
+  });
+});
+
+test.describe('play game-feel feedback (US-284)', () => {
+  test('confirms a vote target before posting and shows accepted feedback', async ({ page }) => {
+    const actionPayloads: Record<string, unknown>[] = [];
+    await mockStandardPlaySurface(page, {
+      onAction: (payload) => {
+        actionPayloads.push(payload);
+      }
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-vote-panel')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('play-vote-target').selectOption(SEAT_OTHER);
+
+    await page.getByTestId('play-vote-submit').click();
+    const confirm = page.getByTestId('play-vote-confirm');
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText(SEAT_OTHER.slice(0, 8));
+    await expectIdentityBlind(confirm);
+
+    await page.getByTestId('play-vote-confirm-cancel').click();
+    await expect(confirm).toHaveCount(0);
+    expect(actionPayloads).toHaveLength(0);
+
+    await page.getByTestId('play-vote-submit').click();
+    await page.getByTestId('play-vote-confirm-submit').click();
+    await expect(page.getByTestId('play-action-note')).toContainText('Vote accepted', {
+      timeout: 15_000
+    });
+    expect(actionPayloads).toHaveLength(1);
+    expect(actionPayloads[0]['action']).toMatchObject({ type: 'VOTE', target: SEAT_OTHER });
+  });
+
+  test('renders the own-seat elimination moment and dead-seat treatment', async ({ page }) => {
+    let releaseElimination!: () => void;
+    const eliminationGate = new Promise<void>((resolve) => {
+      releaseElimination = resolve;
+    });
+
+    await mockStandardPlaySurface(page, {
+      liveBatches: [
+        PUBLIC_FRAMES,
+        {
+          wait: eliminationGate,
+          frames: [
+            mkFrame(4, 'PlayerEliminated', 'DAY_1_VOTE', null, {
+              public_player_id: SEAT_ME,
+              cause: 'vote'
+            })
+          ]
+        }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-seat-grid')).toBeVisible({ timeout: 15_000 });
+
+    releaseElimination();
+
+    const eliminated = page.getByTestId('play-eliminated-modal');
+    await expect(eliminated).toBeVisible({ timeout: 15_000 });
+    await expect(eliminated).toContainText('You have been eliminated');
+    await expectIdentityBlind(eliminated);
+
+    const ownSeat = page.locator(`[data-testid="play-seat-row"][data-player-id="${SEAT_ME}"]`);
+    await expect(ownSeat).toHaveAttribute('data-alive', 'false');
+    await expect(ownSeat).toHaveAttribute('data-self', 'true');
+    await expect(ownSeat).toHaveAttribute('data-state', 'dead-self');
+  });
+
+  test('shows a phase-change banner from released phase-start frames', async ({ page }) => {
+    let releaseNight!: () => void;
+    const nightGate = new Promise<void>((resolve) => {
+      releaseNight = resolve;
+    });
+
+    await mockStandardPlaySurface(page, {
+      liveBatches: [
+        PUBLIC_FRAMES,
+        {
+          wait: nightGate,
+          frames: [mkFrame(4, 'PhaseStarted', 'NIGHT_1_ACTIONS', null, {})]
+        }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-phase')).toContainText('DAY_1_VOTE', {
+      timeout: 15_000
+    });
+
+    releaseNight();
+
+    const banner = page.getByTestId('play-phase-banner');
+    await expect(banner).toBeVisible({ timeout: 15_000 });
+    await expect(banner).toContainText('Night falls');
+    await expect(banner).toHaveAttribute('data-phase', 'NIGHT_1_ACTIONS');
+    await expectIdentityBlind(banner);
+  });
+
+  test('feedback remains usable and identity-blind on a phone-width viewport', async ({ page }) => {
+    const actionPayloads: Record<string, unknown>[] = [];
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page, {
+      onAction: (payload) => {
+        actionPayloads.push(payload);
+      }
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await page.getByTestId('play-mobile-tab-actions').click();
+    await expect(page.getByTestId('play-vote-panel')).toBeVisible({ timeout: 15_000 });
+
+    await page.getByTestId('play-vote-target').selectOption(SEAT_OTHER);
+    await page.getByTestId('play-vote-submit').click();
+
+    const confirm = page.getByTestId('play-vote-confirm');
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toBeInViewport();
+    await expectIdentityBlind(confirm);
+
+    await page.getByTestId('play-vote-confirm-submit').click();
+    const note = page.getByTestId('play-action-note');
+    await expect(note).toContainText('Vote accepted', { timeout: 15_000 });
+    await expect(note).toBeInViewport();
+    expect(actionPayloads).toHaveLength(1);
+    await expectIdentityBlind(page.getByTestId('play-shell'));
   });
 });
 

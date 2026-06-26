@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Game-feel feedback (US-284): keep stream-derived announcements in the pure
+  dashboard play reducer (`PhaseStarted` -> `derivePhaseBanner`) and expose
+  them through `PlaySession`; keep recoverable vote confirmation and accepted
+  action copy as `/play/[gameId]` route-local UI state. Route-mocked e2e should
+  assert cancel-before-POST, confirm-after-POST, own-seat elimination, and
+  Promise-gated phase/elimination SSE batches without introducing human/AI or
+  model identity markers.
 - Live play vote tally (US-283): keep current vote presentation derived from
   the pure play-state reducer via `deriveVoteTally(state.votes)`. The play
   route should render it only for public `DAY_*_VOTE` phase ids, use truncated
@@ -4373,6 +4380,36 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   Frontend gates: `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`
   -> 0 errors / 0 warnings; `pnpm -C web/dashboard test` -> 59 passed;
   `pnpm -C web/dashboard test:e2e` -> 43 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:56 PDT - US-284
+- Added recoverable vote submission on `/play/[gameId]`: the first click opens
+  an identity-blind confirmation showing the chosen public seat id (or
+  abstain), cancel performs no POST, and confirm submits the action with
+  explicit accepted feedback.
+- Added pure phase-banner derivation to the play-state reducer
+  (`PhaseStarted` -> `Day breaks` / `Night falls`) and exposed it through the
+  Svelte play session so banners follow the released public SSE stream.
+- Added an own-seat elimination moment: when the player's public seat is marked
+  dead by a released `PlayerEliminated` frame, a dismissible eliminated modal
+  appears and the self row gets a distinct dead-state treatment.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/playState.ts`,
+  `web/dashboard/src/lib/api/playState.test.ts`,
+  `web/dashboard/src/lib/playSession.svelte.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- src/lib/api/playState.test.ts` failed first
+  on missing `derivePhaseBanner` / `phaseBanner`; focused GREEN same command
+  -> 61 passed. Focused e2e
+  `pnpm -C web/dashboard test:e2e -- play.spec.ts` -> 13 passed. Frontend
+  gates: `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0
+  errors / 0 warnings; `pnpm -C web/dashboard test` -> 61 passed;
+  `pnpm -C web/dashboard test:e2e` -> 47 passed / 3 skipped. Backend gates:
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
   passed / 41 skipped / 10 deselected.

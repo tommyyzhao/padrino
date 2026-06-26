@@ -13,6 +13,7 @@ import {
   applyFrame,
   emptyPlayState,
   type BoardSeat,
+  type PhaseBanner,
   type PlayState,
   type ReleasedChatLine
 } from './api/playState';
@@ -59,6 +60,9 @@ export function createPlaySession(opts: PlaySessionOptions) {
     },
     get chat(): ReleasedChatLine[] {
       return state.chat;
+    },
+    get phaseBanner(): PhaseBanner | null {
+      return state.phaseBanner;
     },
     get winner(): string | null {
       return state.winner;

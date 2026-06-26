@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { applyFrame, applyFrames, deriveVoteTally, emptyPlayState } from './playState';
+import {
+  applyFrame,
+  applyFrames,
+  derivePhaseBanner,
+  deriveVoteTally,
+  emptyPlayState
+} from './playState';
 import type { LiveEventFrame } from './types';
 
 function frame(
@@ -97,6 +103,42 @@ describe('play-state reducer', () => {
     );
     expect(state.terminal).toBe(true);
     expect(state.winner).toBe('TOWN');
+  });
+
+  it('derives phase-transition banners from PhaseStarted frames', () => {
+    expect(derivePhaseBanner('', 'DAY_1_DISCUSSION_ROUND_1', 1)).toEqual({
+      phase: 'DAY_1_DISCUSSION_ROUND_1',
+      sequence: 1,
+      kind: 'day',
+      message: 'Day breaks'
+    });
+    expect(derivePhaseBanner('DAY_1_VOTE', 'NIGHT_1_ACTIONS', 9)).toEqual({
+      phase: 'NIGHT_1_ACTIONS',
+      sequence: 9,
+      kind: 'night',
+      message: 'Night falls'
+    });
+    expect(derivePhaseBanner('NIGHT_1_ACTIONS', 'DAY_2_VOTE', 10)).toEqual({
+      phase: 'DAY_2_VOTE',
+      sequence: 10,
+      kind: 'day',
+      message: 'Day breaks'
+    });
+    expect(derivePhaseBanner('DAY_2_VOTE', 'GAME_OVER', 11)).toBeNull();
+  });
+
+  it('stores the latest phase banner when a phase-start transition arrives', () => {
+    const state = applyFrames(emptyPlayState(), [
+      frame(1, 'PhaseStarted', {}, { phase: 'DAY_1_VOTE' }),
+      frame(2, 'PhaseStarted', {}, { phase: 'NIGHT_1_ACTIONS' })
+    ]);
+
+    expect(state.phaseBanner).toEqual({
+      phase: 'NIGHT_1_ACTIONS',
+      sequence: 2,
+      kind: 'night',
+      message: 'Night falls'
+    });
   });
 
   it('ignores resume-overlap frames so reconnect folding is idempotent', () => {

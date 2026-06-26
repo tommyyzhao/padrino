@@ -43,6 +43,8 @@ export interface PlayState {
   votes: Record<string, string | null>;
   /** The released chat feed in release order. */
   chat: ReleasedChatLine[];
+  /** Latest phase-transition banner derived from released PhaseStarted frames. */
+  phaseBanner: PhaseBanner | null;
   /** The terminal winner once GameTerminated is released, else null. */
   winner: string | null;
   /** Whether the terminal frame has been released. */
@@ -61,6 +63,14 @@ export interface VoteTargetCount {
   count: number;
 }
 
+/** Short identity-blind announcement for a released phase transition. */
+export interface PhaseBanner {
+  phase: string;
+  sequence: number;
+  kind: 'day' | 'night';
+  message: string;
+}
+
 /** Identity-blind current vote view: voter rows plus target counts. */
 export interface VoteTally {
   rows: VoteTallyRow[];
@@ -74,6 +84,7 @@ export function emptyPlayState(): PlayState {
     seats: [],
     votes: {},
     chat: [],
+    phaseBanner: null,
     winner: null,
     terminal: false
   };
@@ -103,6 +114,7 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
   let seats = state.seats;
   let votes = phaseChanged ? {} : state.votes;
   let chat = state.chat;
+  let phaseBanner = state.phaseBanner;
   let winner = state.winner;
   let terminal = state.terminal;
 
@@ -112,6 +124,12 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
   }
 
   switch (frame.event_type) {
+    case 'PhaseStarted': {
+      if (phaseChanged) {
+        phaseBanner = derivePhaseBanner(state.phase, frame.phase, frame.sequence);
+      }
+      break;
+    }
     case 'VoteSubmitted': {
       if (actor) {
         const isAbstain = frame.payload.is_abstain === true;
@@ -154,9 +172,27 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
     seats,
     votes,
     chat,
+    phaseBanner,
     winner,
     terminal
   };
+}
+
+export function derivePhaseBanner(
+  previousPhase: string,
+  nextPhase: string,
+  sequence: number
+): PhaseBanner | null {
+  if (nextPhase === '' || nextPhase === previousPhase) return null;
+
+  const normalized = nextPhase.toUpperCase();
+  if (normalized.startsWith('NIGHT_')) {
+    return { phase: nextPhase, sequence, kind: 'night', message: 'Night falls' };
+  }
+  if (normalized.startsWith('DAY_')) {
+    return { phase: nextPhase, sequence, kind: 'day', message: 'Day breaks' };
+  }
+  return null;
 }
 
 export function deriveVoteTally(votes: Record<string, string | null>): VoteTally {
