@@ -480,6 +480,11 @@ export interface LaunchResponse {
   created: boolean;
 }
 
+/** Result of a solo instant-match handoff (US-278): route to the new game. */
+export interface HumanMatchResponse {
+  game_id: string;
+}
+
 /** Per-human deterministic play stats (US-145); no leaderboard / ELO in v1. */
 export interface HumanPlayerStats {
   ruleset_id: string;

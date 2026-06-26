@@ -51,7 +51,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check; e2e where the route-mocked nav test is added). Backend gates pass if client/types touched."
       ],
       "notes": "Sites: web/dashboard/src/routes/+page.svelte (CTA), +layout.svelte (nav), the existing guest-mint + consent flow (reused by friends-lobby join at lobby/[id]/+page.svelte ~207), client.ts (add match() -> POST /human/match). Depends on US-277. Keep consent inline + one-tap. The full live funnel (real game to terminal) is US-287 (needs the US-288 harness); US-278's own nav test can use route-mocked fixtures.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-279",

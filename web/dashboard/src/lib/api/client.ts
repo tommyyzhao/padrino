@@ -11,6 +11,7 @@ import type {
   GauntletListEntry,
   GauntletReport,
   GuestSummary,
+  HumanMatchResponse,
   HumanPlayerStats,
   LaunchResponse,
   LobbyRoster,
@@ -337,6 +338,11 @@ export class PadrinoClient {
   /** Per-human deterministic play stats; gated to the signed-in account (US-145). */
   getHumanStats(rulesetId: string): Promise<HumanPlayerStats> {
     return this.request('/human/stats', { ruleset_id: rulesetId });
+  }
+
+  /** Start a casual solo human-vs-AI match (US-278). */
+  match(): Promise<HumanMatchResponse> {
+    return this.mutate('POST', '/human/match');
   }
 
   // ---- lobby (US-147/148/149)

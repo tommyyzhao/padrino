@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Solo dashboard entry flow (US-278): preserve returning guest sessions by
+  enabling human-session credentials, probing `/human/me`, and minting
+  `/human/guest` only on 401 before checking `/human/consent`. Home/funnel
+  Playwright tests should route-mock public home data and human match calls;
+  `pnpm test:e2e` owns the correctly env-baked static build, while manual
+  focused `vite preview` runs need a fresh build with the e2e API base URL.
 - Human stats read model (US-276): keep `/human/stats` as a thin projection of
   the materialized `HumanPlayerStats` counts, not a hot-path recompute. The
   API edge maps stored `role_win_rates_json` items from `name` to the dashboard
@@ -4158,3 +4164,38 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   unrelated transient scheduler timing failure; the exact test passed in
   isolation and the full rerun passed. Frontend gates not run; US-277 is
   backend-only and did not touch `web/dashboard`.
+
+## 2026-06-25T22:56 PDT - US-278
+- Added the dashboard solo entry flow: home now has a primary `Play vs AI` CTA,
+  nav distinguishes `Play vs AI` from `Play with friends`, and the CTA probes
+  the current human session, mints a guest only when needed, gates one-tap
+  Terms/Privacy/16+ consent inline, calls `POST /human/match`, and routes to
+  `/play/{game_id}`.
+- Added `PadrinoClient.match()` plus the `HumanMatchResponse` type, with a
+  client unit test proving the cookie-authenticated `/human/match` mutation.
+- Added route-mocked Playwright coverage for CTA hierarchy, fresh visitor
+  guest+consent+match navigation, and returning consented guest fast-path
+  navigation without re-minting or re-consenting. Tightened the existing home
+  KPI test to wait for async public-surface values instead of sampling early.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/+layout.svelte`,
+  `web/dashboard/tests/e2e/home.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test src/lib/api/client.test.ts` failed first on
+  missing `client.match`; focused RED
+  `pnpm -C web/dashboard exec playwright test tests/e2e/home.spec.ts --project=chromium`
+  failed first on the missing CTA/flow. Focused GREEN after implementation:
+  client test -> 22 passed; home e2e -> 4 passed / 1 skipped. Frontend gates:
+  `pnpm -C web/dashboard lint` -> pass (an initial parallel lint/check run hit
+  a transient missing Vite timestamp file; lint passed immediately when rerun
+  alone); `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
+  `pnpm -C web/dashboard test` -> 55 passed;
+  `pnpm -C web/dashboard test:e2e` -> 30 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
