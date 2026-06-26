@@ -149,7 +149,7 @@ async def _drain_until_status(
             game = await session.get(Game, game_id)
             if game is not None and game.status == expected:
                 return
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
     raise AssertionError(f"game {game_id} never reached status {expected!r}")
 
 
@@ -160,7 +160,7 @@ async def _drain_until_factory_called(
     while asyncio.get_running_loop().time() < deadline:
         if calls:
             return
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
     raise AssertionError("mock AI factory was never called within the budget")
 
 

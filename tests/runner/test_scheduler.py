@@ -1842,9 +1842,14 @@ async def test_continuous_game_reaper_runs_during_loop_with_injected_clock(
     def clock() -> datetime:
         return current
 
+    # Cooperative poll (sleep first, then read) on the file's standard generous
+    # budget + coarse cadence: a tight 0.01s observer loop saturates the event
+    # loop under ``pytest --cov`` and starves the background scheduler tick it is
+    # waiting on (the reaper never gets to run within a 1s window), so use the
+    # same 30s / 0.05s pattern as ``_drive_scheduler_until``.
     async def _wait_for_worker_heartbeat() -> None:
-        for _ in range(100):
-            await asyncio.sleep(0.01)
+        for _ in range(_SCHEDULER_MAX_POLLS):
+            await asyncio.sleep(_SCHEDULER_POLL_INTERVAL_S)
             async with session_factory() as session:
                 beats = await scheduler_heartbeats_repo.list_(session)
             if beats:
@@ -1852,8 +1857,8 @@ async def test_continuous_game_reaper_runs_during_loop_with_injected_clock(
         raise AssertionError("scheduler did not start ticking")
 
     async def _wait_for_game_lease_clear() -> None:
-        for _ in range(100):
-            await asyncio.sleep(0.01)
+        for _ in range(_SCHEDULER_MAX_POLLS):
+            await asyncio.sleep(_SCHEDULER_POLL_INTERVAL_S)
             async with session_factory() as session:
                 row = await games_repo.get(session, game_id)
             if row is not None and row.leased_by is None and row.lease_expires_at is None:

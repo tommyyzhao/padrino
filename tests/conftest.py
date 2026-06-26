@@ -20,7 +20,8 @@ import shutil
 import subprocess
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -437,24 +438,71 @@ async def db_engine(pytestconfig: pytest.Config) -> AsyncIterator[AsyncEngine]:
 
 
 @pytest.fixture
-async def engine(db_engine: AsyncEngine, use_postgres: bool) -> AsyncIterator[AsyncEngine]:
+async def engine(
+    db_engine: AsyncEngine, use_postgres: bool, tmp_path: Path
+) -> AsyncIterator[AsyncEngine]:
     import sqlalchemy as sa
 
-    from padrino.db.base import Base
+    from padrino.db.base import Base, create_engine
 
+    # SQLite path: give every test its OWN fresh on-disk database instead of
+    # sharing the session-scoped engine's single StaticPool connection.
+    #
+    # The shared-connection model is the root of a class of coverage-amplified
+    # flakes in the background-worker tests (scheduler / human-lane): those tests
+    # run real `run_scheduler` / `run_human_lane` loops whose own sessions commit
+    # on the *same* physical SQLite connection the test's concurrent observer
+    # (and the next test's fixtures) also use. Under `pytest --cov` (per-line
+    # tracing slows every await) the worker and observer contend on that one
+    # connection, which surfaced as intermittent timing failures (a child game
+    # read as non-terminal so the gauntlet never finalized; a stale lease seen as
+    # un-reaped) and a rare "no such table" cascade (a shared schema view seen
+    # mid-flight). A private per-test *file* database (not ``:memory:``) gives the
+    # worker and any concurrent observer their own pooled connections — exactly
+    # the model the already-stable budget/blocking-executor tests use — so they
+    # no longer serialize through one StaticPool connection. A leaked or late
+    # worker also operates on a now-disposed engine and cannot touch the next
+    # test's database. ``import padrino.db.models`` guarantees every table is
+    # registered on the metadata before ``create_all`` regardless of collection
+    # order.
+    if not use_postgres:
+        from sqlalchemy import event
+
+        import padrino.db.models  # noqa: F401  (register every model on Base.metadata)
+
+        db_path = tmp_path / "padrino-test.sqlite"
+        eng = create_engine(f"sqlite+aiosqlite:///{db_path}")
+
+        # WAL + a generous busy timeout, applied to EVERY pooled connection
+        # (busy_timeout is per-connection; aiosqlite sets no default), let the
+        # worker's writes and a concurrent observer's reads proceed without
+        # spurious "database is locked" under coverage-slowed load.
+        @event.listens_for(eng.sync_engine, "connect")
+        def _set_sqlite_test_pragmas(dbapi_conn: Any, _record: Any) -> None:
+            cur = dbapi_conn.cursor()
+            try:
+                cur.execute("PRAGMA journal_mode=WAL;")
+                cur.execute("PRAGMA busy_timeout=30000;")
+            finally:
+                cur.close()
+
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        try:
+            yield eng
+        finally:
+            await eng.dispose()
+        return
+
+    # Postgres path: the schema is migrated once per session (expensive), and the
+    # NullPool engine already opens a fresh connection per checkout, so isolation
+    # is achieved by truncating between tests rather than rebuilding the schema.
     async with db_engine.connect() as conn:
-        if not use_postgres:
-            await conn.execute(sa.text("PRAGMA foreign_keys = OFF;"))
-
         # Tables are deleted children-first (reversed dependency order) so no
-        # cascade is needed on either dialect.
+        # cascade is needed.
         for table in reversed(Base.metadata.sorted_tables):
             await conn.execute(sa.text(f'DELETE FROM "{table.name}";'))
         await conn.commit()
-
-        if not use_postgres:
-            await conn.execute(sa.text("PRAGMA foreign_keys = ON;"))
-            await conn.commit()
 
     yield db_engine
 
