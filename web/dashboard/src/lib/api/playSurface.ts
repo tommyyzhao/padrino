@@ -102,6 +102,24 @@ export function actionTypeLabel(actionType: string): string {
     .join(' ');
 }
 
+/** A short player-facing description for a currently legal action type. */
+export function actionTypeDescription(
+  legal: LegalActionsView | null,
+  actionType: string | null
+): string | null {
+  if (legal === null || actionType === null) return null;
+  if (!legal.allowed_action_types.includes(actionType)) return null;
+
+  const provided = legal.action_descriptions?.[actionType]?.trim();
+  if (provided) return provided;
+
+  const label = actionTypeLabel(actionType);
+  if (legal.legal_targets.length > 0) {
+    return `${label} one legal target. This option is available because the current ruleset and phase allow it.`;
+  }
+  return `${label} for this phase. This option is available because the current ruleset and phase allow it.`;
+}
+
 /** The server-provided targeted non-vote action for the current seat, if any. */
 export function nightActionType(legal: LegalActionsView | null): string | null {
   if (legal === null) return null;

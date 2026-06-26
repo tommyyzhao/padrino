@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { expectIdentityBlind } from './helpers/identityBlind';
 
 // US-155: Frontend in-game play surface.
@@ -25,6 +25,10 @@ const NAR_GAME_ID = 'eeee0004-0004-0004-0004-eeeeeeeeeeee';
 const SEAT_ME = 'p1seataa-0000-0000-0000-000000000001';
 const SEAT_OTHER = 'p2seatbb-0000-0000-0000-000000000002';
 const SEAT_THIRD = 'p3seatcc-0000-0000-0000-000000000003';
+
+type LiveBatch =
+  | Record<string, unknown>[]
+  | { frames: Record<string, unknown>[]; wait?: Promise<void> };
 
 function mkFrame(
   seq: number,
@@ -74,6 +78,226 @@ const OBSERVATION_FRAMES = [
 
 function observationSseBody(frames: Record<string, unknown>[] = OBSERVATION_FRAMES): string {
   return frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('');
+}
+
+async function mockStandardPlaySurface(
+  page: Page,
+  {
+    gameId = GAME_ID,
+    publicFrames = PUBLIC_FRAMES,
+    liveBatches,
+    observationFrames = OBSERVATION_FRAMES,
+    observationBatches,
+    onObservationRequest,
+    onAction,
+    onChat
+  }: {
+    gameId?: string;
+    publicFrames?: Record<string, unknown>[];
+    liveBatches?: LiveBatch[];
+    observationFrames?: Record<string, unknown>[];
+    observationBatches?: LiveBatch[];
+    onObservationRequest?: (url: string) => void;
+    onAction?: (payload: Record<string, unknown>) => void;
+    onChat?: (payload: Record<string, unknown>) => void;
+  } = {}
+): Promise<void> {
+  const isApi = (route: Route) => {
+    const t = route.request().resourceType();
+    return t === 'fetch' || t === 'xhr';
+  };
+
+  await page.route(`**/public/games/${gameId}/composition`, async (route) => {
+    if (!isApi(route)) return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        game_id: gameId,
+        ruleset_id: 'mini7_v1',
+        composition: { human_count: 2, ai_count: 5, total: 7 }
+      })
+    });
+  });
+
+  let liveIndex = 0;
+  await page.route(`**/public/games/${gameId}/live*`, async (route) => {
+    const batches = liveBatches ?? [publicFrames];
+    const batch = batches[liveIndex];
+    liveIndex += 1;
+    if (batch) {
+      const frames = Array.isArray(batch) ? batch : batch.frames;
+      if (!Array.isArray(batch) && batch.wait) await batch.wait;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+        body: buildSseBody(frames)
+      });
+    } else {
+      await route.abort('failed');
+    }
+  });
+
+  let obsIndex = 0;
+  await page.route(`**/human/games/${gameId}/observation/stream*`, async (route) => {
+    onObservationRequest?.(route.request().url());
+    const batches = observationBatches ?? [observationFrames];
+    const batch = batches[obsIndex];
+    obsIndex += 1;
+    if (batch) {
+      const frames = Array.isArray(batch) ? batch : batch.frames;
+      if (!Array.isArray(batch) && batch.wait) await batch.wait;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+        body: observationSseBody(frames)
+      });
+    } else {
+      await route.abort('failed');
+    }
+  });
+
+  await page.route(`**/human/games/${gameId}/actions`, async (route) => {
+    if (!isApi(route)) return route.continue();
+    onAction?.(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        accepted: true,
+        public_player_id: SEAT_ME,
+        phase: 'DAY_1_VOTE',
+        action_type: 'VOTE',
+        target: SEAT_OTHER,
+        idempotent_replay: false
+      })
+    });
+  });
+
+  await page.route(`**/human/games/${gameId}/chat`, async (route) => {
+    if (!isApi(route)) return route.continue();
+    onChat?.(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        accepted: true,
+        public_player_id: SEAT_ME,
+        phase: 'DAY_1_VOTE',
+        channel: 'PUBLIC',
+        status: 'RELEASED',
+        idempotent_replay: false
+      })
+    });
+  });
+}
+
+async function expectTouchSized(locator: ReturnType<Page['getByTestId']>): Promise<void> {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box?.height).toBeGreaterThanOrEqual(44);
+}
+
+async function installControlledEventSource(
+  page: Page,
+  observationFrames: Record<string, unknown>[] = OBSERVATION_FRAMES
+): Promise<void> {
+  await page.addInitScript((frames) => {
+    type ControlledWindow = Window & {
+      __padrinoLiveSources: ControlledEventSource[];
+      __padrinoEmitLive: (index: number, frame: Record<string, unknown>) => void;
+      __padrinoFailLive: (index: number) => void;
+      __padrinoLiveUrls: () => string[];
+    };
+
+    class ControlledEventSource {
+      readonly url: string;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      readyState = 0;
+
+      constructor(url: string) {
+        this.url = url;
+        const win = window as unknown as ControlledWindow;
+        if (url.includes('/observation/stream')) {
+          setTimeout(() => {
+            this.readyState = 1;
+            this.onopen?.(new Event('open'));
+            for (const frame of frames as Record<string, unknown>[]) {
+              this.onmessage?.({
+                data: JSON.stringify(frame),
+                lastEventId: String(frame['sequence'] ?? '')
+              } as MessageEvent);
+            }
+          }, 0);
+          return;
+        }
+
+        win.__padrinoLiveSources.push(this);
+        setTimeout(() => {
+          if (this.readyState === 2) return;
+          this.readyState = 1;
+          this.onopen?.(new Event('open'));
+        }, 0);
+      }
+
+      emit(frame: Record<string, unknown>): void {
+        if (this.readyState === 2) return;
+        this.onmessage?.({
+          data: JSON.stringify(frame),
+          lastEventId: String(frame['sequence'] ?? '')
+        } as MessageEvent);
+      }
+
+      fail(): void {
+        if (this.readyState === 2) return;
+        this.readyState = 2;
+        this.onerror?.(new Event('error'));
+      }
+
+      close(): void {
+        this.readyState = 2;
+      }
+    }
+
+    const win = window as unknown as ControlledWindow;
+    win.__padrinoLiveSources = [];
+    win.__padrinoEmitLive = (index, frame) => win.__padrinoLiveSources[index]?.emit(frame);
+    win.__padrinoFailLive = (index) => win.__padrinoLiveSources[index]?.fail();
+    win.__padrinoLiveUrls = () => win.__padrinoLiveSources.map((source) => source.url);
+    (window as unknown as { EventSource: typeof EventSource }).EventSource =
+      ControlledEventSource as unknown as typeof EventSource;
+  }, observationFrames);
+}
+
+async function emitControlledLive(
+  page: Page,
+  index: number,
+  frame: Record<string, unknown>
+): Promise<void> {
+  await page.evaluate(
+    ([sourceIndex, liveFrame]) => {
+      (
+        window as unknown as Window & {
+          __padrinoEmitLive: (index: number, frame: Record<string, unknown>) => void;
+        }
+      ).__padrinoEmitLive(sourceIndex as number, liveFrame as Record<string, unknown>);
+    },
+    [index, frame]
+  );
+}
+
+async function failControlledLive(page: Page, index: number): Promise<void> {
+  await page.evaluate((sourceIndex) => {
+    (
+      window as unknown as Window & {
+        __padrinoFailLive: (index: number) => void;
+      }
+    ).__padrinoFailLive(sourceIndex as number);
+  }, index);
 }
 
 test.describe('play surface (US-155)', () => {
@@ -171,6 +395,17 @@ test.describe('play surface (US-155)', () => {
     await page.goto(`/play/${GAME_ID}`);
     await expect(page.getByTestId('play-title')).toBeVisible();
 
+    await page.getByTestId('play-help-open').click();
+    const help = page.getByTestId('play-help-drawer');
+    await expect(help).toBeVisible();
+    await expect(help.getByTestId('how-to-play-panel')).toContainText('How to play Mafia');
+    await expect(help.getByTestId('how-to-play-day')).toContainText('vote');
+    await expect(help.getByTestId('how-to-play-win')).toContainText('Town wins');
+    await expect(help.getByTestId('how-to-play-spot-ai')).toContainText('Spot the AI');
+    await expectIdentityBlind(help);
+    await page.getByTestId('play-help-close').click();
+    await expect(help).toHaveCount(0);
+
     // Composition is counts-only.
     await expect(page.getByTestId('play-composition')).toContainText('2 humans');
     await expect(page.getByTestId('play-composition')).toContainText('5 AI');
@@ -192,7 +427,9 @@ test.describe('play surface (US-155)', () => {
     await expect(page.getByTestId('play-vote-panel')).toBeVisible({ timeout: 15_000 });
     await page.getByTestId('play-vote-target').selectOption(SEAT_OTHER);
     await page.getByTestId('play-vote-submit').click();
-    await expect(page.getByTestId('play-action-note')).toContainText('Vote submitted', {
+    await expect(page.getByTestId('play-vote-confirm')).toBeVisible();
+    await page.getByTestId('play-vote-confirm-submit').click();
+    await expect(page.getByTestId('play-action-note')).toContainText('Vote accepted', {
       timeout: 15_000
     });
     expect(actionPosted).toBe(true);
@@ -260,7 +497,10 @@ test.describe('play surface (US-155)', () => {
         alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
         legal_actions: {
           allowed_action_types: ['ROLEBLOCK'],
-          legal_targets: [SEAT_OTHER, SEAT_THIRD]
+          legal_targets: [SEAT_OTHER, SEAT_THIRD],
+          action_descriptions: {
+            ROLEBLOCK: 'Block one legal target from completing their night action.'
+          }
         }
       },
       { type: 'phase_deadline', phase: 'NIGHT_1_ACTIONS', deadline_at: '2099-01-01T00:02:00Z' }
@@ -301,14 +541,526 @@ test.describe('play surface (US-155)', () => {
     await page.goto(`/play/${NAR_GAME_ID}`);
     await expect(page.getByTestId('play-night-panel')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('play-night-action-type')).toContainText('Roleblock');
+    await expect(page.getByTestId('play-night-action-description')).toContainText(
+      'Block one legal target from completing their night action.'
+    );
 
     await page.getByTestId('play-night-target').selectOption(SEAT_THIRD);
     await page.getByTestId('play-night-submit').click();
-    await expect(page.getByTestId('play-action-note')).toContainText('Roleblock submitted', {
+    await expect(page.getByTestId('play-action-note')).toContainText('Roleblock accepted', {
       timeout: 15_000
     });
 
     expect(actionPayload).not.toBeNull();
     expect(actionPayload?.['action']).toMatchObject({ type: 'ROLEBLOCK', target: SEAT_THIRD });
+  });
+
+  test('help drawer renders identity-blind rules on a phone-width viewport', async ({ page }) => {
+    const isApi = (route: import('@playwright/test').Route) => {
+      const t = route.request().resourceType();
+      return t === 'fetch' || t === 'xhr';
+    };
+
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    await page.route(`**/public/games/${GAME_ID}/composition`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          game_id: GAME_ID,
+          ruleset_id: 'mini7_v1',
+          composition: { human_count: 2, ai_count: 5, total: 7 }
+        })
+      });
+    });
+
+    let firstLive = true;
+    await page.route(`**/public/games/${GAME_ID}/live*`, async (route) => {
+      if (firstLive) {
+        firstLive = false;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: buildSseBody(PUBLIC_FRAMES)
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    let firstObs = true;
+    await page.route(`**/human/games/${GAME_ID}/observation/stream*`, async (route) => {
+      if (firstObs) {
+        firstObs = false;
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+          body: observationSseBody()
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await page.getByTestId('play-help-open').click();
+    const help = page.getByTestId('play-help-drawer');
+    await expect(help).toBeVisible();
+    await expect(help.getByTestId('how-to-play-panel')).toBeVisible();
+    await expect(help.getByTestId('how-to-play-night')).toBeVisible();
+    await expect(help).toHaveCSS('overflow-y', 'auto');
+    await expectIdentityBlind(help);
+  });
+});
+
+test.describe('play vote tally (US-283)', () => {
+  test('renders and live-updates voter rows and running target counts without identity leaks', async ({
+    page
+  }) => {
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+
+    await mockStandardPlaySurface(page, {
+      liveBatches: [
+        PUBLIC_FRAMES,
+        {
+          wait: updateGate,
+          frames: [
+            mkFrame(4, 'VoteSubmitted', 'DAY_1_VOTE', SEAT_THIRD, {
+              target: SEAT_ME,
+              is_abstain: false
+            })
+          ]
+        }
+      ],
+      observationFrames: [
+        {
+          type: 'observation',
+          phase: 'DAY_1_VOTE',
+          you: { player_id: SEAT_ME, alive: true },
+          alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
+          legal_actions: { allowed_action_types: ['VOTE', 'ABSTAIN'], legal_targets: [SEAT_OTHER] }
+        },
+        { type: 'phase_deadline', phase: 'DAY_1_VOTE', deadline_at: '2099-01-01T00:02:00Z' }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+
+    const tally = page.getByTestId('play-vote-tally-panel');
+    await expect(tally).toBeVisible({ timeout: 15_000 });
+    await expectIdentityBlind(tally);
+
+    const targetRow = page.locator(
+      `[data-testid="play-vote-count-row"][data-target="${SEAT_ME}"]`
+    );
+    const firstVoterRow = page.locator(
+      `[data-testid="play-vote-voter-row"][data-voter="${SEAT_OTHER}"]`
+    );
+    await expect(targetRow).toHaveAttribute('data-count', '1');
+    await expect(firstVoterRow).toHaveAttribute('data-target', SEAT_ME);
+
+    releaseUpdate();
+
+    await expect(targetRow).toHaveAttribute('data-count', '2', { timeout: 15_000 });
+    await expect(
+      page.locator(`[data-testid="play-vote-voter-row"][data-voter="${SEAT_THIRD}"]`)
+    ).toHaveAttribute('data-target', SEAT_ME);
+  });
+
+  test('is reachable on a phone-width actions panel', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page);
+
+    await page.goto(`/play/${GAME_ID}`);
+    await page.getByTestId('play-mobile-tab-actions').click();
+
+    const tally = page.getByTestId('play-vote-tally-panel');
+    await expect(tally).toBeVisible({ timeout: 15_000 });
+    await expect(tally).toBeInViewport();
+    await expect(page.getByTestId('play-vote-count-row')).toHaveCount(1);
+  });
+
+  test('hides when the live stream leaves the day vote phase', async ({ page }) => {
+    let releaseNight!: () => void;
+    const nightGate = new Promise<void>((resolve) => {
+      releaseNight = resolve;
+    });
+
+    await mockStandardPlaySurface(page, {
+      liveBatches: [
+        PUBLIC_FRAMES,
+        {
+          wait: nightGate,
+          frames: [mkFrame(4, 'PhaseStarted', 'NIGHT_1_ACTIONS', null, {})]
+        }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-vote-tally-panel')).toBeVisible({ timeout: 15_000 });
+
+    releaseNight();
+
+    await expect(page.getByTestId('play-vote-tally-panel')).toHaveCount(0, {
+      timeout: 15_000
+    });
+  });
+});
+
+test.describe('play game-feel feedback (US-284)', () => {
+  test('confirms a vote target before posting and shows accepted feedback', async ({ page }) => {
+    const actionPayloads: Record<string, unknown>[] = [];
+    await mockStandardPlaySurface(page, {
+      onAction: (payload) => {
+        actionPayloads.push(payload);
+      }
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-vote-panel')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('play-vote-target').selectOption(SEAT_OTHER);
+
+    await page.getByTestId('play-vote-submit').click();
+    const confirm = page.getByTestId('play-vote-confirm');
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText(SEAT_OTHER.slice(0, 8));
+    await expectIdentityBlind(confirm);
+
+    await page.getByTestId('play-vote-confirm-cancel').click();
+    await expect(confirm).toHaveCount(0);
+    expect(actionPayloads).toHaveLength(0);
+
+    await page.getByTestId('play-vote-submit').click();
+    await page.getByTestId('play-vote-confirm-submit').click();
+    await expect(page.getByTestId('play-action-note')).toContainText('Vote accepted', {
+      timeout: 15_000
+    });
+    expect(actionPayloads).toHaveLength(1);
+    expect(actionPayloads[0]['action']).toMatchObject({ type: 'VOTE', target: SEAT_OTHER });
+  });
+
+  test('renders the own-seat elimination moment and dead-seat treatment', async ({ page }) => {
+    let releaseElimination!: () => void;
+    const eliminationGate = new Promise<void>((resolve) => {
+      releaseElimination = resolve;
+    });
+
+    await mockStandardPlaySurface(page, {
+      liveBatches: [
+        PUBLIC_FRAMES,
+        {
+          wait: eliminationGate,
+          frames: [
+            mkFrame(4, 'PlayerEliminated', 'DAY_1_VOTE', null, {
+              public_player_id: SEAT_ME,
+              cause: 'vote'
+            })
+          ]
+        }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-seat-grid')).toBeVisible({ timeout: 15_000 });
+
+    releaseElimination();
+
+    const eliminated = page.getByTestId('play-eliminated-modal');
+    await expect(eliminated).toBeVisible({ timeout: 15_000 });
+    await expect(eliminated).toContainText('You have been eliminated');
+    await expectIdentityBlind(eliminated);
+
+    const ownSeat = page.locator(`[data-testid="play-seat-row"][data-player-id="${SEAT_ME}"]`);
+    await expect(ownSeat).toHaveAttribute('data-alive', 'false');
+    await expect(ownSeat).toHaveAttribute('data-self', 'true');
+    await expect(ownSeat).toHaveAttribute('data-state', 'dead-self');
+  });
+
+  test('shows a phase-change banner from released phase-start frames', async ({ page }) => {
+    let releaseNight!: () => void;
+    const nightGate = new Promise<void>((resolve) => {
+      releaseNight = resolve;
+    });
+
+    await mockStandardPlaySurface(page, {
+      liveBatches: [
+        PUBLIC_FRAMES,
+        {
+          wait: nightGate,
+          frames: [mkFrame(4, 'PhaseStarted', 'NIGHT_1_ACTIONS', null, {})]
+        }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-phase')).toContainText('DAY_1_VOTE', {
+      timeout: 15_000
+    });
+
+    releaseNight();
+
+    const banner = page.getByTestId('play-phase-banner');
+    await expect(banner).toBeVisible({ timeout: 15_000 });
+    await expect(banner).toContainText('Night falls');
+    await expect(banner).toHaveAttribute('data-phase', 'NIGHT_1_ACTIONS');
+    await expectIdentityBlind(banner);
+  });
+
+  test('feedback remains usable and identity-blind on a phone-width viewport', async ({ page }) => {
+    const actionPayloads: Record<string, unknown>[] = [];
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page, {
+      onAction: (payload) => {
+        actionPayloads.push(payload);
+      }
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await page.getByTestId('play-mobile-tab-actions').click();
+    await expect(page.getByTestId('play-vote-panel')).toBeVisible({ timeout: 15_000 });
+
+    await page.getByTestId('play-vote-target').selectOption(SEAT_OTHER);
+    await page.getByTestId('play-vote-submit').click();
+
+    const confirm = page.getByTestId('play-vote-confirm');
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toBeInViewport();
+    await expectIdentityBlind(confirm);
+
+    await page.getByTestId('play-vote-confirm-submit').click();
+    const note = page.getByTestId('play-action-note');
+    await expect(note).toContainText('Vote accepted', { timeout: 15_000 });
+    await expect(note).toBeInViewport();
+    expect(actionPayloads).toHaveLength(1);
+    await expectIdentityBlind(page.getByTestId('play-shell'));
+  });
+});
+
+test.describe('play surface responsive layout (US-282)', () => {
+  test('phone-width tabs make board, chat, and actions reachable with touch targets', async ({
+    page
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page);
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-title')).toBeVisible();
+
+    const tabs = page.getByTestId('play-mobile-tabs');
+    await expect(tabs).toBeVisible();
+    await expectTouchSized(page.getByTestId('play-mobile-tab-board'));
+    await expectTouchSized(page.getByTestId('play-mobile-tab-chat'));
+    await expectTouchSized(page.getByTestId('play-mobile-tab-actions'));
+
+    await expect(page.getByTestId('play-mobile-tab-board')).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+    await expect(page.getByTestId('play-seat-grid')).toBeVisible({ timeout: 15_000 });
+
+    await page.getByTestId('play-mobile-tab-chat').click();
+    await expect(page.getByTestId('play-mobile-tab-chat')).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+    await expect(page.getByTestId('play-chat-feed')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('play-chat-line')).toContainText('I think it is p1.');
+
+    await page.getByTestId('play-mobile-tab-actions').click();
+    await expect(page.getByTestId('play-mobile-tab-actions')).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+    await expect(page.getByTestId('play-vote-panel')).toBeVisible({ timeout: 15_000 });
+    await expectTouchSized(page.getByTestId('play-vote-submit'));
+  });
+
+  test('wide viewport keeps the three-column desktop play layout', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await mockStandardPlaySurface(page);
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-seat-grid')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('play-mobile-tabs')).toBeHidden();
+
+    const shell = page.getByTestId('play-shell');
+    await expect(shell).toHaveCSS('display', 'grid');
+    const columns = await shell.evaluate((el) => getComputedStyle(el).gridTemplateColumns);
+    expect(columns).toContain('220px');
+    expect(columns).toContain('300px');
+
+    const boardBox = await page.getByTestId('play-board-panel').boundingBox();
+    const mainBox = await page.getByTestId('play-main-panel').boundingBox();
+    const infoBox = await page.getByTestId('play-info-panel').boundingBox();
+    expect(boardBox?.x ?? 0).toBeLessThan(mainBox?.x ?? 0);
+    expect(mainBox?.x ?? 0).toBeLessThan(infoBox?.x ?? 0);
+  });
+
+  test('mobile chat composer stays reachable and submits from a narrow viewport', async ({
+    page
+  }) => {
+    let chatPayload: Record<string, unknown> | null = null;
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page, {
+      onChat: (payload) => {
+        chatPayload = payload;
+      }
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await page.getByTestId('play-mobile-tab-chat').click();
+
+    const input = page.getByTestId('play-chat-input');
+    await expect(input).toBeVisible({ timeout: 15_000 });
+    await expect(input).toBeInViewport();
+    await input.fill('hello from mobile');
+    await page.getByTestId('play-chat-send').click();
+
+    await expect(page.getByTestId('play-chat-status')).toHaveAttribute('data-status', 'released', {
+      timeout: 15_000
+    });
+    expect(chatPayload).toMatchObject({ channel: 'PUBLIC', text: 'hello from mobile' });
+  });
+});
+
+test.describe('play connection reliability (US-285)', () => {
+  test('live-tail indicator reflects disconnect and recovery on a phone-width viewport', async ({
+    page
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installControlledEventSource(page);
+    await mockStandardPlaySurface(page, { liveBatches: [] });
+
+    await page.goto(`/play/${GAME_ID}`);
+
+    const indicator = page.getByTestId('play-connection-indicator');
+    await expect(indicator).toHaveAttribute('data-state', 'live', { timeout: 15_000 });
+    await emitControlledLive(page, 0, mkFrame(1, 'PhaseStarted', 'DAY_1_VOTE', null, {}));
+    await expect(page.getByTestId('play-phase')).toContainText('DAY_1_VOTE', {
+      timeout: 15_000
+    });
+
+    await failControlledLive(page, 0);
+    await expect(indicator).toHaveAttribute('data-state', 'reconnecting', {
+      timeout: 15_000
+    });
+
+    await page.waitForFunction(() => {
+      return (
+        window as unknown as Window & {
+          __padrinoLiveSources: unknown[];
+        }
+      ).__padrinoLiveSources.length >= 2;
+    });
+    await emitControlledLive(
+      page,
+      1,
+      mkFrame(2, 'PublicMessageSubmitted', 'DAY_1_VOTE', SEAT_OTHER, {
+        text: 'Recovered stream message.'
+      })
+    );
+
+    await expect(indicator).toHaveAttribute('data-state', 'live', { timeout: 15_000 });
+    await page.getByTestId('play-mobile-tab-chat').click();
+    await expect(page.getByTestId('play-chat-line')).toContainText('Recovered stream message.', {
+      timeout: 15_000
+    });
+
+    const urls = await page.evaluate(() =>
+      (
+        window as unknown as Window & {
+          __padrinoLiveUrls: () => string[];
+        }
+      ).__padrinoLiveUrls()
+    );
+    expect(new URL(urls[0]).searchParams.has('after')).toBe(false);
+    expect(new URL(urls[1]).searchParams.get('after')).toBe('1');
+    await expectIdentityBlind(page.getByTestId('play-shell'));
+  });
+
+  test('return-after-away notice is non-leaky', async ({ page }) => {
+    await mockStandardPlaySurface(page, {
+      observationFrames: [
+        {
+          type: 'observation',
+          phase: 'DAY_1_VOTE',
+          you: { player_id: SEAT_ME, alive: true },
+          alive_players: [SEAT_ME, SEAT_OTHER],
+          legal_actions: { allowed_action_types: ['VOTE', 'ABSTAIN'], legal_targets: [SEAT_OTHER] },
+          return_notice: {
+            kind: 'away_resuming',
+            message: 'You were away. Resuming from the latest table state.'
+          }
+        },
+        { type: 'phase_deadline', phase: 'DAY_1_VOTE', deadline_at: '2099-01-01T00:02:00Z' }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    const notice = page.getByTestId('play-return-notice');
+    await expect(notice).toBeVisible({ timeout: 15_000 });
+    await expect(notice).toContainText('You were away');
+    const noticeText = ((await notice.textContent()) ?? '').toLowerCase();
+    expect(noticeText).not.toContain('ai');
+    expect(noticeText).not.toContain('human');
+    expect(noticeText).not.toContain('takeover');
+    await expectIdentityBlind(notice);
+  });
+
+  test('observation recovery re-fetches a snapshot without sequence resume', async ({ page }) => {
+    let releaseSnapshot!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const observationUrls: string[] = [];
+
+    await mockStandardPlaySurface(page, {
+      observationBatches: [
+        OBSERVATION_FRAMES,
+        {
+          wait: snapshotGate,
+          frames: [
+            {
+              type: 'observation',
+              phase: 'DAY_1_VOTE',
+              you: { player_id: SEAT_ME, alive: true },
+              alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
+              legal_actions: {
+                allowed_action_types: ['VOTE', 'ABSTAIN'],
+                legal_targets: [SEAT_THIRD]
+              }
+            },
+            {
+              type: 'phase_deadline',
+              phase: 'DAY_1_VOTE',
+              deadline_at: '2099-01-01T00:03:00Z'
+            }
+          ]
+        }
+      ],
+      onObservationRequest: (url) => observationUrls.push(url)
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-vote-target')).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => observationUrls.length, { timeout: 15_000 }).toBeGreaterThan(1);
+    releaseSnapshot();
+
+    await page.getByTestId('play-vote-target').selectOption(SEAT_THIRD);
+    await expect(page.getByTestId('play-vote-target')).toHaveValue(SEAT_THIRD, {
+      timeout: 15_000
+    });
+    for (const rawUrl of observationUrls) {
+      const url = new URL(rawUrl);
+      expect(url.pathname).toContain(`/human/games/${GAME_ID}/observation/stream`);
+      expect(url.searchParams.has('after')).toBe(false);
+    }
   });
 });

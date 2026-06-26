@@ -37,6 +37,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.analytics.human_stats import refresh_human_player_stats_for_game
 from padrino.core.agents.contract import AgentResponse, ResponseError
 from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.events import EventAdapter
@@ -591,14 +592,16 @@ async def _persist_terminated_event(
             placement_result = _placement_result_for(state, persistence.game_id)
 
         await _append_event_row(session, persistence, stored)
-        await games_repo.update_status(
+        completed_game = await games_repo.update_status(
             session,
             persistence.game_id,
             status=GAME_STATUS_COMPLETED,
             terminal_result=terminal_result_payload,
             current_phase=stored.body["phase"],
             event_hash_head=stored.event_hash,
+            stamp_completed_at=True,
         )
+        completed_at = None if completed_game is None else completed_game.completed_at
         if apply_ratings:
             assert persistence.league_id is not None
             if game is not None and game.pair_id is not None:
@@ -662,6 +665,11 @@ async def _persist_terminated_event(
                     game_result=solo_result,
                     agent_builds_by_seat=persistence.agent_builds,
                 )
+        await refresh_human_player_stats_for_game(
+            session,
+            persistence.game_id,
+            now=completed_at,
+        )
     if placement_result is not None:
         await _apply_placement_after_finalization(persistence, placement_result)
 

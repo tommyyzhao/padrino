@@ -3,7 +3,7 @@
  *
  * Reads the state file written by globalSetup and SIGTERMs the smoke
  * harness's process group, which kills the detached API + scheduler
- * children spawned by `padrino smoke localhost --keep-running`. A second
+ * children spawned by `padrino smoke localhost --with-human-lane --keep-running`. A second
  * SIGKILL follows if anything is still alive after 5 seconds.
  */
 

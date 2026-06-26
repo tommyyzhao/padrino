@@ -42,6 +42,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.human_seat_auth import resolve_human_game_seat
+from padrino.core.enums import SeatKind
 from padrino.core.observation_privacy import (
     assert_no_identity_markers,
     coerce_identity_mode,
@@ -49,7 +50,7 @@ from padrino.core.observation_privacy import (
 )
 from padrino.core.observations import build_observation, format_phase_id
 from padrino.core.rulesets import get_ruleset
-from padrino.db.models import Game
+from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.runner.human_chat_observation import (
     hydrate_observation_human_chat,
@@ -63,6 +64,8 @@ WRONG_SEAT_DETAIL = "wrong_seat"
 #: SSE frame discriminators.
 OBSERVATION_FRAME = "observation"
 DEADLINE_FRAME = "phase_deadline"
+RETURN_NOTICE_KIND = "away_resuming"
+RETURN_NOTICE_MESSAGE = "You were away. Resuming from the latest table state."
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +105,13 @@ def _deadline_frame(phase: str, deadline_at: datetime | None) -> dict[str, Any]:
         "phase": phase,
         "deadline_at": deadline_at.isoformat() if deadline_at is not None else None,
     }
+
+
+def _return_notice_for_seat(seat_row: GameSeat) -> dict[str, str] | None:
+    """Return the non-leaky resume notice for a seat already resumed by the server."""
+    if seat_row.seat_kind != SeatKind.AI_TAKEOVER.value and seat_row.taken_over_at_phase is None:
+        return None
+    return {"kind": RETURN_NOTICE_KIND, "message": RETURN_NOTICE_MESSAGE}
 
 
 async def build_seat_observation_snapshot(
@@ -153,6 +163,9 @@ async def build_seat_observation_snapshot(
     identity_mode = coerce_identity_mode(game.identity_mode)
     observation_payload = observation.model_dump(mode="json")
     observation_frame: dict[str, Any] = {"type": OBSERVATION_FRAME, **observation_payload}
+    return_notice = _return_notice_for_seat(seat_row)
+    if return_notice is not None:
+        observation_frame["return_notice"] = return_notice
 
     if is_anonymous(identity_mode):
         # The per-seat view carries the seat's OWN role/faction (allowed) but
@@ -195,6 +208,8 @@ __all__ = [
     "DEADLINE_FRAME",
     "GAME_NOT_FOUND_DETAIL",
     "OBSERVATION_FRAME",
+    "RETURN_NOTICE_KIND",
+    "RETURN_NOTICE_MESSAGE",
     "WRONG_SEAT_DETAIL",
     "SeatObservationSnapshot",
     "build_seat_observation_snapshot",

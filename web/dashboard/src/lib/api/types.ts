@@ -480,6 +480,11 @@ export interface LaunchResponse {
   created: boolean;
 }
 
+/** Result of a solo instant-match handoff (US-278): route to the new game. */
+export interface HumanMatchResponse {
+  game_id: string;
+}
+
 /** Per-human deterministic play stats (US-145); no leaderboard / ELO in v1. */
 export interface HumanPlayerStats {
   ruleset_id: string;
@@ -492,6 +497,25 @@ export interface HumanPlayerStats {
   survival_rate: number;
   voting_accuracy: VotingAccuracyAnalytics;
   detection_accuracy: string;
+}
+
+/** The caller's own postgame spot-the-AI result when they have submitted it. */
+export interface HumanGameSpotTheAi {
+  total: number;
+  correct: number;
+  accuracy: string;
+}
+
+/** One completed casual human-lane game in the caller's private history. */
+export interface HumanGameHistoryEntry {
+  game_id: string;
+  ruleset_id: string;
+  ended_at: string;
+  result: 'WIN' | 'LOSS' | 'DRAW' | 'UNKNOWN';
+  winner: string | null;
+  role: string;
+  spot_the_ai: HumanGameSpotTheAi | null;
+  reveal_path: string;
 }
 
 // ---- live transport frames (SSE-out) -------------------------------------
@@ -520,6 +544,13 @@ export type SeatStreamFrameType = 'observation' | 'phase_deadline';
 export interface LegalActionsView {
   allowed_action_types: string[];
   legal_targets: string[];
+  action_descriptions?: Record<string, string>;
+}
+
+/** Non-leaky notice shown to a player returning after the server resumed their seat. */
+export interface ReturnNoticeView {
+  kind: 'away_resuming';
+  message: string;
 }
 
 /** The seat's own identity-mode-aware observation projection frame (US-136). */
@@ -528,6 +559,7 @@ export interface SeatObservationFrame {
   phase?: string;
   alive_players?: string[];
   legal_actions?: LegalActionsView;
+  return_notice?: ReturnNoticeView;
   [key: string]: unknown;
 }
 

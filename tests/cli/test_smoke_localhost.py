@@ -15,6 +15,7 @@ in ``PADRINO_SMOKE_PG_URL``.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+import padrino.smoke as smoke_module
+from padrino.bootstrap import BootstrapResult, StepReport
 from padrino.cli import app
 from padrino.smoke import (
     STEP_ASSERT_LEAGUE_LEADERBOARD,
@@ -128,7 +131,112 @@ def test_smoke_localhost_cli_help() -> None:
     assert isinstance(smoke, click.Group)
     localhost_cmd = smoke.commands["localhost"]
     option_names = {opt for param in localhost_cmd.params for opt in param.opts}
-    assert {"--db-url", "--port", "--keep-running"} <= option_names
+    assert {"--db-url", "--port", "--keep-running", "--with-human-lane"} <= option_names
+
+
+class _FakeEngine:
+    async def dispose(self) -> None:
+        return None
+
+
+class _FakeProcess:
+    def __init__(self, cmd: list[str], *, env: dict[str, str]) -> None:
+        self.cmd = cmd
+        self.env = env
+        self.stderr = io.BytesIO()
+        self.terminated = False
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return 0 if self.terminated or self.killed else None
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+async def _bootstrap_ok(*_args: Any, **_kwargs: Any) -> BootstrapResult:
+    return BootstrapResult(
+        succeeded=True,
+        steps=(StepReport(name="bootstrap", status="ok"),),
+        admin_raw_key="pk_smoke",
+    )
+
+
+async def _execute_smoke_flow_noop(*_args: Any, **_kwargs: Any) -> None:
+    return None
+
+
+def test_run_smoke_subprocess_starts_human_lane_child_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes: list[_FakeProcess] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeProcess:
+        proc = _FakeProcess(cmd, env=kwargs["env"])
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(smoke_module, "bootstrap", _bootstrap_ok)
+    monkeypatch.setattr(smoke_module, "_execute_smoke_flow", _execute_smoke_flow_noop)
+    monkeypatch.setattr(smoke_module, "create_engine", lambda _db_url: _FakeEngine())
+    monkeypatch.setattr(smoke_module, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr("padrino.smoke.subprocess.Popen", fake_popen)
+
+    result = asyncio.run(
+        run_smoke_subprocess(
+            db_url="sqlite+aiosqlite:///smoke.db",
+            port=8123,
+            with_human_lane=True,
+            keep_running=False,
+        )
+    )
+
+    assert result.succeeded is True
+    assert [proc.cmd[3] for proc in processes] == ["serve", "scheduler", "human-lane"]
+    human_lane_proc = processes[2]
+    assert human_lane_proc.cmd[-2:] == ["--db-url", "sqlite+aiosqlite:///smoke.db"]
+    assert human_lane_proc.env["PADRINO_DB_URL"] == "sqlite+aiosqlite:///smoke.db"
+    assert human_lane_proc.env["PADRINO_HUMAN_LANE_MOCK_AI"] == "true"
+    assert all(proc.terminated for proc in processes)
+
+
+def test_run_smoke_subprocess_leaves_human_lane_child_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes: list[_FakeProcess] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeProcess:
+        proc = _FakeProcess(cmd, env=kwargs["env"])
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(smoke_module, "bootstrap", _bootstrap_ok)
+    monkeypatch.setattr(smoke_module, "_execute_smoke_flow", _execute_smoke_flow_noop)
+    monkeypatch.setattr(smoke_module, "create_engine", lambda _db_url: _FakeEngine())
+    monkeypatch.setattr(smoke_module, "create_session_factory", lambda _engine: object())
+    monkeypatch.setattr("padrino.smoke.subprocess.Popen", fake_popen)
+
+    result = asyncio.run(
+        run_smoke_subprocess(
+            db_url="sqlite+aiosqlite:///smoke.db",
+            port=8123,
+            keep_running=False,
+        )
+    )
+
+    assert result.succeeded is True
+    assert [proc.cmd[3] for proc in processes] == ["serve", "scheduler"]
+
+
+def test_dashboard_global_setup_enables_human_lane_worker() -> None:
+    source = Path("web/dashboard/tests/e2e/global-setup.ts").read_text(encoding="utf-8")
+    assert "'--with-human-lane'" in source
 
 
 def test_run_smoke_in_process_fails_fast_on_bootstrap_error(

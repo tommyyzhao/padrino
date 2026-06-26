@@ -17,7 +17,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: src/padrino/api/routes/human.py (ADD route), web/dashboard/src/lib/api/client.ts:338-340 + web types.ts (~484 HumanPlayerStats type - the projection target), src/padrino/analytics/human_stats.py (refresh/projection), human_player_stats model + Alembic 0034. require_human admits guests (needed - the solo funnel is guest-based). Backend-only story (no UI change here - the profile guest-gate is US-286). Watch the 'name'->'role' key remap in role_win_rates_json.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-277",
@@ -33,7 +33,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: api/routes/human.py (ADD POST /human/match), api/lobby_launch.py (launch_lobby is lobby-keyed; reuse - do NOT hand-roll Game/GameSeat materialization), api/routes/lobbies.py (mirror its launch route: enforce_consent + release_admission_for_lobby + re-admit ACTION_LAUNCH), core/lobby/autofill.py (autofill_empty_seats - the CORRECT fill primitive, preserves the HUMAN seat), economics/human_cost_governance.py (admission caps/breaker + human_eligible_pool curated pool). NAME 'match' (the existing 'guest quickplay'/POST /human/guest mints a SESSION, not a game). Do NOT use matchmaker.next_match (seats all seats) and do NOT route through scientific continuous_matchmaking. Casual + anonymous + firewall-safe.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-278",
@@ -51,7 +51,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check; e2e where the route-mocked nav test is added). Backend gates pass if client/types touched."
       ],
       "notes": "Sites: web/dashboard/src/routes/+page.svelte (CTA), +layout.svelte (nav), the existing guest-mint + consent flow (reused by friends-lobby join at lobby/[id]/+page.svelte ~207), client.ts (add match() -> POST /human/match). Depends on US-277. Keep consent inline + one-tap. The full live funnel (real game to terminal) is US-287 (needs the US-288 harness); US-278's own nav test can use route-mocked fixtures.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-279",
@@ -69,7 +69,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check)."
       ],
       "notes": "Sites: a transient loading route/state in web/dashboard/src/routes/play (or the match flow), client.ts match() await/poll, /healthz/human-lane (operator counts - derive a friendly state, do NOT expose raw). Most solo matches start instantly (deterministic autofill). Depends on US-277. Frontend -> pnpm gates (e2e via route-mocked fixtures; no live game needed for US-279's own test).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-280",
@@ -85,7 +85,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check; e2e for the viewport assertion)."
       ],
       "notes": "Sites: a new onboarding component/route under web/dashboard/src/routes (linked from +page.svelte and the US-278 match entry). Persist dismissal in localStorage. No Svelte component-mount harness exists (vitest is TS-only) -> use Playwright e2e + page.setViewportSize for render/mobile assertions. Independent of the match endpoint.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-281",
@@ -101,7 +101,7 @@
         "Reducer/derivation of action descriptions (if any pure logic) is unit-tested via vitest over synthetic legal-action payloads."
       ],
       "notes": "Sites: play/[gameId]/+page.svelte + lib components, the legal_actions/observation payload already streamed per seat, core ruleset action definitions. Reuse existing legal_actions. Render/viewport -> Playwright e2e (route-mocked); pure logic -> vitest. Independent of the match flow.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-282",
@@ -117,7 +117,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check + e2e). NOTE: there is NO Svelte component-mount harness (vitest is TS-only) - use Playwright e2e with page.setViewportSize + route-mocked SSE, NOT component tests."
       ],
       "notes": "Sites: play/[gameId]/+page.svelte (md:grid-cols-[220px_1fr_300px]) + lib components. Responsive web only (no native app). Sequence FIRST among play-surface stories. Test via Playwright e2e (page.setViewportSize) + route-mocked SSE fixtures (web/dashboard/tests/e2e/play.spec.ts pattern) - the only render harness that exists.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-283",
@@ -135,7 +135,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check + e2e)."
       ],
       "notes": "Sites: play/[gameId]/+page.svelte play-state reducer (already ingests VoteSubmitted) - render what it tracks; SSE live-tail provides vote frames. Depends on US-282. Split: derivation -> vitest (playState.test.ts); render/live-update -> Playwright e2e route-mocked (no live human game exists in the smoke harness).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-284",
@@ -153,7 +153,7 @@
         "All feedback is identity-blind and works on a phone-width viewport; tests assert mobile + no identity leak. All frontend gates pass (pnpm -C web/dashboard lint + check + e2e)."
       ],
       "notes": "Sites: play/[gameId]/+page.svelte + components; phase/elimination/vote frames arrive via SSE + the reducer. Depends on US-282. Keep votes recoverable (no irreversible one-click). Pure phase/elimination derivation -> vitest; render -> Playwright e2e route-mocked (no live human game in the harness).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-285",
@@ -171,7 +171,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check + e2e). Identity-blind throughout; works on a phone-width viewport."
       ],
       "notes": "Sites: web/dashboard/src/lib/liveClient.ts (ADD onOpen/onStateChange + backoff+jitter; today LiveClientOptions exposes only onFrame/onError and the injected LiveEventSource omits onopen), play/[gameId]/+page.svelte (indicator + return notice + the SEPARATE obsSse EventSource at ~line 110, half-open/non-resumable), the reconnect-by-sequence contract (LiveClient ?after=), the 90s grace/AI-takeover (server-side, identity-blind - do NOT change). Depends on US-282. Split: backoff/dedup logic -> vitest (liveClient.test.ts); indicator/notice render -> Playwright e2e route-mocked.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-286",
@@ -189,7 +189,7 @@
         "All backend + frontend gates pass (ruff/format/mypy/pytest -m 'not integration'; pnpm -C web/dashboard lint + check + e2e for the guest-render assertion)."
       ],
       "notes": "Sites: web/dashboard/src/routes/profile/+page.svelte (line 43 signedIn=me.kind==='account', line 52 'if(!signedIn) return' -> un-gate for guests; lines 80-86 signed-out card -> only on 401), src/padrino/api/routes/human.py (ADD list-my-games route), games/game_seats tables for the caller's principal, reveal/recap routes (play/[gameId]/reveal, watch/[id]/recap) to link to. Backend already serves stats by principal_id (works for guests). Depends on US-276. This story OWNS the profile guest-gate fix (US-276 is backend-only). Casual + own-games-only.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-288",
@@ -207,7 +207,7 @@
         "All backend + frontend gates pass (ruff/format/mypy/pytest -m 'not integration'; pnpm -C web/dashboard lint + check)."
       ],
       "notes": "Sites: src/padrino/cli.py (`human-lane` command ~344-391 - read the mock flag, build ai_adapter_factory), src/padrino/runner/human_lane.py (ai_adapter_factory param already threaded to build_human_lane_adapter; _PlaceholderAdapter docstring ~189-199 notes the real-adapter default), src/padrino/llm/mock NoopMockAdapter/DeterministicMockAdapter, src/padrino/smoke.py run_smoke_subprocess (~849-889 spawn serve+scheduler; ~928-936 teardown - add a third human-lane child behind --with-human-lane), web/dashboard/tests/e2e/global-setup.ts (enable the flag). Priority 287 but runs before US-287 (which depends on it). This is the harness foundation US-287 needs; without it the funnel e2e cannot run a real human game to terminal.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-287",
@@ -230,7 +230,7 @@
         "All backend + frontend gates pass (ruff/format/mypy/pytest -m 'not integration'; pnpm -C web/dashboard lint + check + the e2e suite)."
       ],
       "notes": "Sites: web/dashboard/tests/e2e/* (Playwright; global-setup boots the backend - now with the human-lane worker via US-288), the funnel from US-278 (CTA) + US-277 (match) + US-279 (loading) + US-276/US-286 (guest profile). DEPENDS on US-288 (harness can run a human game to terminal) and US-279 (loading step asserted). This is the guard that the acquisition path never silently breaks again (like /human/stats did). The other play-surface stories use route-mocked fixtures for their own tests; THIS one uses the real human-lane harness to prove the firewall end-to-end.",
-      "passes": false
+      "passes": true
     }
   ]
 }

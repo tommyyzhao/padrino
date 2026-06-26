@@ -1,7 +1,12 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
+  import { PadrinoApiError } from '$lib/api/client';
+  import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
+  import HowToPlayPanel from '$lib/components/HowToPlayPanel.svelte';
   import { padrino } from '$lib/clientStore.svelte';
+  import { dismissHowToPlay, hasDismissedHowToPlay } from '$lib/howToPlay';
   import { canonicalTeamRulesets } from '$lib/rulesets';
   import type {
     PublicLadderEntry,
@@ -17,6 +22,27 @@
 
   let liveGames = $state<PublicLiveGameEntry[]>([]);
   let recentGames = $state<PublicRecentGameEntry[]>([]);
+  let matchState = $state<'idle' | 'checking' | 'needs_consent' | 'starting'>('idle');
+  let matchError = $state<string | null>(null);
+  let consenting = $state(false);
+  let showHowToPlay = $state(false);
+
+  let matchBusy = $derived(
+    matchState === 'checking' || matchState === 'starting' || consenting
+  );
+  let matchLoadingText = $derived(
+    matchState === 'checking'
+      ? 'Checking your session...'
+      : matchState === 'starting'
+        ? 'Opening table finder...'
+        : consenting
+          ? 'Accepting...'
+          : null
+  );
+
+  function isUnauthorized(error: unknown): boolean {
+    return error instanceof PadrinoApiError && error.status === 401;
+  }
 
   async function load() {
     // Three public surfaces feed both the KPIs and the lobby sections.
@@ -54,8 +80,164 @@
     }
   }
 
+  async function ensureHumanSession(): Promise<void> {
+    padrino.setHumanSession(true);
+    try {
+      await padrino.client.getHumanMe();
+    } catch (error) {
+      if (!isUnauthorized(error)) {
+        throw error;
+      }
+      await padrino.client.createGuest();
+    }
+  }
+
+  async function openMatchQueue(): Promise<void> {
+    matchState = 'starting';
+    await goto('/play/match');
+  }
+
+  async function startSoloMatch(options: { skipHowToPlay?: boolean } = {}): Promise<void> {
+    matchError = null;
+    if (!options.skipHowToPlay && !hasDismissedHowToPlay()) {
+      showHowToPlay = true;
+      return;
+    }
+    matchState = 'checking';
+    try {
+      await ensureHumanSession();
+      const consent = await padrino.client.getConsentStatus();
+      if (!consent.consented) {
+        matchState = 'needs_consent';
+        return;
+      }
+      await openMatchQueue();
+    } catch (error) {
+      matchError = (error as Error).message;
+      matchState = 'idle';
+    }
+  }
+
+  async function acceptConsentAndMatch(): Promise<void> {
+    consenting = true;
+    matchError = null;
+    try {
+      const consent = await padrino.client.postConsent();
+      if (!consent.consented) {
+        matchState = 'needs_consent';
+        matchError = 'Consent is required before play.';
+        return;
+      }
+      await openMatchQueue();
+    } catch (error) {
+      matchError = (error as Error).message;
+      matchState = 'needs_consent';
+    } finally {
+      consenting = false;
+    }
+  }
+
+  function continueAfterHowToPlay(): void {
+    dismissHowToPlay();
+    showHowToPlay = false;
+    void startSoloMatch({ skipHowToPlay: true });
+  }
+
+  function closeHowToPlay(): void {
+    showHowToPlay = false;
+  }
+
   onMount(load);
 </script>
+
+<section
+  id="play-vs-ai"
+  class="mb-8 grid gap-4 border-b border-border pb-6 lg:grid-cols-[1fr_auto] lg:items-center"
+  data-testid="home-entry"
+>
+  <div>
+    <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+      Casual anonymous Mafia
+    </p>
+    <h1 class="text-2xl font-semibold tracking-normal">Play vs AI</h1>
+    <p class="mt-2 max-w-2xl text-sm text-muted-foreground">
+      Start a private table with one human seat and curated AI fill. Identities stay hidden until
+      the reveal.
+    </p>
+    <div class="mt-4 flex flex-wrap items-center gap-3">
+      <Button
+        class="px-5 py-2.5"
+        testid="home-play-vs-ai-cta"
+        onclick={() => void startSoloMatch()}
+        disabled={matchBusy}
+      >
+        {matchBusy ? 'Preparing...' : 'Play vs AI'}
+      </Button>
+      <a
+        class="text-sm underline-offset-2 hover:underline"
+        href="#lobby-live-section"
+        data-testid="home-watch-link"
+      >
+        Watch live games
+      </a>
+      <a
+        class="text-sm underline-offset-2 hover:underline"
+        href="/how-to-play"
+        data-testid="home-how-to-play-link"
+      >
+        How to play
+      </a>
+    </div>
+
+    {#if matchLoadingText}
+      <p class="mt-3 text-sm text-muted-foreground" data-testid="home-match-loading">
+        {matchLoadingText}
+      </p>
+    {/if}
+
+    {#if matchState === 'needs_consent'}
+      <Card class="mt-4 max-w-xl border-amber-400" data-testid="home-consent-card">
+        <p class="mb-3 flex items-start gap-2 text-xs" data-testid="home-consent-row">
+          <span>
+            I accept the <strong>Terms</strong> and <strong>Privacy Policy</strong> and confirm I am
+            <strong>16 or older</strong>.
+          </span>
+        </p>
+        <Button
+          testid="home-consent-accept"
+          onclick={() => void acceptConsentAndMatch()}
+          disabled={consenting}
+        >
+          {consenting ? 'Accepting...' : 'Accept & play'}
+        </Button>
+      </Card>
+    {/if}
+
+    {#if matchError}
+      <p class="mt-3 text-sm text-red-500" data-testid="home-match-error">{matchError}</p>
+    {/if}
+  </div>
+</section>
+
+{#if showHowToPlay}
+  <div
+    class="fixed inset-0 z-50 overflow-y-auto bg-background/85 px-4 py-6 backdrop-blur-sm"
+    data-testid="how-to-play-modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="how-to-play-title"
+  >
+    <div class="mx-auto max-w-3xl">
+      <HowToPlayPanel>
+        <Button testid="how-to-play-continue" onclick={continueAfterHowToPlay}>
+          Got it, continue
+        </Button>
+        <Button variant="ghost" testid="how-to-play-back" onclick={closeHowToPlay}>Back</Button>
+        <a class="text-sm underline-offset-2 hover:underline" href="/how-to-play">Open full guide</a>
+      </HowToPlayPanel>
+    </div>
+  </div>
+{/if}
 
 <div class="grid gap-4 sm:grid-cols-3" data-testid="home-kpis">
   <Card>

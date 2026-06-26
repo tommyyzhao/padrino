@@ -16,14 +16,16 @@ human session via :func:`padrino.api.human_auth.require_human`.
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.auth import _get_auth_settings, _get_rate_limiter
@@ -33,6 +35,7 @@ from padrino.api.human_auth import (
     HUMAN_SESSION_COOKIE,
     HumanPrincipalContext,
     generate_session_token,
+    get_human_context,
     require_human,
 )
 from padrino.api.human_chat import submit_chat
@@ -41,6 +44,7 @@ from padrino.api.human_chat_moderation import (
     build_message_guard_from_settings,
 )
 from padrino.api.human_consent import (
+    CONSENT_REQUIRED_DETAIL,
     client_ip_hash,
     enforce_consent,
     has_current_consent,
@@ -48,7 +52,13 @@ from padrino.api.human_consent import (
     required_consent_versions,
 )
 from padrino.api.human_observation import build_seat_observation_snapshot, stream_snapshot
+from padrino.api.human_seat_auth import HUMAN_LANE_SEAT_KINDS
 from padrino.api.human_turing import get_own_result, submit_guess
+from padrino.api.lobby_launch import (
+    AutoFillPoolError,
+    LobbyNotLaunchableError,
+    launch_lobby,
+)
 from padrino.api.oauth import (
     OAuthError,
     build_authorization_request,
@@ -58,12 +68,35 @@ from padrino.api.oauth import (
     state_flow_token,
     validate_authorization_state,
 )
-from padrino.api.reveal import build_participant_reveal
+from padrino.api.pagination import (
+    InvalidCursorError,
+    decode_index_cursor,
+    encode_index_cursor,
+    invalid_cursor_error,
+)
+from padrino.api.reveal import build_participant_reveal, winner_from_terminal_result
 from padrino.core.engine.actions import Action
+from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStatus
 from padrino.core.reveal import EndgameReveal
+from padrino.core.rulesets import get_ruleset
+from padrino.db.game_status import GAME_STATUS_COMPLETED
+from padrino.db.models import Game, GameSeat, HumanPlayerStats, HumanTuringGuess, Principal
 from padrino.db.repositories import human_principals as principals_repo
+from padrino.db.repositories import leagues as leagues_repo
+from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
+from padrino.economics.human_cost_governance import (
+    ACTION_CREATE,
+    ACTION_LAUNCH,
+    HumanAdmitDecision,
+    admit_human,
+    bind_admission_slots,
+    release_admission_for_lobby,
+    release_inference_reservations_for_lobby,
+    rollback_admission_decision,
+)
+from padrino.settings import Settings
 
 router = APIRouter()
 
@@ -71,6 +104,8 @@ OAUTH_STATE_COOKIE = "padrino_oauth_state"
 OAUTH_VERIFIER_COOKIE = "padrino_oauth_verifier"
 _OAUTH_FLOW_TTL_SECONDS = 600
 _OAUTH_FLOW_PRUNE_SAMPLE_MODULUS = 16
+_SOLO_MATCH_RULESET_ID = "mini7_v1"
+_ADMISSION_DENIED_STATUS = status.HTTP_429_TOO_MANY_REQUESTS
 
 
 class GuestSummary(BaseModel):
@@ -100,6 +135,235 @@ class ConsentStatus(BaseModel):
 
     consented: bool
     required_versions: dict[str, str]
+
+
+class MatchResponse(BaseModel):
+    """Result of a solo instant match handoff."""
+
+    game_id: uuid.UUID
+
+
+class HumanRoleWinRate(BaseModel):
+    """One client-shaped role win-rate item."""
+
+    role: str
+    wins: int
+    games: int
+    rate: float
+
+
+class HumanVotingAccuracy(BaseModel):
+    """Client-shaped voting accuracy counts and derived rate."""
+
+    total_votes: int
+    accurate_votes: int
+    rate: float
+
+
+class HumanStatsResponse(BaseModel):
+    """Per-human casual stats projected from the materialized stats row."""
+
+    ruleset_id: str
+    principal_id: uuid.UUID
+    games: int
+    wins: int
+    draws: int
+    losses: int
+    role_win_rates: list[HumanRoleWinRate]
+    survival_rate: float
+    voting_accuracy: HumanVotingAccuracy
+    detection_accuracy: str
+
+
+class HumanGameSpotTheAi(BaseModel):
+    """The caller's own postgame spot-the-AI result, when already submitted."""
+
+    total: int
+    correct: int
+    accuracy: str
+
+
+class HumanGameHistoryEntry(BaseModel):
+    """One completed human-lane game in the caller's private history."""
+
+    game_id: uuid.UUID
+    ruleset_id: str
+    ended_at: datetime
+    result: Literal["WIN", "LOSS", "DRAW", "UNKNOWN"]
+    winner: str | None
+    role: str
+    spot_the_ai: HumanGameSpotTheAi | None
+    reveal_path: str
+
+
+class HumanGameHistoryResponse(BaseModel):
+    """Bounded page of the caller's own completed human-lane games."""
+
+    items: list[HumanGameHistoryEntry]
+    next_cursor: str | None = None
+    total_estimate: int
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    return numerator / denominator if denominator > 0 else 0.0
+
+
+def _personal_game_result(
+    *,
+    winner: str | None,
+    faction: str,
+) -> Literal["WIN", "LOSS", "DRAW", "UNKNOWN"]:
+    if winner is None:
+        return "UNKNOWN"
+    if winner == "DRAW":
+        return "DRAW"
+    return "WIN" if winner == faction else "LOSS"
+
+
+def _detection_accuracy_string(row: HumanPlayerStats | None) -> str:
+    if row is None or row.detection_total == 0:
+        return "0"
+    return f"{row.detection_accurate}/{row.detection_total}"
+
+
+def _role_win_rates(raw_json: str) -> list[HumanRoleWinRate]:
+    raw_rates: list[dict[str, Any]] = json.loads(raw_json)
+    return [
+        HumanRoleWinRate(
+            role=str(rate.get("role", rate["name"])),
+            wins=int(rate["wins"]),
+            games=int(rate["games"]),
+            rate=_ratio(int(rate["wins"]), int(rate["games"])),
+        )
+        for rate in raw_rates
+    ]
+
+
+def _project_human_stats(
+    *,
+    ruleset_id: str,
+    principal_id: uuid.UUID,
+    row: HumanPlayerStats | None,
+) -> HumanStatsResponse:
+    if row is None:
+        return HumanStatsResponse(
+            ruleset_id=ruleset_id,
+            principal_id=principal_id,
+            games=0,
+            wins=0,
+            draws=0,
+            losses=0,
+            role_win_rates=[],
+            survival_rate=0.0,
+            voting_accuracy=HumanVotingAccuracy(total_votes=0, accurate_votes=0, rate=0.0),
+            detection_accuracy="0",
+        )
+    return HumanStatsResponse(
+        ruleset_id=row.ruleset_id,
+        principal_id=row.principal_id,
+        games=row.games,
+        wins=row.wins,
+        draws=row.draws,
+        losses=row.losses,
+        role_win_rates=_role_win_rates(row.role_win_rates_json),
+        survival_rate=_ratio(row.survived_games, row.games),
+        voting_accuracy=HumanVotingAccuracy(
+            total_votes=row.voting_total_votes,
+            accurate_votes=row.voting_accurate_votes,
+            rate=_ratio(row.voting_accurate_votes, row.voting_total_votes),
+        ),
+        detection_accuracy=_detection_accuracy_string(row),
+    )
+
+
+@router.get("/human/stats", response_model=HumanStatsResponse)
+async def get_human_stats(
+    ruleset_id: str = Query(min_length=1),
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> HumanStatsResponse:
+    """Return the caller's casual materialized play stats for one ruleset."""
+    stmt = select(HumanPlayerStats).where(
+        HumanPlayerStats.ruleset_id == ruleset_id,
+        HumanPlayerStats.principal_id == ctx.principal_id,
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return _project_human_stats(
+        ruleset_id=ruleset_id,
+        principal_id=ctx.principal_id,
+        row=row,
+    )
+
+
+@router.get("/human/games", response_model=HumanGameHistoryResponse)
+async def list_human_games(
+    limit: int = Query(20, ge=1, le=50),
+    cursor: str | None = Query(default=None),
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> HumanGameHistoryResponse:
+    """Return the caller's own completed casual human-lane games."""
+    start = 0
+    if cursor is not None:
+        try:
+            start = decode_index_cursor(cursor)
+        except InvalidCursorError as exc:
+            raise invalid_cursor_error() from exc
+
+    filters = (
+        GameSeat.occupant_principal_id == ctx.principal_id,
+        GameSeat.seat_kind.in_(HUMAN_LANE_SEAT_KINDS),
+        Game.status == GAME_STATUS_COMPLETED,
+        Game.completed_at.is_not(None),
+    )
+    total_stmt = select(func.count()).select_from(Game).join(GameSeat).where(*filters)
+    total = int((await session.execute(total_stmt)).scalar_one())
+
+    stmt = (
+        select(Game, GameSeat, HumanTuringGuess)
+        .join(GameSeat, GameSeat.game_id == Game.id)
+        .outerjoin(
+            HumanTuringGuess,
+            (HumanTuringGuess.game_id == Game.id)
+            & (HumanTuringGuess.guesser_public_id == GameSeat.public_player_id),
+        )
+        .where(*filters)
+        .order_by(Game.completed_at.desc(), Game.id.desc())
+        .offset(start)
+        .limit(limit + 1)
+    )
+    rows = list((await session.execute(stmt)).all())
+    next_cursor = encode_index_cursor(start + limit) if len(rows) > limit else None
+    items: list[HumanGameHistoryEntry] = []
+    for game, seat, guess in rows[:limit]:
+        assert game.completed_at is not None
+        ended_at = game.completed_at
+        if ended_at.tzinfo is None:
+            ended_at = ended_at.replace(tzinfo=UTC)
+        winner = winner_from_terminal_result(game.terminal_result)
+        items.append(
+            HumanGameHistoryEntry(
+                game_id=game.id,
+                ruleset_id=game.ruleset_id,
+                ended_at=ended_at,
+                result=_personal_game_result(winner=winner, faction=seat.faction),
+                winner=winner,
+                role=seat.role,
+                spot_the_ai=None
+                if guess is None
+                else HumanGameSpotTheAi(
+                    total=guess.total,
+                    correct=guess.correct,
+                    accuracy=guess.accuracy,
+                ),
+                reveal_path=f"/play/{game.id}/reveal",
+            )
+        )
+    return HumanGameHistoryResponse(
+        items=items,
+        next_cursor=next_cursor,
+        total_estimate=total,
+    )
 
 
 @router.get("/human/consent", response_model=ConsentStatus)
@@ -139,6 +403,154 @@ async def post_consent(
         source_ip_hash=client_ip_hash(request),
     )
     return ConsentStatus(consented=True, required_versions=versions)
+
+
+@router.post(
+    "/human/match",
+    response_model=MatchResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_match(
+    request: Request,
+    ctx: HumanPrincipalContext | None = Depends(get_human_context),
+    session: AsyncSession = Depends(get_session),
+) -> MatchResponse | JSONResponse:
+    """Create a one-human casual lobby, auto-fill AI seats, and launch it.
+
+    This is the solo "Play vs AI" handoff. It deliberately reuses the lobby
+    launch path rather than hand-rolling game materialization, so auto-fill,
+    role assignment, human-lane ownership, anonymity, and rating segregation
+    stay identical to private friend lobbies.
+    """
+    settings = _get_auth_settings(request)
+    if ctx is None:
+        _principal, raw_token = await _create_guest_session(
+            session,
+            settings=settings,
+            now=datetime.now(UTC),
+        )
+        await session.commit()
+        return _consent_required_response(raw_token=raw_token, settings=settings)
+
+    await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
+
+    create_admission = await _admit_or_429(
+        session,
+        settings=settings,
+        principal_id=ctx.principal_id,
+        action=ACTION_CREATE,
+    )
+    now = datetime.now(UTC)
+    ruleset = get_ruleset(_SOLO_MATCH_RULESET_ID)
+    league = await leagues_repo.get_or_create_humans_included(
+        session,
+        ruleset_id=_SOLO_MATCH_RULESET_ID,
+        ranked=False,
+    )
+    lobby = await lobbies_repo.create_lobby(
+        session,
+        ruleset_id=_SOLO_MATCH_RULESET_ID,
+        identity_mode=IdentityMode.ANONYMOUS.value,
+        theme_pack_id=None,
+        lobby_seed=secrets.token_hex(16),
+        invite_token=secrets.token_urlsafe(24),
+        integrity_acknowledged=False,
+        host_principal_id=ctx.principal_id,
+        league_id=league.id,
+        now=now,
+    )
+    host_member = await lobbies_repo.add_member(
+        session,
+        lobby_id=lobby.id,
+        principal_id=ctx.principal_id,
+        is_host=True,
+        now=now,
+    )
+    await bind_admission_slots(
+        session,
+        create_admission,
+        lobby_id=lobby.id,
+        lobby_member_id=host_member.id,
+    )
+    await lobbies_repo.add_seat(
+        session,
+        lobby_id=lobby.id,
+        seat_index=0,
+        seat_kind=LobbySeatKind.HUMAN,
+        member_id=host_member.id,
+    )
+    for seat_index in range(1, ruleset.PLAYER_COUNT):
+        await lobbies_repo.add_seat(
+            session,
+            lobby_id=lobby.id,
+            seat_index=seat_index,
+            seat_kind=LobbySeatKind.AI,
+        )
+    await lobbies_repo.set_lobby_status(
+        session,
+        lobby_id=lobby.id,
+        status=LobbyStatus.LOCKED.value,
+        now=now,
+    )
+
+    await release_admission_for_lobby(session, lobby_id=lobby.id, released_at=now)
+    launch_admission = await _admit_or_429(
+        session,
+        settings=settings,
+        principal_id=ctx.principal_id,
+        action=ACTION_LAUNCH,
+    )
+    try:
+        result = await launch_lobby(session, lobby_id=lobby.id)
+    except (LobbyNotLaunchableError, AutoFillPoolError) as exc:
+        await rollback_admission_decision(session, launch_admission)
+        detail = "autofill_pool_exhausted" if isinstance(exc, AutoFillPoolError) else str(exc)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
+
+    if result.created:
+        await bind_admission_slots(
+            session,
+            launch_admission,
+            lobby_id=lobby.id,
+            lobby_member_id=host_member.id,
+        )
+        await release_inference_reservations_for_lobby(
+            session,
+            lobby_id=lobby.id,
+            released_at=now,
+        )
+    else:
+        await rollback_admission_decision(session, launch_admission)
+
+    await session.commit()
+    return MatchResponse(game_id=result.game_id)
+
+
+async def _admit_or_429(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    principal_id: uuid.UUID,
+    action: str,
+) -> HumanAdmitDecision:
+    decision = await admit_human(
+        session,
+        settings,
+        principal_id=principal_id,
+        action=action,
+    )
+    if not decision.allowed:
+        raise HTTPException(status_code=_ADMISSION_DENIED_STATUS, detail=decision.reason)
+    return decision
+
+
+def _consent_required_response(*, raw_token: str, settings: Settings) -> JSONResponse:
+    response = JSONResponse(
+        status_code=status.HTTP_412_PRECONDITION_FAILED,
+        content={"detail": CONSENT_REQUIRED_DETAIL},
+    )
+    _set_human_session_cookie(response, raw_token=raw_token, settings=settings)
+    return response
 
 
 class ActionSubmission(BaseModel):
@@ -433,6 +845,46 @@ async def get_turing_guess(
     )
 
 
+async def _create_guest_session(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    now: datetime,
+) -> tuple[Principal, str]:
+    raw_token = generate_session_token()
+    expires_at = now + timedelta(hours=settings.padrino_human_session_ttl_hours)
+    principal = await principals_repo.create_principal(
+        session,
+        kind=principals_repo.PRINCIPAL_KIND_GUEST,
+    )
+    await principals_repo.create_session(
+        session,
+        principal_id=principal.id,
+        raw_token=raw_token,
+        kind=principals_repo.SESSION_KIND_GUEST,
+        issued_at=now,
+        expires_at=expires_at,
+    )
+    return principal, raw_token
+
+
+def _set_human_session_cookie(
+    response: Response,
+    *,
+    raw_token: str,
+    settings: Settings,
+) -> None:
+    response.set_cookie(
+        key=HUMAN_SESSION_COOKIE,
+        value=raw_token,
+        max_age=settings.padrino_human_session_ttl_hours * 3600,
+        httponly=True,
+        secure=settings.padrino_human_session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+
+
 @router.post(
     "/human/guest",
     response_model=GuestSummary,
@@ -445,31 +897,9 @@ async def create_guest(
 ) -> GuestSummary:
     """Create a guest principal + session and set the human session cookie."""
     settings = _get_auth_settings(request)
-    raw_token = generate_session_token()
     now = datetime.now(UTC)
-    expires_at = now + timedelta(hours=settings.padrino_human_session_ttl_hours)
-
-    principal = await principals_repo.create_principal(
-        session, kind=principals_repo.PRINCIPAL_KIND_GUEST
-    )
-    await principals_repo.create_session(
-        session,
-        principal_id=principal.id,
-        raw_token=raw_token,
-        kind=principals_repo.SESSION_KIND_GUEST,
-        issued_at=now,
-        expires_at=expires_at,
-    )
-
-    response.set_cookie(
-        key=HUMAN_SESSION_COOKIE,
-        value=raw_token,
-        max_age=settings.padrino_human_session_ttl_hours * 3600,
-        httponly=True,
-        secure=settings.padrino_human_session_cookie_secure,
-        samesite="lax",
-        path="/",
-    )
+    principal, raw_token = await _create_guest_session(session, settings=settings, now=now)
+    _set_human_session_cookie(response, raw_token=raw_token, settings=settings)
     return GuestSummary(
         principal_id=principal.id,
         kind=principal.kind,

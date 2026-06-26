@@ -19,12 +19,17 @@ function frame(sequence: number, overrides: Partial<LiveEventFrame> = {}): LiveE
 
 class FakeEventSource implements LiveEventSource {
   readonly url: string;
+  onopen: (() => void) | null = null;
   onmessage: ((event: { data: string; lastEventId?: string }) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
   closed = false;
 
   constructor(url: string) {
     this.url = url;
+  }
+
+  open(): void {
+    this.onopen?.();
   }
 
   emit(f: LiveEventFrame): void {
@@ -41,6 +46,39 @@ class FakeEventSource implements LiveEventSource {
 }
 
 describe('LiveClient', () => {
+  it('emits connection-state transitions and an onOpen callback', () => {
+    const sources: FakeEventSource[] = [];
+    const states: string[] = [];
+    let opens = 0;
+    const pending: { reconnect: (() => void) | null } = { reconnect: null };
+    const client = new LiveClient({
+      buildUrl: () => 'http://api/live',
+      eventSourceFactory: (url) => {
+        const s = new FakeEventSource(url);
+        sources.push(s);
+        return s;
+      },
+      onFrame: () => {},
+      onOpen: () => {
+        opens += 1;
+      },
+      onStateChange: (state) => states.push(state),
+      scheduleReconnect: (fn) => {
+        pending.reconnect = fn;
+      }
+    });
+
+    client.start();
+    sources[0].open();
+    sources[0].fail();
+    pending.reconnect?.();
+    sources[1].open();
+    client.close();
+
+    expect(opens).toBe(2);
+    expect(states).toEqual(['reconnecting', 'live', 'reconnecting', 'live', 'offline']);
+  });
+
   it('delivers released frames in order and tracks the resume cursor', () => {
     const sources: FakeEventSource[] = [];
     const frames: number[] = [];
@@ -60,7 +98,7 @@ describe('LiveClient', () => {
     expect(client.cursor).toBe(2);
   });
 
-  it('reconnects by sequence and drops resume-overlap duplicates', () => {
+  it('reconnects by sequence without frame duplication or loss', () => {
     const sources: FakeEventSource[] = [];
     const frames: number[] = [];
     const pending: { reconnect: (() => void) | null } = { reconnect: null };
@@ -89,8 +127,48 @@ describe('LiveClient', () => {
     // is dropped so the released stream stays gap-free AND duplicate-free.
     sources[1].emit(frame(2));
     sources[1].emit(frame(3));
-    expect(frames).toEqual([1, 2, 3]);
-    expect(client.cursor).toBe(3);
+    sources[1].emit(frame(4));
+    expect(frames).toEqual([1, 2, 3, 4]);
+    expect(client.cursor).toBe(4);
+  });
+
+  it('uses increasing bounded reconnect backoff with jitter', () => {
+    const sources: FakeEventSource[] = [];
+    const delays: number[] = [];
+    const pending: { reconnect: (() => void) | null } = { reconnect: null };
+    const client = new LiveClient({
+      buildUrl: () => 'http://api/live',
+      eventSourceFactory: (url) => {
+        const s = new FakeEventSource(url);
+        sources.push(s);
+        return s;
+      },
+      onFrame: () => {},
+      reconnectBaseDelayMs: 100,
+      reconnectMaxDelayMs: 500,
+      reconnectJitterRatio: 0.5,
+      random: () => 1,
+      scheduleReconnect: (fn, delayMs) => {
+        delays.push(delayMs);
+        pending.reconnect = fn;
+      }
+    });
+
+    client.start();
+    sources[0].fail();
+    pending.reconnect?.();
+    sources[1].fail();
+    pending.reconnect?.();
+    sources[2].fail();
+    pending.reconnect?.();
+    sources[3].fail();
+
+    expect(delays.length).toBe(4);
+    expect(delays[0]).toBeGreaterThan(0);
+    expect(delays[1]).toBeGreaterThan(delays[0]);
+    expect(delays[2]).toBeGreaterThan(delays[1]);
+    expect(delays.every((delay) => delay > 0 && delay <= 500)).toBe(true);
+    expect(delays[3]).toBe(500);
   });
 
   it('stops reconnecting after close()', () => {

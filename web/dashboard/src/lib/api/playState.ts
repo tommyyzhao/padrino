@@ -43,10 +43,38 @@ export interface PlayState {
   votes: Record<string, string | null>;
   /** The released chat feed in release order. */
   chat: ReleasedChatLine[];
+  /** Latest phase-transition banner derived from released PhaseStarted frames. */
+  phaseBanner: PhaseBanner | null;
   /** The terminal winner once GameTerminated is released, else null. */
   winner: string | null;
   /** Whether the terminal frame has been released. */
   terminal: boolean;
+}
+
+/** One seat's current day-vote choice. `target === null` means abstain. */
+export interface VoteTallyRow {
+  voter: string;
+  target: string | null;
+}
+
+/** Current votes against one elimination target. Abstains are not counted. */
+export interface VoteTargetCount {
+  target: string;
+  count: number;
+}
+
+/** Short identity-blind announcement for a released phase transition. */
+export interface PhaseBanner {
+  phase: string;
+  sequence: number;
+  kind: 'day' | 'night';
+  message: string;
+}
+
+/** Identity-blind current vote view: voter rows plus target counts. */
+export interface VoteTally {
+  rows: VoteTallyRow[];
+  counts: VoteTargetCount[];
 }
 
 export function emptyPlayState(): PlayState {
@@ -56,6 +84,7 @@ export function emptyPlayState(): PlayState {
     seats: [],
     votes: {},
     chat: [],
+    phaseBanner: null,
     winner: null,
     terminal: false
   };
@@ -85,6 +114,7 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
   let seats = state.seats;
   let votes = phaseChanged ? {} : state.votes;
   let chat = state.chat;
+  let phaseBanner = state.phaseBanner;
   let winner = state.winner;
   let terminal = state.terminal;
 
@@ -94,6 +124,12 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
   }
 
   switch (frame.event_type) {
+    case 'PhaseStarted': {
+      if (phaseChanged) {
+        phaseBanner = derivePhaseBanner(state.phase, frame.phase, frame.sequence);
+      }
+      break;
+    }
     case 'VoteSubmitted': {
       if (actor) {
         const isAbstain = frame.payload.is_abstain === true;
@@ -136,9 +172,45 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
     seats,
     votes,
     chat,
+    phaseBanner,
     winner,
     terminal
   };
+}
+
+export function derivePhaseBanner(
+  previousPhase: string,
+  nextPhase: string,
+  sequence: number
+): PhaseBanner | null {
+  if (nextPhase === '' || nextPhase === previousPhase) return null;
+
+  const normalized = nextPhase.toUpperCase();
+  if (normalized.startsWith('NIGHT_')) {
+    return { phase: nextPhase, sequence, kind: 'night', message: 'Night falls' };
+  }
+  if (normalized.startsWith('DAY_')) {
+    return { phase: nextPhase, sequence, kind: 'day', message: 'Day breaks' };
+  }
+  return null;
+}
+
+export function deriveVoteTally(votes: Record<string, string | null>): VoteTally {
+  const rows = Object.entries(votes)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([voter, target]) => ({ voter, target }));
+
+  const countsByTarget: Record<string, number> = {};
+  for (const target of Object.values(votes)) {
+    if (target === null) continue;
+    countsByTarget[target] = (countsByTarget[target] ?? 0) + 1;
+  }
+
+  const counts = Object.entries(countsByTarget)
+    .map(([target, count]) => ({ target, count }))
+    .sort((a, b) => b.count - a.count || a.target.localeCompare(b.target));
+
+  return { rows, counts };
 }
 
 /** Fold a batch of released frames in order. */

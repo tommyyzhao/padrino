@@ -11,6 +11,8 @@ import type {
   GauntletListEntry,
   GauntletReport,
   GuestSummary,
+  HumanGameHistoryEntry,
+  HumanMatchResponse,
   HumanPlayerStats,
   LaunchResponse,
   LobbyRoster,
@@ -56,6 +58,10 @@ export interface PadrinoClientOptions {
    */
   humanSession?: boolean;
   fetchImpl?: typeof fetch;
+}
+
+interface RequestOptions {
+  signal?: AbortSignal;
 }
 
 export class PadrinoClient {
@@ -144,10 +150,11 @@ export class PadrinoClient {
   private async mutate<T>(
     method: 'POST' | 'PATCH',
     path: string,
-    body?: unknown
+    body?: unknown,
+    options: RequestOptions = {}
   ): Promise<T> {
     const headers = this.authHeaders();
-    const init: RequestInit = { method, headers };
+    const init: RequestInit = { method, headers, signal: options.signal };
     if (this.humanSession) {
       init.credentials = 'include';
     }
@@ -334,9 +341,21 @@ export class PadrinoClient {
     return this.request(`/human/games/${encodeURIComponent(gameId)}/reveal`);
   }
 
-  /** Per-human deterministic play stats; gated to the signed-in account (US-145). */
+  /** Per-human deterministic play stats; gated to the current human principal (US-145/276). */
   getHumanStats(rulesetId: string): Promise<HumanPlayerStats> {
     return this.request('/human/stats', { ruleset_id: rulesetId });
+  }
+
+  /** Recent completed casual games for the current human principal (US-286). */
+  listHumanGames(
+    params: { limit?: number; cursor?: string | null } = {}
+  ): Promise<CursorPage<HumanGameHistoryEntry>> {
+    return this.request('/human/games', params);
+  }
+
+  /** Start a casual solo human-vs-AI match (US-278). */
+  match(options: RequestOptions = {}): Promise<HumanMatchResponse> {
+    return this.mutate('POST', '/human/match', undefined, options);
   }
 
   // ---- lobby (US-147/148/149)

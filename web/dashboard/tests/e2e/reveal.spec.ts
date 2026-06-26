@@ -341,6 +341,14 @@ test.describe('profile / stats page (US-156)', () => {
         })
       });
     });
+    await page.route('**/human/games*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: [], next_cursor: null, total_estimate: 0 })
+      });
+    });
 
     await page.goto('/profile');
     await expect(page.getByTestId('profile-title')).toBeVisible();
@@ -400,6 +408,14 @@ test.describe('profile / stats page (US-156)', () => {
         })
       });
     });
+    await page.route('**/human/games*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: [], next_cursor: null, total_estimate: 0 })
+      });
+    });
 
     await page.goto('/profile');
     await expect(page.getByTestId('profile-stats')).toBeVisible({ timeout: 15_000 });
@@ -410,5 +426,173 @@ test.describe('profile / stats page (US-156)', () => {
     await expect(detection).toContainText('67');
     await expect(detection).not.toContainText('—');
     await expect(detection).not.toContainText('NaN');
+  });
+
+  test('guest profile renders stats, match history, and save-history upsell', async ({
+    page
+  }) => {
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          principal_id: 'dddddddd-0000-0000-0000-000000000000',
+          kind: 'guest',
+          display_name: 'Guest Player'
+        })
+      });
+    });
+    await page.route('**/human/stats*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ruleset_id: 'mini7_v1',
+          principal_id: 'dddddddd-0000-0000-0000-000000000000',
+          games: 2,
+          wins: 1,
+          draws: 0,
+          losses: 1,
+          role_win_rates: [{ role: 'DETECTIVE', games: 1, wins: 1, rate: 1 }],
+          survival_rate: 0.5,
+          voting_accuracy: { total_votes: 2, accurate_votes: 1, rate: 0.5 },
+          detection_accuracy: '4/6'
+        })
+      });
+    });
+    await page.route('**/human/games*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [
+            {
+              game_id: GAME_ID,
+              ruleset_id: 'mini7_v1',
+              ended_at: '2026-06-25T18:00:00Z',
+              result: 'WIN',
+              winner: 'TOWN',
+              role: 'DETECTIVE',
+              spot_the_ai: { total: 6, correct: 4, accuracy: '4/6' },
+              reveal_path: `/play/${GAME_ID}/reveal`
+            }
+          ],
+          next_cursor: null,
+          total_estimate: 1
+        })
+      });
+    });
+
+    await page.goto('/profile');
+
+    await expect(page.getByTestId('profile-signed-out')).toHaveCount(0);
+    await expect(page.getByTestId('profile-guest-upsell')).toContainText('Sign in to save');
+    await expect(page.getByTestId('profile-stats')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('profile-games')).toContainText('2');
+    await expect(page.getByTestId('profile-history')).toBeVisible({ timeout: 15_000 });
+    const row = page.getByTestId('profile-history-row').first();
+    await expect(row).toContainText('DETECTIVE');
+    await expect(row).toContainText('WIN');
+    await expect(row).toContainText('4/6');
+
+    await page.getByTestId('profile-history-link').first().click();
+    await expect(page).toHaveURL(new RegExp(`/play/${GAME_ID}/reveal$`));
+  });
+
+  test('true signed-out visitor sees signed-out card without loading stats or history', async ({
+    page
+  }) => {
+    let statsCalls = 0;
+    let historyCalls = 0;
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'human_session_required' })
+      });
+    });
+    await page.route('**/human/stats*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      statsCalls += 1;
+      await route.fulfill({ status: 500, body: '{}' });
+    });
+    await page.route('**/human/games*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      historyCalls += 1;
+      await route.fulfill({ status: 500, body: '{}' });
+    });
+
+    await page.goto('/profile');
+
+    await expect(page.getByTestId('profile-signed-out')).toBeVisible();
+    await expect(page.getByTestId('profile-stats')).toHaveCount(0);
+    expect(statsCalls).toBe(0);
+    expect(historyCalls).toBe(0);
+  });
+
+  test('guest profile has empty history and graceful history error states', async ({ page }) => {
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          principal_id: 'eeeeeeee-0000-0000-0000-000000000000',
+          kind: 'guest',
+          display_name: null
+        })
+      });
+    });
+    await page.route('**/human/stats*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ruleset_id: 'mini7_v1',
+          principal_id: 'eeeeeeee-0000-0000-0000-000000000000',
+          games: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          role_win_rates: [],
+          survival_rate: 0,
+          voting_accuracy: { total_votes: 0, accurate_votes: 0, rate: 0 },
+          detection_accuracy: '0'
+        })
+      });
+    });
+    let failHistory = false;
+    await page.route('**/human/games*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      if (failHistory) {
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'history_unavailable' })
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: [], next_cursor: null, total_estimate: 0 })
+      });
+    });
+
+    await page.goto('/profile');
+    await expect(page.getByTestId('profile-empty-history')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('profile-empty-history')).toContainText('No games yet');
+    await expect(page.getByTestId('profile-empty-play')).toContainText('Play vs AI');
+
+    failHistory = true;
+    await page.reload();
+
+    await expect(page.getByTestId('profile-history-error')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('profile-stats')).toBeVisible();
   });
 });

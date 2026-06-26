@@ -50,6 +50,16 @@ def test_default_fallback_model(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _fresh().padrino_fallback_model == "deepinfra/deepseek-ai/DeepSeek-V4-Flash"
 
 
+def test_default_human_lane_mock_ai_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PADRINO_HUMAN_LANE_MOCK_AI", raising=False)
+    assert _fresh().padrino_human_lane_mock_ai is False
+
+
+def test_env_override_human_lane_mock_ai(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PADRINO_HUMAN_LANE_MOCK_AI", "1")
+    assert _fresh().padrino_human_lane_mock_ai is True
+
+
 def test_env_override_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PADRINO_LOG_LEVEL", "DEBUG")
     assert _fresh().padrino_log_level == "DEBUG"

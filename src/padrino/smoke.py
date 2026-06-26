@@ -15,8 +15,9 @@ Two execution modes share the same flow:
   ``asyncio.Task`` in the same event loop.
 * :func:`run_smoke_subprocess` — used by the CLI. ``padrino serve`` and
   ``padrino scheduler`` run as child processes; the smoke talks to them
-  over real HTTP on ``127.0.0.1:{port}``. Children are torn down before
-  returning unless ``keep_running=True``.
+  over real HTTP on ``127.0.0.1:{port}``. With ``with_human_lane=True`` it
+  also starts ``padrino human-lane`` with mock-AI enabled for dashboard e2e.
+  Children are torn down before returning unless ``keep_running=True``.
 
 All LLM calls go through :class:`padrino.llm.mock.NoopMockAdapter` — no
 network. The mock takes every game to a ``MAX_DAYS_REACHED`` draw, which is
@@ -812,6 +813,7 @@ async def run_smoke_subprocess(
     db_url: str,
     port: int | None = None,
     keep_running: bool = False,
+    with_human_lane: bool = False,
     clone_count: int = 1,
     boot_timeout_s: float = DEFAULT_BOOT_TIMEOUT_S,
     health_timeout_s: float = DEFAULT_HEALTH_TIMEOUT_S,
@@ -824,7 +826,8 @@ async def run_smoke_subprocess(
 
     ``port=None`` picks a free localhost port. ``keep_running=True`` returns
     after a successful run without tearing down the children so an operator
-    can poke at the live instance.
+    can poke at the live instance. ``with_human_lane=True`` also starts the
+    dedicated human-game worker with deterministic mock AI.
     """
     ctx = _SmokeContext()
     boot = await bootstrap(db_url=db_url, with_admin_key=True)
@@ -866,11 +869,21 @@ async def run_smoke_subprocess(
         "--db-url",
         db_url,
     ]
+    human_lane_cmd = [
+        py,
+        "-m",
+        "padrino.cli",
+        "human-lane",
+        "--db-url",
+        db_url,
+    ]
 
     api_proc: subprocess.Popen[bytes] | None = None
     scheduler_proc: subprocess.Popen[bytes] | None = None
+    human_lane_proc: subprocess.Popen[bytes] | None = None
     api_tail = _StderrTail("api")
     scheduler_tail = _StderrTail("scheduler")
+    human_lane_tail = _StderrTail("human-lane")
 
     try:
         api_proc = subprocess.Popen(
@@ -885,8 +898,19 @@ async def run_smoke_subprocess(
             stderr=subprocess.PIPE,
             env=env,
         )
+        if with_human_lane:
+            human_lane_env = dict(env)
+            human_lane_env["PADRINO_HUMAN_LANE_MOCK_AI"] = "true"
+            human_lane_proc = subprocess.Popen(
+                human_lane_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=human_lane_env,
+            )
         api_tail.start(api_proc.stderr)
         scheduler_tail.start(scheduler_proc.stderr)
+        if human_lane_proc is not None:
+            human_lane_tail.start(human_lane_proc.stderr)
 
         engine = create_engine(db_url)
         session_factory = create_session_factory(engine)
@@ -908,7 +932,9 @@ async def run_smoke_subprocess(
                     )
                 except SmokeError as exc:
                     ctx.add(exc.step, "failed", message=exc.message)
-                    ctx.stderr_tail = api_tail.lines() + scheduler_tail.lines()
+                    ctx.stderr_tail = (
+                        api_tail.lines() + scheduler_tail.lines() + human_lane_tail.lines()
+                    )
                     return SmokeResult(
                         succeeded=False,
                         steps=tuple(ctx.steps),
@@ -925,8 +951,9 @@ async def run_smoke_subprocess(
     finally:
         await api_tail.stop()
         await scheduler_tail.stop()
+        await human_lane_tail.stop()
         if not keep_running:
-            for proc in (scheduler_proc, api_proc):
+            for proc in (human_lane_proc, scheduler_proc, api_proc):
                 if proc is not None and proc.poll() is None:
                     proc.terminate()
                     try:

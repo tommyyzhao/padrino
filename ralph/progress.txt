@@ -3,6 +3,81 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human-lane smoke harness (US-288): keep deterministic human-lane AI mocking
+  behind `PADRINO_HUMAN_LANE_MOCK_AI` / `padrino_human_lane_mock_ai` and wire it
+  through the existing `ai_adapter_factory` seam, not through the production
+  heterogeneous provider builder. `padrino smoke localhost --with-human-lane`
+  should start `serve`, `scheduler`, and `human-lane` against the same DB while
+  setting the mock-AI flag only for the human-lane child; default smoke remains
+  API+scheduler only. Full worker tests that run concurrent human-lane DB
+  sessions should use file-backed SQLite instead of the shared in-memory
+  fixture.
+- Human profile history (US-286): keep `/human/games` as an authenticated,
+  principal-scoped, terminal-only projection over `Game` + `GameSeat`, filtered
+  to `HUMAN_LANE_SEAT_KINDS` and `Game.status == COMPLETED`. It should expose
+  only the caller's own role/outcome plus their own `HumanTuringGuess` score
+  when submitted; never include seat-kind maps, principal ids, model/provider
+  ids, or canonical rating fields. The dashboard profile should distinguish a
+  true `/human/me` 401 from an authenticated guest and treat account sign-in as
+  a persistence upsell, not a stats/history gate.
+- Live connection reliability (US-285): keep the live-tail contract in
+  `LiveClient` as the only sequence-resumable stream (`?after=<lastSequence>`)
+  with `onOpen` / `onStateChange` and bounded jittered backoff. Keep the
+  per-seat observation SSE route-local and snapshot-only: on error it reopens
+  the same URL with no `after` cursor. Return-after-away copy should come from
+  the observation shell as `return_notice.kind == "away_resuming"` and must not
+  include seat kind, model, provider, or takeover terminology.
+- Game-feel feedback (US-284): keep stream-derived announcements in the pure
+  dashboard play reducer (`PhaseStarted` -> `derivePhaseBanner`) and expose
+  them through `PlaySession`; keep recoverable vote confirmation and accepted
+  action copy as `/play/[gameId]` route-local UI state. Route-mocked e2e should
+  assert cancel-before-POST, confirm-after-POST, own-seat elimination, and
+  Promise-gated phase/elimination SSE batches without introducing human/AI or
+  model identity markers.
+- Live play vote tally (US-283): keep current vote presentation derived from
+  the pure play-state reducer via `deriveVoteTally(state.votes)`. The play
+  route should render it only for public `DAY_*_VOTE` phase ids, use truncated
+  public seat ids only, and test live updates with route-mocked SSE batches
+  gated by a Promise so assertions can observe the pre-update and post-update
+  states deterministically.
+- Responsive play surface (US-282): keep `/play/[gameId]` as a single
+  identity-blind DOM whose mobile behavior is panel-gated with a `md:hidden`
+  tab strip (`Seats` / `Chat` / `Actions`) while the
+  `md:grid md:grid-cols-[220px_1fr_300px]` shell preserves the desktop layout.
+  Route-mocked Playwright tests should assert both mobile reachability and wide
+  grid columns, and mobile chat submit should be tested through the real
+  `/human/games/{id}/chat` route mock rather than component mounting.
+- Play-surface help/action metadata (US-281): keep the in-game rules drawer on
+  `/play/[gameId]` backed by the shared `HowToPlayPanel`, and derive action
+  helper copy from the seat observation `legal_actions` payload via optional
+  `LegalActionsView.action_descriptions`. The frontend fallback should use the
+  actual currently allowed action type so new rulesets still render useful
+  copy without a hardcoded UI action table.
+- How-to-play onboarding (US-280): keep the rules explainer as a shared
+  `HowToPlayPanel` rendered by both `/how-to-play` and the home pre-match
+  modal. Gate first-time `Play vs AI` with the localStorage key
+  `padrino:how-to-play-dismissed:v1`, and set that key in route-mocked e2e
+  tests that need to exercise the direct match/queue path without onboarding.
+- Match queue flow (US-279): keep solo `POST /human/match` creation in the
+  transient `/play/match` route after the home page finishes session + consent
+  checks. Use `client.match({ signal })` plus a cancelled flag so cancel/back
+  aborts or ignores late responses, retry only on brief admission statuses
+  (409/423/429/503) with bounded player-facing copy, and never call or echo
+  `/healthz/human-lane` operator counts. For new dashboard routes, run focused
+  e2e through `pnpm -C web/dashboard test:e2e -- ...`; raw `playwright test`
+  can reuse a stale static preview build.
+- Solo dashboard entry flow (US-278): preserve returning guest sessions by
+  enabling human-session credentials, probing `/human/me`, and minting
+  `/human/guest` only on 401 before checking `/human/consent`. Home/funnel
+  Playwright tests should route-mock public home data and human match calls;
+  `pnpm test:e2e` owns the correctly env-baked static build, while manual
+  focused `vite preview` runs need a fresh build with the e2e API base URL.
+- Human stats read model (US-276): keep `/human/stats` as a thin projection of
+  the materialized `HumanPlayerStats` counts, not a hot-path recompute. The
+  API edge maps stored `role_win_rates_json` items from `name` to the dashboard
+  `role` key, derives rates with zero-denominator guards, emits
+  `detection_accuracy` as a client-parseable string, and returns a shaped
+  zero payload for authenticated principals with no games.
 - Publish-gate LLM cost stamps (US-274): `cost_usd is None` together with
   `price_basis is None` is the canonical legitimately-unbilled turn shape
   persisted by `game_runner._pricing_stamp` for provider/exhaustion failures
@@ -4101,3 +4176,411 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2683 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-275 is backend test-only purity
   firewall work and did not touch `web/dashboard`.
+
+## 2026-06-25T22:33 PDT - US-276
+- Added `GET /human/stats` using `require_human`, returning the caller's
+  casual stats for a requested `ruleset_id` projected from
+  `human_player_stats` into the dashboard `HumanPlayerStats` shape. Guests and
+  accounts both work; authenticated principals with no materialized row get a
+  well-formed zero payload.
+- The projection derives survival/voting/role rates from stored counts, remaps
+  stored role-win-rate JSON `name` keys to client `role`, emits
+  `detection_accuracy` as a client-parseable string, and exposes no canonical
+  scientific rating fields.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/human.py`,
+  `tests/api/test_human_stats_route.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_stats_route.py -q` failed first with
+  `/human/stats` 404s; focused GREEN same command -> 4 passed. Adjacent GREEN
+  `uv run pytest tests/api/test_human_stats_route.py tests/analytics/test_human_stats.py -q`
+  -> 13 passed; `uv run pytest tests/api/test_guest_quickplay.py tests/api/test_human_auth.py -q`
+  -> 21 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2689 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-276 is backend-only and did not
+  touch `web/dashboard`.
+
+## 2026-06-25T22:44 PDT - US-277
+- Added `POST /human/match` as the solo instant-match path. The route mints a
+  guest session when no human cookie exists, enforces current consent before any
+  lobby/game rows are materialized, composes a one-human `mini7_v1` casual
+  lobby, locks it, releases create-time admission slots, and reuses
+  `launch_lobby` so AI autofill, role assignment, anonymity, and human-lane
+  materialization stay on the existing launch handoff.
+- Added route coverage for no-consent refusal/session minting, successful
+  single-human launch, same-seed deterministic AI autofill, daily cap and global
+  breaker denial, exact one-slot admission consumption, counts-only response
+  shape, anonymous identity mode, dormant Humans-Included league binding, and
+  zero scientific `Rating` / `RatingEvent` rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/human.py`,
+  `tests/api/test_human_match.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_match.py` failed first with
+  `/human/match` 404s; focused GREEN same command -> 6 passed. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; final `uv run pytest -m "not integration"` ->
+  2696 passed / 41 skipped / 10 deselected. The first full pytest run hit an
+  unrelated transient scheduler timing failure; the exact test passed in
+  isolation and the full rerun passed. Frontend gates not run; US-277 is
+  backend-only and did not touch `web/dashboard`.
+
+## 2026-06-25T22:56 PDT - US-278
+- Added the dashboard solo entry flow: home now has a primary `Play vs AI` CTA,
+  nav distinguishes `Play vs AI` from `Play with friends`, and the CTA probes
+  the current human session, mints a guest only when needed, gates one-tap
+  Terms/Privacy/16+ consent inline, calls `POST /human/match`, and routes to
+  `/play/{game_id}`.
+- Added `PadrinoClient.match()` plus the `HumanMatchResponse` type, with a
+  client unit test proving the cookie-authenticated `/human/match` mutation.
+- Added route-mocked Playwright coverage for CTA hierarchy, fresh visitor
+  guest+consent+match navigation, and returning consented guest fast-path
+  navigation without re-minting or re-consenting. Tightened the existing home
+  KPI test to wait for async public-surface values instead of sampling early.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/+layout.svelte`,
+  `web/dashboard/tests/e2e/home.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test src/lib/api/client.test.ts` failed first on
+  missing `client.match`; focused RED
+  `pnpm -C web/dashboard exec playwright test tests/e2e/home.spec.ts --project=chromium`
+  failed first on the missing CTA/flow. Focused GREEN after implementation:
+  client test -> 22 passed; home e2e -> 4 passed / 1 skipped. Frontend gates:
+  `pnpm -C web/dashboard lint` -> pass (an initial parallel lint/check run hit
+  a transient missing Vite timestamp file; lint passed immediately when rerun
+  alone); `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
+  `pnpm -C web/dashboard test` -> 55 passed;
+  `pnpm -C web/dashboard test:e2e` -> 30 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-26T00:10 PDT - US-285
+- Added LiveClient connection state (`live` / `reconnecting` / `offline`) plus
+  `onOpen` / `onStateChange`, capped exponential reconnect backoff with jitter,
+  and stale-source guards while preserving resume-by-sequence duplicate
+  filtering.
+- Exposed the state through `PlaySession` and rendered an identity-blind
+  connection indicator on `/play/[gameId]`, including phone-width Playwright
+  coverage for disconnect and recovery.
+- Added a non-leaky `return_notice` on the seat observation snapshot for a
+  player whose seat was already resumed by the server after the disconnect
+  grace window, and rendered that notice without AI/human/model/takeover copy.
+- Kept observation SSE out of the sequence-resume contract: the play route
+  re-fetches the same snapshot URL with bounded retry and tests assert no
+  `after` cursor on observation recovery.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_observation.py`,
+  `tests/api/test_seat_observation_stream.py`,
+  `web/dashboard/src/lib/api/liveClient.ts`,
+  `web/dashboard/src/lib/api/liveClient.test.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/lib/playSession.svelte.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- liveClient.test.ts` failed first on missing
+  open/state/backoff behavior; focused RED
+  `uv run pytest tests/api/test_seat_observation_stream.py::test_return_after_takeover_gets_non_leaky_resume_notice`
+  failed first on missing `return_notice`. Focused GREEN:
+  `pnpm -C web/dashboard test -- liveClient.test.ts` -> 63 passed;
+  focused pytest -> 1 passed; `pnpm -C web/dashboard test:e2e -- play.spec.ts
+  -g "play connection reliability"` -> 16 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2697
+  passed / 41 skipped / 10 deselected. Frontend gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
+  0 warnings; `pnpm -C web/dashboard test` -> 63 passed;
+  `pnpm -C web/dashboard test:e2e` -> 50 passed / 3 skipped.
+
+## 2026-06-25T23:08 PDT - US-279
+- Added a transient `/play/match` loading/queue screen. The home `Play vs AI`
+  flow now performs only session + consent checks, then routes to the match
+  screen, which owns match creation, instant-start navigation to `/play/{game}`,
+  bounded retry copy for brief admission deferrals, and cancel/back handling.
+- Added abort-signal plumbing to `PadrinoClient.match()` so canceling the
+  transient screen aborts an in-flight request where possible and ignores late
+  successful responses where the browser/server already raced.
+- Added route-mocked Playwright coverage for fresh visitor queue visibility,
+  cancel/back without late play navigation, fast returning-guest transition,
+  deferred friendly "finding your table" retry copy, and no player-visible
+  operator internals or `/healthz/human-lane` dependency.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/play/match/+page.svelte`,
+  `web/dashboard/tests/e2e/home.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test src/lib/api/client.test.ts` failed first because
+  `client.match({ signal })` did not pass an abort signal; focused RED
+  home e2e failed first because the match queue route/screen did not exist.
+  Focused GREEN after implementation: client test -> 23 passed;
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/home.spec.ts --project=chromium`
+  -> 6 passed / 1 skipped. Frontend gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
+  0 warnings; `pnpm -C web/dashboard test` -> 56 passed;
+  `pnpm -C web/dashboard test:e2e` -> 32 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:18 PDT - US-280
+- Added a one-screen `How to play` guide for town-vs-mafia roles, day
+  discussion/vote, night actions, win conditions, and the spot-the-AI endgame
+  guess/detection-accuracy hook. The guide is reachable from home at
+  `/how-to-play` and reuses the same identity-blind-safe panel inside the
+  first-time `Play vs AI` modal.
+- The home match entry now persists onboarding dismissal in localStorage, blocks
+  match creation until first-time players acknowledge the guide, and preserves
+  the existing fast path for returning players.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/howToPlay.ts`,
+  `web/dashboard/src/lib/components/HowToPlayPanel.svelte`,
+  `web/dashboard/src/routes/how-to-play/+page.svelte`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/tests/e2e/home.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/home.spec.ts --project=chromium`
+  failed first on the missing home link, modal, and `/how-to-play` route;
+  focused GREEN same command -> 10 passed / 1 skipped. Frontend gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
+  0 warnings; `pnpm -C web/dashboard test:e2e` -> 36 passed / 3 skipped.
+  Backend gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:28 PDT - US-281
+- Added an in-game `Rules` drawer to `/play/[gameId]` that opens without
+  leaving the match, reuses the shared identity-blind `HowToPlayPanel`, closes
+  in-place, and remains scrollable on a 390px-wide viewport.
+- Added optional legal-action description metadata to the dashboard
+  `LegalActionsView` contract plus pure `actionTypeDescription` derivation.
+  Server/ruleset-provided descriptions are used when present; otherwise the
+  fallback is generated from the currently allowed action type.
+- Rendered the current night action's description beside the target selector
+  and covered the NAR roleblock path with route-mocked Playwright fixtures.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/playSurface.ts`,
+  `web/dashboard/src/lib/api/playSurface.test.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- src/lib/api/playSurface.test.ts` failed first
+  on missing `actionTypeDescription`; focused RED
+  `pnpm -C web/dashboard test:e2e -- play.spec.ts` failed first on the missing
+  drawer trigger and action-description element. Focused GREEN after
+  implementation: `pnpm -C web/dashboard test -- src/lib/api/playSurface.test.ts`
+  -> 58 passed; `pnpm -C web/dashboard test:e2e -- play.spec.ts` -> 3 passed.
+  Frontend gates: `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`
+  -> 0 errors / 0 warnings; `pnpm -C web/dashboard test` -> 58 passed;
+  `pnpm -C web/dashboard test:e2e` -> 37 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:38 PDT - US-282
+- Reworked `/play/[gameId]` for a portrait-first phone layout: a mobile
+  tab strip exposes the seat board, chat feed/composer, and current
+  action/vote panel as reachable panels, while `md+` keeps the three-column
+  `220px / 1fr / 300px` desktop grid.
+- Increased touch targets on mobile play controls and made the chat composer
+  sticky within the chat panel so the textarea and send button remain reachable
+  on narrow viewports. The underlying live-tail, seat observation, action, and
+  chat transports remain unchanged.
+- Added route-mocked Playwright coverage for mobile panel reachability,
+  touch-sized tabs/action submit, desktop grid preservation, mobile chat
+  submission, and post-relayout live data rendering.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/play.spec.ts --project=chromium`
+  failed first on missing mobile tabs/panel selectors; focused GREEN same
+  command -> 6 passed. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
+  `pnpm -C web/dashboard test:e2e` -> 40 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:48 PDT - US-283
+- Added a pure `deriveVoteTally` helper on the dashboard play-state reducer to
+  turn current-phase `VoteSubmitted` state into voter-to-target rows plus
+  running elimination-target counts, with abstains retained as rows but excluded
+  from counts.
+- Rendered a day-vote-only tally panel on `/play/[gameId]` that uses only
+  identity-blind public seat ids, lives inside the existing responsive actions
+  surface on mobile, updates from live-tail frames, and hides when the public
+  phase leaves `DAY_*_VOTE`.
+- Extended route-mocked Playwright coverage with Promise-gated SSE batches so
+  the first rendered count and the later live update are both asserted
+  deterministically.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/playState.ts`,
+  `web/dashboard/src/lib/api/playState.test.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- src/lib/api/playState.test.ts` failed first
+  on missing `deriveVoteTally`; focused GREEN same command -> 59 passed.
+  Focused e2e `node tests/e2e/run.mjs -g "play vote tally"` -> 3 passed.
+  Frontend gates: `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`
+  -> 0 errors / 0 warnings; `pnpm -C web/dashboard test` -> 59 passed;
+  `pnpm -C web/dashboard test:e2e` -> 43 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:56 PDT - US-284
+- Added recoverable vote submission on `/play/[gameId]`: the first click opens
+  an identity-blind confirmation showing the chosen public seat id (or
+  abstain), cancel performs no POST, and confirm submits the action with
+  explicit accepted feedback.
+- Added pure phase-banner derivation to the play-state reducer
+  (`PhaseStarted` -> `Day breaks` / `Night falls`) and exposed it through the
+  Svelte play session so banners follow the released public SSE stream.
+- Added an own-seat elimination moment: when the player's public seat is marked
+  dead by a released `PlayerEliminated` frame, a dismissible eliminated modal
+  appears and the self row gets a distinct dead-state treatment.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/playState.ts`,
+  `web/dashboard/src/lib/api/playState.test.ts`,
+  `web/dashboard/src/lib/playSession.svelte.ts`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test -- src/lib/api/playState.test.ts` failed first
+  on missing `derivePhaseBanner` / `phaseBanner`; focused GREEN same command
+  -> 61 passed. Focused e2e
+  `pnpm -C web/dashboard test:e2e -- play.spec.ts` -> 13 passed. Frontend
+  gates: `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0
+  errors / 0 warnings; `pnpm -C web/dashboard test` -> 61 passed;
+  `pnpm -C web/dashboard test:e2e` -> 47 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-26T00:20 PDT - US-286
+- Added authenticated `GET /human/games` as a bounded, principal-scoped history
+  projection over completed human-lane games. It returns only the caller's own
+  game id, ruleset, ended timestamp, personal result, own role, reveal link, and
+  submitted spot-the-AI score when present.
+- Un-gated `/profile` for authenticated guests while preserving the true-401
+  signed-out card. Guest profiles now render casual stats, a sign-in-to-save
+  upsell, match history, no-games CTA, and a history error state without
+  leaking human/AI maps or scientific rating fields.
+- Added dashboard API types/client method for `listHumanGames` plus route-mocked
+  Playwright coverage for guest stats/history, reveal-link navigation, true
+  signed-out behavior, empty history, and graceful history failure.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/human.py`,
+  `tests/api/test_human_stats_route.py`,
+  `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/routes/profile/+page.svelte`,
+  `web/dashboard/tests/e2e/reveal.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_stats_route.py -q` failed first on
+  missing `/human/games`; focused RED
+  `pnpm -C web/dashboard test -- src/lib/api/client.test.ts` failed first on
+  missing `client.listHumanGames`. Focused GREEN:
+  `uv run pytest tests/api/test_human_stats_route.py -q` -> 6 passed;
+  `pnpm -C web/dashboard test -- src/lib/api/client.test.ts` -> 64 passed;
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/reveal.spec.ts --project=chromium`
+  -> 7 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2699 passed / 41 skipped /
+  10 deselected. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
+  `pnpm -C web/dashboard test` -> 64 passed;
+  `pnpm -C web/dashboard test:e2e` -> 53 passed / 3 skipped.
+
+## 2026-06-26T00:32 PDT - US-288
+- Added `PADRINO_HUMAN_LANE_MOCK_AI` / `padrino_human_lane_mock_ai` as the
+  deterministic human-lane e2e seam. When enabled, `padrino human-lane`
+  injects `NoopMockAdapter` through `run_human_lane(ai_adapter_factory=...)`
+  so human-lane AI seats avoid real provider/network calls while production
+  mode still uses the existing heterogeneous adapter builder.
+- Added `padrino smoke localhost --with-human-lane` to spawn `serve`,
+  `scheduler`, and `human-lane` against the same DB, with the mock-AI flag set
+  for the human-lane child and normal teardown/error-tail handling. The default
+  smoke path remains API+scheduler only.
+- Updated dashboard Playwright global setup to boot smoke with the human-lane
+  worker, and added runner coverage that drives a mixed human/AI game to a
+  terminal draw under the mock factory, replay-verifies the persisted hash
+  chain, and asserts zero scientific `Rating` / `RatingEvent` rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/cli.py`, `src/padrino/settings.py`,
+  `src/padrino/smoke.py`, `tests/test_settings.py`,
+  `tests/cli/test_human_lane_cli.py`, `tests/cli/test_smoke_localhost.py`,
+  `tests/runner/test_human_lane_mock_ai.py`,
+  `web/dashboard/tests/e2e/global-setup.ts`,
+  `web/dashboard/tests/e2e/global-teardown.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/test_settings.py::test_default_human_lane_mock_ai_disabled tests/test_settings.py::test_env_override_human_lane_mock_ai -q`
+  failed first on missing settings; focused RED CLI/smoke tests failed first
+  on missing `ai_adapter_factory`, `--with-human-lane`, and global-setup flag;
+  focused runner test exposed the need for file-backed SQLite for a real
+  concurrent worker run. Focused GREEN: settings tests -> 2 passed; CLI/smoke
+  focused set -> 6 passed; runner mock-AI test -> 1 passed. Full backend
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2709
+  passed / 41 skipped / 10 deselected. Frontend gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
+  0 warnings; `pnpm -C web/dashboard test:e2e` -> 53 passed / 3 skipped.
+
+## 2026-06-26T00:52 PDT - US-287
+- Added an unmocked dashboard Playwright funnel test that drives a cold visitor
+  through home onboarding, guest+consent, `POST /human/match`, the match
+  loading screen, `/play/{gameId}`, terminal completion via the human-lane
+  worker, the spot-the-AI reveal, and `/profile` guest stats/history.
+- The funnel test asserts the real game reaches `COMPLETED`, has
+  `completed_at`, materializes human stats, records the reveal guess, lists the
+  just-played game in profile history, and writes zero SCIENTIFIC rating events.
+- Fixed the production gaps exposed by the full funnel: terminal games now stamp
+  `completed_at` through the game repository and refresh human stats at
+  completion; dashboard CORS preflight now allows JSON `POST`/`PATCH` mutations
+  instead of only read methods.
+- Kept the e2e harness deterministic by setting short human-lane deadline/release
+  env defaults only in dashboard global setup when not already overridden.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/app.py`,
+  `src/padrino/db/repositories/games.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/api/test_health.py`,
+  `tests/runner/test_human_lane_mock_ai.py`,
+  `web/dashboard/tests/e2e/funnel.spec.ts`,
+  `web/dashboard/tests/e2e/global-setup.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_human_lane_mock_ai.py::test_mock_ai_human_lane_game_completes_replays_and_skips_scientific_ratings -q`
+  first exposed missing `completed_at`/stats; focused RED
+  `pnpm -C web/dashboard test:e2e -- funnel.spec.ts` exposed CORS preflight on
+  JSON reveal guess. Focused GREEN: runner completion test -> 1 passed; CORS
+  preflight test -> 1 passed; `pnpm -C web/dashboard test:e2e -- funnel.spec.ts`
+  -> 1 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2710 passed / 41 skipped /
+  10 deselected. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
+  `pnpm -C web/dashboard test:e2e` -> 54 passed / 3 skipped.

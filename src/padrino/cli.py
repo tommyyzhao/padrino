@@ -29,6 +29,7 @@ import asyncio
 import json
 import signal
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -364,12 +365,23 @@ def human_lane(
     minutes-to-hours human games never starve the benchmark scheduler.
     """
     from padrino.db.base import create_engine, create_session_factory
-    from padrino.runner.human_lane import run_human_lane
+    from padrino.llm.adapter import AgentBuild as LlmAgentBuild
+    from padrino.llm.adapter import LlmAdapter
+    from padrino.runner.human_lane import AiAdapterFactory, run_human_lane
     from padrino.settings import get_settings
 
+    settings = get_settings()
     resolved_concurrency = (
-        concurrency if concurrency is not None else get_settings().padrino_human_lane_max_concurrent
+        concurrency if concurrency is not None else settings.padrino_human_lane_max_concurrent
     )
+    ai_adapter_factory: AiAdapterFactory | None = None
+    if settings.padrino_human_lane_mock_ai:
+        from padrino.llm.mock import NoopMockAdapter
+
+        def _mock_ai_adapter_factory(_assignments: Mapping[str, LlmAgentBuild]) -> LlmAdapter:
+            return NoopMockAdapter()
+
+        ai_adapter_factory = _mock_ai_adapter_factory
 
     async def _run() -> None:
         engine = create_engine(db_url)
@@ -392,6 +404,8 @@ def human_lane(
                 session_factory,
                 concurrency=resolved_concurrency,
                 stop_event=stop_event,
+                ai_adapter_factory=ai_adapter_factory,
+                settings=settings,
             )
         finally:
             await engine.dispose()
@@ -657,7 +671,12 @@ def smoke_localhost(
     keep_running: bool = typer.Option(
         False,
         "--keep-running",
-        help="Skip teardown of the API + scheduler children on success.",
+        help="Skip teardown of the spawned children on success.",
+    ),
+    with_human_lane: bool = typer.Option(
+        False,
+        "--with-human-lane",
+        help="Also spawn the human-lane worker with deterministic mock AI enabled.",
     ),
     clone_count: int = typer.Option(
         1, "--clone-count", help="Number of child games to schedule in the smoke gauntlet."
@@ -676,6 +695,7 @@ def smoke_localhost(
             db_url=db_url,
             port=port,
             keep_running=keep_running,
+            with_human_lane=with_human_lane,
             clone_count=clone_count,
             gauntlet_timeout_s=timeout_s,
         )

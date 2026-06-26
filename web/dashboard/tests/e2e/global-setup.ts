@@ -1,9 +1,9 @@
 /**
  * Playwright globalSetup for the Padrino dashboard e2e suite (US-070).
  *
- * Spawns `padrino smoke localhost --keep-running --port <api-port>` to:
+ * Spawns `padrino smoke localhost --with-human-lane --keep-running --port <api-port>` to:
  *   - bootstrap a fresh SQLite database
- *   - bring up the API + scheduler as detached child processes
+ *   - bring up the API + scheduler + human-lane worker as detached child processes
  *   - drive one mock-adapter gauntlet to completion
  *   - export + ingest one game so the public read endpoints have data
  *
@@ -53,6 +53,7 @@ async function spawnSmoke(apiPort: number, dbPath: string, timeoutMs: number): P
       'smoke',
       'localhost',
       '--keep-running',
+      '--with-human-lane',
       '--port',
       String(apiPort),
       '--db-url',
@@ -70,6 +71,15 @@ async function spawnSmoke(apiPort: number, dbPath: string, timeoutMs: number): P
       env: {
         ...process.env,
         PADRINO_CORS_ALLOW_ORIGINS: corsOrigin,
+        // Short timed phases keep e2e games fast. The deadline is the timed
+        // discussion/vote phase DURATION, not just a max-wait, so raising it
+        // slows the whole game; the human action-submission path is guarded in
+        // depth by tests/api/test_human_action_channel.py instead of by the
+        // funnel re-driving an accepted action under this fast deadline.
+        PADRINO_HUMAN_PHASE_DEADLINE_SECONDS:
+          process.env.PADRINO_HUMAN_PHASE_DEADLINE_SECONDS ?? '0.05',
+        PADRINO_HUMAN_RELEASE_DELAY_SECONDS:
+          process.env.PADRINO_HUMAN_RELEASE_DELAY_SECONDS ?? '0',
         // The public spectator site reads the /public/* surface anonymously
         // (the production public-surface-only deployment serves these without a
         // key). Enable anonymous public reads so the e2e suite exercises the

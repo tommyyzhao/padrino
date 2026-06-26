@@ -106,6 +106,7 @@ async def _seed_human_game(
     identity_mode: str = IdentityMode.ANONYMOUS.value,
     human_seat: str = _HUMAN_SEAT,
     deadline: datetime | None = _DEADLINE,
+    taken_over: bool = False,
 ) -> uuid.UUID:
     """Persist a non-terminal human game at DAY_1_VOTE and return its id."""
     game = Game(
@@ -137,16 +138,22 @@ async def _seed_human_game(
 
     for s in assign_roles(_GAME_SEED, mini7_v1):
         is_human = s.public_player_id == human_seat
+        seat_kind = SeatKind.AI.value
+        taken_over_at_phase = None
+        if is_human:
+            seat_kind = SeatKind.AI_TAKEOVER.value if taken_over else SeatKind.HUMAN.value
+            taken_over_at_phase = _PHASE if taken_over else None
         session.add(
             GameSeat(
                 game_id=game.id,
                 public_player_id=s.public_player_id,
                 seat_index=s.seat_index,
                 agent_build_id=None,
-                seat_kind=SeatKind.HUMAN.value if is_human else SeatKind.AI.value,
+                seat_kind=seat_kind,
                 role=s.role.value,
                 faction=s.faction.value,
                 alive=True,
+                taken_over_at_phase=taken_over_at_phase,
                 occupant_principal_id=principal_id if is_human else None,
             )
         )
@@ -380,6 +387,38 @@ async def test_anonymous_mode_has_no_identity_markers(
     assert resp.status_code == 200
     for frame in _parse_frames(resp.text):
         assert not _has_marker(frame)
+
+
+@pytest.mark.asyncio
+async def test_return_after_takeover_gets_non_leaky_resume_notice(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    token = await _guest(client)
+    principal_id = await _principal_id(session_factory)
+    async with session_factory() as session, session.begin():
+        game_id = await _seed_human_game(
+            session,
+            principal_id=principal_id,
+            identity_mode=IdentityMode.ANONYMOUS.value,
+            taken_over=True,
+        )
+
+    resp = await client.get(
+        f"/human/games/{game_id}/observation/stream",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert resp.status_code == 200
+    obs = next(f for f in _parse_frames(resp.text) if f["type"] == OBSERVATION_FRAME)
+
+    assert obs["return_notice"] == {
+        "kind": "away_resuming",
+        "message": "You were away. Resuming from the latest table state.",
+    }
+    assert not _has_marker(obs)
+    rendered = json.dumps(obs["return_notice"]).lower()
+    assert "ai" not in rendered
+    assert "human" not in rendered
+    assert "takeover" not in rendered
 
 
 @pytest.mark.asyncio
