@@ -4,7 +4,9 @@
   import { PadrinoApiError } from '$lib/api/client';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
+  import HowToPlayPanel from '$lib/components/HowToPlayPanel.svelte';
   import { padrino } from '$lib/clientStore.svelte';
+  import { dismissHowToPlay, hasDismissedHowToPlay } from '$lib/howToPlay';
   import { canonicalTeamRulesets } from '$lib/rulesets';
   import type {
     PublicLadderEntry,
@@ -23,6 +25,7 @@
   let matchState = $state<'idle' | 'checking' | 'needs_consent' | 'starting'>('idle');
   let matchError = $state<string | null>(null);
   let consenting = $state(false);
+  let showHowToPlay = $state(false);
 
   let matchBusy = $derived(
     matchState === 'checking' || matchState === 'starting' || consenting
@@ -94,8 +97,12 @@
     await goto('/play/match');
   }
 
-  async function startSoloMatch(): Promise<void> {
+  async function startSoloMatch(options: { skipHowToPlay?: boolean } = {}): Promise<void> {
     matchError = null;
+    if (!options.skipHowToPlay && !hasDismissedHowToPlay()) {
+      showHowToPlay = true;
+      return;
+    }
     matchState = 'checking';
     try {
       await ensureHumanSession();
@@ -128,6 +135,16 @@
     } finally {
       consenting = false;
     }
+  }
+
+  function continueAfterHowToPlay(): void {
+    dismissHowToPlay();
+    showHowToPlay = false;
+    void startSoloMatch({ skipHowToPlay: true });
+  }
+
+  function closeHowToPlay(): void {
+    showHowToPlay = false;
   }
 
   onMount(load);
@@ -163,6 +180,13 @@
       >
         Watch live games
       </a>
+      <a
+        class="text-sm underline-offset-2 hover:underline"
+        href="/how-to-play"
+        data-testid="home-how-to-play-link"
+      >
+        How to play
+      </a>
     </div>
 
     {#if matchLoadingText}
@@ -194,6 +218,26 @@
     {/if}
   </div>
 </section>
+
+{#if showHowToPlay}
+  <div
+    class="fixed inset-0 z-50 overflow-y-auto bg-background/85 px-4 py-6 backdrop-blur-sm"
+    data-testid="how-to-play-modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="how-to-play-title"
+  >
+    <div class="mx-auto max-w-3xl">
+      <HowToPlayPanel>
+        <Button testid="how-to-play-continue" onclick={continueAfterHowToPlay}>
+          Got it, continue
+        </Button>
+        <Button variant="ghost" testid="how-to-play-back" onclick={closeHowToPlay}>Back</Button>
+        <a class="text-sm underline-offset-2 hover:underline" href="/how-to-play">Open full guide</a>
+      </HowToPlayPanel>
+    </div>
+  </div>
+{/if}
 
 <div class="grid gap-4 sm:grid-cols-3" data-testid="home-kpis">
   <Card>

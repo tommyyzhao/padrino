@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 const SOLO_GAME_ID = 'ffff0005-0005-0005-0005-ffffffffffff';
+const HOW_TO_PLAY_DISMISSED_KEY = 'padrino:how-to-play-dismissed:v1';
 
 type Page = import('@playwright/test').Page;
 type Route = import('@playwright/test').Route;
@@ -72,9 +73,113 @@ test.describe('home', () => {
     await expect(page.getByTestId('nav-lobby')).toHaveText('Play with friends');
   });
 
+  test('links to a one-screen how-to-play guide with the core concepts', async ({ page }) => {
+    await routeQuietHome(page);
+    await page.goto('/');
+
+    await page.getByTestId('home-how-to-play-link').click();
+    await expect(page).toHaveURL(/\/how-to-play$/);
+
+    const guide = page.getByTestId('how-to-play-panel');
+    await expect(guide).toBeVisible();
+    await expect(guide).toContainText(/Town/i);
+    await expect(guide).toContainText(/Mafia/i);
+    await expect(guide).toContainText(/day discussion/i);
+    await expect(guide).toContainText(/vote/i);
+    await expect(guide).toContainText(/night actions/i);
+    await expect(guide).toContainText(/win/i);
+    await expect(guide).toContainText(/spot the AI/i);
+    await expect(guide).toContainText(/detection accuracy/i);
+  });
+
+  test('first-time Play vs AI surfaces how-to-play and returning players skip it', async ({
+    page
+  }) => {
+    await routeQuietHome(page);
+
+    let matchCalls = 0;
+
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ principal_id: 'guest-how-to', kind: 'guest', display_name: null })
+      });
+    });
+
+    await page.route('**/human/consent', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          consented: true,
+          required_versions: { TOS: '1', PRIVACY: '1', AGE_GATE: '1' }
+        })
+      });
+    });
+
+    await page.route('**/human/match', async (route) => {
+      if (!isApi(route)) return route.continue();
+      matchCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ game_id: SOLO_GAME_ID })
+      });
+    });
+
+    await page.goto('/');
+    await page.evaluate((key) => window.localStorage.removeItem(key), HOW_TO_PLAY_DISMISSED_KEY);
+    await page.getByTestId('home-play-vs-ai-cta').click();
+    await expect(page.getByTestId('how-to-play-modal')).toBeVisible();
+    expect(matchCalls).toBe(0);
+
+    await page.getByTestId('how-to-play-continue').click();
+    await expect(page).toHaveURL(new RegExp(`/play/${SOLO_GAME_ID}$`), { timeout: 15_000 });
+    expect(matchCalls).toBe(1);
+    await expect
+      .poll(() => page.evaluate((key) => window.localStorage.getItem(key), HOW_TO_PLAY_DISMISSED_KEY))
+      .toBe('true');
+
+    await page.goto('/');
+    await page.getByTestId('home-play-vs-ai-cta').click();
+    await expect(page.getByTestId('how-to-play-modal')).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`/play/${SOLO_GAME_ID}$`), { timeout: 15_000 });
+    expect(matchCalls).toBe(2);
+  });
+
+  test('how-to-play guide renders on a phone-width viewport', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/how-to-play');
+
+    await expect(page.getByTestId('how-to-play-panel')).toBeVisible();
+    await expect(page.getByTestId('how-to-play-spot-ai')).toBeVisible();
+    const hasHorizontalOverflow = await page.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth
+    );
+    expect(hasHorizontalOverflow).toBe(false);
+  });
+
+  test('how-to-play copy stays identity-blind-safe', async ({ page }) => {
+    await page.goto('/how-to-play');
+
+    const copy = (await page.getByTestId('how-to-play-panel').textContent()) ?? '';
+    expect(copy).toMatch(/identities stay hidden/i);
+    expect(copy).toMatch(/reveal/i);
+    expect(copy).not.toMatch(
+      /provider|model name|typing|latency|response time|human seat|AI seat|bot tell|mid-game tell/i
+    );
+  });
+
   test('fresh visitor accepts inline consent, starts a match, and reaches play', async ({
     page
   }) => {
+    await page.addInitScript(
+      (key) => window.localStorage.setItem(key, 'true'),
+      HOW_TO_PLAY_DISMISSED_KEY
+    );
     await routeQuietHome(page);
 
     let guestCreated = false;
@@ -140,6 +245,10 @@ test.describe('home', () => {
   });
 
   test('match queue screen is cancelable and ignores a late match response', async ({ page }) => {
+    await page.addInitScript(
+      (key) => window.localStorage.setItem(key, 'true'),
+      HOW_TO_PLAY_DISMISSED_KEY
+    );
     await routeQuietHome(page);
 
     let matchCalls = 0;
@@ -196,6 +305,10 @@ test.describe('home', () => {
   test('deferred match admission shows friendly bounded retry copy and remains cancelable', async ({
     page
   }) => {
+    await page.addInitScript(
+      (key) => window.localStorage.setItem(key, 'true'),
+      HOW_TO_PLAY_DISMISSED_KEY
+    );
     await routeQuietHome(page);
 
     let healthzCalled = false;
@@ -262,6 +375,10 @@ test.describe('home', () => {
   test('returning consented guest skips re-consent and goes straight to match', async ({
     page
   }) => {
+    await page.addInitScript(
+      (key) => window.localStorage.setItem(key, 'true'),
+      HOW_TO_PLAY_DISMISSED_KEY
+    );
     await routeQuietHome(page);
 
     let guestCreateCalls = 0;

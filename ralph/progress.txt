@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- How-to-play onboarding (US-280): keep the rules explainer as a shared
+  `HowToPlayPanel` rendered by both `/how-to-play` and the home pre-match
+  modal. Gate first-time `Play vs AI` with the localStorage key
+  `padrino:how-to-play-dismissed:v1`, and set that key in route-mocked e2e
+  tests that need to exercise the direct match/queue path without onboarding.
 - Match queue flow (US-279): keep solo `POST /human/match` creation in the
   transient `/play/match` route after the home page finishes session + consent
   checks. Use `client.match({ signal })` plus a cancelled flag so cancel/back
@@ -4238,5 +4243,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   0 warnings; `pnpm -C web/dashboard test` -> 56 passed;
   `pnpm -C web/dashboard test:e2e` -> 32 passed / 3 skipped. Backend gates:
   `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:18 PDT - US-280
+- Added a one-screen `How to play` guide for town-vs-mafia roles, day
+  discussion/vote, night actions, win conditions, and the spot-the-AI endgame
+  guess/detection-accuracy hook. The guide is reachable from home at
+  `/how-to-play` and reuses the same identity-blind-safe panel inside the
+  first-time `Play vs AI` modal.
+- The home match entry now persists onboarding dismissal in localStorage, blocks
+  match creation until first-time players acknowledge the guide, and preserves
+  the existing fast path for returning players.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/howToPlay.ts`,
+  `web/dashboard/src/lib/components/HowToPlayPanel.svelte`,
+  `web/dashboard/src/routes/how-to-play/+page.svelte`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/tests/e2e/home.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/home.spec.ts --project=chromium`
+  failed first on the missing home link, modal, and `/how-to-play` route;
+  focused GREEN same command -> 10 passed / 1 skipped. Frontend gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
+  0 warnings; `pnpm -C web/dashboard test:e2e` -> 36 passed / 3 skipped.
+  Backend gates: `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
   passed / 41 skipped / 10 deselected.

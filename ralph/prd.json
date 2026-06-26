@@ -85,7 +85,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check; e2e for the viewport assertion)."
       ],
       "notes": "Sites: a new onboarding component/route under web/dashboard/src/routes (linked from +page.svelte and the US-278 match entry). Persist dismissal in localStorage. No Svelte component-mount harness exists (vitest is TS-only) -> use Playwright e2e + page.setViewportSize for render/mobile assertions. Independent of the match endpoint.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-281",
