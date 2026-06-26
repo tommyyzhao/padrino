@@ -16,14 +16,16 @@ human session via :func:`padrino.api.human_auth.require_human`.
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.auth import _get_auth_settings, _get_rate_limiter
@@ -61,6 +63,7 @@ from padrino.api.oauth import (
 from padrino.api.reveal import build_participant_reveal
 from padrino.core.engine.actions import Action
 from padrino.core.reveal import EndgameReveal
+from padrino.db.models import HumanPlayerStats
 from padrino.db.repositories import human_principals as principals_repo
 from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
@@ -100,6 +103,117 @@ class ConsentStatus(BaseModel):
 
     consented: bool
     required_versions: dict[str, str]
+
+
+class HumanRoleWinRate(BaseModel):
+    """One client-shaped role win-rate item."""
+
+    role: str
+    wins: int
+    games: int
+    rate: float
+
+
+class HumanVotingAccuracy(BaseModel):
+    """Client-shaped voting accuracy counts and derived rate."""
+
+    total_votes: int
+    accurate_votes: int
+    rate: float
+
+
+class HumanStatsResponse(BaseModel):
+    """Per-human casual stats projected from the materialized stats row."""
+
+    ruleset_id: str
+    principal_id: uuid.UUID
+    games: int
+    wins: int
+    draws: int
+    losses: int
+    role_win_rates: list[HumanRoleWinRate]
+    survival_rate: float
+    voting_accuracy: HumanVotingAccuracy
+    detection_accuracy: str
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    return numerator / denominator if denominator > 0 else 0.0
+
+
+def _detection_accuracy_string(row: HumanPlayerStats | None) -> str:
+    if row is None or row.detection_total == 0:
+        return "0"
+    return f"{row.detection_accurate}/{row.detection_total}"
+
+
+def _role_win_rates(raw_json: str) -> list[HumanRoleWinRate]:
+    raw_rates: list[dict[str, Any]] = json.loads(raw_json)
+    return [
+        HumanRoleWinRate(
+            role=str(rate.get("role", rate["name"])),
+            wins=int(rate["wins"]),
+            games=int(rate["games"]),
+            rate=_ratio(int(rate["wins"]), int(rate["games"])),
+        )
+        for rate in raw_rates
+    ]
+
+
+def _project_human_stats(
+    *,
+    ruleset_id: str,
+    principal_id: uuid.UUID,
+    row: HumanPlayerStats | None,
+) -> HumanStatsResponse:
+    if row is None:
+        return HumanStatsResponse(
+            ruleset_id=ruleset_id,
+            principal_id=principal_id,
+            games=0,
+            wins=0,
+            draws=0,
+            losses=0,
+            role_win_rates=[],
+            survival_rate=0.0,
+            voting_accuracy=HumanVotingAccuracy(total_votes=0, accurate_votes=0, rate=0.0),
+            detection_accuracy="0",
+        )
+    return HumanStatsResponse(
+        ruleset_id=row.ruleset_id,
+        principal_id=row.principal_id,
+        games=row.games,
+        wins=row.wins,
+        draws=row.draws,
+        losses=row.losses,
+        role_win_rates=_role_win_rates(row.role_win_rates_json),
+        survival_rate=_ratio(row.survived_games, row.games),
+        voting_accuracy=HumanVotingAccuracy(
+            total_votes=row.voting_total_votes,
+            accurate_votes=row.voting_accurate_votes,
+            rate=_ratio(row.voting_accurate_votes, row.voting_total_votes),
+        ),
+        detection_accuracy=_detection_accuracy_string(row),
+    )
+
+
+@router.get("/human/stats", response_model=HumanStatsResponse)
+async def get_human_stats(
+    ruleset_id: str = Query(min_length=1),
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> HumanStatsResponse:
+    """Return the caller's casual materialized play stats for one ruleset."""
+    stmt = select(HumanPlayerStats).where(
+        HumanPlayerStats.ruleset_id == ruleset_id,
+        HumanPlayerStats.principal_id == ctx.principal_id,
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return _project_human_stats(
+        ruleset_id=ruleset_id,
+        principal_id=ctx.principal_id,
+        row=row,
+    )
 
 
 @router.get("/human/consent", response_model=ConsentStatus)

@@ -17,7 +17,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: src/padrino/api/routes/human.py (ADD route), web/dashboard/src/lib/api/client.ts:338-340 + web types.ts (~484 HumanPlayerStats type - the projection target), src/padrino/analytics/human_stats.py (refresh/projection), human_player_stats model + Alembic 0034. require_human admits guests (needed - the solo funnel is guest-based). Backend-only story (no UI change here - the profile guest-gate is US-286). Watch the 'name'->'role' key remap in role_win_rates_json.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-277",

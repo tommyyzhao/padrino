@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human stats read model (US-276): keep `/human/stats` as a thin projection of
+  the materialized `HumanPlayerStats` counts, not a hot-path recompute. The
+  API edge maps stored `role_win_rates_json` items from `name` to the dashboard
+  `role` key, derives rates with zero-denominator guards, emits
+  `detection_accuracy` as a client-parseable string, and returns a shaped
+  zero payload for authenticated principals with no games.
 - Publish-gate LLM cost stamps (US-274): `cost_usd is None` together with
   `price_basis is None` is the canonical legitimately-unbilled turn shape
   persisted by `game_runner._pricing_stamp` for provider/exhaustion failures
@@ -4101,3 +4107,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2683 passed / 41 skipped /
   10 deselected. Frontend gates not run; US-275 is backend test-only purity
   firewall work and did not touch `web/dashboard`.
+
+## 2026-06-25T22:33 PDT - US-276
+- Added `GET /human/stats` using `require_human`, returning the caller's
+  casual stats for a requested `ruleset_id` projected from
+  `human_player_stats` into the dashboard `HumanPlayerStats` shape. Guests and
+  accounts both work; authenticated principals with no materialized row get a
+  well-formed zero payload.
+- The projection derives survival/voting/role rates from stored counts, remaps
+  stored role-win-rate JSON `name` keys to client `role`, emits
+  `detection_accuracy` as a client-parseable string, and exposes no canonical
+  scientific rating fields.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/human.py`,
+  `tests/api/test_human_stats_route.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_stats_route.py -q` failed first with
+  `/human/stats` 404s; focused GREEN same command -> 4 passed. Adjacent GREEN
+  `uv run pytest tests/api/test_human_stats_route.py tests/analytics/test_human_stats.py -q`
+  -> 13 passed; `uv run pytest tests/api/test_guest_quickplay.py tests/api/test_human_auth.py -q`
+  -> 21 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2689 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-276 is backend-only and did not
+  touch `web/dashboard`.
