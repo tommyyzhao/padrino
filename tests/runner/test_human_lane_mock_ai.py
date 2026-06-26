@@ -196,7 +196,7 @@ async def test_mock_ai_human_lane_game_completes_replays_and_skips_scientific_ra
                 concurrency=1,
                 stop_event=stop,
                 ai_adapter_factory=mock_ai_factory,
-                poll_interval_s=0.01,
+                poll_interval_s=0.05,
                 settings=Settings(
                     padrino_human_lane_mock_ai=True,
                     padrino_human_phase_deadline_seconds=0.001,

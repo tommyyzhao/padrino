@@ -365,7 +365,7 @@ async def _assert_live_frames_anonymous(
     session_factory: async_sessionmaker[AsyncSession], game_id: uuid.UUID
 ) -> None:
     """Every live-tail SSE frame of the human game leaks zero forbidden keys."""
-    cfg = LiveTailConfig(poll_ms=1, heartbeat_ms=1_000_000, idle_timeout_ms=5_000)
+    cfg = LiveTailConfig(poll_ms=25, heartbeat_ms=1_000_000, idle_timeout_ms=5_000)
     frame_count = 0
     async for block in stream_live_tail(session_factory, game_id, config=cfg):
         for line in block.splitlines():
@@ -501,14 +501,20 @@ async def test_human_game_full_spine_smoke(
             ruleset,
             ranked,
             timeout_s,
-            config=HumanTickConfig(phase_deadline_seconds=1.0, release_delay_seconds=0.0),
+            # phase_deadline_seconds is the REAL wall-clock asyncio.wait_for ceiling
+            # run_tick puts around adapter.complete(); a tight 1.0s ceiling is
+            # spuriously exceeded under `pytest --cov` (coverage tracing slows the
+            # human adapter's DB-backed pull), coercing the human and breaking the
+            # TOWN-win assertion. A generous ceiling is a backstop (the pre-staged
+            # human action returns instantly) with no happy-path cost.
+            config=HumanTickConfig(phase_deadline_seconds=30.0, release_delay_seconds=0.0),
             clock=clock.now,
             sleep=clock.sleep,
             release_chat=release_chat,
         )
 
     outcome = await drive_game_loop(
-        GameConfig(game_id=str(game_id), game_seed=game_seed, ruleset_id=_RULESET, timeout_s=1.0),
+        GameConfig(game_id=str(game_id), game_seed=game_seed, ruleset_id=_RULESET, timeout_s=30.0),
         mux,
         ranked=False,
         persistence=persistence,

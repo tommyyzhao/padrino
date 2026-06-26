@@ -107,12 +107,17 @@ async def _seed_game(
 
 
 # Ceiling for "wait until the async lane worker reaches a state" helpers. The
-# happy path returns in well under a second (~1.7s worst-case locally), so this
-# is only a backstop — but a tight 5s ceiling is spuriously exceeded on the slow,
-# heavily-loaded macOS GitHub runner (the same suite passes on the ubuntu runner),
-# flaking the crash->FAILED drain. A generous ceiling removes the flake with zero
-# happy-path cost; a genuinely stuck worker still fails the assertion, just later.
+# happy path returns in well under a second locally, so this is only a backstop.
+# It must be generous because under `pytest --cov` the coverage tracer makes the
+# async worker loop + these polls dramatically slower, and the human-lane test
+# cluster runs back-to-back, so the crash->FAILED marker task can be starved for
+# seconds. A genuinely stuck worker still fails the assertion, just later.
 _DRAIN_TIMEOUT_S = 30.0
+# Poll cadence for the drain helpers AND the worker's poll_interval_s in these
+# tests. A tight 0.01s poll saturates the event loop under coverage instrumentation
+# (every traced iteration is slow) and starves the awaited DB write; a 0.05s poll
+# keeps the tests fast while leaving the loop room to schedule the outcome.
+_POLL_INTERVAL_S = 0.05
 
 
 async def _drain_until(
@@ -123,7 +128,7 @@ async def _drain_until(
     while asyncio.get_running_loop().time() < deadline:
         if predicate():
             return
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(_POLL_INTERVAL_S)
     raise AssertionError("predicate never became true within the budget")
 
 
@@ -140,7 +145,7 @@ async def _drain_until_status(
             game = await session.get(Game, game_id)
             if game is not None and game.status == expected:
                 return
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(_POLL_INTERVAL_S)
     raise AssertionError(f"game {game_id} never reached status {expected!r}")
 
 
@@ -175,7 +180,7 @@ async def test_human_lane_runs_game_and_excludes_ai_only(
             concurrency=2,
             stop_event=stop,
             game_executor=_executor,
-            poll_interval_s=0.01,
+            poll_interval_s=_POLL_INTERVAL_S,
         )
     )
     await _drain_until(lambda: human_id in ran)
@@ -207,7 +212,7 @@ async def test_crashed_human_game_is_marked_failed_and_not_reselected(
             concurrency=1,
             stop_event=stop,
             game_executor=_executor,
-            poll_interval_s=0.01,
+            poll_interval_s=_POLL_INTERVAL_S,
         )
     )
     try:
@@ -260,7 +265,7 @@ async def test_human_lane_honors_its_own_concurrency_cap(
             concurrency=2,
             stop_event=stop,
             game_executor=_executor,
-            poll_interval_s=0.01,
+            poll_interval_s=_POLL_INTERVAL_S,
         )
     )
     # Wait until the lane has saturated its 2 slots.
@@ -309,7 +314,7 @@ async def test_waiting_human_lobbies_do_not_reduce_benchmark_concurrency(
             stop_event=stop,
             game_executor=_human_executor,
             semaphore=human_sem,
-            poll_interval_s=0.01,
+            poll_interval_s=_POLL_INTERVAL_S,
         )
     )
     # Human lane saturates its single slot.
@@ -383,7 +388,7 @@ async def test_human_lane_worker_heartbeat_is_written_each_tick(
             session_factory,
             concurrency=1,
             stop_event=stop,
-            poll_interval_s=0.01,
+            poll_interval_s=_POLL_INTERVAL_S,
             worker_id="test-worker:42",
         ),
         timeout=_DRAIN_TIMEOUT_S,
@@ -433,7 +438,7 @@ async def test_heartbeat_failure_does_not_crash_human_lane_loop(
                 session_factory,
                 concurrency=1,
                 stop_event=stop,
-                poll_interval_s=0.01,
+                poll_interval_s=_POLL_INTERVAL_S,
                 worker_id="test-worker:heartbeat-failure",
             ),
             timeout=_DRAIN_TIMEOUT_S,
@@ -487,7 +492,7 @@ async def test_open_breaker_stops_new_turns_for_unstarted_game(
             concurrency=2,
             stop_event=stop,
             game_executor=_executor,
-            poll_interval_s=0.01,
+            poll_interval_s=_POLL_INTERVAL_S,
             settings=_breaker_settings(50.0),
         )
     )
@@ -541,7 +546,7 @@ async def test_open_breaker_lets_active_game_finish(
             concurrency=2,
             stop_event=stop,
             game_executor=_executor,
-            poll_interval_s=0.01,
+            poll_interval_s=_POLL_INTERVAL_S,
             settings=_breaker_settings(50.0),
         )
     )
