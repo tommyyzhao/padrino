@@ -160,19 +160,21 @@ async function driveOneLegalAction(page: Page, gameId: string, attempt: number):
 async function driveUntilTerminal(
   page: Page,
   gameId: string
-): Promise<{ snapshot: GameSnapshot; actionAccepted: boolean }> {
+): Promise<{ snapshot: GameSnapshot; actionAccepted: boolean; sawServerError: boolean }> {
   const deadline = Date.now() + 120_000;
   let attempt = 0;
   let actionAccepted = false;
+  let sawServerError = false;
   let last: GameSnapshot = queryGameSnapshot(gameId);
 
   while (Date.now() < deadline) {
     last = queryGameSnapshot(gameId);
     if (last.status === 'COMPLETED') {
-      return { snapshot: last, actionAccepted };
+      return { snapshot: last, actionAccepted, sawServerError };
     }
     const result = await driveOneLegalAction(page, gameId, attempt);
     actionAccepted ||= result === 'accepted';
+    if (result.startsWith('action:5')) sawServerError = true;
     attempt += 1;
     await page.waitForTimeout(250);
   }
@@ -215,15 +217,26 @@ test.describe('US-287 cold visitor funnel', () => {
     expect(terminal.snapshot.terminal_result).not.toBeNull();
     expect(terminal.snapshot.scientific_rating_events).toBe(0);
     expect(terminal.snapshot.human_stats_games).toBeGreaterThanOrEqual(1);
+    // The human action-submission path (authz, consent, phase/legal-action
+    // validation, rate limiting, atomic persistence) is covered in depth by
+    // tests/api/test_human_action_channel.py + test_human_rate_limit_peek_commit.py.
+    // Under the fast e2e phase deadline most driven actions are coerced as
+    // out-of-phase (4xx, expected); the funnel only guards that the action
+    // channel never 500s while a real game is driven to terminal.
+    expect(terminal.sawServerError).toBe(false);
 
     await page.goto(`/play/${gameId}/reveal`);
     await expect(page.getByTestId('reveal-title')).toBeVisible();
     await expect(page.getByTestId('guess-panel')).toBeVisible({ timeout: 15_000 });
-    const guessRows = page.getByTestId('guess-seat-row');
-    await expect.poll(() => guessRows.count(), { timeout: 15_000 }).toBeGreaterThan(0);
-    const guessRowCount = await guessRows.count();
-    for (let index = 0; index < guessRowCount; index += 1) {
-      await guessRows.nth(index).getByRole('button', { name: 'AI' }).click();
+    // Click AI on every guessable row. The reveal renders one row per seat
+    // EXCEPT the viewer's own, gated on the viewer's seat resolving, so the AI
+    // button count is stable; click the buttons directly (not row indices) so
+    // the loop never targets a row without an AI button.
+    const guessAiButtons = page.getByTestId('guess-seat-row').getByRole('button', { name: 'AI' });
+    await expect.poll(() => guessAiButtons.count(), { timeout: 15_000 }).toBeGreaterThan(0);
+    const guessAiCount = await guessAiButtons.count();
+    for (let index = 0; index < guessAiCount; index += 1) {
+      await guessAiButtons.nth(index).click();
     }
     await page.getByTestId('guess-submit').click();
     await expect(page.getByTestId('reveal-accuracy')).toBeVisible({ timeout: 15_000 });

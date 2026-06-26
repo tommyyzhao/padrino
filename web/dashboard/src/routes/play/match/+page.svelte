@@ -46,6 +46,10 @@
     return error instanceof Error && error.name === 'AbortError';
   }
 
+  function isConsentRequired(error: unknown): boolean {
+    return error instanceof PadrinoApiError && error.status === 412;
+  }
+
   function retryDelay(): number {
     return RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
   }
@@ -73,6 +77,14 @@
       if (isDeferredAdmission(error) && attempt < MAX_ATTEMPTS) {
         stage = 'deferred';
         scheduleRetry();
+        return;
+      }
+      if (isConsentRequired(error)) {
+        // 412: the match endpoint refused for lack of current consent and minted
+        // a fresh guest session. Route back to the home 'Play vs AI' CTA, which
+        // collects consent inline before re-attempting the match (rather than
+        // showing the generic 'table finder stopped' timeout error).
+        void goto('/');
         return;
       }
       stage = 'error';

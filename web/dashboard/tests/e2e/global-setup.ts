@@ -71,6 +71,11 @@ async function spawnSmoke(apiPort: number, dbPath: string, timeoutMs: number): P
       env: {
         ...process.env,
         PADRINO_CORS_ALLOW_ORIGINS: corsOrigin,
+        // Short timed phases keep e2e games fast. The deadline is the timed
+        // discussion/vote phase DURATION, not just a max-wait, so raising it
+        // slows the whole game; the human action-submission path is guarded in
+        // depth by tests/api/test_human_action_channel.py instead of by the
+        // funnel re-driving an accepted action under this fast deadline.
         PADRINO_HUMAN_PHASE_DEADLINE_SECONDS:
           process.env.PADRINO_HUMAN_PHASE_DEADLINE_SECONDS ?? '0.05',
         PADRINO_HUMAN_RELEASE_DELAY_SECONDS:

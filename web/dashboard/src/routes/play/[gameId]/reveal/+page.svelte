@@ -155,7 +155,8 @@
         and your own detection accuracy.
       </p>
       <ul class="mb-3 flex flex-col gap-2">
-        {#each guessableSeats as seat (seat.public_player_id)}
+        {#if ownSeatId}
+          {#each guessableSeats as seat (seat.public_player_id)}
           <li
             class="flex items-center gap-3 rounded border border-border px-2 py-1 text-sm"
             data-testid="guess-seat-row"
@@ -195,7 +196,15 @@
               </button>
             </span>
           </li>
-        {/each}
+          {/each}
+        {:else}
+          <li
+            class="px-2 py-1 text-xs text-muted-foreground"
+            data-testid="guess-loading"
+          >
+            Loading your seat…
+          </li>
+        {/if}
       </ul>
       <Button testid="guess-submit" disabled={submitting} onclick={() => void submitGuess()}>
         {submitting ? 'Submitting…' : 'Reveal everyone'}
