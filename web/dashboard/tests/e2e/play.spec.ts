@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { expectIdentityBlind } from './helpers/identityBlind';
 
 // US-155: Frontend in-game play surface.
@@ -74,6 +74,111 @@ const OBSERVATION_FRAMES = [
 
 function observationSseBody(frames: Record<string, unknown>[] = OBSERVATION_FRAMES): string {
   return frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('');
+}
+
+async function mockStandardPlaySurface(
+  page: Page,
+  {
+    gameId = GAME_ID,
+    publicFrames = PUBLIC_FRAMES,
+    observationFrames = OBSERVATION_FRAMES,
+    onAction,
+    onChat
+  }: {
+    gameId?: string;
+    publicFrames?: Record<string, unknown>[];
+    observationFrames?: Record<string, unknown>[];
+    onAction?: (payload: Record<string, unknown>) => void;
+    onChat?: (payload: Record<string, unknown>) => void;
+  } = {}
+): Promise<void> {
+  const isApi = (route: Route) => {
+    const t = route.request().resourceType();
+    return t === 'fetch' || t === 'xhr';
+  };
+
+  await page.route(`**/public/games/${gameId}/composition`, async (route) => {
+    if (!isApi(route)) return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        game_id: gameId,
+        ruleset_id: 'mini7_v1',
+        composition: { human_count: 2, ai_count: 5, total: 7 }
+      })
+    });
+  });
+
+  let firstLive = true;
+  await page.route(`**/public/games/${gameId}/live*`, async (route) => {
+    if (firstLive) {
+      firstLive = false;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+        body: buildSseBody(publicFrames)
+      });
+    } else {
+      await route.abort('failed');
+    }
+  });
+
+  let firstObs = true;
+  await page.route(`**/human/games/${gameId}/observation/stream*`, async (route) => {
+    if (firstObs) {
+      firstObs = false;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        headers: { 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+        body: observationSseBody(observationFrames)
+      });
+    } else {
+      await route.abort('failed');
+    }
+  });
+
+  await page.route(`**/human/games/${gameId}/actions`, async (route) => {
+    if (!isApi(route)) return route.continue();
+    onAction?.(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        accepted: true,
+        public_player_id: SEAT_ME,
+        phase: 'DAY_1_VOTE',
+        action_type: 'VOTE',
+        target: SEAT_OTHER,
+        idempotent_replay: false
+      })
+    });
+  });
+
+  await page.route(`**/human/games/${gameId}/chat`, async (route) => {
+    if (!isApi(route)) return route.continue();
+    onChat?.(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        accepted: true,
+        public_player_id: SEAT_ME,
+        phase: 'DAY_1_VOTE',
+        channel: 'PUBLIC',
+        status: 'RELEASED',
+        idempotent_replay: false
+      })
+    });
+  });
+}
+
+async function expectTouchSized(locator: ReturnType<Page['getByTestId']>): Promise<void> {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box?.height).toBeGreaterThanOrEqual(44);
 }
 
 test.describe('play surface (US-155)', () => {
@@ -388,5 +493,92 @@ test.describe('play surface (US-155)', () => {
     await expect(help.getByTestId('how-to-play-night')).toBeVisible();
     await expect(help).toHaveCSS('overflow-y', 'auto');
     await expectIdentityBlind(help);
+  });
+});
+
+test.describe('play surface responsive layout (US-282)', () => {
+  test('phone-width tabs make board, chat, and actions reachable with touch targets', async ({
+    page
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page);
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-title')).toBeVisible();
+
+    const tabs = page.getByTestId('play-mobile-tabs');
+    await expect(tabs).toBeVisible();
+    await expectTouchSized(page.getByTestId('play-mobile-tab-board'));
+    await expectTouchSized(page.getByTestId('play-mobile-tab-chat'));
+    await expectTouchSized(page.getByTestId('play-mobile-tab-actions'));
+
+    await expect(page.getByTestId('play-mobile-tab-board')).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+    await expect(page.getByTestId('play-seat-grid')).toBeVisible({ timeout: 15_000 });
+
+    await page.getByTestId('play-mobile-tab-chat').click();
+    await expect(page.getByTestId('play-mobile-tab-chat')).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+    await expect(page.getByTestId('play-chat-feed')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('play-chat-line')).toContainText('I think it is p1.');
+
+    await page.getByTestId('play-mobile-tab-actions').click();
+    await expect(page.getByTestId('play-mobile-tab-actions')).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+    await expect(page.getByTestId('play-vote-panel')).toBeVisible({ timeout: 15_000 });
+    await expectTouchSized(page.getByTestId('play-vote-submit'));
+  });
+
+  test('wide viewport keeps the three-column desktop play layout', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await mockStandardPlaySurface(page);
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-seat-grid')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('play-mobile-tabs')).toBeHidden();
+
+    const shell = page.getByTestId('play-shell');
+    await expect(shell).toHaveCSS('display', 'grid');
+    const columns = await shell.evaluate((el) => getComputedStyle(el).gridTemplateColumns);
+    expect(columns).toContain('220px');
+    expect(columns).toContain('300px');
+
+    const boardBox = await page.getByTestId('play-board-panel').boundingBox();
+    const mainBox = await page.getByTestId('play-main-panel').boundingBox();
+    const infoBox = await page.getByTestId('play-info-panel').boundingBox();
+    expect(boardBox?.x ?? 0).toBeLessThan(mainBox?.x ?? 0);
+    expect(mainBox?.x ?? 0).toBeLessThan(infoBox?.x ?? 0);
+  });
+
+  test('mobile chat composer stays reachable and submits from a narrow viewport', async ({
+    page
+  }) => {
+    let chatPayload: Record<string, unknown> | null = null;
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page, {
+      onChat: (payload) => {
+        chatPayload = payload;
+      }
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await page.getByTestId('play-mobile-tab-chat').click();
+
+    const input = page.getByTestId('play-chat-input');
+    await expect(input).toBeVisible({ timeout: 15_000 });
+    await expect(input).toBeInViewport();
+    await input.fill('hello from mobile');
+    await page.getByTestId('play-chat-send').click();
+
+    await expect(page.getByTestId('play-chat-status')).toHaveAttribute('data-status', 'released', {
+      timeout: 15_000
+    });
+    expect(chatPayload).toMatchObject({ channel: 'PUBLIC', text: 'hello from mobile' });
   });
 });

@@ -57,6 +57,7 @@
   let actionNote = $state<string | null>(null);
   let error = $state<string | null>(null);
   let helpOpen = $state(false);
+  let mobilePanel = $state<'board' | 'chat' | 'actions'>('board');
 
   let obsSse: EventSource | null = null;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -276,8 +277,61 @@
   </div>
 {/if}
 
-<div class="grid gap-3 md:grid-cols-[220px_1fr_300px]" data-testid="play-shell">
-  <div class="flex flex-col gap-3">
+<div
+  class="mb-3 grid grid-cols-3 gap-2 md:hidden"
+  role="tablist"
+  aria-label="Play panels"
+  data-testid="play-mobile-tabs"
+>
+  <button
+    type="button"
+    role="tab"
+    aria-selected={mobilePanel === 'board'}
+    class={`min-h-11 rounded-md border px-2 py-2 text-sm font-medium ${
+      mobilePanel === 'board'
+        ? 'border-primary bg-primary text-background'
+        : 'border-border bg-card text-foreground'
+    }`}
+    data-testid="play-mobile-tab-board"
+    onclick={() => (mobilePanel = 'board')}
+  >
+    Seats
+  </button>
+  <button
+    type="button"
+    role="tab"
+    aria-selected={mobilePanel === 'chat'}
+    class={`min-h-11 rounded-md border px-2 py-2 text-sm font-medium ${
+      mobilePanel === 'chat'
+        ? 'border-primary bg-primary text-background'
+        : 'border-border bg-card text-foreground'
+    }`}
+    data-testid="play-mobile-tab-chat"
+    onclick={() => (mobilePanel = 'chat')}
+  >
+    Chat
+  </button>
+  <button
+    type="button"
+    role="tab"
+    aria-selected={mobilePanel === 'actions'}
+    class={`min-h-11 rounded-md border px-2 py-2 text-sm font-medium ${
+      mobilePanel === 'actions'
+        ? 'border-primary bg-primary text-background'
+        : 'border-border bg-card text-foreground'
+    }`}
+    data-testid="play-mobile-tab-actions"
+    onclick={() => (mobilePanel = 'actions')}
+  >
+    Actions
+  </button>
+</div>
+
+<div class="flex flex-col gap-3 md:grid md:grid-cols-[220px_1fr_300px]" data-testid="play-shell">
+  <div
+    class={`${mobilePanel === 'board' ? 'flex' : 'hidden'} flex-col gap-3 md:flex`}
+    data-testid="play-board-panel"
+  >
     <Card>
       <h2 class="mb-2 text-sm font-semibold">Seats</h2>
       {#if board.length === 0}
@@ -306,131 +360,151 @@
     </Card>
   </div>
 
-  <div class="flex flex-col gap-3">
-    <Card>
-      <h2 class="mb-2 text-sm font-semibold">Your move</h2>
-      {#if terminal}
-        <p class="text-xs text-muted-foreground" data-testid="play-action-ended">
-          The game has ended.
-        </p>
-      {:else if isVotePhase(legal)}
-        <div class="flex flex-col gap-2" data-testid="play-vote-panel">
-          <label class="flex flex-col gap-1 text-xs">
-            <span class="font-medium">Vote to eliminate</span>
-            <select
-              class="rounded border border-border bg-background px-2 py-1 text-sm"
-              data-testid="play-vote-target"
-              bind:value={voteTarget.value}
-            >
-              <option value={null}>Abstain</option>
-              {#each legal?.legal_targets ?? [] as t (t)}
-                <option value={t}>{t.slice(0, 8)}</option>
-              {/each}
-            </select>
-          </label>
-          <Button testid="play-vote-submit" disabled={actionBusy} onclick={() => void submitVote()}>
-            {actionBusy ? 'Submitting…' : 'Submit vote'}
-          </Button>
-        </div>
-      {:else if isNightActionPhase(legal)}
-        <div class="flex flex-col gap-2" data-testid="play-night-panel">
-          <label class="flex flex-col gap-1 text-xs">
-            <span class="font-medium" data-testid="play-night-action-type">
-              {selectedNightActionLabel}
-            </span>
-            {#if selectedNightActionDescription}
-              <span
-                class="text-xs text-muted-foreground"
-                title={selectedNightActionDescription}
-                data-testid="play-night-action-description"
+  <div
+    class={`${mobilePanel === 'actions' || mobilePanel === 'chat' ? 'flex' : 'hidden'} flex-col gap-3 md:flex`}
+    data-testid="play-main-panel"
+  >
+    <div class={`${mobilePanel === 'actions' ? 'block' : 'hidden'} md:block`} data-testid="play-action-panel">
+      <Card>
+        <h2 class="mb-2 text-sm font-semibold">Your move</h2>
+        {#if terminal}
+          <p class="text-xs text-muted-foreground" data-testid="play-action-ended">
+            The game has ended.
+          </p>
+        {:else if isVotePhase(legal)}
+          <div class="flex flex-col gap-2" data-testid="play-vote-panel">
+            <label class="flex flex-col gap-1 text-xs">
+              <span class="font-medium">Vote to eliminate</span>
+              <select
+                class="min-h-11 rounded border border-border bg-background px-3 py-2 text-sm"
+                data-testid="play-vote-target"
+                bind:value={voteTarget.value}
               >
-                {selectedNightActionDescription}
-              </span>
-            {/if}
-            <select
-              class="rounded border border-border bg-background px-2 py-1 text-sm"
-              data-testid="play-night-target"
-              bind:value={nightTarget.value}
+                <option value={null}>Abstain</option>
+                {#each legal?.legal_targets ?? [] as t (t)}
+                  <option value={t}>{t.slice(0, 8)}</option>
+                {/each}
+              </select>
+            </label>
+            <Button
+              class="min-h-11"
+              testid="play-vote-submit"
+              disabled={actionBusy}
+              onclick={() => void submitVote()}
             >
-              <option value={null}>Skip</option>
-              {#each legal?.legal_targets ?? [] as t (t)}
-                <option value={t}>{t.slice(0, 8)}</option>
-              {/each}
-            </select>
-          </label>
-          <Button
-            testid="play-night-submit"
-            disabled={actionBusy}
-            onclick={() => void submitNightAction()}
-          >
-            {actionBusy ? 'Submitting…' : `Submit ${selectedNightActionLabel}`}
-          </Button>
-        </div>
-      {:else}
-        <p class="text-xs text-muted-foreground" data-testid="play-action-none">
-          No action to take right now.
-        </p>
-      {/if}
-      {#if actionNote}
-        <p class="mt-2 text-xs text-emerald-600" data-testid="play-action-note">{actionNote}</p>
-      {/if}
-      {#if error}
-        <p class="mt-2 text-xs text-red-500" data-testid="play-action-error">{error}</p>
-      {/if}
-    </Card>
-
-    <Card>
-      <h2 class="mb-2 text-sm font-semibold">Chat</h2>
-      {#if chat.length === 0}
-        <p class="text-xs text-muted-foreground" data-testid="play-chat-empty">No chat yet.</p>
-      {:else}
-        <ol class="mb-3 flex flex-col gap-2" data-testid="play-chat-feed">
-          {#each chat as line (line.sequence)}
-            <li class="text-xs" data-testid="play-chat-line">
-              <span class="font-mono text-muted-foreground">[{line.phase}]</span>
-              {#if line.public_player_id}
-                <span class="mx-1 font-semibold">{line.public_player_id.slice(0, 8)}</span>
+              {actionBusy ? 'Submitting…' : 'Submit vote'}
+            </Button>
+          </div>
+        {:else if isNightActionPhase(legal)}
+          <div class="flex flex-col gap-2" data-testid="play-night-panel">
+            <label class="flex flex-col gap-1 text-xs">
+              <span class="font-medium" data-testid="play-night-action-type">
+                {selectedNightActionLabel}
+              </span>
+              {#if selectedNightActionDescription}
+                <span
+                  class="text-xs text-muted-foreground"
+                  title={selectedNightActionDescription}
+                  data-testid="play-night-action-description"
+                >
+                  {selectedNightActionDescription}
+                </span>
               {/if}
-              <span>{line.text}</span>
-            </li>
-          {/each}
-        </ol>
-      {/if}
+              <select
+                class="min-h-11 rounded border border-border bg-background px-3 py-2 text-sm"
+                data-testid="play-night-target"
+                bind:value={nightTarget.value}
+              >
+                <option value={null}>Skip</option>
+                {#each legal?.legal_targets ?? [] as t (t)}
+                  <option value={t}>{t.slice(0, 8)}</option>
+                {/each}
+              </select>
+            </label>
+            <Button
+              class="min-h-11"
+              testid="play-night-submit"
+              disabled={actionBusy}
+              onclick={() => void submitNightAction()}
+            >
+              {actionBusy ? 'Submitting…' : `Submit ${selectedNightActionLabel}`}
+            </Button>
+          </div>
+        {:else}
+          <p class="text-xs text-muted-foreground" data-testid="play-action-none">
+            No action to take right now.
+          </p>
+        {/if}
+        {#if actionNote}
+          <p class="mt-2 text-xs text-emerald-600" data-testid="play-action-note">{actionNote}</p>
+        {/if}
+        {#if error}
+          <p class="mt-2 text-xs text-red-500" data-testid="play-action-error">{error}</p>
+        {/if}
+      </Card>
+    </div>
 
-      <div class="flex flex-col gap-2" data-testid="play-chat-composer">
-        <textarea
-          class="rounded border border-border bg-background px-2 py-1 text-sm"
-          rows="2"
-          placeholder="Say something…"
-          data-testid="play-chat-input"
-          bind:value={chatText}
-          disabled={terminal}
-        ></textarea>
-        <div class="flex items-center gap-2">
-          <Button
-            testid="play-chat-send"
-            disabled={terminal || composerStatus === 'pending' || chatText.trim() === ''}
-            onclick={() => void sendChat()}
-          >
-            Send
-          </Button>
-          <span
-            class="text-xs text-muted-foreground"
-            data-testid="play-chat-status"
-            data-status={composerStatus}
-          >
-            {#if composerStatus === 'pending'}Holding for release…
-            {:else if composerStatus === 'released'}Released
-            {:else if composerStatus === 'blocked'}Blocked by moderation
-            {:else if composerStatus === 'error'}Failed to send
-            {:else}&nbsp;{/if}
-          </span>
+    <div class={`${mobilePanel === 'chat' ? 'block' : 'hidden'} md:block`} data-testid="play-chat-panel">
+      <Card>
+        <h2 class="mb-2 text-sm font-semibold">Chat</h2>
+        {#if chat.length === 0}
+          <p class="text-xs text-muted-foreground" data-testid="play-chat-empty">No chat yet.</p>
+        {:else}
+          <ol class="mb-3 flex flex-col gap-2" data-testid="play-chat-feed">
+            {#each chat as line (line.sequence)}
+              <li class="text-xs" data-testid="play-chat-line">
+                <span class="font-mono text-muted-foreground">[{line.phase}]</span>
+                {#if line.public_player_id}
+                  <span class="mx-1 font-semibold">{line.public_player_id.slice(0, 8)}</span>
+                {/if}
+                <span>{line.text}</span>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+
+        <div
+          class="sticky bottom-2 flex flex-col gap-2 rounded-md bg-card pt-2 md:static md:bottom-auto md:bg-transparent md:pt-0"
+          data-testid="play-chat-composer"
+        >
+          <textarea
+            class="min-h-24 rounded border border-border bg-background px-3 py-2 text-sm"
+            rows="3"
+            placeholder="Say something…"
+            data-testid="play-chat-input"
+            bind:value={chatText}
+            disabled={terminal}
+          ></textarea>
+          <div class="flex items-center gap-2">
+            <Button
+              class="min-h-11"
+              testid="play-chat-send"
+              disabled={terminal || composerStatus === 'pending' || chatText.trim() === ''}
+              onclick={() => void sendChat()}
+            >
+              Send
+            </Button>
+            <span
+              class="text-xs text-muted-foreground"
+              data-testid="play-chat-status"
+              data-status={composerStatus}
+            >
+              {#if composerStatus === 'pending'}Holding for release…
+              {:else if composerStatus === 'released'}Released
+              {:else if composerStatus === 'blocked'}Blocked by moderation
+              {:else if composerStatus === 'error'}Failed to send
+              {:else}&nbsp;{/if}
+            </span>
+          </div>
         </div>
-      </div>
-    </Card>
+      </Card>
+    </div>
   </div>
 
-  <div class="flex flex-col gap-3">
+  <div
+    class={`${mobilePanel === 'actions' ? 'flex' : 'hidden'} flex-col gap-3 md:flex`}
+    data-testid="play-info-panel"
+  >
     <Card>
       <h2 class="mb-2 text-sm font-semibold">This game</h2>
       <p class="text-xs text-muted-foreground">

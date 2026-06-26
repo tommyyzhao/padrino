@@ -117,7 +117,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check + e2e). NOTE: there is NO Svelte component-mount harness (vitest is TS-only) - use Playwright e2e with page.setViewportSize + route-mocked SSE, NOT component tests."
       ],
       "notes": "Sites: play/[gameId]/+page.svelte (md:grid-cols-[220px_1fr_300px]) + lib components. Responsive web only (no native app). Sequence FIRST among play-surface stories. Test via Playwright e2e (page.setViewportSize) + route-mocked SSE fixtures (web/dashboard/tests/e2e/play.spec.ts pattern) - the only render harness that exists.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-283",

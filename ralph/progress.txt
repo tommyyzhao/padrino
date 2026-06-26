@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Responsive play surface (US-282): keep `/play/[gameId]` as a single
+  identity-blind DOM whose mobile behavior is panel-gated with a `md:hidden`
+  tab strip (`Seats` / `Chat` / `Actions`) while the
+  `md:grid md:grid-cols-[220px_1fr_300px]` shell preserves the desktop layout.
+  Route-mocked Playwright tests should assert both mobile reachability and wide
+  grid columns, and mobile chat submit should be tested through the real
+  `/human/games/{id}/chat` route mock rather than component mounting.
 - Play-surface help/action metadata (US-281): keep the in-game rules drawer on
   `/play/[gameId]` backed by the shared `HowToPlayPanel`, and derive action
   helper copy from the seat observation `legal_actions` payload via optional
@@ -4305,6 +4312,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   Frontend gates: `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`
   -> 0 errors / 0 warnings; `pnpm -C web/dashboard test` -> 58 passed;
   `pnpm -C web/dashboard test:e2e` -> 37 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:38 PDT - US-282
+- Reworked `/play/[gameId]` for a portrait-first phone layout: a mobile
+  tab strip exposes the seat board, chat feed/composer, and current
+  action/vote panel as reachable panels, while `md+` keeps the three-column
+  `220px / 1fr / 300px` desktop grid.
+- Increased touch targets on mobile play controls and made the chat composer
+  sticky within the chat panel so the textarea and send button remain reachable
+  on narrow viewports. The underlying live-tail, seat observation, action, and
+  chat transports remain unchanged.
+- Added route-mocked Playwright coverage for mobile panel reachability,
+  touch-sized tabs/action submit, desktop grid preservation, mobile chat
+  submission, and post-relayout live data rendering.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/play.spec.ts --project=chromium`
+  failed first on missing mobile tabs/panel selectors; focused GREEN same
+  command -> 6 passed. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
+  `pnpm -C web/dashboard test:e2e` -> 40 passed / 3 skipped. Backend gates:
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
   passed / 41 skipped / 10 deselected.
