@@ -207,7 +207,7 @@
         "All backend + frontend gates pass (ruff/format/mypy/pytest -m 'not integration'; pnpm -C web/dashboard lint + check)."
       ],
       "notes": "Sites: src/padrino/cli.py (`human-lane` command ~344-391 - read the mock flag, build ai_adapter_factory), src/padrino/runner/human_lane.py (ai_adapter_factory param already threaded to build_human_lane_adapter; _PlaceholderAdapter docstring ~189-199 notes the real-adapter default), src/padrino/llm/mock NoopMockAdapter/DeterministicMockAdapter, src/padrino/smoke.py run_smoke_subprocess (~849-889 spawn serve+scheduler; ~928-936 teardown - add a third human-lane child behind --with-human-lane), web/dashboard/tests/e2e/global-setup.ts (enable the flag). Priority 287 but runs before US-287 (which depends on it). This is the harness foundation US-287 needs; without it the funnel e2e cannot run a real human game to terminal.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-287",

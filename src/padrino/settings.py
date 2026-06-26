@@ -123,6 +123,10 @@ class Settings(BaseSettings):
     # The two lanes are different processes (``padrino human-lane`` vs
     # ``padrino scheduler``) with independent semaphores.
     padrino_human_lane_max_concurrent: int = 5
+    # Local/e2e harness seam (US-288). When true, ``padrino human-lane`` injects
+    # the deterministic mock adapter for AI seats so human-lane smoke/e2e runs
+    # never require real provider credentials or network calls.
+    padrino_human_lane_mock_ai: bool = False
 
     # Human-aware tick (US-138). A human-friendly per-phase deadline the tick
     # barrier waits on (slow humans and slow LLMs alike are coerced to a safe

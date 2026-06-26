@@ -1,9 +1,9 @@
 /**
  * Playwright globalSetup for the Padrino dashboard e2e suite (US-070).
  *
- * Spawns `padrino smoke localhost --keep-running --port <api-port>` to:
+ * Spawns `padrino smoke localhost --with-human-lane --keep-running --port <api-port>` to:
  *   - bootstrap a fresh SQLite database
- *   - bring up the API + scheduler as detached child processes
+ *   - bring up the API + scheduler + human-lane worker as detached child processes
  *   - drive one mock-adapter gauntlet to completion
  *   - export + ingest one game so the public read endpoints have data
  *
@@ -53,6 +53,7 @@ async function spawnSmoke(apiPort: number, dbPath: string, timeoutMs: number): P
       'smoke',
       'localhost',
       '--keep-running',
+      '--with-human-lane',
       '--port',
       String(apiPort),
       '--db-url',

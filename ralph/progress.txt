@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human-lane smoke harness (US-288): keep deterministic human-lane AI mocking
+  behind `PADRINO_HUMAN_LANE_MOCK_AI` / `padrino_human_lane_mock_ai` and wire it
+  through the existing `ai_adapter_factory` seam, not through the production
+  heterogeneous provider builder. `padrino smoke localhost --with-human-lane`
+  should start `serve`, `scheduler`, and `human-lane` against the same DB while
+  setting the mock-AI flag only for the human-lane child; default smoke remains
+  API+scheduler only. Full worker tests that run concurrent human-lane DB
+  sessions should use file-backed SQLite instead of the shared in-memory
+  fixture.
 - Human profile history (US-286): keep `/human/games` as an authenticated,
   principal-scoped, terminal-only projection over `Game` + `GameSeat`, filtered
   to `HUMAN_LANE_SEAT_KINDS` and `Game.status == COMPLETED`. It should expose
@@ -4504,3 +4513,38 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
   `pnpm -C web/dashboard test` -> 64 passed;
   `pnpm -C web/dashboard test:e2e` -> 53 passed / 3 skipped.
+
+## 2026-06-26T00:32 PDT - US-288
+- Added `PADRINO_HUMAN_LANE_MOCK_AI` / `padrino_human_lane_mock_ai` as the
+  deterministic human-lane e2e seam. When enabled, `padrino human-lane`
+  injects `NoopMockAdapter` through `run_human_lane(ai_adapter_factory=...)`
+  so human-lane AI seats avoid real provider/network calls while production
+  mode still uses the existing heterogeneous adapter builder.
+- Added `padrino smoke localhost --with-human-lane` to spawn `serve`,
+  `scheduler`, and `human-lane` against the same DB, with the mock-AI flag set
+  for the human-lane child and normal teardown/error-tail handling. The default
+  smoke path remains API+scheduler only.
+- Updated dashboard Playwright global setup to boot smoke with the human-lane
+  worker, and added runner coverage that drives a mixed human/AI game to a
+  terminal draw under the mock factory, replay-verifies the persisted hash
+  chain, and asserts zero scientific `Rating` / `RatingEvent` rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/cli.py`, `src/padrino/settings.py`,
+  `src/padrino/smoke.py`, `tests/test_settings.py`,
+  `tests/cli/test_human_lane_cli.py`, `tests/cli/test_smoke_localhost.py`,
+  `tests/runner/test_human_lane_mock_ai.py`,
+  `web/dashboard/tests/e2e/global-setup.ts`,
+  `web/dashboard/tests/e2e/global-teardown.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/test_settings.py::test_default_human_lane_mock_ai_disabled tests/test_settings.py::test_env_override_human_lane_mock_ai -q`
+  failed first on missing settings; focused RED CLI/smoke tests failed first
+  on missing `ai_adapter_factory`, `--with-human-lane`, and global-setup flag;
+  focused runner test exposed the need for file-backed SQLite for a real
+  concurrent worker run. Focused GREEN: settings tests -> 2 passed; CLI/smoke
+  focused set -> 6 passed; runner mock-AI test -> 1 passed. Full backend
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2709
+  passed / 41 skipped / 10 deselected. Frontend gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
+  0 warnings; `pnpm -C web/dashboard test:e2e` -> 53 passed / 3 skipped.
