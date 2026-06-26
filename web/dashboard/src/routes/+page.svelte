@@ -31,7 +31,7 @@
     matchState === 'checking'
       ? 'Checking your session...'
       : matchState === 'starting'
-        ? 'Starting your table...'
+        ? 'Opening table finder...'
         : consenting
           ? 'Accepting...'
           : null
@@ -89,10 +89,9 @@
     }
   }
 
-  async function launchSoloMatch(): Promise<void> {
+  async function openMatchQueue(): Promise<void> {
     matchState = 'starting';
-    const match = await padrino.client.match();
-    await goto(`/play/${encodeURIComponent(match.game_id)}`);
+    await goto('/play/match');
   }
 
   async function startSoloMatch(): Promise<void> {
@@ -105,7 +104,7 @@
         matchState = 'needs_consent';
         return;
       }
-      await launchSoloMatch();
+      await openMatchQueue();
     } catch (error) {
       matchError = (error as Error).message;
       matchState = 'idle';
@@ -122,7 +121,7 @@
         matchError = 'Consent is required before play.';
         return;
       }
-      await launchSoloMatch();
+      await openMatchQueue();
     } catch (error) {
       matchError = (error as Error).message;
       matchState = 'needs_consent';

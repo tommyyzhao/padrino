@@ -69,7 +69,7 @@
         "All frontend gates pass (pnpm -C web/dashboard lint + check)."
       ],
       "notes": "Sites: a transient loading route/state in web/dashboard/src/routes/play (or the match flow), client.ts match() await/poll, /healthz/human-lane (operator counts - derive a friendly state, do NOT expose raw). Most solo matches start instantly (deterministic autofill). Depends on US-277. Frontend -> pnpm gates (e2e via route-mocked fixtures; no live game needed for US-279's own test).",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-280",

@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Match queue flow (US-279): keep solo `POST /human/match` creation in the
+  transient `/play/match` route after the home page finishes session + consent
+  checks. Use `client.match({ signal })` plus a cancelled flag so cancel/back
+  aborts or ignores late responses, retry only on brief admission statuses
+  (409/423/429/503) with bounded player-facing copy, and never call or echo
+  `/healthz/human-lane` operator counts. For new dashboard routes, run focused
+  e2e through `pnpm -C web/dashboard test:e2e -- ...`; raw `playwright test`
+  can reuse a stale static preview build.
 - Solo dashboard entry flow (US-278): preserve returning guest sessions by
   enabling human-session credentials, probing `/human/me`, and minting
   `/human/guest` only on 401 before checking `/human/consent`. Home/funnel
@@ -4196,6 +4204,39 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   alone); `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
   `pnpm -C web/dashboard test` -> 55 passed;
   `pnpm -C web/dashboard test:e2e` -> 30 passed / 3 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-25T23:08 PDT - US-279
+- Added a transient `/play/match` loading/queue screen. The home `Play vs AI`
+  flow now performs only session + consent checks, then routes to the match
+  screen, which owns match creation, instant-start navigation to `/play/{game}`,
+  bounded retry copy for brief admission deferrals, and cancel/back handling.
+- Added abort-signal plumbing to `PadrinoClient.match()` so canceling the
+  transient screen aborts an in-flight request where possible and ignores late
+  successful responses where the browser/server already raced.
+- Added route-mocked Playwright coverage for fresh visitor queue visibility,
+  cancel/back without late play navigation, fast returning-guest transition,
+  deferred friendly "finding your table" retry copy, and no player-visible
+  operator internals or `/healthz/human-lane` dependency.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/play/match/+page.svelte`,
+  `web/dashboard/tests/e2e/home.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test src/lib/api/client.test.ts` failed first because
+  `client.match({ signal })` did not pass an abort signal; focused RED
+  home e2e failed first because the match queue route/screen did not exist.
+  Focused GREEN after implementation: client test -> 23 passed;
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/home.spec.ts --project=chromium`
+  -> 6 passed / 1 skipped. Frontend gates:
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
+  0 warnings; `pnpm -C web/dashboard test` -> 56 passed;
+  `pnpm -C web/dashboard test:e2e` -> 32 passed / 3 skipped. Backend gates:
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
   passed / 41 skipped / 10 deselected.

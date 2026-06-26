@@ -59,6 +59,10 @@ export interface PadrinoClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+interface RequestOptions {
+  signal?: AbortSignal;
+}
+
 export class PadrinoClient {
   readonly baseUrl: string;
   private apiKey: string | null;
@@ -145,10 +149,11 @@ export class PadrinoClient {
   private async mutate<T>(
     method: 'POST' | 'PATCH',
     path: string,
-    body?: unknown
+    body?: unknown,
+    options: RequestOptions = {}
   ): Promise<T> {
     const headers = this.authHeaders();
-    const init: RequestInit = { method, headers };
+    const init: RequestInit = { method, headers, signal: options.signal };
     if (this.humanSession) {
       init.credentials = 'include';
     }
@@ -341,8 +346,8 @@ export class PadrinoClient {
   }
 
   /** Start a casual solo human-vs-AI match (US-278). */
-  match(): Promise<HumanMatchResponse> {
-    return this.mutate('POST', '/human/match');
+  match(options: RequestOptions = {}): Promise<HumanMatchResponse> {
+    return this.mutate('POST', '/human/match', undefined, options);
   }
 
   // ---- lobby (US-147/148/149)

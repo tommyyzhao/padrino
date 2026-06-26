@@ -299,6 +299,17 @@ describe('PadrinoClient human-session play channels', () => {
     expect(match).toEqual({ game_id: 'g-solo' });
   });
 
+  it('passes an abort signal through the solo match mutation', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ game_id: 'g-solo' }));
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+    const controller = new AbortController();
+
+    await client.match({ signal: controller.signal });
+
+    const init = fetchImpl.mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBe(controller.signal);
+  });
+
   it('throws PadrinoApiError with parsed detail on a failed mutation', async () => {
     const fetchImpl = vi
       .fn()
