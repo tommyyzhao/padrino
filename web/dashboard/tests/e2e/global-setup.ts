@@ -71,6 +71,10 @@ async function spawnSmoke(apiPort: number, dbPath: string, timeoutMs: number): P
       env: {
         ...process.env,
         PADRINO_CORS_ALLOW_ORIGINS: corsOrigin,
+        PADRINO_HUMAN_PHASE_DEADLINE_SECONDS:
+          process.env.PADRINO_HUMAN_PHASE_DEADLINE_SECONDS ?? '0.05',
+        PADRINO_HUMAN_RELEASE_DELAY_SECONDS:
+          process.env.PADRINO_HUMAN_RELEASE_DELAY_SECONDS ?? '0',
         // The public spectator site reads the /public/* surface anonymously
         // (the production public-surface-only deployment serves these without a
         // key). Enable anonymous public reads so the e2e suite exercises the

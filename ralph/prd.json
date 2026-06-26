@@ -230,7 +230,7 @@
         "All backend + frontend gates pass (ruff/format/mypy/pytest -m 'not integration'; pnpm -C web/dashboard lint + check + the e2e suite)."
       ],
       "notes": "Sites: web/dashboard/tests/e2e/* (Playwright; global-setup boots the backend - now with the human-lane worker via US-288), the funnel from US-278 (CTA) + US-277 (match) + US-279 (loading) + US-276/US-286 (guest profile). DEPENDS on US-288 (harness can run a human game to terminal) and US-279 (loading step asserted). This is the guard that the acquisition path never silently breaks again (like /human/stats did). The other play-surface stories use route-mocked fixtures for their own tests; THIS one uses the real human-lane harness to prove the firewall end-to-end.",
-      "passes": false
+      "passes": true
     }
   ]
 }

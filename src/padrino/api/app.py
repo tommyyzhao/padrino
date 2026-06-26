@@ -188,7 +188,7 @@ def create_app(
             CORSMiddleware,
             allow_origins=origins,
             allow_credentials=("*" not in origins),
-            allow_methods=["GET", "HEAD", "OPTIONS"],
+            allow_methods=["GET", "HEAD", "OPTIONS", "POST", "PATCH"],
             allow_headers=["Authorization", "Content-Type", "Accept"],
         )
     app.middleware("http")(admin_token_deprecation_middleware)

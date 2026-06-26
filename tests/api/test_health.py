@@ -136,6 +136,23 @@ async def test_cors_enabled_when_origins_passed() -> None:
     assert response.headers.get("access-control-allow-origin") == "http://dashboard.example"
 
 
+async def test_cors_preflight_allows_dashboard_json_mutations() -> None:
+    app = create_app(cors_allow_origins=["http://dashboard.example"])
+    client = await _http_client(app)
+    async with client:
+        response = await client.options(
+            "/human/games/00000000-0000-0000-0000-000000000000/turing-guess",
+            headers={
+                "Origin": "http://dashboard.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "http://dashboard.example"
+    assert "POST" in response.headers.get("access-control-allow-methods", "")
+
+
 async def test_cors_enabled_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     from padrino import settings as settings_mod
 

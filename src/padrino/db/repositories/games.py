@@ -186,6 +186,7 @@ async def update_status(
     event_hash_head: str | None = None,
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
+    stamp_completed_at: bool = False,
 ) -> Game | None:
     game = await session.get(Game, game_id)
     if game is None:
@@ -201,6 +202,8 @@ async def update_status(
         game.started_at = started_at
     if completed_at is not None:
         game.completed_at = completed_at
+    elif stamp_completed_at:
+        game.completed_at = datetime.now(UTC)
     await session.flush()
     return game
 

@@ -21,6 +21,7 @@ from padrino.db.models import (
     Game,
     GameEvent,
     GameSeat,
+    HumanPlayerStats,
     League,
     Lobby,
     ModelConfig,
@@ -227,11 +228,21 @@ async def test_mock_ai_human_lane_game_completes_replays_and_skips_scientific_ra
             rating_event_count = (
                 await session.execute(select(func.count()).select_from(RatingEvent))
             ).scalar_one()
+            human_stats = list(
+                (
+                    await session.execute(
+                        select(HumanPlayerStats).where(
+                            HumanPlayerStats.ruleset_id == mini7_v1.RULESET_ID
+                        )
+                    )
+                ).scalars()
+            )
     finally:
         await engine.dispose()
 
     assert game is not None
     assert game.status == GAME_STATUS_COMPLETED
+    assert game.completed_at is not None
     assert game.terminal_result is not None
     assert game.terminal_result["winner"] == "DRAW"
     assert mock_factory_calls and set(mock_factory_calls[0]) == {
@@ -247,3 +258,5 @@ async def test_mock_ai_human_lane_game_completes_replays_and_skips_scientific_ra
     assert rows[-1].event_hash == game.event_hash_head
     assert rating_count == 0
     assert rating_event_count == 0
+    assert len(human_stats) == 1
+    assert human_stats[0].games == 1

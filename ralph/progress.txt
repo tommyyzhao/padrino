@@ -4548,3 +4548,39 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed / 41 skipped / 10 deselected. Frontend gates:
   `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check` -> 0 errors /
   0 warnings; `pnpm -C web/dashboard test:e2e` -> 53 passed / 3 skipped.
+
+## 2026-06-26T00:52 PDT - US-287
+- Added an unmocked dashboard Playwright funnel test that drives a cold visitor
+  through home onboarding, guest+consent, `POST /human/match`, the match
+  loading screen, `/play/{gameId}`, terminal completion via the human-lane
+  worker, the spot-the-AI reveal, and `/profile` guest stats/history.
+- The funnel test asserts the real game reaches `COMPLETED`, has
+  `completed_at`, materializes human stats, records the reveal guess, lists the
+  just-played game in profile history, and writes zero SCIENTIFIC rating events.
+- Fixed the production gaps exposed by the full funnel: terminal games now stamp
+  `completed_at` through the game repository and refresh human stats at
+  completion; dashboard CORS preflight now allows JSON `POST`/`PATCH` mutations
+  instead of only read methods.
+- Kept the e2e harness deterministic by setting short human-lane deadline/release
+  env defaults only in dashboard global setup when not already overridden.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/app.py`,
+  `src/padrino/db/repositories/games.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/api/test_health.py`,
+  `tests/runner/test_human_lane_mock_ai.py`,
+  `web/dashboard/tests/e2e/funnel.spec.ts`,
+  `web/dashboard/tests/e2e/global-setup.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_human_lane_mock_ai.py::test_mock_ai_human_lane_game_completes_replays_and_skips_scientific_ratings -q`
+  first exposed missing `completed_at`/stats; focused RED
+  `pnpm -C web/dashboard test:e2e -- funnel.spec.ts` exposed CORS preflight on
+  JSON reveal guess. Focused GREEN: runner completion test -> 1 passed; CORS
+  preflight test -> 1 passed; `pnpm -C web/dashboard test:e2e -- funnel.spec.ts`
+  -> 1 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2710 passed / 41 skipped /
+  10 deselected. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
+  `pnpm -C web/dashboard test:e2e` -> 54 passed / 3 skipped.
