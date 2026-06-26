@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.analytics.human_stats import refresh_human_player_stats_for_game
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE, generate_session_token
-from padrino.db.models import Game, GameEvent, GameSeat, HumanPlayerStats
+from padrino.db.models import Game, GameEvent, GameSeat, HumanPlayerStats, HumanTuringGuess
 from padrino.db.repositories import human_principals as principals_repo
 
 _RULESET = "mini7_v1"
@@ -160,6 +160,70 @@ async def _seed_completed_human_game(
         )
     for event in _TOWN_WIN_GAME:
         session.add(_game_event(game.id, event))
+    await session.flush()
+    return game
+
+
+async def _seed_history_game(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    completed_at: datetime,
+    winner: str,
+    role: str,
+    faction: str,
+    game_seed: str,
+    guess_accuracy: tuple[int, int, str] | None = None,
+    status: str = "COMPLETED",
+) -> Game:
+    game = Game(
+        ruleset_id=_RULESET,
+        game_seed=game_seed,
+        status=status,
+        terminal_result={"winner": winner, "reason": "fixture"},
+        completed_at=completed_at,
+    )
+    session.add(game)
+    await session.flush()
+    session.add(
+        GameSeat(
+            game_id=game.id,
+            public_player_id="P03",
+            seat_index=3,
+            agent_build_id=None,
+            seat_kind="HUMAN",
+            occupant_principal_id=principal_id,
+            role=role,
+            faction=faction,
+            alive=True,
+        )
+    )
+    session.add(
+        GameSeat(
+            game_id=game.id,
+            public_player_id="P01",
+            seat_index=1,
+            agent_build_id=None,
+            seat_kind="AI",
+            occupant_principal_id=None,
+            role="MAFIA_GOON",
+            faction="MAFIA",
+            alive=False,
+        )
+    )
+    if guess_accuracy is not None:
+        total, correct, accuracy = guess_accuracy
+        session.add(
+            HumanTuringGuess(
+                game_id=game.id,
+                guesser_public_id="P03",
+                guess={"P01": "AI"},
+                total=total,
+                correct=correct,
+                accuracy=accuracy,
+                created_at=completed_at,
+            )
+        )
     await session.flush()
     return game
 
@@ -308,3 +372,114 @@ async def test_human_stats_projects_analytics_materialized_output(
     assert body["voting_accuracy"] == {"total_votes": 1, "accurate_votes": 1, "rate": 1.0}
     assert body["detection_accuracy"] == "1/2"
     assert body["role_win_rates"] == [{"role": "DETECTIVE", "wins": 1, "games": 1, "rate": 1.0}]
+
+
+@pytest.mark.asyncio
+async def test_human_games_lists_only_callers_completed_history_with_personal_fields(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    token, principal_id = await _guest(client)
+    _other_token, other_principal_id = await _guest(client)
+    async with session_factory() as session, session.begin():
+        newest = await _seed_history_game(
+            session,
+            principal_id=principal_id,
+            completed_at=_NOW,
+            winner="TOWN",
+            role="DETECTIVE",
+            faction="TOWN",
+            game_seed="history-newest",
+            guess_accuracy=(6, 4, "4/6"),
+        )
+        older = await _seed_history_game(
+            session,
+            principal_id=principal_id,
+            completed_at=_NOW - timedelta(hours=2),
+            winner="MAFIA",
+            role="VILLAGER",
+            faction="TOWN",
+            game_seed="history-older",
+        )
+        await _seed_history_game(
+            session,
+            principal_id=other_principal_id,
+            completed_at=_NOW + timedelta(hours=1),
+            winner="MAFIA",
+            role="MAFIA_GOON",
+            faction="MAFIA",
+            game_seed="history-other",
+            guess_accuracy=(6, 6, "1.0"),
+        )
+        await _seed_history_game(
+            session,
+            principal_id=principal_id,
+            completed_at=_NOW + timedelta(hours=2),
+            winner="TOWN",
+            role="DOCTOR",
+            faction="TOWN",
+            game_seed="history-running",
+            status="RUNNING",
+        )
+
+    first = await client.get(
+        "/human/games",
+        params={"limit": 1},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["total_estimate"] == 2
+    assert first_body["next_cursor"] is not None
+    assert len(first_body["items"]) == 1
+    item = first_body["items"][0]
+    assert item == {
+        "game_id": str(newest.id),
+        "ruleset_id": _RULESET,
+        "ended_at": _NOW.isoformat().replace("+00:00", "Z"),
+        "result": "WIN",
+        "winner": "TOWN",
+        "role": "DETECTIVE",
+        "spot_the_ai": {"total": 6, "correct": 4, "accuracy": "4/6"},
+        "reveal_path": f"/play/{newest.id}/reveal",
+    }
+    serialized = json.dumps(first_body).lower()
+    for forbidden in (
+        "seat_kind",
+        "occupant_principal_id",
+        "agent_build_id",
+        "public_player_id",
+        "rating",
+        "mu",
+        "sigma",
+    ):
+        assert forbidden not in serialized
+
+    second = await client.get(
+        "/human/games",
+        params={"limit": 1, "cursor": first_body["next_cursor"]},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+
+    assert second.status_code == 200
+    second_body = second.json()
+    assert second_body["next_cursor"] is None
+    assert second_body["items"][0]["game_id"] == str(older.id)
+    assert second_body["items"][0]["result"] == "LOSS"
+    assert second_body["items"][0]["role"] == "VILLAGER"
+    assert second_body["items"][0]["spot_the_ai"] is None
+
+
+@pytest.mark.asyncio
+async def test_human_games_requires_auth_and_returns_empty_page(
+    client: AsyncClient,
+) -> None:
+    unauth = await client.get("/human/games")
+    assert unauth.status_code == 401
+
+    token, _principal_id = await _guest(client)
+    resp = await client.get("/human/games", cookies={HUMAN_SESSION_COOKIE: token})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"items": [], "next_cursor": None, "total_estimate": 0}

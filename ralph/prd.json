@@ -189,7 +189,7 @@
         "All backend + frontend gates pass (ruff/format/mypy/pytest -m 'not integration'; pnpm -C web/dashboard lint + check + e2e for the guest-render assertion)."
       ],
       "notes": "Sites: web/dashboard/src/routes/profile/+page.svelte (line 43 signedIn=me.kind==='account', line 52 'if(!signedIn) return' -> un-gate for guests; lines 80-86 signed-out card -> only on 401), src/padrino/api/routes/human.py (ADD list-my-games route), games/game_seats tables for the caller's principal, reveal/recap routes (play/[gameId]/reveal, watch/[id]/recap) to link to. Backend already serves stats by principal_id (works for guests). Depends on US-276. This story OWNS the profile guest-gate fix (US-276 is backend-only). Casual + own-games-only.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-288",

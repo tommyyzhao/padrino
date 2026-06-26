@@ -288,6 +288,27 @@ describe('PadrinoClient human-session play channels', () => {
     expect(statsUrl.searchParams.get('ruleset_id')).toBe('mini7_v1');
   });
 
+  it('lists the current human principal history with bounded pagination', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse({
+          items: [],
+          next_cursor: null,
+          total_estimate: 0
+        })
+      )
+    );
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+
+    await client.listHumanGames({ limit: 10, cursor: 'cursor-1' });
+
+    const historyUrl = new URL(fetchImpl.mock.calls[0][0]);
+    expect(historyUrl.pathname).toBe('/human/games');
+    expect(historyUrl.searchParams.get('limit')).toBe('10');
+    expect(historyUrl.searchParams.get('cursor')).toBe('cursor-1');
+    expect((fetchImpl.mock.calls[0][1] as RequestInit).credentials).toBe('include');
+  });
+
   it('starts a solo human match via the cookie-authenticated match endpoint', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ game_id: 'g-solo' }));
     const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });

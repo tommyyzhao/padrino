@@ -499,6 +499,25 @@ export interface HumanPlayerStats {
   detection_accuracy: string;
 }
 
+/** The caller's own postgame spot-the-AI result when they have submitted it. */
+export interface HumanGameSpotTheAi {
+  total: number;
+  correct: number;
+  accuracy: string;
+}
+
+/** One completed casual human-lane game in the caller's private history. */
+export interface HumanGameHistoryEntry {
+  game_id: string;
+  ruleset_id: string;
+  ended_at: string;
+  result: 'WIN' | 'LOSS' | 'DRAW' | 'UNKNOWN';
+  winner: string | null;
+  role: string;
+  spot_the_ai: HumanGameSpotTheAi | null;
+  reveal_path: string;
+}
+
 // ---- live transport frames (SSE-out) -------------------------------------
 
 /** One released PUBLIC frame from the live-tail SSE (public_event_v1, US-133). */

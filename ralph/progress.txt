@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human profile history (US-286): keep `/human/games` as an authenticated,
+  principal-scoped, terminal-only projection over `Game` + `GameSeat`, filtered
+  to `HUMAN_LANE_SEAT_KINDS` and `Game.status == COMPLETED`. It should expose
+  only the caller's own role/outcome plus their own `HumanTuringGuess` score
+  when submitted; never include seat-kind maps, principal ids, model/provider
+  ids, or canonical rating fields. The dashboard profile should distinguish a
+  true `/human/me` 401 from an authenticated guest and treat account sign-in as
+  a persistence upsell, not a stats/history gate.
 - Live connection reliability (US-285): keep the live-tail contract in
   `LiveClient` as the only sequence-resumable stream (`?after=<lastSequence>`)
   with `onOpen` / `onStateChange` and bounded jittered backoff. Keep the
@@ -4459,3 +4467,40 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2696
   passed / 41 skipped / 10 deselected.
+
+## 2026-06-26T00:20 PDT - US-286
+- Added authenticated `GET /human/games` as a bounded, principal-scoped history
+  projection over completed human-lane games. It returns only the caller's own
+  game id, ruleset, ended timestamp, personal result, own role, reveal link, and
+  submitted spot-the-AI score when present.
+- Un-gated `/profile` for authenticated guests while preserving the true-401
+  signed-out card. Guest profiles now render casual stats, a sign-in-to-save
+  upsell, match history, no-games CTA, and a history error state without
+  leaking human/AI maps or scientific rating fields.
+- Added dashboard API types/client method for `listHumanGames` plus route-mocked
+  Playwright coverage for guest stats/history, reveal-link navigation, true
+  signed-out behavior, empty history, and graceful history failure.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/human.py`,
+  `tests/api/test_human_stats_route.py`,
+  `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/routes/profile/+page.svelte`,
+  `web/dashboard/tests/e2e/reveal.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_stats_route.py -q` failed first on
+  missing `/human/games`; focused RED
+  `pnpm -C web/dashboard test -- src/lib/api/client.test.ts` failed first on
+  missing `client.listHumanGames`. Focused GREEN:
+  `uv run pytest tests/api/test_human_stats_route.py -q` -> 6 passed;
+  `pnpm -C web/dashboard test -- src/lib/api/client.test.ts` -> 64 passed;
+  `pnpm -C web/dashboard test:e2e -- tests/e2e/reveal.spec.ts --project=chromium`
+  -> 7 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2699 passed / 41 skipped /
+  10 deselected. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
+  `pnpm -C web/dashboard test` -> 64 passed;
+  `pnpm -C web/dashboard test:e2e` -> 53 passed / 3 skipped.

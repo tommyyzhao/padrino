@@ -11,6 +11,7 @@ import type {
   GauntletListEntry,
   GauntletReport,
   GuestSummary,
+  HumanGameHistoryEntry,
   HumanMatchResponse,
   HumanPlayerStats,
   LaunchResponse,
@@ -340,9 +341,16 @@ export class PadrinoClient {
     return this.request(`/human/games/${encodeURIComponent(gameId)}/reveal`);
   }
 
-  /** Per-human deterministic play stats; gated to the signed-in account (US-145). */
+  /** Per-human deterministic play stats; gated to the current human principal (US-145/276). */
   getHumanStats(rulesetId: string): Promise<HumanPlayerStats> {
     return this.request('/human/stats', { ruleset_id: rulesetId });
+  }
+
+  /** Recent completed casual games for the current human principal (US-286). */
+  listHumanGames(
+    params: { limit?: number; cursor?: string | null } = {}
+  ): Promise<CursorPage<HumanGameHistoryEntry>> {
+    return this.request('/human/games', params);
   }
 
   /** Start a casual solo human-vs-AI match (US-278). */

@@ -25,7 +25,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.auth import _get_auth_settings, _get_rate_limiter
@@ -52,6 +52,7 @@ from padrino.api.human_consent import (
     required_consent_versions,
 )
 from padrino.api.human_observation import build_seat_observation_snapshot, stream_snapshot
+from padrino.api.human_seat_auth import HUMAN_LANE_SEAT_KINDS
 from padrino.api.human_turing import get_own_result, submit_guess
 from padrino.api.lobby_launch import (
     AutoFillPoolError,
@@ -67,12 +68,19 @@ from padrino.api.oauth import (
     state_flow_token,
     validate_authorization_state,
 )
-from padrino.api.reveal import build_participant_reveal
+from padrino.api.pagination import (
+    InvalidCursorError,
+    decode_index_cursor,
+    encode_index_cursor,
+    invalid_cursor_error,
+)
+from padrino.api.reveal import build_participant_reveal, winner_from_terminal_result
 from padrino.core.engine.actions import Action
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStatus
 from padrino.core.reveal import EndgameReveal
 from padrino.core.rulesets import get_ruleset
-from padrino.db.models import HumanPlayerStats, Principal
+from padrino.db.game_status import GAME_STATUS_COMPLETED
+from padrino.db.models import Game, GameSeat, HumanPlayerStats, HumanTuringGuess, Principal
 from padrino.db.repositories import human_principals as principals_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
@@ -167,8 +175,49 @@ class HumanStatsResponse(BaseModel):
     detection_accuracy: str
 
 
+class HumanGameSpotTheAi(BaseModel):
+    """The caller's own postgame spot-the-AI result, when already submitted."""
+
+    total: int
+    correct: int
+    accuracy: str
+
+
+class HumanGameHistoryEntry(BaseModel):
+    """One completed human-lane game in the caller's private history."""
+
+    game_id: uuid.UUID
+    ruleset_id: str
+    ended_at: datetime
+    result: Literal["WIN", "LOSS", "DRAW", "UNKNOWN"]
+    winner: str | None
+    role: str
+    spot_the_ai: HumanGameSpotTheAi | None
+    reveal_path: str
+
+
+class HumanGameHistoryResponse(BaseModel):
+    """Bounded page of the caller's own completed human-lane games."""
+
+    items: list[HumanGameHistoryEntry]
+    next_cursor: str | None = None
+    total_estimate: int
+
+
 def _ratio(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator > 0 else 0.0
+
+
+def _personal_game_result(
+    *,
+    winner: str | None,
+    faction: str,
+) -> Literal["WIN", "LOSS", "DRAW", "UNKNOWN"]:
+    if winner is None:
+        return "UNKNOWN"
+    if winner == "DRAW":
+        return "DRAW"
+    return "WIN" if winner == faction else "LOSS"
 
 
 def _detection_accuracy_string(row: HumanPlayerStats | None) -> str:
@@ -243,6 +292,77 @@ async def get_human_stats(
         ruleset_id=ruleset_id,
         principal_id=ctx.principal_id,
         row=row,
+    )
+
+
+@router.get("/human/games", response_model=HumanGameHistoryResponse)
+async def list_human_games(
+    limit: int = Query(20, ge=1, le=50),
+    cursor: str | None = Query(default=None),
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> HumanGameHistoryResponse:
+    """Return the caller's own completed casual human-lane games."""
+    start = 0
+    if cursor is not None:
+        try:
+            start = decode_index_cursor(cursor)
+        except InvalidCursorError as exc:
+            raise invalid_cursor_error() from exc
+
+    filters = (
+        GameSeat.occupant_principal_id == ctx.principal_id,
+        GameSeat.seat_kind.in_(HUMAN_LANE_SEAT_KINDS),
+        Game.status == GAME_STATUS_COMPLETED,
+        Game.completed_at.is_not(None),
+    )
+    total_stmt = select(func.count()).select_from(Game).join(GameSeat).where(*filters)
+    total = int((await session.execute(total_stmt)).scalar_one())
+
+    stmt = (
+        select(Game, GameSeat, HumanTuringGuess)
+        .join(GameSeat, GameSeat.game_id == Game.id)
+        .outerjoin(
+            HumanTuringGuess,
+            (HumanTuringGuess.game_id == Game.id)
+            & (HumanTuringGuess.guesser_public_id == GameSeat.public_player_id),
+        )
+        .where(*filters)
+        .order_by(Game.completed_at.desc(), Game.id.desc())
+        .offset(start)
+        .limit(limit + 1)
+    )
+    rows = list((await session.execute(stmt)).all())
+    next_cursor = encode_index_cursor(start + limit) if len(rows) > limit else None
+    items: list[HumanGameHistoryEntry] = []
+    for game, seat, guess in rows[:limit]:
+        assert game.completed_at is not None
+        ended_at = game.completed_at
+        if ended_at.tzinfo is None:
+            ended_at = ended_at.replace(tzinfo=UTC)
+        winner = winner_from_terminal_result(game.terminal_result)
+        items.append(
+            HumanGameHistoryEntry(
+                game_id=game.id,
+                ruleset_id=game.ruleset_id,
+                ended_at=ended_at,
+                result=_personal_game_result(winner=winner, faction=seat.faction),
+                winner=winner,
+                role=seat.role,
+                spot_the_ai=None
+                if guess is None
+                else HumanGameSpotTheAi(
+                    total=guess.total,
+                    correct=guess.correct,
+                    accuracy=guess.accuracy,
+                ),
+                reveal_path=f"/play/{game.id}/reveal",
+            )
+        )
+    return HumanGameHistoryResponse(
+        items=items,
+        next_cursor=next_cursor,
+        total_estimate=total,
     )
 
 
