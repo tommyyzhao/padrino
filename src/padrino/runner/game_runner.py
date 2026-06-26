@@ -28,7 +28,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, cast
 
@@ -57,7 +58,12 @@ from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
-from padrino.economics.human_cost_governance import price_turn_usd
+from padrino.economics.human_cost_governance import (
+    PRICE_BASIS_FALLBACK_TABLE,
+    PRICE_BASIS_PROVIDER_RESPONSE_COST,
+    fallback_price_table_version,
+    price_turn_usd,
+)
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
@@ -148,6 +154,11 @@ class GamePersistence:
 
     ``ranked`` carries a persisted league binding for executors that call
     :func:`drive_game_loop` indirectly, such as the human-lane worker.
+
+    ``worker_id`` and ``lease_clock`` are the benchmark scheduler's lease fence:
+    when ``worker_id`` is present, terminal persistence re-reads the ``games``
+    row inside the finalize transaction and proceeds only while that same
+    worker still holds an unexpired per-game lease.
     """
 
     session_factory: async_sessionmaker[AsyncSession]
@@ -157,6 +168,9 @@ class GamePersistence:
     ranked: bool = False
     resume: GameResume | None = None
     settings: Settings | None = None
+    worker_id: str | None = None
+    lease_clock: Callable[[], Any] | None = None
+    db_write_lock: asyncio.Lock | None = field(default=None, repr=False, compare=False)
 
 
 class GameConfig(BaseModel):
@@ -262,11 +276,24 @@ async def _append_event_row(
     )
 
 
+@asynccontextmanager
+async def _persistence_transaction(
+    persistence: GamePersistence,
+) -> AsyncIterator[AsyncSession]:
+    lock = persistence.db_write_lock
+    if lock is None:
+        async with persistence.session_factory() as session, session.begin():
+            yield session
+        return
+    async with lock, persistence.session_factory() as session, session.begin():
+        yield session
+
+
 async def _persist_stored_event(
     persistence: GamePersistence,
     stored: StoredEvent,
 ) -> None:
-    async with persistence.session_factory() as session, session.begin():
+    async with _persistence_transaction(persistence) as session:
         await _append_event_row(session, persistence, stored)
 
 
@@ -333,7 +360,7 @@ async def _persist_roles_assigned(
             }
         )
 
-    async with persistence.session_factory() as session, session.begin():
+    async with _persistence_transaction(persistence) as session:
         await _append_event_row(session, persistence, stored)
         for spec in seat_specs:
             await games_repo.add_seat(
@@ -478,6 +505,59 @@ async def _apply_placement_after_finalization(
         )
 
 
+def _lease_fence_allows_finalize(
+    persistence: GamePersistence,
+    game: Any | None,
+) -> bool:
+    worker_id = persistence.worker_id
+    if worker_id is None:
+        return True
+    if game is None:
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            reason="missing_game",
+        )
+        return False
+    lease_clock = persistence.lease_clock
+    if lease_clock is None:
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            reason="missing_lease_clock",
+        )
+        return False
+    if game.leased_by != worker_id:
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            leased_by=game.leased_by,
+            reason="worker_mismatch",
+        )
+        return False
+    expires_at = game.lease_expires_at
+    if expires_at is None:
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            reason="missing_lease_expiry",
+        )
+        return False
+    if games_repo._aware(expires_at) <= games_repo._aware(lease_clock()):
+        _logger.info(
+            "game.finalize.lease_fence_blocked",
+            game_id=str(persistence.game_id),
+            worker_id=worker_id,
+            reason="lease_expired",
+        )
+        return False
+    return True
+
+
 async def _persist_terminated_event(
     persistence: GamePersistence,
     stored: StoredEvent,
@@ -495,13 +575,15 @@ async def _persist_terminated_event(
         "reason": state.terminal_reason,
         "day_terminated": day_terminated,
     }
-    async with persistence.session_factory() as session, session.begin():
+    async with _persistence_transaction(persistence) as session:
         game = await games_repo.get(session, persistence.game_id)
         if game is not None and game.status == GAME_STATUS_COMPLETED:
             _logger.info(
                 "Game already terminated and completed; skipping rating application and status updates.",
                 game_id=str(persistence.game_id),
             )
+            return
+        if not _lease_fence_allows_finalize(persistence, game):
             return
         apply_human_ratings = await _should_apply_human_ratings(session, persistence, ranked, state)
         apply_placement = _should_apply_placement(persistence, ranked, state, game)
@@ -603,24 +685,42 @@ _UNBILLED_RESULT_STATUSES: Final[frozenset[str]] = frozenset(
 )
 
 
-def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float | None:
+@dataclass(frozen=True)
+class _PricingStamp:
+    cost_usd: float | None
+    price_basis: str | None
+    price_table_version: str | None
+
+
+def _pricing_stamp(persistence: GamePersistence, result: AdapterResult) -> _PricingStamp:
     if result.cost_usd is None:
         if result.status in _UNBILLED_RESULT_STATUSES:
-            return None
+            return _PricingStamp(None, None, None)
         if (
             result.raw_response == ""
             and result.input_tokens is None
             and result.output_tokens is None
         ):
-            return None
+            return _PricingStamp(None, None, None)
     settings = persistence.settings or get_settings()
-    return price_turn_usd(
+    cost_usd = price_turn_usd(
         settings,
         response_cost=result.cost_usd,
         model=result.model_id or "default",
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
     )
+    if result.cost_usd is not None:
+        return _PricingStamp(cost_usd, PRICE_BASIS_PROVIDER_RESPONSE_COST, None)
+    return _PricingStamp(
+        cost_usd,
+        PRICE_BASIS_FALLBACK_TABLE,
+        fallback_price_table_version(settings),
+    )
+
+
+def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float | None:
+    return _pricing_stamp(persistence, result).cost_usd
 
 
 async def _persist_llm_call(
@@ -630,7 +730,8 @@ async def _persist_llm_call(
 ) -> None:
     request_json = observation.model_dump(mode="json")
     failure = result.failure
-    async with persistence.session_factory() as session, session.begin():
+    pricing = _pricing_stamp(persistence, result)
+    async with _persistence_transaction(persistence) as session:
         await llm_calls_repo.record_call(
             session,
             game_id=persistence.game_id,
@@ -648,7 +749,9 @@ async def _persist_llm_call(
             latency_ms=result.latency_ms,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
-            cost_usd=_priced_cost_usd(persistence, result),
+            cost_usd=pricing.cost_usd,
+            price_basis=pricing.price_basis,
+            price_table_version=pricing.price_table_version,
             provider_response_id=result.provider_response_id,
         )
 
@@ -1275,6 +1378,7 @@ async def run_game(
     ranked: bool,
     *,
     persistence: GamePersistence | None = None,
+    resume: GameResume | None = None,
 ) -> GameOutcome:
     """Run a benchmark game with the standard tick barrier.
 
@@ -1282,12 +1386,16 @@ async def run_game(
     scheduler jobs, and tests. Human-lane games call :func:`drive_game_loop`
     with their own tick runner instead of using this benchmark shortcut.
     """
+    effective_resume = resume
+    if effective_resume is None and persistence is not None:
+        effective_resume = persistence.resume
     return await drive_game_loop(
         config,
         adapter,
         ranked,
         persistence=persistence,
         tick_runner=_default_tick_runner,
+        resume=effective_resume,
     )
 
 

@@ -36,6 +36,8 @@ async def record_call(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     cost_usd: float | None = None,
+    price_basis: str | None = None,
+    price_table_version: str | None = None,
     provider_response_id: str | None = None,
 ) -> LlmCall:
     """Insert one llm_call row and return the persisted ORM object."""
@@ -57,6 +59,8 @@ async def record_call(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd=cost_usd,
+        price_basis=price_basis,
+        price_table_version=price_table_version,
         provider_response_id=provider_response_id,
     )
     session.add(obj)

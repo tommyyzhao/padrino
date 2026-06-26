@@ -6,7 +6,8 @@ that fires due ``scheduled_gauntlets`` rows, threading the injected clock so the
 job's timing stays deterministic under test.
 
 US-098 extends the hook to also run the continuous matchmaking pipeline when
-``padrino_enable_continuous_matchmaking`` is True.
+``padrino_enable_continuous_matchmaking`` is True. US-262 adds the gated
+campaign tick to the same composed hook.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ def build_scheduled_gauntlet_tick_hook(
     adapter_factory: AdapterFactory | None = None,
     guard: GuardModelAdapter | None = None,
     notifier: AlertNotifier | None = None,
+    worker_id: str | None = None,
 ) -> TickHook:
     """Return a scheduler tick hook that fires every due scheduled gauntlet.
 
@@ -39,6 +41,11 @@ def build_scheduled_gauntlet_tick_hook(
     the continuous matchmaking pipeline (admission → matchmaker → runner →
     moderation gate) on each tick.
     """
+    campaign_worker_id = worker_id
+    if campaign_worker_id is None:
+        from padrino.runner.scheduler import default_worker_id
+
+        campaign_worker_id = default_worker_id()
 
     async def _hook(now: datetime) -> None:
         await run_due_scheduled_gauntlets(
@@ -47,6 +54,15 @@ def build_scheduled_gauntlet_tick_hook(
             settings=settings,
             adapter_factory=adapter_factory,
         )
+        if settings.padrino_enable_campaign_tick:
+            from padrino.scheduler.campaign_tick import run_campaign_tick
+
+            await run_campaign_tick(
+                session_factory,
+                now=now,
+                settings=settings,
+                worker_id=campaign_worker_id,
+            )
         if settings.padrino_enable_behavioral_evaluation:
             from padrino.ratings.evaluator import run_pending_behavioral_evaluations
 

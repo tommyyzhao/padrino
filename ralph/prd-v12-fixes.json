@@ -17,7 +17,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: game_runner.py _resume_phase/_phase_started_without_resolution (~765-791), drive_game_loop phase re-run (~1250-1314), _persist_stored_event per-event commit (~292-298); benchmark_durability.py rehydrate (~33-49); events repo for delete-by-sequence-above. The US-256 crash hook fires via phase_snapshot with an `if not crashed` guard at tests/runner/test_benchmark_resume.py ~213 - it lands at the first PhaseStarted snapshot BEFORE the tick; the new test must inject the crash inside the per-seat submission persist loop after N submissions. Option (a) truncate-to-boundary is required (it restores byte-identical replay). NO migration. Also apply the same partial-phase truncation to the human-lane rehydration if it shares the path.",
-      "passes": true
+      "passes": false
     },
     {
       "id": "US-271",
@@ -33,7 +33,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: runner/scheduler.py _drive_gauntlet (~599-618: _record_campaign_cell_failures at ~609-614 BEFORE the budget_halts branch ~615-618); _run_child_games partitions failures vs budget_halts (~473-501); campaigns.py record_materialized_cell_failure (~383-392) and mark_materialized_cell_completed (~451-468). Default DEFAULT_CAMPAIGN_CELL_MAX_ATTEMPTS=1 (scheduler.py ~80, settings padrino_campaign_cell_max_attempts ~386). Existing budget-halt tests (~1280, ~1344) halt ALL games with no co-occurring failure; the mixed case is the untested window. NO migration.",
-      "passes": true
+      "passes": false
     },
     {
       "id": "US-272",
@@ -49,7 +49,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: scheduler.py _run_one_game slot claim (~317-331) + release-in-finally (~357-364) + _reap_stale_games (~763-775); db/repositories/games.py reset_stale_games (~154-176); economics/budget_reservations.py (binding_key write ~65/89, release_budget_slot keys on slot_id only), benchmark_admission.py (binding_key game:<uuid>), game_binding_key helper. Cap math: claim admits only when implicit_used + len(live) < cap (implicit_used = ceil(spent/reserve), summed with live - so orphaned live slots are pure additive waste). campaign_tick reserves+releases its probe slot in the same txn (binding_key campaign-tick:<id>) so it is not part of the leak. NO migration (binding_key column already exists).",
-      "passes": true
+      "passes": false
     },
     {
       "id": "US-273",
@@ -67,7 +67,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: gauntlets/completion.py finalize_gauntlet_if_done (~417-421 internal flush+commit); runner/scheduler.py _drive_gauntlet finalize vs _record_campaign_cell_completion (~626-668); db/repositories/campaigns.py mark_materialized_cell_completed (~451-468, only MATERIALIZED->COMPLETED transition), finalize_campaign_if_done (~471-490, done==total over CAMPAIGN_PAIRING_TERMINAL_STATUSES={COMPLETED,DEAD_LETTER}); campaign_tick.py (~68 claim/heartbeat, ~104 finalize). Depends on US-271 (both touch _drive_gauntlet's campaign-cell handling; build on its committed ordering). Option B (reconciliation in the tick) is the lower-blast-radius choice and self-heals existing stuck cells. NO migration.",
-      "passes": true
+      "passes": false
     },
     {
       "id": "US-274",
@@ -83,7 +83,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: gauntlets/publish_gate.py _cost_stamp_blockers (~362-396, the two top blocker arms at ~380-396), evaluate_publish_gate ready_to_publish = not blockers (~183); game_runner.py _pricing_stamp (~695-704) + _UNBILLED_RESULT_STATUSES (~683-685); db/repositories/llm_calls.record_call inserts every result (no status filter); tick.py exhausted->ActionTimedOut (~164-191); tests/runner/test_llm_call_cost_persistence.py (~345-379 asserts the unbilled None/None shape). The five publish-gate tests seed only billed cost_usd=0.01 rows - none seed the unbilled shape. NO migration.",
-      "passes": true
+      "passes": false
     },
     {
       "id": "US-275",
@@ -98,7 +98,7 @@
         "All backend gates pass (ruff/format/mypy/pytest -m 'not integration')."
       ],
       "notes": "Sites: tests/core/test_purity.py FORBIDDEN_TOP_LEVEL (~21-39, rglob-scans all core modules); tests/core/test_pairing.py purity guard (~171-181, denylist lacks os); tests/core/test_no_wallclock.py (~41-49, call-expression only). Verified: `import os` passes both today; `import asyncio` already fails test_purity.py. Test-only change, NO source change to core, NO migration.",
-      "passes": true
+      "passes": false
     }
   ]
 }

@@ -20,11 +20,17 @@ from padrino.db.repositories import api_keys as api_keys_repo
 from padrino.observability.metrics import (
     CONTENT_TYPE_LATEST,
     api_requests_total,
+    budget_campaign_spend_usd,
+    budget_fraction_of_cap,
+    budget_global_spend_usd,
+    cost_drift_fraction,
     games_total,
     invalid_action_total,
     llm_calls_total,
     llm_latency_seconds,
     phase_duration_seconds,
+    record_budget_burn,
+    record_cost_drift,
     record_game_completed,
     record_invalid_action,
     record_llm_call,
@@ -180,12 +186,70 @@ def test_scheduler_inflight_gauge_inc_dec() -> None:
     assert any(v == 1.0 for _, v in samples), samples
 
 
+def test_record_budget_burn_updates_global_campaign_and_fraction_gauges() -> None:
+    record_budget_burn(scope_type="global", scope_id="benchmark", spent_usd=80.0, cap_usd=100.0)
+    record_budget_burn(
+        scope_type="campaign",
+        scope_id="campaign-1",
+        spent_usd=45.0,
+        cap_usd=50.0,
+    )
+
+    payload = render_prometheus_text().decode("utf-8")
+    names = {f.name for f in text_string_to_metric_families(payload)}
+    assert {
+        "padrino_budget_global_spend_usd",
+        "padrino_budget_campaign_spend_usd",
+        "padrino_budget_fraction_of_cap",
+    }.issubset(names)
+
+    global_samples = _samples(payload, "padrino_budget_global_spend_usd")
+    assert any(value == 80.0 for _, value in global_samples), global_samples
+
+    campaign_samples = _samples(payload, "padrino_budget_campaign_spend_usd")
+    assert _sum_with_labels(campaign_samples, {"campaign_id": "campaign-1"}) == 45.0
+
+    fraction_samples = _samples(payload, "padrino_budget_fraction_of_cap")
+    assert (
+        _sum_with_labels(fraction_samples, {"scope_type": "global", "scope_id": "benchmark"}) == 0.8
+    )
+    assert (
+        _sum_with_labels(fraction_samples, {"scope_type": "campaign", "scope_id": "campaign-1"})
+        == 0.9
+    )
+
+
+def test_record_cost_drift_updates_drift_gauge() -> None:
+    record_cost_drift(
+        model_id="cerebras/zai-glm-4.7",
+        price_basis="FALLBACK_TABLE",
+        observed_cost_usd=0.15,
+        expected_cost_usd=0.10,
+    )
+
+    payload = render_prometheus_text().decode("utf-8")
+    names = {f.name for f in text_string_to_metric_families(payload)}
+    assert "padrino_cost_drift_fraction" in names
+    samples = _samples(payload, "padrino_cost_drift_fraction")
+    assert _sum_with_labels(
+        samples,
+        {"model": "cerebras/zai-glm-4.7", "price_basis": "FALLBACK_TABLE"},
+    ) == pytest.approx(0.5)
+
+
 def test_reset_clears_every_collector() -> None:
     record_llm_call(model_id="x/y", status="ok", latency_ms=10)
     record_phase_duration(ruleset="mini7_v1", phase_kind="DAY_VOTE", duration_s=0.5)
     record_game_completed(outcome="TOWN", ruleset="mini7_v1")
     record_invalid_action(reason="TIMEOUT")
     scheduler_inflight_gauntlets.inc()
+    record_budget_burn(scope_type="campaign", scope_id="campaign-1", spent_usd=1.0, cap_usd=2.0)
+    record_cost_drift(
+        model_id="x/y",
+        price_basis="FALLBACK_TABLE",
+        observed_cost_usd=2.0,
+        expected_cost_usd=1.0,
+    )
 
     reset_metrics()
 
@@ -194,6 +258,10 @@ def test_reset_clears_every_collector() -> None:
     assert not _samples(payload, "padrino_phase_duration_seconds")
     assert not _samples(payload, "padrino_games")
     assert not _samples(payload, "padrino_invalid_action")
+    assert not _samples(payload, "padrino_budget_campaign_spend_usd")
+    assert not _samples(payload, "padrino_budget_fraction_of_cap")
+    assert not _samples(payload, "padrino_cost_drift_fraction")
+    assert all(value == 0.0 for _, value in _samples(payload, "padrino_budget_global_spend_usd"))
     gauge_samples = _samples(payload, "padrino_scheduler_inflight_gauntlets")
     assert all(v == 0.0 for _, v in gauge_samples), gauge_samples
 
@@ -305,6 +373,10 @@ def test_metrics_module_exposes_canonical_instruments() -> None:
     games_total.labels(outcome="DRAW", ruleset="r").inc()
     invalid_action_total.labels(reason="REASON").inc()
     api_requests_total.labels(route="/x", method="GET", status="200").inc()
+    budget_global_spend_usd.set(1.0)
+    budget_campaign_spend_usd.labels(campaign_id="campaign-1").set(1.0)
+    budget_fraction_of_cap.labels(scope_type="campaign", scope_id="campaign-1").set(0.5)
+    cost_drift_fraction.labels(model="model", price_basis="basis").set(0.1)
     payload = render_prometheus_text().decode("utf-8")
     names = {f.name for f in text_string_to_metric_families(payload)}
     assert {
@@ -315,4 +387,8 @@ def test_metrics_module_exposes_canonical_instruments() -> None:
         "padrino_invalid_action",
         "padrino_api_requests",
         "padrino_scheduler_inflight_gauntlets",
+        "padrino_budget_global_spend_usd",
+        "padrino_budget_campaign_spend_usd",
+        "padrino_budget_fraction_of_cap",
+        "padrino_cost_drift_fraction",
     }.issubset(names)

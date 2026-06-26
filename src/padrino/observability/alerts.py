@@ -23,6 +23,10 @@ The fire/resolve seams are wired at the existing observability points:
   * ``moderation.guard.unavailable``— guard is ``None`` or erroring while
     continuous matchmaking is enabled.
   * ``admission.denied.streak``     — N consecutive admission denials.
+  * ``budget.burn.threshold``       — benchmark spend reaches the configured
+    fraction of a global/campaign cap.
+  * ``cost.drift.threshold``        — observed per-call cost diverges beyond
+    the configured threshold from the stamped expectation.
 
 This module lives in the impure observability layer: it performs network I/O
 and reads wall-clock-derived inputs supplied by its callers. It is never
@@ -31,12 +35,13 @@ imported by pure core.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 import structlog
 
 from padrino.observability.events import EVENT_ALERT_FIRED
+from padrino.observability.metrics import cost_drift_ratio
 
 _logger = structlog.get_logger("padrino.observability.alerts")
 
@@ -46,6 +51,8 @@ ALERT_SPEND_CAP_REACHED: str = "spend.cap.reached"
 ALERT_SCHEDULER_HEARTBEAT_STALE: str = "scheduler.heartbeat.stale"
 ALERT_MODERATION_GUARD_UNAVAILABLE: str = "moderation.guard.unavailable"
 ALERT_ADMISSION_DENIED_STREAK: str = "admission.denied.streak"
+ALERT_BUDGET_BURN: str = "budget.burn.threshold"
+ALERT_COST_DRIFT: str = "cost.drift.threshold"
 
 #: All known alert keys (used by tests and the Prometheus rules cross-check).
 ALERT_KEYS: tuple[str, ...] = (
@@ -53,7 +60,21 @@ ALERT_KEYS: tuple[str, ...] = (
     ALERT_SCHEDULER_HEARTBEAT_STALE,
     ALERT_MODERATION_GUARD_UNAVAILABLE,
     ALERT_ADMISSION_DENIED_STREAK,
+    ALERT_BUDGET_BURN,
+    ALERT_COST_DRIFT,
 )
+
+
+class BudgetBurnAlertSettings(Protocol):
+    """Settings surface required for budget-burn alert evaluation."""
+
+    padrino_budget_burn_alert_fraction_threshold: float
+
+
+class CostDriftAlertSettings(Protocol):
+    """Settings surface required for cost-drift alert evaluation."""
+
+    padrino_cost_drift_alert_fraction_threshold: float
 
 
 class AlertNotifier:
@@ -165,12 +186,77 @@ def build_alert_notifier(settings: Any) -> AlertNotifier:
     return notifier
 
 
+def budget_fraction_of_cap(*, spent_usd: float, cap_usd: float) -> float:
+    """Return spend as a fraction of cap, treating zero caps as already consumed."""
+    if cap_usd <= 0:
+        return 1.0 if spent_usd >= cap_usd else 0.0
+    return max(0.0, spent_usd / cap_usd)
+
+
+async def evaluate_budget_burn_alert(
+    notifier: AlertNotifier,
+    settings: BudgetBurnAlertSettings,
+    *,
+    scope_type: str,
+    scope_id: str,
+    spent_usd: float,
+    cap_usd: float,
+) -> bool:
+    """Fire or resolve the budget-burn alert for one spend/cap observation."""
+    threshold = settings.padrino_budget_burn_alert_fraction_threshold
+    fraction = budget_fraction_of_cap(spent_usd=spent_usd, cap_usd=cap_usd)
+    if fraction >= threshold:
+        return await notifier.fire(
+            ALERT_BUDGET_BURN,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            spent_usd=round(spent_usd, 6),
+            cap_usd=round(cap_usd, 6),
+            fraction_of_cap=round(fraction, 6),
+            threshold=round(threshold, 6),
+        )
+    return notifier.resolve(ALERT_BUDGET_BURN)
+
+
+async def evaluate_cost_drift_alert(
+    notifier: AlertNotifier,
+    settings: CostDriftAlertSettings,
+    *,
+    observed_cost_usd: float,
+    expected_cost_usd: float,
+    model_id: str | None = None,
+    price_basis: str | None = None,
+) -> bool:
+    """Fire or resolve the cost-drift alert for one observed/expected call cost."""
+    threshold = settings.padrino_cost_drift_alert_fraction_threshold
+    drift = cost_drift_ratio(
+        observed_cost_usd=observed_cost_usd,
+        expected_cost_usd=expected_cost_usd,
+    )
+    if drift > threshold:
+        return await notifier.fire(
+            ALERT_COST_DRIFT,
+            model_id=model_id,
+            price_basis=price_basis,
+            observed_cost_usd=round(observed_cost_usd, 6),
+            expected_cost_usd=round(expected_cost_usd, 6),
+            drift_fraction=round(drift, 6),
+            threshold=round(threshold, 6),
+        )
+    return notifier.resolve(ALERT_COST_DRIFT)
+
+
 __all__ = [
     "ALERT_ADMISSION_DENIED_STREAK",
+    "ALERT_BUDGET_BURN",
+    "ALERT_COST_DRIFT",
     "ALERT_KEYS",
     "ALERT_MODERATION_GUARD_UNAVAILABLE",
     "ALERT_SCHEDULER_HEARTBEAT_STALE",
     "ALERT_SPEND_CAP_REACHED",
     "AlertNotifier",
+    "budget_fraction_of_cap",
     "build_alert_notifier",
+    "evaluate_budget_burn_alert",
+    "evaluate_cost_drift_alert",
 ]

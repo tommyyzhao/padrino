@@ -48,7 +48,7 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     prompt_versions as prompt_versions_repo,
 )
-from padrino.gauntlets.completion import diagnostics_for_games
+from padrino.gauntlets.completion import diagnostics_for_games, gauntlet_child_progress
 from padrino.gauntlets.evaluation import GauntletReport, evaluate_gauntlet
 from padrino.gauntlets.scheduler import (
     MAX_CLONE_COUNT,
@@ -99,6 +99,11 @@ class DiagnosticsSummary(BaseModel):
     average_public_message_chars: float
 
 
+class ProgressSummary(BaseModel):
+    done: int
+    total: int
+
+
 class GauntletDetailResponse(BaseModel):
     id: uuid.UUID
     league_id: uuid.UUID
@@ -111,6 +116,7 @@ class GauntletDetailResponse(BaseModel):
     created_at: datetime
     completed_at: datetime | None
     games: list[GameSummary]
+    progress: ProgressSummary
     diagnostics: DiagnosticsSummary
 
 
@@ -304,6 +310,7 @@ async def get_gauntlet(
         terminal_ids = list((await session.execute(terminal_stmt)).scalars().all())
     else:
         terminal_ids = []
+    progress = await gauntlet_child_progress(session, gauntlet_id)
     diagnostics = await diagnostics_for_games(session, terminal_ids)
     return GauntletDetailResponse(
         id=obj.id,
@@ -325,6 +332,10 @@ async def get_gauntlet(
             )
             for g in games
         ],
+        progress=ProgressSummary(
+            done=progress.done if progress is not None else 0,
+            total=progress.total if progress is not None else 0,
+        ),
         diagnostics=DiagnosticsSummary(
             games_completed=diagnostics.games_completed,
             timeout_rate=diagnostics.timeout_rate,

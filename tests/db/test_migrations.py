@@ -39,6 +39,9 @@ EXPECTED_TABLES = {
     "rate_limit_buckets",
     "scheduled_gauntlets",
     "behavioral_evaluations",
+    "campaigns",
+    "campaign_pairings",
+    "budget_reservation_slots",
 }
 
 

@@ -3,6 +3,200 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Publish-gate LLM cost stamps (US-274): `cost_usd is None` together with
+  `price_basis is None` is the canonical legitimately-unbilled turn shape
+  persisted by `game_runner._pricing_stamp` for provider/exhaustion failures
+  and empty no-token responses. `_cost_stamp_blockers` should skip exactly that
+  symmetric None/None shape, while still blocking asymmetric rows where either
+  the billed cost or the price basis is missing and preserving existing
+  `price_basis` validation for billed calls.
+- Campaign orphan-cell healing (US-273): keep the recovery pass in
+  `scheduler.campaign_tick`, not in pure core and not by changing
+  `finalize_gauntlet_if_done`'s commit contract. Before
+  `finalize_campaign_if_done`, call
+  `campaigns.reconcile_completed_materialized_cells` to flip only
+  `MATERIALIZED` cells whose linked `Gauntlet.status == "COMPLETED"` to
+  `COMPLETED`. The pass is idempotent and self-heals the crash window between
+  gauntlet completion and campaign-cell completion without creating duplicate
+  gauntlets.
+- Orphaned benchmark budget slots (US-272): treat
+  `BudgetReservationSlot.binding_key` as the crash-reclaim handle for a game.
+  `claim_budget_slot` releases any prior live row with the same non-None
+  binding key in the same `scope_key` before taking a fresh slot, so
+  reaped/retried games cannot stack reservations. The scheduler game reaper
+  releases all scopes for `game_binding_key(game_id)` in the same transaction
+  as `games_repo.reset_stale_games`, freeing both `global:benchmark` and
+  campaign-owned `campaign:<id>` slots after a worker crash.
+- Campaign budget pauses (US-271): in `runner.scheduler._drive_gauntlet`,
+  treat any `child_result.budget_halts` as a gauntlet-level pause and return
+  after `gauntlets_repo.mark_pending` before campaign-cell failure accounting.
+  Mixed budget halt + sibling failure must not call
+  `record_materialized_cell_failure`, increment `attempt_count`, dead-letter,
+  or clear the materialized cell's `gauntlet_id`; the re-drive should finish
+  the same gauntlet/cell.
+- Benchmark partial-phase resume (US-270): keep crash repair in
+  `runner.benchmark_durability` over persisted `game_events`, not in pure core.
+  Rehydration first verifies the full loaded hash chain with
+  `replay_state_from_rows`; only then, for non-terminal logs whose latest
+  `PhaseStarted` has durable tail rows but no matching `PhaseResolved`, delete
+  rows after that `PhaseStarted` and rebuild the returned `GameResume` from the
+  truncated prefix. Boundary crashes remain a no-op; resolved phases and
+  tampered rows are never silently truncated.
+- Campaign publish gate (US-269): keep publication readiness in
+  `gauntlets.publish_gate` as a typed read-side checklist. Build on
+  `gauntlets.campaign_report` for documented holes, but re-check canonical
+  publishability from `Rating` rows joined to the canonical
+  `CANONICAL_TEAM` `RatingContext` and from campaign-completed games only.
+  Dead-letter cells are `documented_holes`, not blockers; blockers cover hash
+  replay, identity/rating side-channel keys in PUBLIC payloads, excluded
+  rating events, per-model coverage, sigma/rank stability, and immutable
+  `LlmCall` cost stamps.
+- Campaign reporting (US-268): keep the operator/publication data source in
+  `gauntlets.campaign_report` as frozen Pydantic models. Sum campaign spend
+  only from persisted `LlmCall.cost_usd` rows joined through
+  `Gauntlet.campaign_id`; do not reprice with current settings. Progress comes
+  from `campaign_pairings` status counts, documented holes reuse
+  `campaigns.list_dead_letter_cells`, per-model convergence reuses
+  `ratings.model_rollup`, and rank stability is a read-side rollback over the
+  last `Campaign.rank_stability_k` `RatingEvent` updates.
+- Budget/cost observability (US-267): keep Prometheus instruments as
+  module-level singletons in `observability.metrics` on the shared `REGISTRY`,
+  with explicit `record_*` helpers. Budget admission is the right boundary to
+  record global/campaign spend and cap fraction because it already has the
+  authoritative spend/cap values. Alert threshold logic stays in
+  `observability.alerts` as injected-value helpers that call
+  `AlertNotifier.fire(key, **details)` on breach and `resolve(key)` on recovery.
+- Immutable LLM-call pricing (US-266): derive `game_runner._pricing_stamp` at
+  the same boundary as `LlmCall.cost_usd`. Provider response costs stamp
+  `price_basis=PROVIDER_RESPONSE_COST`; fallback-priced calls stamp
+  `price_basis=FALLBACK_TABLE` plus
+  `fallback_price_table_version(settings)` (sha256 of canonical JSON for the
+  configured fallback table). `LlmCall.created_at` remains the call insert time
+  and therefore the priced-at instant; reports should group historical fallback
+  spend by the stored `price_table_version`, not by current settings.
+- Admission active-game predicates (US-265): treat active as "not in
+  `db.game_status.GAME_TERMINAL_STATUSES`" so `FAILED` games do not consume
+  concurrency. Keep completed-only export, rating, and public-detail guards
+  explicit about `COMPLETED`; those are not active-cap predicates.
+- Benchmark budget admission (US-264): keep the authoritative benchmark spend
+  gate in `economics.benchmark_admission`. At game grain, lease the game, claim
+  a `global:benchmark` slot and, for campaign-owned games, a `campaign:<id>`
+  slot, then release those live slots when the game executor exits so charged
+  `LlmCall` spend becomes the lasting budget usage. A denial is a retryable
+  pause, not a child-game failure: reset the game to `CREATED`, return the
+  gauntlet to `PENDING`, and skip that gauntlet/campaign only long enough for
+  other budget-open work to proceed.
+- Budget reservation slots (US-263): keep generic benchmark/campaign budget
+  enforcement in `economics.budget_reservations` over
+  `budget_reservation_slots`. Encode scope and any time/owner partition in the
+  opaque `scope_key`; divide the ceiling into `floor(budget / reserve)` slots;
+  round already-charged spend up into implicit low slots; claim the next unused
+  physical `slot_index` inside `session.begin_nested()` and retry
+  `IntegrityError`. A released row remains physical under the unique
+  `(scope_key, slot_index)` key, but no longer counts as live capacity.
+- Campaign TickHook composition (US-262): keep campaign orchestration in
+  `scheduler.campaign_tick.run_campaign_tick` and wire it through
+  `scheduler.bootstrap.build_scheduled_gauntlet_tick_hook` behind
+  `padrino_enable_campaign_tick`, so it composes with scheduled-gauntlet,
+  matchmaking, evaluator, and retention jobs. The hook should use only the
+  scheduler-provided `now`: first `reset_stale_campaigns`, then
+  `claim_or_heartbeat_campaign` for one worker-held campaign, then
+  `materialize_next_batch` with the settings batch size and one mirror pair per
+  cell. The ordinary gauntlet scheduler remains the only child-game runner.
+- Gauntlet/campaign completion (US-261): use
+  `gauntlets.completion.finalize_gauntlet_if_done` as the single completion
+  gate. A gauntlet completes only after every child `Game.status` is terminal
+  (`COMPLETED` or `FAILED`) and, when all children succeeded, persisted
+  `ModelSeatCounts` are within the settings-driven
+  `padrino_gauntlet_balance_tolerance_seats`. Any failed child exempts the
+  balance gate, and diagnostics/provisional counts are computed over
+  `COMPLETED` child games only. Campaign cells use explicit terminal ledger
+  statuses (`COMPLETED` / `DEAD_LETTER`) and `finalize_campaign_if_done`
+  auto-completes the campaign once `campaign_progress.done == total`.
+- Campaign cell dead-lettering (US-260): keep failed campaign-owned gauntlets
+  mapped through `campaign_pairings.gauntlet_id` into
+  `record_materialized_cell_failure`. Retryable exhausted cells increment
+  `attempt_count` and requeue by clearing `gauntlet_id` until
+  `padrino_campaign_cell_max_attempts`; poison failures or exhausted cells
+  become `DEAD_LETTER`. The schema has only `last_error`, so persist
+  `"kind: message"` and expose parsed failure details via
+  `list_dead_letter_cells` for US-268 reports.
+- Campaign ledger materialization (US-259): resolve generator model ids to a
+  single canonical active `AgentBuild` per `ModelConfig.model_name` /
+  `litellm_model_id` at campaign creation time, store UUID strings in
+  `campaign_pairings.roster_json`, and keep child gauntlet creation behind a
+  bounded `materialize_next_batch` that locks only PENDING cells, passes
+  `derive_campaign_cell_seed(campaign_seed, cell_index)` to
+  `create_paired_gauntlet`, then flips the cell to MATERIALIZED with
+  `gauntlet_id`. Resumes should read cell statuses from the ledger, not infer
+  from child rows.
+- Campaign schema migrations (US-258): when adding campaign-owned gauntlet
+  metadata, create the referenced `campaigns` table and cheap
+  `campaign_pairings` ledger before `batch_alter_table("gauntlets")` adds the
+  nullable `campaign_id` FK/index. On downgrade, drop the child ledger table,
+  then drop the gauntlet FK/index/column before dropping `campaigns`. The newest
+  revision owns the single-head assertion; older revision tests should assert
+  only their down-chain position.
+- Campaign pairing matrices (US-257): keep the generator pure under
+  `core/scheduling/pairing.py`. Generate deterministic full-field cyclic rounds
+  for coverage/opponent diversity, assign each cell's group to seats by
+  `assign_roles(derive_campaign_cell_seed(...), ruleset)` exposure deficits,
+  then validate the returned matrix with `analyze_pairing_matrix`. MIRROR cells
+  emit one roster; pair leg 1 reverses that roster while both legs share the
+  per-cell campaign seed.
+- Benchmark resume byte-stability (US-256): prove replay determinism with the
+  same `game_id` and `game_seed` on both paths. Run an in-memory reference,
+  crash a persisted run after a durable `PhaseStarted` via `drive_game_loop`'s
+  `phase_snapshot`, rehydrate with `rehydrate_benchmark_game`, then resume via
+  `run_game` and compare the complete event-hash sequence, final hash, and
+  chain digest. Also assert exactly one `GameCreated` and contiguous persisted
+  sequences so the test catches sequence-0 restarts.
+- Scheduled gauntlet seeds (US-255): derive recurring scheduled gauntlet seeds
+  from stable occurrence data only:
+  `derive_scheduled_gauntlet_seed(schedule_id, scheduled_fire_at=row.next_run_at)`
+  before `mark_run` advances the schedule. Normalize SQLite-naive datetimes to
+  UTC for cross-dialect stability; legacy due rows with `next_run_at is None`
+  use the stable `"initial"` occurrence key. The injected `now` remains only
+  the due/reschedule clock, never seed material.
+- Scheduler failure classification (US-254): keep retry/dead-letter policy at
+  the scheduler retry seam via `classify_game_exception`. Replay/hash and
+  validation/contract failures are poison and immediately `mark_failed` with a
+  stable `last_error_kind`; provider/transport timeouts, retry exhaustion, and
+  legacy unknown runtime crashes stay retryable. Backoff goes through the
+  injected scheduler `Sleeper`, and `games_repo.mark_failed` owns
+  `last_error` / `last_error_kind` stamping.
+- Lease-fenced benchmark finalization (US-253): scheduler-created
+  `GamePersistence` should carry `worker_id`, injected `lease_clock`, and a
+  per-game `db_write_lock`. `_persist_terminated_event` re-reads the `Game`
+  row inside the terminal transaction after the existing COMPLETED skip and
+  aborts before `GameTerminated` / ratings if the lease is missing, expired, or
+  reassigned. Keep SQLite scheduler tests from polling the single in-memory
+  connection while a full persisted game is writing events.
+- Game-grain leases (US-252): keep game-claim/reaper logic in
+  `db/repositories/games.py` with injected `now`/TTL/worker id. PostgreSQL
+  claim paths should add `with_for_update(skip_locked=True)` only for that
+  dialect; SQLite remains the single-writer path. `reset_stale_games` clears
+  `leased_by`/`lease_expires_at`, and `claim_oldest_pending_game` must treat
+  cleared RUNNING rows as reclaimable so resumed benchmark games keep their
+  event-log state instead of being reset to CREATED.
+- Additive game-table migrations (US-251): when a new Alembic revision adds
+  nullable `games` columns plus an index, keep the migration and `Game` model
+  byte-aligned with a dedicated per-revision test. Upgrade the prior head,
+  assert the added column/index delta, seed an existing row to prove NULL
+  backfill, downgrade to the prior head, and assert model column/index metadata
+  matches the migration.
+- Benchmark resume threading (US-250): keep benchmark scheduler resume state on
+  `GamePersistence.resume`. `_run_with_retry` should rehydrate the current
+  `game_events` tail before each child-game attempt, `_run_one_game` should
+  pass that `GameResume` through persistence, and `_default_game_executor` /
+  `run_game` should forward it to `drive_game_loop`. This preserves injected
+  `GameExecutor` compatibility while letting fakes inspect `persistence.resume`.
+- Benchmark rehydration (US-249): keep benchmark resume as pure replay over
+  `game_events` rows via `events_repo.list_events` +
+  `runner.human_durability.replay_state_from_rows`; then derive the resume
+  phase with `game_runner._resume_phase` / `format_phase_id`. Verify non-empty
+  logs before deciding to skip `GameCreated`-only tails so tampered rows still
+  raise `ReplayHashMismatchError` instead of being silently ignored.
 - Model detail ruleset fallback (US-248): keep `/models/[id]` ruleset
   discovery in its own failure boundary. Use `publicRulesets()` +
   `canonicalTeamRulesets()` when available, but fall back to the shipped
@@ -405,6 +599,65 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 - Disconnect grace + silent AI takeover (US-150): a dropped human gets a short reconnect grace window; on expiry a curated AI silently takes the seat so the game continues, invisibly in anonymous mode. TWO modules, no schema change, no new deps. (1) PURE `core/disconnect.py` (data-in/data-out with an INJECTED `now` — never reads a clock): `SeatPresence{public_player_id, connected, disconnected_at}` + `is_within_grace(presence, *, now, grace_seconds)` (connected -> always within; disconnected within window -> reconnectable; a disconnected seat with NO drop instant treated as just-dropped) + `seats_past_grace(presences, *, now, grace_seconds) -> [seat_id]` (the disconnected seats whose window expired, in input order — a reconnect BEFORE expiry flips `connected=True` so the seat is never listed: "reconnect returns the seat") + `project_presence_for_viewer(presences, *, viewer_seat_id, identity_mode) -> [{seat_id, connected}]` (the IDENTITY-BLIND presence frame: in ANONYMOUS mode — the fail-closed default via `observation_privacy.is_anonymous`, so None coerces anonymous — it carries ONLY the viewer's OWN seat; other seats' presence/reconnecting state is NEVER exposed because an AI never disconnects, so any per-seat presence signal would out a human; TRANSPARENT may show all; each entry is `{seat_id, connected}` ONLY — never a drop timestamp or human/AI marker). `core/disconnect.py` imports `datetime` for pure grace ARITHMETIC (timedelta only) — add it to `tests/core/test_purity.py::ALLOWED_FORBIDDEN_IMPORTS` ("disconnect.py": frozenset({"datetime"})) EXACTLY like `scheduling/__init__.py`; the `test_allowed_datetime_modules_make_no_wallclock_calls` guard then enforces no `.now()/.utcnow()/.today()` (the module uses `value.replace(tzinfo=UTC)` for the SQLite-naive coercion — `replace` is not a wall-clock attr). (2) IMPURE `runner/disconnect_takeover.py::take_over_seat(*, mux, event_log, state, seat_id, replacement_adapter, replacement_agent_build_ref, reason="disconnect_grace_expired") -> TakeoverResult{event, replaced_adapter}`: REUSES US-139's `SeatMultiplexAdapter.swap_seat(seat, adapter)` (rebinds the dispatch table between ticks, returns the replaced human adapter, KeyError on an unknown seat — a takeover replaces an existing occupant) + US-122's `SeatTakenOver` event appended to the hash-chained `EventLog` with `day`/`phase` read from `state.current_phase` (pure logical values via `core.observations.format_phase_id` — NO wall clock/random in the payload). The takeover is REVEAL-ONLY: `SeatTakenOver` is SYSTEM-visibility so it NEVER lands on a PUBLIC/live frame (no mid-game leak); it surfaces only at the endgame reveal where `reducer.compute_seat_provenance(typed_events)` derives HUMAN_THEN_AI for the seat (requires the seat marked seat_kind=HUMAN in RolesAssigned, i.e. the US-149 launch handoff). New setting `padrino_human_reconnect_grace_seconds: float = 90.0` (wall-clock value consumed only in the impure runner; the pure decision reads it as plain data). Test `tests/runner/test_disconnect_takeover.py` (12): pure grace decisions (connected always within, recent-within/old-past, seats_past_grace lists only expired, reconnect-returns-seat, naive-timestamp coercion); identity-blind projection (anonymous shows only viewer's own seat, None fails closed, other-seat reconnecting never exposed, transparent shows all); runner orchestration reuses the US-139 `_TakeoverMux` + `_FakeClock` + `make_town_win_script`: a HUMAN seat is taken over mid-DAY_1_VOTE (swap on the real mux, `seats_past_grace` decides), the game still reaches TOWN, no PUBLIC frame carries SeatTakenOver, the committed log (incl. the appended SeatTakenOver) replays bit-for-bit, and `take_over_seat` on a hand-built HUMAN-marked RolesAssigned+state yields a SYSTEM-visibility pure-data event + HUMAN_THEN_AI provenance + KeyError on an unknown seat.
 
 ---
+
+## 2026-06-24T20:26 PDT - US-266
+- Added Alembic `0055` with nullable `llm_calls.price_basis` and
+  `llm_calls.price_table_version`, chained after `0054`; older shipped
+  migrations were not edited. The newest migration test owns the single-head
+  assertion and downgrade verifies exactly those columns are dropped.
+- Stamped pricing metadata in the runner persistence seam: provider
+  `response_cost` rows use `PROVIDER_RESPONSE_COST`, fallback-token rows use
+  `FALLBACK_TABLE` plus a sha256 over the canonical JSON fallback price table.
+  `created_at` is reused as priced-at because `record_call` inserts the row at
+  call-persistence time and no repricing job exists.
+- Added regression coverage for provider/fallback basis stamps, fallback-rate
+  immutability across settings changes, and SQL grouping of spend by stored
+  `price_table_version` for future campaign reporting.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/llm_calls.py`,
+  `src/padrino/db/migrations/versions/0055_llm_call_pricing_basis.py`,
+  `src/padrino/economics/human_cost_governance.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/db/test_migration_0054_budget_reservations.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/runner/test_llm_call_cost_persistence.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED collection failure for missing pricing-basis
+  helper/constants; focused GREEN `uv run pytest
+  tests/db/test_migration_0055_llm_call_pricing_basis.py
+  tests/db/test_migration_0054_budget_reservations.py::test_0054_is_linear_after_0053
+  tests/runner/test_llm_call_cost_persistence.py -q` -> 15 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src
+  tests`; `uv run pytest -m "not integration"` -> 2652 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-24T19:49 PDT - US-263
+- Added Alembic `0054` and the `BudgetReservationSlot` ORM model for generic
+  finite budget reservations with nullable `binding_key` / `released_at` and a
+  unique `(scope_key, slot_index)` constraint.
+- Added `economics.budget_reservations.claim_budget_slot` /
+  `release_budget_slot`, including concurrent unique-constraint retry,
+  fail-closed exhaustion, release/reuse, and independent-scope coverage.
+- Added dedicated 0054 migration/model tests and updated migration smoke table
+  inventories; adjusted the older 0053 migration test to target revision `0053`
+  instead of the moving head.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0054_budget_reservation_slots.py`,
+  `src/padrino/economics/budget_reservations.py`,
+  `tests/db/test_migration_0053_campaigns.py`,
+  `tests/db/test_migration_0054_budget_reservations.py`,
+  `tests/db/test_migrations.py`,
+  `tests/economics/test_budget_reservations.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED collection failures for missing model/module;
+  focused GREEN `uv run pytest tests/economics/test_budget_reservations.py
+  tests/db/test_migration_0054_budget_reservations.py -q`; affected DB tests
+  `uv run pytest tests/db/test_migration_0053_campaigns.py
+  tests/db/test_migration_0054_budget_reservations.py -q`; `uv run ruff check
+  .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest
+  -m "not integration"` -> 2636 passed / 41 skipped / 10 deselected.
 
 ## 2026-06-21T22:31 PDT - US-222
 - Moved non-canonical PLACEMENT rating writes out of the terminal
@@ -3151,3 +3404,700 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed / 48 skipped / 10 deselected.
 - Learning: pass grep args to `web/dashboard/tests/e2e/run.mjs` without an
   extra literal `--`; otherwise Playwright treats `-g` as a test file pattern.
+
+## 2026-06-24T17:08 PDT - US-249
+- Added `runner.benchmark_durability.rehydrate_benchmark_game`, which rebuilds
+  `GameResume` for AI-only benchmark games from persisted `game_events` using
+  the shared `replay_state_from_rows` helper and runner resume-phase logic.
+- Added regression coverage for no-event, `GameCreated`-only, terminal,
+  populated-resume, and tampered-hash-chain cases.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/benchmark_durability.py`,
+  `tests/runner/test_benchmark_durability.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_benchmark_durability.py` failed first on the
+  missing `padrino.runner.benchmark_durability` module; focused GREEN same
+  command -> 5 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2563 passed / 41 skipped /
+  10 deselected. A prior exact pytest run hit a transient shared SQLite schema
+  cascade (`no such table: lobby_seats`); an immediate diagnostic full run and
+  the repeated exact gate both passed.
+
+## 2026-06-24T17:18 PDT - US-250
+- Threaded `GameResume` through the benchmark `run_game` wrapper into
+  `drive_game_loop`, including a fallback from `GamePersistence.resume`.
+- Updated the scheduler retry seam to rehydrate benchmark games from
+  `game_events` before each child-game attempt and store the result on
+  `GamePersistence.resume`; the default executor forwards it into `run_game`.
+- Added regression coverage for run-game resume continuation without duplicate
+  setup rows, scheduler fresh-attempt `resume=None`, retry rehydration after a
+  persisted crash prefix, default-executor resume forwarding, and the completed
+  terminal-persist skip avoiding extra rating writes.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/game_runner.py`,
+  `src/padrino/runner/scheduler.py`,
+  `tests/runner/test_benchmark_resume.py`,
+  `tests/runner/test_scheduler.py`,
+  `tests/runner/test_game_persistence_terminal.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_benchmark_resume.py tests/runner/test_scheduler.py::test_scheduler_fresh_game_attempt_has_no_resume tests/runner/test_scheduler.py::test_default_game_executor_threads_persistence_resume tests/runner/test_scheduler.py::test_scheduler_retry_rehydrates_started_benchmark_game tests/runner/test_game_persistence_terminal.py::test_completed_game_terminal_persist_skip_writes_no_extra_ratings`
+  failed first on the missing `run_game(..., resume=...)`, missing default
+  executor forwarding, and missing retry rehydration; focused GREEN same
+  command -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_scheduler.py tests/runner/test_benchmark_resume.py tests/runner/test_game_persistence_terminal.py`
+  -> 20 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2569 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-24T17:38 PDT - US-251
+- Added Alembic revision `0052_game_leases` after `0051`, using
+  `batch_alter_table("games")` to add nullable `leased_by`,
+  `lease_expires_at`, `attempt_count`, `last_error`, and `last_error_kind`,
+  plus `ix_games_status_lease_expires_at`.
+- Added matching nullable `Game` ORM columns and the same `(status,
+  lease_expires_at)` index declaration.
+- Added a dedicated migration/model agreement test that upgrades from `0051`,
+  seeds an existing game row, upgrades to head, asserts the exact added columns,
+  NULL defaults, index columns, model metadata, and downgrade cleanup.
+- Updated the older `0051` migration test to stop claiming `0051` is the head;
+  `0052` now owns the single-head assertion.
+- Stabilized the scheduler retry-resume regression by running its injected
+  resumed game unranked; that test verifies resume/event-chain behavior, while
+  rating writes are covered by separate scheduler and rating integration tests.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0052_game_leases.py`,
+  `tests/db/test_migration_0051_lobby_integrity_ack.py`,
+  `tests/db/test_migration_0052_game_leases.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0052_game_leases.py` failed first on
+  missing `0052` head/columns/model metadata; focused GREEN same command -> 3
+  passed. Adjacent GREEN
+  `uv run pytest tests/db/test_migration_0050_hot_path_indexes.py tests/db/test_migration_0051_lobby_integrity_ack.py tests/db/test_migration_0052_game_leases.py tests/db/test_migrations.py`
+  -> 12 passed. Order-flake reproduction GREEN
+  `uv run pytest tests/release/test_audit_script.py tests/release/test_metadata.py tests/runner/test_scheduler.py::test_scheduler_retry_rehydrates_started_benchmark_game -q`
+  -> 223 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2573 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-24T17:54 PDT - US-252
+- Added `games_repo.claim_oldest_pending_game`, which claims CREATED games or
+  reclaimable RUNNING games, stamps `leased_by` / `lease_expires_at`, bumps
+  `attempt_count`, and uses PostgreSQL-only `FOR UPDATE SKIP LOCKED`.
+- Added `games_repo.reset_stale_games`, clearing expired RUNNING game leases
+  with an injected clock, and wired an opt-in continuous scheduler reaper via
+  `padrino_enable_game_lease_reaper` /
+  `padrino_game_lease_reaper_interval_seconds`.
+- Added SQLite and PostgreSQL claim coverage plus a scheduler-loop regression
+  proving a lease that is fresh at startup is reaped only after the injected
+  clock advances during the loop.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/games.py`,
+  `src/padrino/runner/scheduler.py`, `src/padrino/settings.py`,
+  `tests/db/test_game_claims.py`,
+  `tests/db/test_scheduler_claim_skip_locked.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_game_claims.py tests/runner/test_scheduler.py::test_scheduler_options_are_settings_driven tests/runner/test_scheduler.py::test_continuous_game_reaper_runs_during_loop_with_injected_clock -q`
+  failed first on the missing game claim/reset helpers and scheduler options;
+  focused GREEN same command -> 5 passed. PostgreSQL GREEN
+  `uv run pytest tests/db/test_scheduler_claim_skip_locked.py::test_two_concurrent_game_claimers_get_distinct_rows tests/db/test_scheduler_claim_skip_locked.py::test_two_concurrent_claimers_get_distinct_rows -q`
+  -> 2 passed. Adjacent GREEN
+  `uv run pytest tests/db/test_game_claims.py tests/db/test_scheduler_claim_skip_locked.py tests/runner/test_scheduler.py -q`
+  -> 23 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2579 passed / 41 skipped /
+  10 deselected. An earlier full pytest attempt was interrupted after
+  2450 passed while quiet at a human-lane takeover test; the isolated test and
+  immediate repeated exact full gate both passed.
+
+## 2026-06-24T18:11 PDT - US-253
+- Threaded scheduler `worker_id` and an injected lease clock through
+  `_drive_gauntlet` / `_run_child_games` / `_run_one_game` into
+  `GamePersistence`, with a configurable per-game lease TTL.
+- Added `games_repo.lease_game_for_worker` so the scheduler claims a specific
+  child game for the current worker immediately before execution.
+- Added the finalize fence inside `_persist_terminated_event`'s terminal
+  transaction: after the existing COMPLETED short-circuit, it verifies the same
+  worker still owns an unexpired lease before writing `GameTerminated`, status,
+  or rating rows.
+- Added a per-game persistence write lock for scheduler-created
+  `GamePersistence` so SQLite's single shared test connection does not
+  interleave event / LLM-call writes; adjusted the resume scheduler regression
+  to stop from the successful executor path instead of DB-polling during a full
+  persisted game.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/games.py`,
+  `src/padrino/runner/game_runner.py`, `src/padrino/runner/scheduler.py`,
+  `src/padrino/settings.py`,
+  `tests/runner/test_game_persistence_terminal.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_game_persistence_terminal.py::test_terminal_finalize_fence_blocks_stolen_lease_without_writes tests/runner/test_game_persistence_terminal.py::test_terminal_finalize_valid_lease_writes_terminal_event_and_ratings tests/runner/test_game_persistence_terminal.py::test_terminal_lease_fence_read_and_event_write_share_transaction tests/runner/test_scheduler.py::test_scheduler_threads_worker_id_and_clock_to_game_persistence -q`
+  failed first on the missing finalize fence and worker/clock plumbing; focused
+  GREEN `uv run pytest tests/runner/test_scheduler.py tests/runner/test_game_persistence_terminal.py -q`
+  -> 25 passed. SQLite race regression GREEN
+  `for i in 1 2 3 4 5 6 7 8 9 10; do uv run pytest tests/runner/test_game_runner.py tests/runner/test_scheduler.py::test_scheduler_retry_rehydrates_started_benchmark_game -q || exit 1; done`
+  -> 10/10 passed. Adjacent GREEN
+  `uv run pytest tests/db/test_game_claims.py tests/runner/test_benchmark_resume.py tests/db/test_event_persistence.py -q`
+  -> 9 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2584 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-24T18:22 PDT - US-254
+- Added scheduler exception classification for retryable vs poison child-game
+  failures. `ReplayHashMismatchError`, Pydantic/ValueError validation failures,
+  and TypeError contract failures dead-letter immediately; transport/timeouts,
+  LLM retry exhaustion, and legacy unknown runtime failures remain retryable.
+- Threaded deterministic scheduler backoff through the existing injected
+  `Sleeper` seam and stamped `games.last_error` / `last_error_kind` whenever a
+  game is marked `FAILED`.
+- Added regression coverage for classification, one-attempt poison failure,
+  retryable timeout retries with captured backoff delays, and persisted failure
+  kind recovery.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/games.py`,
+  `src/padrino/runner/scheduler.py`, `tests/runner/test_scheduler.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_scheduler.py::test_scheduler_exception_classification_maps_retryable_and_poison_errors tests/runner/test_scheduler.py::test_poison_child_game_failure_stops_after_one_attempt_and_stamps_row tests/runner/test_scheduler.py::test_retryable_child_game_failure_retries_with_injected_backoff_and_stamps_row -q`
+  failed first on missing classifier/backoff behavior and poison still using
+  bounded retry; focused GREEN same command -> 3 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_scheduler.py -q` -> 21 passed;
+  `uv run pytest tests/db/test_game_claims.py tests/runner/test_benchmark_resume.py tests/runner/test_game_persistence_terminal.py -q`
+  -> 11 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2587 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-254 is backend scheduler-only and
+  did not touch `web/dashboard`.
+
+## 2026-06-24T18:30 PDT - US-255
+- Replaced the scheduled-gauntlet wall-clock seed
+  `scheduled:{schedule_id}:{now.isoformat()}` with a SHA-256 seed derived from
+  `schedule_id` plus the schedule row's pre-advance `next_run_at`.
+- Added a public `derive_scheduled_gauntlet_seed` helper that normalizes
+  timezone-aware/SQLite-naive scheduled fire instants to UTC and keeps legacy
+  `next_run_at=None` rows deterministic via an `"initial"` occurrence key.
+- Added scheduled-job regression tests proving the same schedule occurrence
+  produces the same seed under different injected wall-clock `now` values,
+  distinct occurrences produce distinct seeds, and league/ruleset/clone-count
+  materialization is otherwise unchanged.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/scheduler/gauntlet_job.py`,
+  `tests/scheduler/test_gauntlet_job.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/scheduler/test_gauntlet_job.py::test_scheduled_seed_uses_fire_instant_not_injected_now tests/scheduler/test_gauntlet_job.py::test_scheduled_seed_changes_between_distinct_occurrences tests/scheduler/test_gauntlet_job.py::test_scheduled_gauntlet_shape_is_unchanged_by_seed_source -q`
+  failed first on the wall-clock seed and missing deterministic helper; focused
+  GREEN same command -> 3 passed. Adjacent GREEN
+  `uv run pytest tests/scheduler/test_gauntlet_job.py -q` -> 6 passed. Full
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2590
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-255 is
+  backend scheduler-only and did not touch `web/dashboard`.
+
+## 2026-06-24 - US-256
+- Added a benchmark replay-determinism regression that runs a fixed-seed
+  `DeterministicMockAdapter` game uninterrupted, then crashes a persisted run
+  after the `DAY_1_DISCUSSION_ROUND_1` `PhaseStarted` row is durable,
+  rehydrates via `rehydrate_benchmark_game`, and resumes via `run_game`.
+- The test asserts terminal result, final `event_hash`, full event-hash-chain
+  digest, persisted hash sequence, contiguous DB sequences, and exactly one
+  `GameCreated` / resume-phase `PhaseStarted`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/runner/test_benchmark_resume.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/runner/test_benchmark_resume.py` -> 2 passed. Full
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2591
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-256 is
+  backend runner-only and did not touch `web/dashboard`.
+
+## 2026-06-24 - US-257
+- Added `core/scheduling/pairing.py`, a pure deterministic pairing-matrix
+  generator for campaign cells. It exposes `generate_pairing_matrix`,
+  `derive_campaign_cell_seed`, `mirror_leg_roster`, and diagnostics helpers.
+- The generator returns ordered `(cell_index, roster)` cells, derives per-cell
+  seeds with `sha256(b"campaign:" + campaign_seed + cell_index_be8)`, supports
+  MIRROR / ROUND_ROBIN formats, and verifies coverage, distinct-opponent, and
+  faction/role-family exposure guarantees before returning.
+- Added core tests for ordered mirror cells, seed derivation, subset size,
+  coverage across mini7/bench10 large fields, byte-stability across a fresh
+  Python process, and a pairing-specific pure-import firewall.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/scheduling/pairing.py`,
+  `tests/core/test_pairing.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest tests/core/test_pairing.py -q`
+  failed first on the missing pairing module; focused GREEN same command -> 7
+  passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2601 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-257 is pure backend core work and
+  did not touch `web/dashboard`.
+
+## 2026-06-24T18:56 PDT - US-258
+- Added Alembic revision `0053_campaigns` after `0052`, creating `campaigns`
+  and `campaign_pairings` before batch-adding nullable `gauntlets.campaign_id`
+  plus `ix_gauntlets_campaign_id`. The pairing ledger has
+  `uq_campaign_pairing_cell` over `(campaign_id, cell_index)` and nullable
+  `gauntlet_id` for incremental materialization in US-259.
+- Added matching `Campaign` / `CampaignPairing` ORM models, `Gauntlet.campaign_id`,
+  and the gauntlet campaign index declaration. Added the new tables to the
+  migration smoke `EXPECTED_TABLES` set and updated the `0052` test so `0053`
+  owns the single-head assertion.
+- Added a dedicated SQLite migration/model agreement test covering upgrade
+  deltas, FK/index/unique metadata, nullable standalone gauntlets, downgrade
+  cleanup, and duplicate campaign-cell rejection. Added ORM and dialect
+  portability coverage for the new models.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0053_campaigns.py`,
+  `tests/db/test_migration_0053_campaigns.py`,
+  `tests/db/test_migration_0052_game_leases.py`,
+  `tests/db/test_migrations.py`, `tests/db/test_dialect_portability.py`,
+  `tests/db/test_models.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0053_campaigns.py -q` failed first on
+  missing `Campaign` / `CampaignPairing`; focused GREEN
+  `uv run pytest tests/db/test_migration_0053_campaigns.py tests/db/test_models.py::test_gauntlet_round_trip -q`
+  -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/db/test_models.py tests/db/test_dialect_portability.py tests/db/test_migration_0053_campaigns.py -q`
+  -> 32 passed; migration smoke
+  `uv run pytest tests/db/test_migration_0053_campaigns.py tests/db/test_migration_0052_game_leases.py tests/db/test_migrations.py tests/db/test_migrations_all_dialects.py -q`
+  -> 15 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2607 passed / 41 skipped /
+  10 deselected. A first full pytest attempt hit the previously observed shared
+  in-memory SQLite fixture cascade (`no such table: lobby_seats`); the named
+  runner failure passed in isolation and the immediate exact full-gate rerun
+  passed. Frontend gates not run; US-258 is backend schema-only and did not
+  touch `web/dashboard`.
+
+## 2026-06-24T19:07 PDT - US-259
+- Added `db/repositories/campaigns.py` with campaign creation from the pure
+  pairing matrix, active model-id -> agent-build UUID resolution, campaign
+  claim/lease/heartbeat/reset helpers, and bounded ledger materialization.
+- Refactored `create_paired_gauntlet` so it can run inside an existing
+  transaction and stamp `gauntlets.campaign_id`; materialization now creates
+  child paired gauntlets/games from PENDING cells and links the cell row.
+- Added campaign repository coverage for creation without child rows,
+  stale-lease reclaim, bounded materialization, and resume-from-ledger, plus a
+  PostgreSQL `SKIP LOCKED` campaign-claim regression.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/db/repositories/gauntlets.py`,
+  `src/padrino/gauntlets/scheduler.py`, `src/padrino/settings.py`,
+  `tests/db/test_campaigns_repo.py`,
+  `tests/db/test_scheduler_claim_skip_locked.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_campaigns_repo.py -q` failed first on missing
+  `padrino.db.repositories.campaigns`; focused GREEN same command -> 4 passed.
+  Adjacent GREEN
+  `uv run pytest tests/db/test_campaigns_repo.py tests/db/test_scheduler_claim_skip_locked.py tests/gauntlets/test_paired_scheduler.py -q`
+  -> 10 passed; `uv run pytest tests/db/test_repositories.py tests/db/test_models.py -q`
+  -> 35 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2613 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-259 is backend campaign
+  persistence/materialization work and did not touch `web/dashboard`.
+
+## 2026-06-24T19:15 PDT - US-260
+- Added campaign pairing dead-letter helpers:
+  `record_materialized_cell_failure` increments cell attempts, requeues
+  retryable failures until the configured cap, and flips poison/exhausted
+  cells to `DEAD_LETTER`; `list_dead_letter_cells` exposes ordered failure
+  details for campaign reports.
+- Wired campaign-owned gauntlet child-game failures from
+  `runner/scheduler.py` into the pairing ledger, using the existing US-254
+  failure classification and new `padrino_campaign_cell_max_attempts`
+  setting/SchedulerOptions field. Standalone gauntlet failure behavior remains
+  unchanged.
+- Added regression coverage for bounded retry exhaustion, immediate poison
+  dead-lettering, dead-letter exclusion from rematerialization, remaining-cell
+  progress, queryable failure details, and scheduler integration for a
+  campaign-owned failed gauntlet.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/runner/scheduler.py`, `src/padrino/settings.py`,
+  `tests/db/test_campaigns_repo.py`, `tests/runner/test_scheduler.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_campaigns_repo.py::test_campaign_cell_failure_dead_letters_after_bounded_attempts tests/db/test_campaigns_repo.py::test_dead_letter_cells_are_excluded_and_queryable -q`
+  failed first on missing campaign dead-letter APIs; focused RED
+  `uv run pytest tests/runner/test_scheduler.py::test_campaign_owned_failed_gauntlet_dead_letters_cell -q`
+  failed first on missing `campaign_cell_max_attempts`; focused GREEN same
+  commands -> 2 passed / 1 passed. Adjacent GREEN
+  `uv run pytest tests/db/test_campaigns_repo.py -q` -> 7 passed;
+  `uv run pytest tests/runner/test_scheduler.py -q` -> 22 passed. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2617
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-260 is
+  backend campaign/scheduler work and did not touch `web/dashboard`.
+
+## 2026-06-24T19:27 PDT - US-261
+- Tightened gauntlet finalization so scheduler-driven and direct completion now
+  require all child games to be terminal (`COMPLETED` or `FAILED`) and run the
+  per-model faction balance gate over successful child games with persisted
+  seat rows. `CREATED` / `RUNNING` children leave the gauntlet unfinished.
+- Added `TerminalProgress` / `gauntlet_child_progress`, surfaced progress on
+  `GET /gauntlets/{id}`, and changed diagnostics/provisional collection to use
+  only successful `COMPLETED` children while permanently failed children remain
+  terminal for overall completion.
+- Added campaign cell `COMPLETED` terminal status plus `campaign_progress`,
+  `mark_materialized_cell_completed`, and `finalize_campaign_if_done`; scheduler
+  now marks successful campaign cells completed and auto-finalizes campaigns
+  when every cell is `COMPLETED` or `DEAD_LETTER`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/gauntlets.py`,
+  `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/gauntlets/completion.py`,
+  `src/padrino/runner/scheduler.py`, `src/padrino/settings.py`,
+  `tests/db/test_campaigns_repo.py`, `tests/gauntlets/test_completion.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_completion.py::test_failed_children_are_terminal_but_created_or_running_children_block_completion tests/gauntlets/test_completion.py::test_fully_completed_imbalanced_gauntlet_waits_for_balance tests/gauntlets/test_completion.py::test_failed_child_exempts_surviving_completed_games_from_balance_gate tests/db/test_campaigns_repo.py::test_campaign_progress_counts_terminal_cells_and_auto_finalizes tests/runner/test_scheduler.py::test_drive_gauntlet_does_not_complete_with_non_terminal_child -q`
+  failed first on missing progress/finalization helpers; focused GREEN same
+  command -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/gauntlets/test_completion.py tests/db/test_campaigns_repo.py tests/runner/test_scheduler.py tests/api/test_gauntlet_routes.py -q`
+  -> 63 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2622 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-261 is backend
+  gauntlet/campaign scheduler work and did not touch `web/dashboard`.
+
+## 2026-06-24T19:37 PDT - US-262
+- Added `scheduler.campaign_tick.run_campaign_tick`, which reaps stale campaign
+  leases, claims or heartbeats one worker-held campaign using the injected
+  scheduler tick time, materializes a bounded batch of campaign cells, and
+  finalizes campaigns once every cell is terminal.
+- Wired the campaign tick into
+  `scheduler.bootstrap.build_scheduled_gauntlet_tick_hook` behind
+  `padrino_enable_campaign_tick`, preserving the existing scheduled-gauntlet /
+  behavioral-evaluation / continuous-matchmaking / retention hook composition.
+- Added `campaigns.claim_or_heartbeat_campaign` so a worker keeps draining the
+  same campaign across ticks while extending its lease.
+- Added story coverage for composed-hook behavior, disabled gate behavior,
+  bounded multi-tick materialization plus finalization, and injected-clock
+  heartbeat/stale reset behavior.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/scheduler/__init__.py`, `src/padrino/scheduler/bootstrap.py`,
+  `src/padrino/scheduler/campaign_tick.py`, `src/padrino/settings.py`,
+  `tests/scheduler/test_campaign_tick.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/scheduler/test_campaign_tick.py -q` failed first on the
+  missing `padrino.scheduler.campaign_tick`; focused GREEN same command -> 4
+  passed. Adjacent GREEN
+  `uv run pytest tests/scheduler/test_campaign_tick.py tests/db/test_campaigns_repo.py tests/runner/test_scheduler.py -q`
+  -> 35 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2627 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-262 is backend scheduler/campaign
+  work and did not touch `web/dashboard`.
+
+## 2026-06-24T20:13 PDT - US-264
+- Added `economics.benchmark_admission` as the benchmark game-grain budget
+  gate. It computes global spend from all `LlmCall` rows, computes
+  per-campaign spend through `LlmCall -> Game -> Gauntlet.campaign_id`, claims
+  `global:benchmark` plus optional `campaign:<id>` reservation slots, and
+  releases live slots after the game executor exits.
+- Wired scheduler child-game starts through the atomic reservation gate. Budget
+  denial now resets the leased game back to `CREATED`, leaves already-admitted
+  games running to completion, marks the gauntlet `PENDING` for retry, and uses
+  a short-lived skip set so a capped campaign-owned gauntlet does not starve
+  later pending gauntlets that still have budget.
+- Wired campaign ticks through a one-game budget probe before materializing a
+  cell batch, so a per-campaign cap pauses only that campaign while another
+  campaign under cap can continue. The actual hard start gate remains in the
+  scheduler.
+- Added settings `padrino_campaign_spend_cap_usd` and
+  `padrino_benchmark_admission_reserve_usd`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/economics/benchmark_admission.py`,
+  `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/db/repositories/gauntlets.py`,
+  `src/padrino/runner/scheduler.py`,
+  `src/padrino/scheduler/campaign_tick.py`, `src/padrino/settings.py`,
+  `tests/economics/test_benchmark_budget_admission.py`,
+  `tests/runner/test_scheduler.py`, `tests/scheduler/test_campaign_tick.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/economics/test_benchmark_budget_admission.py tests/runner/test_scheduler.py::test_benchmark_budget_gate_bounds_concurrent_game_starts_and_retries_later tests/scheduler/test_campaign_tick.py::test_campaign_tick_skips_campaign_at_cap_and_materializes_different_campaign tests/scheduler/test_campaign_tick.py::test_campaign_tick_resumes_after_budget_slot_is_released -q`
+  failed first on missing `padrino.economics.benchmark_admission`; focused
+  GREEN same command -> 4 passed. Added per-campaign scheduler regression
+  GREEN
+  `uv run pytest tests/runner/test_scheduler.py::test_campaign_budget_halt_skips_to_next_campaign_gauntlet -q`
+  -> 1 passed. Adjacent GREEN
+  `uv run pytest tests/economics/test_budget_reservations.py tests/economics/test_benchmark_budget_admission.py tests/scheduler/test_campaign_tick.py tests/runner/test_scheduler.py -q`
+  -> 36 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2642 passed / 41 skipped /
+  10 deselected. An earlier full pytest attempt was interrupted during a slow
+  human-lane test; the isolated test passed and the full rerun was green.
+  Frontend gates not run; US-264 is backend scheduler/campaign economics work
+  and did not touch `web/dashboard`.
+
+## 2026-06-24T20:18 PDT - US-265
+- Fixed `economics.admission.admit` concurrency accounting to count only
+  non-terminal games by using `GAME_TERMINAL_STATUSES`; `FAILED` games no
+  longer consume continuous-matchmaking concurrency slots.
+- Added admission regression coverage proving `FAILED` games are ignored,
+  `COMPLETED` plus `FAILED` terminal rows admit a new game, and `RUNNING` rows
+  still consume the cap.
+- Audited sibling `status != "COMPLETED"` predicates. Remaining matches are
+  completed-only export, ratings, and game-detail guards rather than
+  active/concurrency predicates, so no additional story change was needed.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/economics/admission.py`,
+  `tests/economics/test_admission.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/economics/test_admission.py -q` failed first on the
+  `FAILED` active-count bug; focused GREEN same command -> 14 passed. Full
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2644
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-265 is
+  backend economics admission work and did not touch `web/dashboard`.
+
+## 2026-06-24T20:35 PDT - US-267
+- Added budget-burn Prometheus gauges for global spend, per-campaign spend,
+  and spend fraction of cap, plus a cost-drift fraction gauge and record
+  helpers in `observability.metrics`.
+- Wired `economics.benchmark_admission` to record global and campaign budget
+  burn metrics at the admission boundary where authoritative spend/cap values
+  are already computed.
+- Added `budget.burn.threshold` and `cost.drift.threshold` alert keys,
+  settings-driven threshold helpers, and matching Prometheus alert-rule entries.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `docs/deployment/alert-rules.yml`,
+  `src/padrino/economics/benchmark_admission.py`,
+  `src/padrino/observability/alerts.py`,
+  `src/padrino/observability/metrics.py`, `src/padrino/settings.py`,
+  `tests/observability/test_alerts.py`,
+  `tests/observability/test_metrics_endpoint.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/observability/test_metrics_endpoint.py::test_record_budget_burn_updates_global_campaign_and_fraction_gauges tests/observability/test_metrics_endpoint.py::test_record_cost_drift_updates_drift_gauge tests/observability/test_alerts.py::test_budget_burn_alert_key_fires_and_resolves tests/observability/test_alerts.py::test_budget_burn_threshold_fires_and_resolves -q`
+  failed first on missing US-267 imports; focused GREEN expanded observability
+  command -> 8 passed. Adjacent GREEN
+  `uv run pytest tests/observability tests/economics/test_benchmark_budget_admission.py -q`
+  -> 56 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2658 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-267 is backend observability work
+  and did not touch `web/dashboard`.
+
+## 2026-06-24T20:46 PDT - US-268
+- Added `gauntlets.campaign_report` typed report models plus
+  `build_campaign_report`, covering campaign spend, progress counts, ETA,
+  dead-letter holes, per-ruleset/per-faction rating convergence, and per-model
+  rollup convergence.
+- Added `padrino campaign report <campaign-id> --format json|summary` for
+  operator-facing JSON and compact human-readable output.
+- Added regression coverage for report shape, dead-letter parsing, convergence
+  fields, CLI JSON/summary output, and immutable historical cost after fallback
+  rate changes.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/gauntlets/campaign_report.py`,
+  `src/padrino/cli.py`, `tests/gauntlets/test_campaign_report.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_campaign_report.py` failed first on the
+  missing `padrino.gauntlets.campaign_report` module; focused GREEN same
+  command -> 4 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2663 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-268 is backend CLI/report work and
+  did not touch `web/dashboard`.
+
+## 2026-06-24T20:58 PDT - US-269
+- Added `gauntlets.publish_gate.evaluate_publish_gate`, returning a frozen
+  `PublishGateResult` with `ready_to_publish`, itemized blockers, and
+  non-blocking documented dead-letter holes.
+- The gate verifies campaign game hash chains, audits PUBLIC event payloads for
+  identity/rating side-channel keys, rejects canonical rating events attached
+  to excluded FAILED / non-completed cells, checks immutable `LlmCall` cost
+  stamps, and evaluates per-model canonical coverage plus sigma/rank stability
+  using `CANONICAL_TEAM` rating rows only.
+- Added regression coverage for the fully-ready path, specific blocker
+  messages, dead-letter/FAILED exclusion without blocking publication,
+  PLACEMENT results not counting toward canonical publishability, and
+  finalized-but-not-yet-publishable campaigns remaining finalized.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/gauntlets/publish_gate.py`,
+  `tests/gauntlets/test_publish_gate.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_publish_gate.py -q` failed first on the
+  missing `padrino.gauntlets.publish_gate` module; focused GREEN same command
+  -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/gauntlets/test_publish_gate.py tests/gauntlets/test_campaign_report.py -q`
+  -> 9 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2669 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-269 is backend publication
+  readiness work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:10 PDT - US-270
+- Fixed benchmark game rehydration to detect a non-terminal partial phase tail
+  and truncate persisted `game_events` back to the latest unresolved
+  `PhaseStarted` before returning `GameResume`, preserving byte-identical
+  resume after a mid-phase process crash.
+- Added an event repository `delete_events_after` helper and regression tests
+  for direct partial-tail truncation, resolved-phase no-op behavior, replay
+  tamper preservation, PhaseStarted-boundary byte identity, and a crash after
+  two durable `VoteSubmitted` rows followed by byte-identical resume.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/events.py`,
+  `src/padrino/runner/benchmark_durability.py`,
+  `tests/runner/test_benchmark_durability.py`,
+  `tests/runner/test_benchmark_resume.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_truncates_partial_phase_tail tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_does_not_truncate_resolved_phase tests/runner/test_benchmark_resume.py::test_mid_phase_crash_truncates_partial_submissions_and_matches_reference -q`
+  failed first on the untruncated partial tail; focused GREEN
+  `uv run pytest tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_truncates_partial_phase_tail tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_does_not_truncate_resolved_phase tests/runner/test_benchmark_durability.py::test_rehydrate_benchmark_raises_on_tampered_event_row tests/runner/test_benchmark_resume.py::test_interrupted_and_resumed_benchmark_game_matches_uninterrupted_hash_chain tests/runner/test_benchmark_resume.py::test_mid_phase_crash_truncates_partial_submissions_and_matches_reference -q`
+  -> 5 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_benchmark_durability.py tests/runner/test_benchmark_resume.py -q`
+  -> 10 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2672 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-270 is backend runner durability
+  work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:28 PDT - US-271
+- Fixed `_drive_gauntlet` so any child-game budget halt requeues the gauntlet
+  and returns before campaign-cell failure recording, preventing a budget pause
+  plus sibling failure from consuming campaign cell attempts or unlinking the
+  materialized cell.
+- Added scheduler regressions for the mixed `budget_halts` + `failures` result:
+  a unit spy verifies `record_materialized_cell_failure` is not called and the
+  cell remains `MATERIALIZED`, and an end-to-end campaign redrive proves the
+  default `campaign_cell_max_attempts=1` path never false-dead-letters and does
+  not duplicate materialization.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/runner/scheduler.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_scheduler.py -k 'campaign_budget_halt_short_circuits_before_recording_cell_failure or campaign_budget_halt_with_sibling_failure_preserves_cell_for_redrive or campaign_owned_failed_gauntlet_dead_letters_cell'`
+  failed first because mixed budget halt/failure still recorded the cell
+  failure; focused GREEN same command -> 3 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_scheduler.py` -> 27 passed. Full gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2674
+  passed / 41 skipped / 10 deselected. Frontend gates not run; US-271 is
+  backend scheduler/campaign accounting work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:32 PDT - US-272
+- Added binding-key reclaim for benchmark budget reservations:
+  `release_budget_slots_by_binding_key` releases every live slot for a crashed
+  game binding, while `claim_budget_slot` self-cleans prior live rows in the
+  same scope before taking a fresh slot.
+- Wired the scheduler stale-game reaper to release all budget slots for each
+  expired game lease via `game_binding_key(game_id)`, covering both global and
+  campaign reservation scopes in the same transaction that clears the lease.
+- Added regressions for binding-key release, same-game retry without slot
+  stacking, hard-cap reuse without overshoot, and stale reaping of orphaned
+  global plus campaign slots.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/economics/budget_reservations.py`,
+  `src/padrino/runner/scheduler.py`,
+  `tests/economics/test_budget_reservations.py`,
+  `tests/economics/test_benchmark_budget_admission.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/economics/test_budget_reservations.py::test_release_budget_slots_by_binding_key_reclaims_all_live_rows -q`
+  failed first on the missing helper; focused RED
+  `uv run pytest tests/economics/test_benchmark_budget_admission.py::test_reserve_benchmark_game_budget_releases_prior_live_binding_slots tests/economics/test_benchmark_budget_admission.py::test_reclaimed_binding_capacity_is_reused_without_overshoot -q`
+  failed first with stacked slots and denied retry admission; focused RED
+  `uv run pytest tests/runner/test_scheduler.py::test_game_lease_reaper_releases_orphaned_budget_slots -q`
+  failed first with two live orphaned slots. Focused GREEN same commands -> 1
+  passed / 2 passed / 1 passed. Adjacent GREEN
+  `uv run pytest tests/economics/test_budget_reservations.py tests/economics/test_benchmark_budget_admission.py -q`
+  -> 8 passed; `uv run pytest tests/runner/test_scheduler.py -q` -> 28
+  passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2678 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-272 is backend economics/scheduler
+  crash-recovery work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:38 PDT - US-273
+- Added a campaign tick reconciliation pass that completes orphaned
+  `MATERIALIZED` campaign cells when their linked gauntlet is already
+  `COMPLETED`, then lets the existing `finalize_campaign_if_done` path close
+  the campaign in the same tick transaction.
+- Added regressions for the exact gauntlet-completed/cell-still-materialized
+  crash window, including campaign auto-finalization after reconciliation and
+  an idempotent normal-completion path that finalizes once without duplicate
+  materialization.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/campaigns.py`,
+  `src/padrino/scheduler/campaign_tick.py`,
+  `tests/scheduler/test_campaign_tick.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/scheduler/test_campaign_tick.py -q` failed first
+  because the orphaned cell stayed `MATERIALIZED` and the campaign did not
+  finalize; focused GREEN same command -> 8 passed. Adjacent GREEN
+  `uv run pytest tests/runner/test_scheduler.py::test_campaign_owned_failed_gauntlet_dead_letters_cell tests/runner/test_scheduler.py::test_campaign_budget_halt_short_circuits_before_recording_cell_failure tests/runner/test_scheduler.py::test_campaign_budget_halt_with_sibling_failure_preserves_cell_for_redrive -q`
+  -> 3 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2680 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-273 is backend campaign scheduler
+  recovery work and did not touch `web/dashboard`.
+
+## 2026-06-25T07:44 PDT - US-274
+- Fixed `_cost_stamp_blockers` so canonical unbilled LLM calls
+  (`cost_usd=None` and `price_basis=None`) do not permanently block campaign
+  publication.
+- Added publish-gate regressions proving a mixed billed/unbilled completed game
+  remains publishable, while incomplete asymmetric cost stamps still emit
+  `cost_stamp_missing`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/gauntlets/publish_gate.py`,
+  `tests/gauntlets/test_publish_gate.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_publish_gate.py` failed first because an
+  exhausted unbilled LLM call still produced publish blockers; focused GREEN
+  same command -> 7 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2682 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-274 is backend publish-gate work
+  and did not touch `web/dashboard`.
+
+## 2026-06-25T07:49 PDT - US-275
+- Closed the pure-core firewall gap by adding `os`, `pathlib`, and
+  `subprocess` to the repo-wide `FORBIDDEN_TOP_LEVEL` denylist in
+  `tests/core/test_purity.py`.
+- Added a regression assertion for those filesystem/process escape hatches and
+  extended the pairing-specific purity guard with the same module names.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/core/test_purity.py`, `tests/core/test_pairing.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_purity.py::test_forbidden_top_level_closes_filesystem_and_process_escape_hatches -q`
+  failed first because the denylist lacked `os`/`pathlib`/`subprocess`;
+  focused GREEN `uv run pytest tests/core/test_purity.py -q` -> 59 passed,
+  and
+  `uv run pytest tests/core/test_pairing.py::test_pairing_module_has_only_pure_imports_and_required_building_blocks -q`
+  -> 1 passed. Full gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2683 passed / 41 skipped /
+  10 deselected. Frontend gates not run; US-275 is backend test-only purity
+  firewall work and did not touch `web/dashboard`.

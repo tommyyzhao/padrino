@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.db.game_status import GAME_STATUS_CREATED, GAME_STATUS_FAILED
+from padrino.db.game_status import (
+    GAME_STATUS_CREATED,
+    GAME_STATUS_FAILED,
+    GAME_STATUS_RUNNING,
+    is_terminal_game_status,
+)
 from padrino.db.models import Game, GameSeat
+
+
+def _aware(dt: datetime) -> datetime:
+    """Treat SQLite's naive datetime reads as UTC for cross-dialect lease checks."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 async def create(
@@ -40,6 +50,79 @@ async def get(session: AsyncSession, game_id: uuid.UUID) -> Game | None:
     return await session.get(Game, game_id)
 
 
+async def claim_oldest_pending_game(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    lease_ttl: timedelta,
+    worker_id: str,
+) -> Game | None:
+    """Claim the oldest runnable game row for one worker.
+
+    Eligible games are newly-created games, expired running games, and running
+    rows whose expired lease has already been cleared by ``reset_stale_games``.
+    PostgreSQL uses ``FOR UPDATE SKIP LOCKED``; SQLite omits it because the
+    supported deployment is single-writer.
+    """
+    stmt = (
+        select(Game)
+        .where(
+            or_(
+                Game.status == GAME_STATUS_CREATED,
+                and_(
+                    Game.status == GAME_STATUS_RUNNING,
+                    or_(
+                        Game.lease_expires_at <= now,
+                        and_(Game.lease_expires_at.is_(None), Game.leased_by.is_(None)),
+                    ),
+                ),
+            )
+        )
+        .order_by(Game.created_at, Game.id)
+        .limit(1)
+    )
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update(skip_locked=True)
+    game = (await session.execute(stmt)).scalars().first()
+    if game is None:
+        return None
+    game.status = GAME_STATUS_RUNNING
+    game.leased_by = worker_id
+    game.lease_expires_at = now + lease_ttl
+    game.attempt_count = (game.attempt_count or 0) + 1
+    await session.flush()
+    return game
+
+
+async def lease_game_for_worker(
+    session: AsyncSession,
+    game_id: uuid.UUID,
+    *,
+    now: datetime,
+    lease_ttl: timedelta,
+    worker_id: str,
+) -> Game | None:
+    """Claim or refresh one specific runnable game for ``worker_id``."""
+    stmt = select(Game).where(Game.id == game_id).limit(1)
+    if session.get_bind().dialect.name == "postgresql":
+        stmt = stmt.with_for_update()
+    game = (await session.execute(stmt)).scalars().first()
+    if game is None or is_terminal_game_status(game.status):
+        return None
+    if game.status not in (GAME_STATUS_CREATED, GAME_STATUS_RUNNING):
+        return None
+    expires_at = game.lease_expires_at
+    held_by_other = game.leased_by is not None and game.leased_by != worker_id
+    if held_by_other and (expires_at is None or _aware(expires_at) > _aware(now)):
+        return None
+    game.status = GAME_STATUS_RUNNING
+    game.leased_by = worker_id
+    game.lease_expires_at = now + lease_ttl
+    game.attempt_count = (game.attempt_count or 0) + 1
+    await session.flush()
+    return game
+
+
 async def list_(
     session: AsyncSession,
     *,
@@ -66,6 +149,31 @@ async def list_by_gauntlet(
     stmt = select(Game).where(Game.gauntlet_id == gauntlet_id).order_by(Game.id)
     result = await session.execute(stmt)
     return list(result.scalars())
+
+
+async def reset_stale_games(
+    session: AsyncSession,
+    *,
+    now: datetime,
+) -> list[uuid.UUID]:
+    """Clear expired leases on RUNNING games and return their ids."""
+    stmt = (
+        select(Game)
+        .where(Game.status == GAME_STATUS_RUNNING, Game.lease_expires_at.is_not(None))
+        .order_by(Game.created_at, Game.id)
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    reset: list[uuid.UUID] = []
+    cutoff = _aware(now)
+    for game in rows:
+        expires_at = game.lease_expires_at
+        if expires_at is not None and _aware(expires_at) <= cutoff:
+            game.leased_by = None
+            game.lease_expires_at = None
+            reset.append(game.id)
+    if reset:
+        await session.flush()
+    return reset
 
 
 async def update_status(
@@ -102,6 +210,8 @@ async def mark_failed(
     game_id: uuid.UUID,
     *,
     completed_at: datetime,
+    last_error: str | None = None,
+    last_error_kind: str | None = None,
 ) -> Game | None:
     """Mark a child game as terminally failed without a terminal result."""
     game = await session.get(Game, game_id)
@@ -110,6 +220,8 @@ async def mark_failed(
     game.status = GAME_STATUS_FAILED
     game.terminal_result = None
     game.completed_at = completed_at
+    game.last_error = last_error
+    game.last_error_kind = last_error_kind
     await session.flush()
     return game
 

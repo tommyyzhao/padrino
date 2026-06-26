@@ -13,6 +13,7 @@ Subcommands:
 - ``padrino bootstrap`` — take a fresh database to a ready-to-serve state
   (migrations, canonical prompts, default league, optional admin key, optional
   provider registration).
+- ``padrino campaign report`` — print campaign cost/progress/ETA/convergence.
 - ``padrino export game`` — emit a signed JSON bundle for one completed game.
 - ``padrino game verify-restore`` — verify a restored completed game's
   ``game_events`` hash chain against ``games.event_hash_head``.
@@ -140,6 +141,14 @@ gauntlet_app = typer.Typer(
 app.add_typer(gauntlet_app, name="gauntlet")
 
 
+campaign_app = typer.Typer(
+    name="campaign",
+    help="Inspect benchmark campaign state.",
+    no_args_is_help=True,
+)
+app.add_typer(campaign_app, name="campaign")
+
+
 @gauntlet_app.command("run")
 def gauntlet_run(
     roster: Path = typer.Option(
@@ -209,6 +218,58 @@ def gauntlet_run(
         }
 
     typer.echo(json.dumps(asyncio.run(_run()), indent=2, sort_keys=True))
+
+
+@campaign_app.command("report")
+def campaign_report_cmd(
+    campaign_id: str = typer.Argument(..., help="UUID of the campaign to report."),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+    output_format: str = typer.Option(
+        "json",
+        "--format",
+        help="Output format: json or summary.",
+    ),
+) -> None:
+    """Print a campaign report as JSON or a compact operator summary."""
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.gauntlets.campaign_report import (
+        CampaignReportNotFound,
+        build_campaign_report,
+        render_campaign_report_summary,
+    )
+
+    try:
+        cid = uuid.UUID(campaign_id)
+    except ValueError as exc:
+        typer.echo(f"invalid campaign_id: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    normalized_format = output_format.lower()
+    if normalized_format not in {"json", "summary"}:
+        typer.echo("--format must be 'json' or 'summary'", err=True)
+        raise typer.Exit(code=2)
+
+    async def _run() -> str:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            async with session_factory() as session:
+                report = await build_campaign_report(session, cid)
+        finally:
+            await engine.dispose()
+        if normalized_format == "summary":
+            return render_campaign_report_summary(report)
+        return report.model_dump_json(indent=2)
+
+    try:
+        typer.echo(asyncio.run(_run()))
+    except CampaignReportNotFound as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command("scheduler")

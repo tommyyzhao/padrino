@@ -252,6 +252,12 @@ class Settings(BaseSettings):
     # across all house-funded games.  $200 is the operator-approved budget;
     # override via PADRINO_GLOBAL_SPEND_CAP_USD.
     padrino_global_spend_cap_usd: float = 200.0
+    # Benchmark campaign admission (US-264). Benchmark games reserve one
+    # estimated spend slice before start against the global cap and, for
+    # campaign-owned games, this per-campaign cap. Released in-flight slots stop
+    # counting once the game finishes; charged LlmCall spend remains immutable.
+    padrino_campaign_spend_cap_usd: float = 200.0
+    padrino_benchmark_admission_reserve_usd: float = 0.5
 
     # Admission / queue policy (US-096). Daily and concurrency caps that bound
     # how many games run independently of spend.  Defaults are conservative:
@@ -351,10 +357,39 @@ class Settings(BaseSettings):
     padrino_alert_webhook_timeout_s: float = 5.0
     padrino_scheduler_heartbeat_stale_seconds: float = 120.0
     padrino_admission_denied_streak_threshold: int = 5
+    # Budget-burn and cost-drift paging (US-267). The burn threshold is a
+    # fraction of the configured cap; the drift threshold is an absolute
+    # relative per-call divergence from the stamped expected cost.
+    padrino_budget_burn_alert_fraction_threshold: float = 0.8
+    padrino_cost_drift_alert_fraction_threshold: float = 0.25
     # Benchmark scheduler child-game retry (US-241). This is deliberately
     # single-host/in-process only: the scheduler retries an exception from the
     # child executor this many total attempts before marking that game FAILED.
     padrino_scheduler_game_max_attempts: int = 2
+    # Benchmark game-grain lease reaper (US-252). Disabled by default so the
+    # existing gauntlet scheduler loop is byte-compatible unless the operator
+    # opts into DB-as-queue game claims. When enabled, the scheduler clears
+    # expired per-game leases on a continuous injected-clock tick.
+    padrino_enable_game_lease_reaper: bool = False
+    padrino_game_lease_reaper_interval_seconds: float = 30.0
+    padrino_game_lease_ttl_seconds: float = 3600.0
+    # Campaign materialization (US-259/US-262). Campaigns persist the full
+    # pairing ledger at creation time, then the gated scheduler tick
+    # materializes child gauntlets/games in bounded batches so a large field
+    # never inserts thousands of runnable games in one scheduler tick.
+    padrino_enable_campaign_tick: bool = False
+    padrino_campaign_materialize_batch_size: int = 10
+    padrino_campaign_lease_ttl_seconds: float = 3600.0
+    # Campaign cell retry bound (US-260). A campaign-owned gauntlet that
+    # terminally fails after child-game retries requeues its cell until this
+    # count is reached, then records a DEAD_LETTER hole for later reporting.
+    padrino_campaign_cell_max_attempts: int = 1
+    # Gauntlet/campaign completion balance gate (US-261). Fully successful
+    # gauntlets must keep each model's observed faction exposure within this
+    # many seats of the ruleset-expected split before the gauntlet finalizes.
+    # Gauntlets with any permanently FAILED child are exempt so a documented
+    # hole does not block campaign progress.
+    padrino_gauntlet_balance_tolerance_seats: int = 4
 
     def build_routing_policy(
         self,

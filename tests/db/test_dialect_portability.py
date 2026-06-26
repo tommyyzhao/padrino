@@ -23,6 +23,8 @@ from padrino.db.base import Base, create_engine, create_session_factory
 from padrino.db.models import (
     AgentBuild,
     ApiKey,
+    Campaign,
+    CampaignPairing,
     Game,
     GameEvent,
     GameSeat,
@@ -59,6 +61,7 @@ from padrino.db.repositories import (
 _JSON_COLUMNS: list[tuple[type[Base], str]] = [
     (PromptVersion, "response_schema"),
     (AgentBuild, "inference_params"),
+    (CampaignPairing, "roster_json"),
     (Game, "terminal_result"),
     (GameEvent, "payload"),
     (LlmCall, "request_json"),
@@ -165,6 +168,8 @@ def test_uuid_primary_keys_use_portable_sa_uuid() -> None:
         PromptVersion,
         AgentBuild,
         League,
+        Campaign,
+        CampaignPairing,
         Gauntlet,
         GauntletRosterSlot,
         Game,

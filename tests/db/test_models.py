@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.db.models import (
     AgentBuild,
+    Campaign,
+    CampaignPairing,
     Game,
     GameSeat,
     Gauntlet,
@@ -195,6 +197,48 @@ async def test_gauntlet_round_trip(
         session.add(g)
         await session.commit()
         assert g.completed_at is None
+        assert g.campaign_id is None
+
+
+async def test_campaign_pairing_cell_unique(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        league = League(name="Campaign League", ruleset_id="mini7_v1", ranked=True)
+        session.add(league)
+        await session.flush()
+        campaign = Campaign(
+            campaign_seed="campaign-seed",
+            ruleset_id="mini7_v1",
+            league_id=league.id,
+            format="MIRROR",
+            player_count=7,
+            per_model_game_target=50,
+            status="PENDING",
+            sigma_target=2.5,
+            rank_stability_k=10,
+        )
+        session.add(campaign)
+        await session.flush()
+        session.add(
+            CampaignPairing(
+                campaign_id=campaign.id,
+                cell_index=0,
+                roster_json=["agent-a", "agent-b"],
+                status="PENDING",
+            )
+        )
+        await session.commit()
+        session.add(
+            CampaignPairing(
+                campaign_id=campaign.id,
+                cell_index=0,
+                roster_json=["agent-c", "agent-d"],
+                status="PENDING",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
 
 
 async def test_gauntlet_fk_violation(

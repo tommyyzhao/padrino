@@ -18,12 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.db.models import SchedulerHeartbeat
 from padrino.observability.alerts import (
     ALERT_ADMISSION_DENIED_STREAK,
+    ALERT_BUDGET_BURN,
+    ALERT_COST_DRIFT,
     ALERT_KEYS,
     ALERT_MODERATION_GUARD_UNAVAILABLE,
     ALERT_SCHEDULER_HEARTBEAT_STALE,
     ALERT_SPEND_CAP_REACHED,
     AlertNotifier,
     build_alert_notifier,
+    evaluate_budget_burn_alert,
+    evaluate_cost_drift_alert,
 )
 from padrino.scheduler.continuous_matchmaking import run_continuous_matchmaking_tick
 from padrino.settings import Settings
@@ -119,6 +123,28 @@ async def test_counter_helpers() -> None:
     assert notifier.increment(ALERT_ADMISSION_DENIED_STREAK) == 2
     notifier.reset_counter(ALERT_ADMISSION_DENIED_STREAK)
     assert notifier.increment(ALERT_ADMISSION_DENIED_STREAK) == 1
+    await notifier.aclose()
+
+
+async def test_budget_burn_alert_key_fires_and_resolves() -> None:
+    rec = _Recorder()
+    notifier = _notifier(rec)
+    assert ALERT_BUDGET_BURN in ALERT_KEYS
+    assert await notifier.fire(ALERT_BUDGET_BURN, scope_type="global") is True
+    assert notifier.is_active(ALERT_BUDGET_BURN)
+    assert notifier.resolve(ALERT_BUDGET_BURN) is True
+    assert not notifier.is_active(ALERT_BUDGET_BURN)
+    await notifier.aclose()
+
+
+async def test_cost_drift_alert_key_fires_and_resolves() -> None:
+    rec = _Recorder()
+    notifier = _notifier(rec)
+    assert ALERT_COST_DRIFT in ALERT_KEYS
+    assert await notifier.fire(ALERT_COST_DRIFT, model_id="cerebras/zai-glm-4.7") is True
+    assert notifier.is_active(ALERT_COST_DRIFT)
+    assert notifier.resolve(ALERT_COST_DRIFT) is True
+    assert not notifier.is_active(ALERT_COST_DRIFT)
     await notifier.aclose()
 
 
@@ -270,6 +296,104 @@ async def test_tick_fires_spend_cap_alert(
     await notifier.aclose()
 
 
+async def test_budget_burn_threshold_fires_and_resolves() -> None:
+    rec = _Recorder()
+    notifier = _notifier(rec)
+    settings = Settings(padrino_budget_burn_alert_fraction_threshold=0.8)
+
+    assert (
+        await evaluate_budget_burn_alert(
+            notifier,
+            settings,
+            scope_type="campaign",
+            scope_id="campaign-1",
+            spent_usd=79.0,
+            cap_usd=100.0,
+        )
+        is False
+    )
+    assert not notifier.is_active(ALERT_BUDGET_BURN)
+
+    assert (
+        await evaluate_budget_burn_alert(
+            notifier,
+            settings,
+            scope_type="campaign",
+            scope_id="campaign-1",
+            spent_usd=80.0,
+            cap_usd=100.0,
+        )
+        is True
+    )
+    assert notifier.is_active(ALERT_BUDGET_BURN)
+    burn_alerts = [p for p in rec.posts if p["alert"] == ALERT_BUDGET_BURN]
+    assert len(burn_alerts) == 1
+    assert burn_alerts[0]["fraction_of_cap"] == 0.8
+
+    assert (
+        await evaluate_budget_burn_alert(
+            notifier,
+            settings,
+            scope_type="campaign",
+            scope_id="campaign-1",
+            spent_usd=50.0,
+            cap_usd=100.0,
+        )
+        is True
+    )
+    assert not notifier.is_active(ALERT_BUDGET_BURN)
+    await notifier.aclose()
+
+
+async def test_cost_drift_threshold_fires_and_resolves() -> None:
+    rec = _Recorder()
+    notifier = _notifier(rec)
+    settings = Settings(padrino_cost_drift_alert_fraction_threshold=0.25)
+
+    assert (
+        await evaluate_cost_drift_alert(
+            notifier,
+            settings,
+            observed_cost_usd=0.124,
+            expected_cost_usd=0.1,
+            model_id="cerebras/zai-glm-4.7",
+            price_basis="FALLBACK_TABLE",
+        )
+        is False
+    )
+    assert not notifier.is_active(ALERT_COST_DRIFT)
+
+    assert (
+        await evaluate_cost_drift_alert(
+            notifier,
+            settings,
+            observed_cost_usd=0.14,
+            expected_cost_usd=0.1,
+            model_id="cerebras/zai-glm-4.7",
+            price_basis="FALLBACK_TABLE",
+        )
+        is True
+    )
+    assert notifier.is_active(ALERT_COST_DRIFT)
+    drift_alerts = [p for p in rec.posts if p["alert"] == ALERT_COST_DRIFT]
+    assert len(drift_alerts) == 1
+    assert drift_alerts[0]["drift_fraction"] == 0.4
+
+    assert (
+        await evaluate_cost_drift_alert(
+            notifier,
+            settings,
+            observed_cost_usd=0.11,
+            expected_cost_usd=0.1,
+            model_id="cerebras/zai-glm-4.7",
+            price_basis="FALLBACK_TABLE",
+        )
+        is True
+    )
+    assert not notifier.is_active(ALERT_COST_DRIFT)
+    await notifier.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Prometheus alert-rules file
 # ---------------------------------------------------------------------------
@@ -287,6 +411,8 @@ def test_alert_rules_file_covers_every_condition() -> None:
         "PadrinoSchedulerHeartbeatStale",
         "PadrinoModerationGuardUnavailable",
         "PadrinoAdmissionDeniedStreak",
+        "PadrinoBudgetBurnThreshold",
+        "PadrinoCostDriftThreshold",
     }
     for r in rules:
         assert r["expr"], "every rule needs a PromQL expression"

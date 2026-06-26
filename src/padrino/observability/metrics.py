@@ -26,6 +26,13 @@ Metric inventory:
   streams open (US-107).
 * ``padrino_broadcast_frames_total`` — cumulative count of
   ``public_event_v1`` frames emitted via SSE broadcast (US-107).
+* ``padrino_budget_global_spend_usd`` — current global benchmark spend.
+* ``padrino_budget_campaign_spend_usd{campaign_id}`` — current spend for one
+  benchmark campaign.
+* ``padrino_budget_fraction_of_cap{scope_type,scope_id}`` — current spend as a
+  fraction of the configured cap.
+* ``padrino_cost_drift_fraction{model,price_basis}`` — relative per-call cost
+  divergence from the stamped expected price.
 
 The instruments live on a single :class:`CollectorRegistry` exposed through
 :data:`REGISTRY` so tests can clear state without touching the global
@@ -148,6 +155,33 @@ broadcast_frames_total = Counter(
     registry=REGISTRY,
 )
 
+budget_global_spend_usd = Gauge(
+    "padrino_budget_global_spend_usd",
+    "Current global benchmark spend in USD.",
+    registry=REGISTRY,
+)
+
+budget_campaign_spend_usd = Gauge(
+    "padrino_budget_campaign_spend_usd",
+    "Current benchmark spend in USD for one campaign.",
+    labelnames=("campaign_id",),
+    registry=REGISTRY,
+)
+
+budget_fraction_of_cap = Gauge(
+    "padrino_budget_fraction_of_cap",
+    "Current benchmark budget consumption as a fraction of cap.",
+    labelnames=("scope_type", "scope_id"),
+    registry=REGISTRY,
+)
+
+cost_drift_fraction = Gauge(
+    "padrino_cost_drift_fraction",
+    "Relative divergence between observed per-call cost and expected stamped cost.",
+    labelnames=("model", "price_basis"),
+    registry=REGISTRY,
+)
+
 
 def split_litellm_model_id(model_id: str | None) -> tuple[str, str]:
     """Return ``(provider, model)`` parsed from a litellm-style model id.
@@ -202,6 +236,55 @@ def record_broadcast_frame() -> None:
     broadcast_frames_total.inc()
 
 
+def _fraction_of_cap(*, spent_usd: float, cap_usd: float) -> float:
+    if cap_usd <= 0:
+        return 1.0 if spent_usd >= cap_usd else 0.0
+    return max(0.0, spent_usd / cap_usd)
+
+
+def cost_drift_ratio(*, observed_cost_usd: float, expected_cost_usd: float) -> float:
+    """Return absolute relative cost drift for one priced call."""
+    if expected_cost_usd <= 0:
+        return 0.0 if observed_cost_usd <= 0 else 1.0
+    return abs(observed_cost_usd - expected_cost_usd) / expected_cost_usd
+
+
+def record_budget_burn(
+    *,
+    scope_type: str,
+    scope_id: str,
+    spent_usd: float,
+    cap_usd: float,
+) -> None:
+    """Update budget-burn gauges for one global or campaign scope."""
+    if scope_type == "global":
+        budget_global_spend_usd.set(spent_usd)
+    elif scope_type == "campaign":
+        budget_campaign_spend_usd.labels(campaign_id=scope_id).set(spent_usd)
+    budget_fraction_of_cap.labels(scope_type=scope_type, scope_id=scope_id).set(
+        _fraction_of_cap(spent_usd=spent_usd, cap_usd=cap_usd)
+    )
+
+
+def record_cost_drift(
+    *,
+    model_id: str | None,
+    price_basis: str | None,
+    observed_cost_usd: float,
+    expected_cost_usd: float,
+) -> None:
+    """Update the relative cost-drift gauge for one model/pricing basis."""
+    cost_drift_fraction.labels(
+        model=model_id or UNKNOWN_LABEL,
+        price_basis=price_basis or UNKNOWN_LABEL,
+    ).set(
+        cost_drift_ratio(
+            observed_cost_usd=observed_cost_usd,
+            expected_cost_usd=expected_cost_usd,
+        )
+    )
+
+
 def render_prometheus_text() -> bytes:
     """Return the current snapshot serialized as Prometheus text exposition."""
     return generate_latest(REGISTRY)
@@ -221,11 +304,15 @@ def reset_metrics() -> None:
         games_total,
         invalid_action_total,
         api_requests_total,
+        budget_campaign_spend_usd,
+        budget_fraction_of_cap,
+        cost_drift_fraction,
     ):
         collector._metrics.clear()
     scheduler_inflight_gauntlets.set(0)
     broadcast_active_streams.set(0)
     broadcast_frames_total.reset()
+    budget_global_spend_usd.set(0)
 
 
 __all__ = [
@@ -235,12 +322,19 @@ __all__ = [
     "api_requests_total",
     "broadcast_active_streams",
     "broadcast_frames_total",
+    "budget_campaign_spend_usd",
+    "budget_fraction_of_cap",
+    "budget_global_spend_usd",
+    "cost_drift_fraction",
+    "cost_drift_ratio",
     "games_total",
     "invalid_action_total",
     "llm_calls_total",
     "llm_latency_seconds",
     "phase_duration_seconds",
     "record_broadcast_frame",
+    "record_budget_burn",
+    "record_cost_drift",
     "record_game_completed",
     "record_invalid_action",
     "record_llm_call",

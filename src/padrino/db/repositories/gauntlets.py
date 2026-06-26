@@ -31,8 +31,10 @@ async def create(
     gauntlet_seed: str,
     ranked: bool,
     status: str = "PENDING",
+    campaign_id: uuid.UUID | None = None,
 ) -> Gauntlet:
     obj = Gauntlet(
+        campaign_id=campaign_id,
         league_id=league_id,
         ruleset_id=ruleset_id,
         prompt_version_id=prompt_version_id,
@@ -102,6 +104,7 @@ async def claim_oldest_pending(
     session: AsyncSession,
     *,
     now: datetime,
+    exclude_ids: set[uuid.UUID] | None = None,
 ) -> Gauntlet | None:
     """Flip the oldest ``PENDING`` gauntlet to ``RUNNING`` and return it.
 
@@ -118,12 +121,10 @@ async def claim_oldest_pending(
     the database lock for the whole transaction), so no row-lock skipping is
     needed or possible.
     """
-    stmt = (
-        select(Gauntlet)
-        .where(Gauntlet.status == "PENDING")
-        .order_by(Gauntlet.created_at, Gauntlet.id)
-        .limit(1)
-    )
+    stmt = select(Gauntlet).where(Gauntlet.status == "PENDING")
+    if exclude_ids:
+        stmt = stmt.where(Gauntlet.id.notin_(exclude_ids))
+    stmt = stmt.order_by(Gauntlet.created_at, Gauntlet.id).limit(1)
     if session.get_bind().dialect.name == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
     obj = (await session.execute(stmt)).scalars().first()
@@ -159,6 +160,19 @@ async def mark_completed(
         return
     obj.status = "COMPLETED"
     obj.completed_at = now
+    obj.heartbeat_at = None
+    await session.flush()
+
+
+async def mark_pending(
+    session: AsyncSession,
+    gauntlet_id: uuid.UUID,
+) -> None:
+    """Return a non-terminal gauntlet to the pending queue."""
+    obj = await session.get(Gauntlet, gauntlet_id)
+    if obj is None:
+        return
+    obj.status = "PENDING"
     obj.heartbeat_at = None
     await session.flush()
 
