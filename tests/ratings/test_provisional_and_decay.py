@@ -11,11 +11,13 @@ from padrino.ratings.provisional_and_decay import (
     DEFAULT_DECAY_IDLE_DAYS,
     DEFAULT_DECAY_SIGMA_PER_DAY,
     DEFAULT_PROVISIONAL_GAMES,
+    HUMAN_RATING_DECAY_IDLE_DAYS,
     ORDINAL_BASE,
     ORDINAL_SCALE,
     apply_decay,
     days_idle,
     is_provisional,
+    project_decayed_display,
     to_ordinal,
 )
 
@@ -166,6 +168,114 @@ def test_apply_decay_sigma_grows_monotonically_with_idle() -> None:
         inflated = apply_decay(sigma, days)
         assert inflated > prev
         prev = inflated
+
+
+# ---------------------------------------------------------------------------
+# Human read-side decay projection
+# ---------------------------------------------------------------------------
+
+
+def test_human_decay_idle_threshold_is_distinct_from_agent_default() -> None:
+    assert HUMAN_RATING_DECAY_IDLE_DAYS == 14
+    assert HUMAN_RATING_DECAY_IDLE_DAYS != DEFAULT_DECAY_IDLE_DAYS
+
+
+def test_project_decayed_display_below_threshold_keeps_raw_score() -> None:
+    result = project_decayed_display(
+        40.0,
+        2.0,
+        _NOW - timedelta(days=HUMAN_RATING_DECAY_IDLE_DAYS),
+        now=_NOW,
+        idle_threshold_days=HUMAN_RATING_DECAY_IDLE_DAYS,
+        decay_per_day=0.05,
+    )
+
+    assert result.mu == pytest.approx(40.0)
+    assert result.sigma == pytest.approx(2.0)
+    assert result.conservative_score == 40.0 - 3.0 * 2.0
+
+
+def test_project_decayed_display_only_decays_days_beyond_threshold() -> None:
+    result = project_decayed_display(
+        40.0,
+        2.0,
+        _NOW - timedelta(days=20),
+        now=_NOW,
+        idle_threshold_days=14,
+        decay_per_day=0.05,
+    )
+
+    expected_sigma = apply_decay(2.0, 6, decay_per_day=0.05)
+    assert result.sigma == pytest.approx(expected_sigma)
+    assert result.conservative_score == pytest.approx(40.0 - 3.0 * expected_sigma)
+
+
+def test_project_decayed_display_none_last_game_returns_raw_score() -> None:
+    result = project_decayed_display(
+        40.0,
+        2.0,
+        None,
+        now=_NOW,
+        idle_threshold_days=HUMAN_RATING_DECAY_IDLE_DAYS,
+        decay_per_day=0.05,
+    )
+
+    assert result.mu == pytest.approx(40.0)
+    assert result.sigma == pytest.approx(2.0)
+    assert result.conservative_score == 34.0
+
+
+def test_project_decayed_display_handles_naive_and_aware_datetimes() -> None:
+    naive_last_game = (_NOW - timedelta(days=20)).replace(tzinfo=None)
+    aware_result = project_decayed_display(
+        40.0,
+        2.0,
+        _NOW - timedelta(days=20),
+        now=_NOW,
+        idle_threshold_days=14,
+        decay_per_day=0.05,
+    )
+    naive_result = project_decayed_display(
+        40.0,
+        2.0,
+        naive_last_game,
+        now=_NOW,
+        idle_threshold_days=14,
+        decay_per_day=0.05,
+    )
+
+    assert naive_result == aware_result
+
+
+def test_project_decayed_display_never_improves_conservative_score() -> None:
+    raw_score = 40.0 - 3.0 * 2.0
+    result = project_decayed_display(
+        40.0,
+        2.0,
+        _NOW - timedelta(days=20),
+        now=_NOW,
+        idle_threshold_days=14,
+        decay_per_day=-0.05,
+    )
+
+    assert result.sigma >= 2.0
+    assert result.conservative_score <= raw_score
+
+
+def test_project_decayed_display_applies_to_provisional_players() -> None:
+    assert is_provisional(2, threshold=DEFAULT_PROVISIONAL_GAMES)
+
+    result = project_decayed_display(
+        40.0,
+        2.0,
+        _NOW - timedelta(days=20),
+        now=_NOW,
+        idle_threshold_days=14,
+        decay_per_day=0.05,
+    )
+
+    assert result.sigma > 2.0
+    assert result.conservative_score < 40.0 - 3.0 * 2.0
 
 
 # ---------------------------------------------------------------------------

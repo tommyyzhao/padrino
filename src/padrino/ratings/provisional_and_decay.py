@@ -5,6 +5,7 @@ All public functions are pure: no DB access, no wall-clock, no side effects.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 DEFAULT_PROVISIONAL_GAMES: int = 10
@@ -12,6 +13,18 @@ ORDINAL_BASE: int = 1000
 ORDINAL_SCALE: float = 40.0
 DEFAULT_DECAY_SIGMA_PER_DAY: float = 0.05
 DEFAULT_DECAY_IDLE_DAYS: int = 30
+# Human ranked ratings use a shorter read-side grace window than the model
+# ladder default; reads project uncertainty without mutating stored rows.
+HUMAN_RATING_DECAY_IDLE_DAYS: int = 14
+
+
+@dataclass(frozen=True, slots=True)
+class DecayedRatingDisplay:
+    """Read-side rating values after optional sigma decay projection."""
+
+    mu: float
+    sigma: float
+    conservative_score: float
 
 
 def is_provisional(games: int, *, threshold: int = DEFAULT_PROVISIONAL_GAMES) -> bool:
@@ -61,14 +74,43 @@ def apply_decay(
     return sigma * (1.0 + decay_per_day * idle_days)
 
 
+def project_decayed_display(
+    mu: float,
+    sigma: float,
+    last_game_at: datetime | None,
+    *,
+    now: datetime,
+    idle_threshold_days: int = HUMAN_RATING_DECAY_IDLE_DAYS,
+    decay_per_day: float = DEFAULT_DECAY_SIGMA_PER_DAY,
+) -> DecayedRatingDisplay:
+    """Return read-side display values with stale-rating sigma inflation.
+
+    ``now`` is injected by the caller so this helper stays pure. Only idle days
+    beyond ``idle_threshold_days`` are decayed, and the projection never makes a
+    stale rating look better than its persisted ``mu - 3*sigma`` score.
+    """
+    idle = days_idle(last_game_at, now=now)
+    effective_idle = max(0, idle - idle_threshold_days)
+    decayed_sigma = apply_decay(sigma, effective_idle, decay_per_day=decay_per_day)
+    display_sigma = max(sigma, decayed_sigma)
+    return DecayedRatingDisplay(
+        mu=mu,
+        sigma=display_sigma,
+        conservative_score=mu - 3.0 * display_sigma,
+    )
+
+
 __all__ = [
     "DEFAULT_DECAY_IDLE_DAYS",
     "DEFAULT_DECAY_SIGMA_PER_DAY",
     "DEFAULT_PROVISIONAL_GAMES",
+    "HUMAN_RATING_DECAY_IDLE_DAYS",
     "ORDINAL_BASE",
     "ORDINAL_SCALE",
+    "DecayedRatingDisplay",
     "apply_decay",
     "days_idle",
     "is_provisional",
+    "project_decayed_display",
     "to_ordinal",
 ]

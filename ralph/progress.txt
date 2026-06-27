@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human rating decay projection (US-314): keep read-side human rating decay
+  pure in `ratings/provisional_and_decay.py` via `project_decayed_display`.
+  Inject `now`, use the human-specific `HUMAN_RATING_DECAY_IDLE_DAYS` constant
+  instead of the model-ladder `DEFAULT_DECAY_IDLE_DAYS`, and never mutate
+  persisted `HumanRating` rows when projecting stale display scores.
 - Ranked telemetry capture (US-311): capture request-scoped metadata at ranked
   lobby launch, not in the decoupled human-lane worker. Store only
   `Game.ranked_source_ip_hash`, then have the ranked human ELO writer append one
@@ -5206,4 +5211,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 33 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2886 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T13:11 PDT - US-314
+- Added the pure `DecayedRatingDisplay` projection and
+  `project_decayed_display` helper for read-side human rating decay, with
+  injected `now`, threshold-only stale-day inflation, and a human-specific
+  `HUMAN_RATING_DECAY_IDLE_DAYS` constant distinct from the existing model
+  ladder default.
+- Locked the projection contract in `tests/ratings/test_provisional_and_decay.py`
+  for exact below-threshold scores, threshold subtraction, `last_game_at=None`,
+  naive/aware datetime compatibility, never-improving conservative scores, and
+  provisional-player neutrality.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/provisional_and_decay.py`,
+  `tests/ratings/test_provisional_and_decay.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_provisional_and_decay.py -q` failed first
+  on missing `HUMAN_RATING_DECAY_IDLE_DAYS`; focused GREEN same command -> 35
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2893 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
