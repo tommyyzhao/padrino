@@ -24,6 +24,7 @@ from padrino.api.rate_limit_store import (
     RateLimitStore,
 )
 from padrino.api.routes.admin import router as admin_router
+from padrino.api.routes.admin_anticheat import router as admin_anticheat_router
 from padrino.api.routes.admin_keys import router as admin_keys_router
 from padrino.api.routes.games import router as games_router
 from padrino.api.routes.gauntlets import router as gauntlets_router
@@ -196,6 +197,7 @@ def create_app(
     app.middleware("http")(metrics_middleware)
     if not surface_only:
         app.include_router(admin_router)
+        app.include_router(admin_anticheat_router)
         app.include_router(admin_keys_router)
         app.include_router(leagues_router)
         app.include_router(gauntlets_router)
