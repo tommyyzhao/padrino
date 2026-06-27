@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- No-AI-strength-of-schedule firewall (US-318): keep ranked human ELO AI seats
+  as transient `INITIAL_MU` / `INITIAL_SIGMA` OpenSkill ratings in
+  `ratings/human_openskill_service.py`. Do not select or mutate scientific
+  `Rating` / `RatingEvent` rows from that writer; regression coverage can seed
+  real AI `agent_build_id` seats plus scientific ladder rows and install a
+  SQL statement listener around `update_human_ratings_for_game` to prove those
+  tables are untouched while human deltas remain identical across strong/weak
+  persisted AI opponents.
 - Provisional human leaderboard ranks (US-317): keep the exclusion centralized in
   `ratings/public_leaderboard.py::_rank_cards`, which builds numeric ranks only
   from `not card.provisional` rows and leaves provisional cards visible with
@@ -5668,3 +5676,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2972
   passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
   touch `web/dashboard`.
+
+## 2026-06-27T15:53 PDT - US-318
+- Locked the v1 no-AI-strength-of-schedule invariant for ranked human ELO:
+  human updates now have regression coverage that seeds real AI `agent_build_id`
+  seats plus strong/weak scientific `Rating` / `RatingEvent` rows, wraps
+  `update_human_ratings_for_game` with a SQL listener, and asserts the
+  scientific tables are neither read nor written.
+- Added the invariant proof that identical human outcomes produce identical
+  human `HumanRatingEvent` deltas and final `HumanRating` rows even when the
+  persisted scientific AI ladder rows have very different `mu` / `sigma`.
+- Added a clearly marked service docstring recording the v1
+  no-strength-of-schedule decision, the CANONICAL_TEAM firewall rationale, and
+  a future-work marker.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/human_openskill_service.py`,
+  `tests/ratings/test_human_ranked_elo.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED/GREEN
+  `uv run pytest tests/ratings/test_human_ranked_elo.py -k "scientific_ai_strength or docstring"`
+  failed first on the missing docstring marker, then passed -> 2 passed.
+  Full module GREEN `uv run pytest tests/ratings/test_human_ranked_elo.py` ->
+  18 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2974 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

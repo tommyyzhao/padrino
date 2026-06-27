@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import ast
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import structlog
-from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import delete, event, func, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from structlog.testing import LogCapture
 
 from padrino.core.engine.role_assignment import assign_roles
@@ -25,7 +27,17 @@ from padrino.db.models import (
     RatingContext,
     RatingEvent,
 )
-from padrino.db.repositories import games, human_principals, human_ratings, leagues
+from padrino.db.repositories import (
+    agent_builds,
+    games,
+    human_principals,
+    human_ratings,
+    leagues,
+    model_configs,
+    prompt_versions,
+    providers,
+)
+from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.ratings.human_openskill_service import (
     FirewallViolation,
     HumanGameResult,
@@ -41,6 +53,8 @@ from padrino.ratings.provisional_and_decay import DEFAULT_PROVISIONAL_GAMES, is_
 
 _GAME_SEED = "seed-human-ranked-elo-001"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_SCIENTIFIC_RATING_SQL_RE = re.compile(r"\b(?:ratings|rating_events)\b", re.IGNORECASE)
+_ScientificSnapshot = tuple[tuple[tuple[Any, ...], ...], tuple[tuple[Any, ...], ...]]
 
 
 async def _seed_human_rating_game(
@@ -51,12 +65,14 @@ async def _seed_human_rating_game(
     hash_prefix: str,
     human_factions: set[Faction] | None = None,
     takeover_factions: set[Faction] | None = None,
+    ai_agent_build_ids: list[uuid.UUID] | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, dict[str, uuid.UUID]]:
     seats = assign_roles(_GAME_SEED, mini7_v1)
     requested_human_factions = (
         {Faction.MAFIA, Faction.TOWN} if human_factions is None else human_factions
     )
     requested_takeover_factions = takeover_factions or set()
+    ai_build_iter = iter(ai_agent_build_ids or [])
     human_seats: dict[str, Faction] = {}
     assigned_factions: set[Faction] = set()
     for seat in seats:
@@ -85,6 +101,7 @@ async def _seed_human_rating_game(
         principals: dict[str, uuid.UUID] = {}
         for seat in seats:
             principal_id: uuid.UUID | None = None
+            agent_build_id: uuid.UUID | None = None
             if seat.public_player_id in human_seats:
                 principal = await human_principals.create_principal(
                     session,
@@ -93,6 +110,11 @@ async def _seed_human_rating_game(
                 )
                 principal_id = principal.id
                 principals[seat.public_player_id] = principal.id
+            elif ai_agent_build_ids is not None:
+                try:
+                    agent_build_id = next(ai_build_iter)
+                except StopIteration as exc:  # pragma: no cover - helper misuse.
+                    raise AssertionError("not enough AI agent builds for seeded seats") from exc
             seat_kind = SeatKind.AI.value
             if principal_id is not None:
                 seat_kind = (
@@ -105,7 +127,7 @@ async def _seed_human_rating_game(
                     game_id=game.id,
                     public_player_id=seat.public_player_id,
                     seat_index=seat.seat_index,
-                    agent_build_id=None,
+                    agent_build_id=agent_build_id,
                     seat_kind=seat_kind,
                     occupant_principal_id=principal_id,
                     role=seat.role.value,
@@ -123,6 +145,165 @@ def _principal_for_faction(principals: dict[str, uuid.UUID], faction: Faction) -
         for seat in seats
         if seat.faction is faction and seat.public_player_id in principals
     )
+
+
+async def _seed_ai_build_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    count: int,
+    hash_prefix: str,
+) -> list[uuid.UUID]:
+    async with session_factory() as session, session.begin():
+        provider = await providers.create(
+            session,
+            name=f"provider-{hash_prefix}",
+            auth_secret_ref="env:CEREBRAS_API_KEY",
+        )
+        model_config = await model_configs.create(
+            session,
+            provider_id=provider.id,
+            model_name=f"model-{hash_prefix}",
+            litellm_model_id=f"mock/{hash_prefix}",
+            model_version="v1",
+            default_temperature=0.7,
+            default_top_p=1.0,
+            default_max_output_tokens=4096,
+            supports_structured_outputs=True,
+        )
+        build_ids: list[uuid.UUID] = []
+        for index in range(count):
+            prompt = await prompt_versions.create(
+                session,
+                ruleset_id=mini7_v1.RULESET_ID,
+                version=f"{hash_prefix}-prompt-{index}",
+                system_prompt="sys",
+                developer_prompt="dev",
+                response_schema={"type": "object"},
+                prompt_hash=f"{hash_prefix}-hash-{index}",
+            )
+            build = await agent_builds.create(
+                session,
+                display_name=f"{hash_prefix}-build-{index}",
+                model_config_id=model_config.id,
+                prompt_version_id=prompt.id,
+                adapter_version="2026.06",
+                inference_params={"temperature": 0.7},
+                active=True,
+            )
+            build_ids.append(build.id)
+    return build_ids
+
+
+async def _seed_scientific_ladder_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    agent_build_ids: list[uuid.UUID],
+    hash_prefix: str,
+    mu: float,
+    sigma: float,
+) -> None:
+    async with session_factory() as session, session.begin():
+        scientific_league = await leagues.create(
+            session,
+            name=f"scientific-{hash_prefix}",
+            ruleset_id=mini7_v1.RULESET_ID,
+            ranked=True,
+            kind=LeagueKind.SCIENTIFIC,
+        )
+        context = await rating_contexts_repo.resolve_canonical_team_context(
+            session,
+            league_id=scientific_league.id,
+            ruleset_id=mini7_v1.RULESET_ID,
+        )
+        assert context is not None
+        audit_game = await games.create(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed=f"scientific-{hash_prefix}",
+            status="COMPLETED",
+        )
+        for index, agent_build_id in enumerate(agent_build_ids):
+            session.add(
+                Rating(
+                    league_id=scientific_league.id,
+                    ruleset_id=mini7_v1.RULESET_ID,
+                    rating_context_id=context.id,
+                    agent_build_id=agent_build_id,
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
+                    mu=mu,
+                    sigma=sigma,
+                    conservative_score=mu - 3.0 * sigma,
+                    games=50 + index,
+                    last_game_at=datetime(2026, 6, 1, tzinfo=UTC),
+                )
+            )
+            session.add(
+                RatingEvent(
+                    league_id=scientific_league.id,
+                    game_id=audit_game.id,
+                    ruleset_id=mini7_v1.RULESET_ID,
+                    rating_context_id=context.id,
+                    game_seed=audit_game.game_seed,
+                    team_outcome="TOWN",
+                    agent_build_id=agent_build_id,
+                    public_player_id=f"P{index + 1:02d}",
+                    scope_type=SCOPE_GLOBAL,
+                    scope_value=SCOPE_VALUE_GLOBAL,
+                    before_mu=INITIAL_MU,
+                    before_sigma=INITIAL_SIGMA,
+                    after_mu=mu,
+                    after_sigma=sigma,
+                )
+            )
+
+
+async def _scientific_ladder_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> _ScientificSnapshot:
+    async with session_factory() as session:
+        rating_rows = (await session.execute(select(Rating))).scalars().all()
+        event_rows = (await session.execute(select(RatingEvent))).scalars().all()
+    ratings_snapshot = tuple(
+        (
+            str(row.id),
+            str(row.league_id),
+            str(row.agent_build_id),
+            row.ruleset_id,
+            str(row.rating_context_id) if row.rating_context_id is not None else None,
+            row.scope_type,
+            row.scope_value,
+            float(row.mu),
+            float(row.sigma),
+            float(row.conservative_score),
+            row.games,
+            row.last_game_at,
+            row.updated_at,
+        )
+        for row in sorted(rating_rows, key=lambda item: str(item.id))
+    )
+    events_snapshot = tuple(
+        (
+            str(row.id),
+            str(row.league_id),
+            str(row.game_id),
+            str(row.agent_build_id),
+            row.ruleset_id,
+            str(row.rating_context_id) if row.rating_context_id is not None else None,
+            row.game_seed,
+            row.team_outcome,
+            row.public_player_id,
+            row.scope_type,
+            row.scope_value,
+            float(row.before_mu),
+            float(row.before_sigma),
+            float(row.after_mu),
+            float(row.after_sigma),
+            row.created_at,
+        )
+        for row in sorted(event_rows, key=lambda item: str(item.id))
+    )
+    return ratings_snapshot, events_snapshot
 
 
 async def _rating_for_principal(
@@ -222,6 +403,113 @@ async def test_ranked_humans_included_updates_only_human_global_rows(
         assert row.sigma < INITIAL_SIGMA
         assert row.games == 1
         assert row.conservative_score == pytest.approx(row.mu - 3.0 * row.sigma)
+
+
+async def test_scientific_ai_strength_is_ignored_and_scientific_tables_are_not_touched(
+    session_factory: async_sessionmaker[AsyncSession],
+    engine: AsyncEngine,
+) -> None:
+    strong_ai_build_ids = await _seed_ai_build_ids(
+        session_factory,
+        count=mini7_v1.PLAYER_COUNT,
+        hash_prefix="strong-ai-sos",
+    )
+    weak_ai_build_ids = await _seed_ai_build_ids(
+        session_factory,
+        count=mini7_v1.PLAYER_COUNT,
+        hash_prefix="weak-ai-sos",
+    )
+    strong_league_id, strong_game_id, strong_principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="strong-ai-human-game",
+        human_factions={Faction.TOWN},
+        ai_agent_build_ids=strong_ai_build_ids,
+    )
+    weak_league_id, weak_game_id, weak_principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="weak-ai-human-game",
+        human_factions={Faction.TOWN},
+        ai_agent_build_ids=weak_ai_build_ids,
+    )
+    await _seed_scientific_ladder_rows(
+        session_factory,
+        agent_build_ids=strong_ai_build_ids,
+        hash_prefix="strong-ai-sos",
+        mu=60.0,
+        sigma=2.0,
+    )
+    await _seed_scientific_ladder_rows(
+        session_factory,
+        agent_build_ids=weak_ai_build_ids,
+        hash_prefix="weak-ai-sos",
+        mu=5.0,
+        sigma=12.0,
+    )
+
+    before_scientific_rows = await _scientific_ladder_snapshot(session_factory)
+    touched_scientific_sql: list[str] = []
+
+    def _capture_scientific_rating_sql(
+        _conn: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        if _SCIENTIFIC_RATING_SQL_RE.search(statement):
+            touched_scientific_sql.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture_scientific_rating_sql)
+    try:
+        async with session_factory() as session, session.begin():
+            strong_events = await update_human_ratings_for_game(
+                session,
+                league_id=strong_league_id,
+                ranked=True,
+                rating_enabled=True,
+                game_result=HumanGameResult(game_id=strong_game_id, winner="TOWN"),
+                now=datetime(2026, 6, 27, tzinfo=UTC),
+            )
+        async with session_factory() as session, session.begin():
+            weak_events = await update_human_ratings_for_game(
+                session,
+                league_id=weak_league_id,
+                ranked=True,
+                rating_enabled=True,
+                game_result=HumanGameResult(game_id=weak_game_id, winner="TOWN"),
+                now=datetime(2026, 6, 27, tzinfo=UTC),
+            )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture_scientific_rating_sql)
+
+    after_scientific_rows = await _scientific_ladder_snapshot(session_factory)
+    assert touched_scientific_sql == []
+    assert after_scientific_rows == before_scientific_rows
+    assert len(strong_events) == 1
+    assert len(weak_events) == 1
+
+    strong_event = strong_events[0]
+    weak_event = weak_events[0]
+    assert strong_event.public_player_id == weak_event.public_player_id
+    assert strong_event.before_mu == pytest.approx(INITIAL_MU)
+    assert weak_event.before_mu == pytest.approx(INITIAL_MU)
+    assert strong_event.before_sigma == pytest.approx(INITIAL_SIGMA)
+    assert weak_event.before_sigma == pytest.approx(INITIAL_SIGMA)
+    assert strong_event.after_mu == pytest.approx(weak_event.after_mu)
+    assert strong_event.after_sigma == pytest.approx(weak_event.after_sigma)
+
+    strong_human_id = _principal_for_faction(strong_principals, Faction.TOWN)
+    weak_human_id = _principal_for_faction(weak_principals, Faction.TOWN)
+    strong_rating = await _rating_for_principal(session_factory, strong_human_id)
+    weak_rating = await _rating_for_principal(session_factory, weak_human_id)
+    assert strong_rating.mu == pytest.approx(weak_rating.mu)
+    assert strong_rating.sigma == pytest.approx(weak_rating.sigma)
+    assert strong_rating.conservative_score == pytest.approx(weak_rating.conservative_score)
 
 
 async def test_ai_takeover_winning_faction_is_forfeit_loss_not_win_credit(
@@ -622,6 +910,16 @@ def test_human_writer_import_graph_avoids_scientific_rating_writers() -> None:
 
     assert imported
     assert imported <= allowed
+
+
+def test_human_writer_docstring_records_no_ai_strength_of_schedule_decision() -> None:
+    import padrino.ratings.human_openskill_service as human_openskill_service
+
+    docstring = " ".join((human_openskill_service.__doc__ or "").lower().split())
+    assert "no-strength-of-schedule" in docstring
+    assert "scientific" in docstring
+    assert "firewall" in docstring
+    assert "future work" in docstring
 
 
 async def test_human_writer_kill_switch_off_writes_nothing_for_ranked_league(

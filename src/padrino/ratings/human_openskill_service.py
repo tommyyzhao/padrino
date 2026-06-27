@@ -3,6 +3,14 @@
 This service is intentionally separate from the scientific rating writer. It
 resolves only ``League.kind == HUMANS_INCLUDED`` rows that are also ranked, and
 persists only the sibling ``human_rating`` / ``human_rating_event`` tables.
+
+V1 no-strength-of-schedule decision: AI seats in ranked human games are
+transient ``INITIAL_MU`` / ``INITIAL_SIGMA`` placeholders. This module must not
+read or write scientific ``Rating`` / ``RatingEvent`` rows to inject model
+strength, because coupling the Humans-Included lane to the CANONICAL_TEAM
+scientific ladder would weaken the rating firewall. Future work may revisit AI
+strength-of-schedule only through an explicit, separately tested firewall
+design.
 """
 
 from __future__ import annotations
