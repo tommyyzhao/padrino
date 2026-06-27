@@ -5,7 +5,8 @@ A human must accept Terms (``TOS``), Privacy (``PRIVACY``), and confirm they are
 api/runner shell that:
 
 * resolves the CURRENT required document versions from :class:`Settings`
-  (:func:`required_consent_versions`), so a version bump re-prompts every human;
+  (:func:`required_consent_requirements`), so a body/hash change re-prompts
+  every human;
 * records a one-tap combined consent (:func:`record_consent`), hashing the
   client IP rather than storing it raw; and
 * enforces the gate (:func:`enforce_consent` / :func:`require_consent_for`),
@@ -19,24 +20,51 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.db.repositories import human_consents as consents_repo
+from padrino.legal.documents import list_legal_documents
 from padrino.settings import Settings
 
 CONSENT_REQUIRED_DETAIL = "consent_required"
 
 
-def required_consent_versions(settings: Settings) -> dict[str, str]:
-    """Map each required document kind to its CURRENT version from settings."""
+@dataclass(frozen=True, slots=True)
+class ConsentRequirement:
+    """The server-authoritative version label and content hash for one document."""
+
+    version_label: str
+    content_hash: str
+
+
+def required_consent_requirements(settings: Settings) -> dict[str, ConsentRequirement]:
+    """Map each required document kind to the CURRENT registry hash.
+
+    ``settings`` is retained for call-site compatibility; the legal document
+    registry is now the authority for version labels and content hashes.
+    """
+    del settings
+    documents = {document.kind: document for document in list_legal_documents()}
+    missing = consents_repo.REQUIRED_DOCUMENT_KINDS - set(documents)
+    if missing:
+        raise RuntimeError(f"missing required legal documents: {sorted(missing)}")
     return {
-        consents_repo.DOCUMENT_KIND_TOS: settings.padrino_consent_tos_version,
-        consents_repo.DOCUMENT_KIND_PRIVACY: settings.padrino_consent_privacy_version,
-        consents_repo.DOCUMENT_KIND_AGE_GATE: settings.padrino_consent_age_gate_version,
+        kind: ConsentRequirement(
+            version_label=documents[kind].version_label,
+            content_hash=documents[kind].content_hash,
+        )
+        for kind in sorted(consents_repo.REQUIRED_DOCUMENT_KINDS)
     }
+
+
+def required_consent_versions(settings: Settings) -> dict[str, str]:
+    """Map each required document kind to its CURRENT registry version label."""
+    requirements = required_consent_requirements(settings)
+    return {kind: requirement.version_label for kind, requirement in requirements.items()}
 
 
 def hash_source_ip(ip: str | None) -> str | None:
@@ -67,11 +95,14 @@ async def record_consent(
 
     Returns the accepted ``{document_kind: document_version}`` map.
     """
-    versions = required_consent_versions(settings)
+    requirements = required_consent_requirements(settings)
+    versions = {kind: requirement.version_label for kind, requirement in requirements.items()}
+    content_hashes = {kind: requirement.content_hash for kind, requirement in requirements.items()}
     await consents_repo.record_combined_consent(
         session,
         subject_principal_id=subject_principal_id,
         versions=versions,
+        content_hashes=content_hashes,
         accepted_at=accepted_at,
         source_ip_hash=source_ip_hash,
     )
@@ -88,7 +119,10 @@ async def has_current_consent(
     return await consents_repo.has_current_consent(
         session,
         subject_principal_id=subject_principal_id,
-        required_versions=required_consent_versions(settings),
+        required_content_hashes={
+            kind: requirement.content_hash
+            for kind, requirement in required_consent_requirements(settings).items()
+        },
     )
 
 
@@ -121,5 +155,6 @@ __all__ = [
     "has_current_consent",
     "hash_source_ip",
     "record_consent",
+    "required_consent_requirements",
     "required_consent_versions",
 ]

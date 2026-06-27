@@ -19,13 +19,15 @@ async def test_legal_documents_index_serves_hash_bound_tos_and_privacy() -> None
 
     assert resp.status_code == 200
     documents = {doc["kind"]: doc for doc in resp.json()["documents"]}
-    assert set(documents) == {"TOS", "PRIVACY"}
+    assert set(documents) == {"TOS", "PRIVACY", "AGE_GATE"}
     for doc in documents.values():
         assert doc["version_label"]
         assert doc["body"].strip()
         assert doc["content_hash"] == hash_legal_document(doc["body"])
         body = doc["body"].lower()
         assert "16+" in body
+    for kind in {"TOS", "PRIVACY"}:
+        body = documents[kind]["body"].lower()
         assert "no warranty" in body
         assert "no cash prizes" in body
 

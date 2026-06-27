@@ -12,6 +12,7 @@ from padrino.core.legal_documents import hash_legal_document
 
 DOCUMENT_KIND_TOS = "TOS"
 DOCUMENT_KIND_PRIVACY = "PRIVACY"
+DOCUMENT_KIND_AGE_GATE = "AGE_GATE"
 _BASE_VERSION_LABEL = "2026-06-18"
 
 
@@ -79,12 +80,26 @@ evidence. Raw IP addresses are not stored by the consent system; only hashes are
 kept when an IP-derived signal is needed.
 """
 
+_AGE_GATE_BODY = """\
+Padrino Age Confirmation
+Version: 2026-06-18
+
+By playing Padrino, you confirm that you are 16+ years of age. If you
+are under 16, do not create a guest session, sign in, join a lobby, or submit
+chat or actions.
+"""
+
 _DOCUMENTS: tuple[LegalDocument, ...] = (
     LegalDocument(kind=DOCUMENT_KIND_TOS, version_label=_BASE_VERSION_LABEL, body=_TOS_BODY),
     LegalDocument(
         kind=DOCUMENT_KIND_PRIVACY,
         version_label=_BASE_VERSION_LABEL,
         body=_PRIVACY_BODY,
+    ),
+    LegalDocument(
+        kind=DOCUMENT_KIND_AGE_GATE,
+        version_label=_BASE_VERSION_LABEL,
+        body=_AGE_GATE_BODY,
     ),
 )
 
@@ -112,6 +127,7 @@ def legal_document_payload(document: LegalDocument) -> dict[str, str]:
 
 
 __all__ = [
+    "DOCUMENT_KIND_AGE_GATE",
     "DOCUMENT_KIND_PRIVACY",
     "DOCUMENT_KIND_TOS",
     "LegalDocument",

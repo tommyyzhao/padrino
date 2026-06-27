@@ -1264,6 +1264,7 @@ class HumanConsent(Base):
     )
     document_kind: Mapped[str] = mapped_column(String, nullable=False)
     document_version: Mapped[str] = mapped_column(String, nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     accepted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

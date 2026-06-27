@@ -4,10 +4,11 @@ A human must accept Terms (``TOS``), Privacy (``PRIVACY``), and confirm they are
 16+ (``AGE_GATE``) before sending any action or chat. One combined "tap" records
 all three kinds at their current versions via :func:`record_combined_consent`.
 Rows are NEVER updated in place — a re-acceptance (e.g. after a document version
-bump that re-prompts) appends fresh rows, preserving a complete audit trail.
+body/hash change that re-prompts) appends fresh rows, preserving a complete
+audit trail.
 
 :func:`current_consent_kinds` returns the set of document kinds for which the
-principal holds a consent matching the supplied *required versions* map; the
+principal holds a consent matching the supplied *required content hashes* map; the
 api/runner enforcement layer compares it against :data:`REQUIRED_DOCUMENT_KINDS`
 to decide whether the principal may act. The enforcement lives in the impure
 shell, never in the pure core.
@@ -39,19 +40,22 @@ async def record_combined_consent(
     *,
     subject_principal_id: uuid.UUID,
     versions: Mapping[str, str],
+    content_hashes: Mapping[str, str],
     accepted_at: datetime,
     source_ip_hash: str | None = None,
 ) -> list[HumanConsent]:
     """Append one consent row per required document kind (the one-tap action).
 
     ``versions`` maps each :data:`REQUIRED_DOCUMENT_KINDS` member to the document
-    version being accepted. Returns the freshly-created rows.
+    version label being accepted. ``content_hashes`` is the server-authoritative
+    hash for each same document kind. Returns the freshly-created rows.
     """
     rows = [
         HumanConsent(
             subject_principal_id=subject_principal_id,
             document_kind=kind,
             document_version=versions[kind],
+            content_hash=content_hashes[kind],
             accepted_at=accepted_at,
             source_ip_hash=source_ip_hash,
         )
@@ -66,21 +70,21 @@ async def current_consent_kinds(
     session: AsyncSession,
     *,
     subject_principal_id: uuid.UUID,
-    required_versions: Mapping[str, str],
+    required_content_hashes: Mapping[str, str],
 ) -> set[str]:
     """Return the document kinds the principal currently consents to.
 
     A kind counts as current only when the principal has at least one consent row
-    whose ``document_version`` equals ``required_versions[kind]``, so a version
-    bump silently drops that kind from the set until the human re-accepts.
+    whose ``content_hash`` equals ``required_content_hashes[kind]``, so a body
+    change silently drops that kind from the set until the human re-accepts.
     """
-    stmt = select(HumanConsent.document_kind, HumanConsent.document_version).where(
+    stmt = select(HumanConsent.document_kind, HumanConsent.content_hash).where(
         HumanConsent.subject_principal_id == subject_principal_id
     )
     result = await session.execute(stmt)
     current: set[str] = set()
-    for kind, version in result.all():
-        if required_versions.get(kind) == version:
+    for kind, content_hash in result.all():
+        if required_content_hashes.get(kind) == content_hash:
             current.add(kind)
     return current
 
@@ -89,13 +93,13 @@ async def has_current_consent(
     session: AsyncSession,
     *,
     subject_principal_id: uuid.UUID,
-    required_versions: Mapping[str, str],
+    required_content_hashes: Mapping[str, str],
 ) -> bool:
     """True when the principal holds a current consent for EVERY required kind."""
     kinds = await current_consent_kinds(
         session,
         subject_principal_id=subject_principal_id,
-        required_versions=required_versions,
+        required_content_hashes=required_content_hashes,
     )
     return kinds >= REQUIRED_DOCUMENT_KINDS
 
