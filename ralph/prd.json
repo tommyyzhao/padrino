@@ -492,7 +492,7 @@
         "The cache key changes when the decay clock crosses a day boundary for an idle player; games/sample_count remain true persisted integer counts"
       ],
       "notes": "Epic EPIC-E - Rating integrity: decay, forfeit-on-abandon, provisional & SoS invariant. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-316",

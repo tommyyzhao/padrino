@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human leaderboard decay (US-315): apply `project_decayed_display` only at
+  public card read time in `ratings/public_leaderboard.py`, with an injected
+  `now` normalized to UTC. Keep `HumanRating` persisted values untouched, pass
+  decayed `mu`/`sigma`/`conservative_score` into `_human_openskill_card`, and
+  compose the human cache token as rating updated/count + quarantine + handle +
+  consent + decay day bucket so daily idle-score changes do not collide with
+  the AI/placement/solo cache parts.
 - Manual ranked rollback (US-301): reserve the missing `0061` migration by
   inserting it between `0060` and `0062`, then update only `0062+` lineage
   tests; never edit migrations `<=0060`. Keep the recompute pure in
@@ -5573,3 +5580,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2960
   passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
   touch `web/dashboard`.
+
+## 2026-06-27T15:22 PDT - US-315
+- Wired read-side human rating decay into public leaderboard cards by passing an
+  injected `now` through `compute_public_leaderboard`, normalizing it to UTC,
+  and projecting `HumanRating.last_game_at` with
+  `project_decayed_display`.
+- Added the decay as-of day bucket to `_human_rating_cache_part` while
+  preserving the existing updated/count, quarantine, ranked-handle, and ranked
+  consent tokens.
+- Extended human leaderboard tests for idle sigma inflation, fresh-row exact
+  display, persisted-row immutability, decayed sorting/ranking, cache day-boundary
+  invalidation, and true persisted `games` / `sample_count`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `tests/ratings/test_public_leaderboard_human_handle.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py -q`
+  failed first on missing `compute_public_leaderboard(..., now=...)`; focused
+  GREEN same command -> 6 passed. Related GREEN
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py tests/ratings/test_human_rating_quarantine.py tests/ratings/test_ranked_consent_withdrawal.py tests/ratings/test_provisional_and_decay.py tests/api/test_public_routes.py -q`
+  -> 63 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2963 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

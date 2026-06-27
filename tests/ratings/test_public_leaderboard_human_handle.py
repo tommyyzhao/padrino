@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.db.models import HumanRating
@@ -31,6 +33,9 @@ async def _seed_ranked_human_rating(
     display_name: str,
     ranked_handle: str | None,
     score: float,
+    games: int = 12,
+    last_game_at: datetime | None = NOW,
+    updated_at: datetime = NOW,
 ) -> uuid.UUID:
     async with session_factory() as session, session.begin():
         league = await leagues.get_or_create_humans_included(
@@ -61,9 +66,9 @@ async def _seed_ranked_human_rating(
                 mu=score + 6.0,
                 sigma=2.0,
                 conservative_score=score,
-                games=12,
-                last_game_at=NOW,
-                updated_at=NOW,
+                games=games,
+                last_game_at=last_game_at,
+                updated_at=updated_at,
             )
         )
         return principal.id
@@ -71,6 +76,156 @@ async def _seed_ranked_human_rating(
 
 def _stable_human_entity_id(principal_id: uuid.UUID) -> str:
     return hashlib.sha256(f"human|{principal_id}".encode()).hexdigest()[:32]
+
+
+async def _load_human_rating(
+    session: AsyncSession,
+    principal_id: uuid.UUID,
+) -> HumanRating:
+    rating = (
+        await session.execute(
+            select(HumanRating).where(HumanRating.human_player_id == str(principal_id))
+        )
+    ).scalar_one()
+    return rating
+
+
+async def test_human_cards_project_idle_decay_without_mutating_persisted_rating(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_cache()
+    idle_id = await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Idle Realname",
+        ranked_handle="IdleHandle",
+        score=40.0,
+        last_game_at=NOW - timedelta(days=26),
+    )
+    fresh_id = await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Fresh Realname",
+        ranked_handle="FreshHandle",
+        score=30.0,
+        last_game_at=NOW,
+    )
+
+    async with session_factory() as session:
+        idle_before = await _load_human_rating(session, idle_id)
+        before_values = (
+            idle_before.mu,
+            idle_before.sigma,
+            idle_before.conservative_score,
+            idle_before.games,
+            idle_before.last_game_at,
+            idle_before.updated_at,
+        )
+        leaderboard = await compute_public_leaderboard(
+            session,
+            ruleset_id="mini7_v1",
+            now=NOW,
+        )
+        idle_after = await _load_human_rating(session, idle_id)
+        after_values = (
+            idle_after.mu,
+            idle_after.sigma,
+            idle_after.conservative_score,
+            idle_after.games,
+            idle_after.last_game_at,
+            idle_after.updated_at,
+        )
+
+    assert after_values == before_values
+
+    by_name = {card.entity.display_name: card for card in leaderboard.human_cards}
+    idle = by_name["IdleHandle"]
+    fresh = by_name["FreshHandle"]
+    assert idle.mu == pytest.approx(idle_before.mu)
+    assert idle.sigma is not None
+    assert idle.conservative_score is not None
+    assert idle.sigma > idle_before.sigma
+    assert idle.conservative_score < idle_before.conservative_score
+    assert idle.score == pytest.approx(idle.conservative_score)
+    assert idle.games == idle_before.games
+    assert idle.sample_count == idle_before.games
+
+    async with session_factory() as session:
+        fresh_row = await _load_human_rating(session, fresh_id)
+    assert fresh.mu == pytest.approx(fresh_row.mu)
+    assert fresh.sigma == pytest.approx(fresh_row.sigma)
+    assert fresh.conservative_score == pytest.approx(fresh_row.conservative_score)
+    assert fresh.score == pytest.approx(fresh_row.conservative_score)
+
+
+async def test_human_cards_sort_and_rank_by_decayed_score(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_cache()
+    await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Idle High Raw",
+        ranked_handle="IdleHighRaw",
+        score=40.0,
+        last_game_at=NOW - timedelta(days=26),
+    )
+    await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Active Lower Raw",
+        ranked_handle="ActiveLowerRaw",
+        score=38.0,
+        last_game_at=NOW,
+    )
+
+    async with session_factory() as session:
+        leaderboard = await compute_public_leaderboard(
+            session,
+            ruleset_id="mini7_v1",
+            now=NOW,
+        )
+
+    assert [card.entity.display_name for card in leaderboard.human_cards] == [
+        "ActiveLowerRaw",
+        "IdleHighRaw",
+    ]
+    by_name = {card.entity.display_name: card for card in leaderboard.human_cards}
+    assert by_name["ActiveLowerRaw"].rank == 1
+    assert by_name["IdleHighRaw"].rank == 2
+    idle_score = by_name["IdleHighRaw"].conservative_score
+    active_score = by_name["ActiveLowerRaw"].conservative_score
+    assert idle_score is not None
+    assert active_score is not None
+    assert idle_score < active_score
+
+
+async def test_human_cache_key_changes_on_decay_day_boundary(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_cache()
+    await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Cache Idle",
+        ranked_handle="CacheIdle",
+        score=40.0,
+        games=17,
+        last_game_at=NOW - timedelta(days=26),
+    )
+
+    async with session_factory() as session:
+        before = await compute_public_leaderboard(
+            session,
+            ruleset_id="mini7_v1",
+            now=NOW.replace(hour=23, minute=59),
+        )
+        after = await compute_public_leaderboard(
+            session,
+            ruleset_id="mini7_v1",
+            now=NOW + timedelta(days=1),
+        )
+
+    assert before.cache_tag != after.cache_tag
+    assert before.human_cards[0].games == 17
+    assert before.human_cards[0].sample_count == 17
+    assert after.human_cards[0].games == 17
+    assert after.human_cards[0].sample_count == 17
 
 
 async def test_public_human_cards_use_ranked_handle_or_default_not_display_name(

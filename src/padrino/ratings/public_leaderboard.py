@@ -23,7 +23,7 @@ import hashlib
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
 from openskill.models import PlackettLuce
@@ -56,7 +56,10 @@ from padrino.ratings.openskill_service import (
     SCOPE_GLOBAL,
     SCOPE_VALUE_GLOBAL,
 )
-from padrino.ratings.provisional_and_decay import DEFAULT_PROVISIONAL_GAMES
+from padrino.ratings.provisional_and_decay import (
+    DEFAULT_PROVISIONAL_GAMES,
+    project_decayed_display,
+)
 from padrino.ratings.solo_rate_service import (
     DEFAULT_SOLO_RATE_MIN_ATTEMPTS,
     beta_binomial_credible_interval,
@@ -246,6 +249,7 @@ async def compute_public_leaderboard(
     gauntlet_id: str | None = None,
     provisional_games_threshold: int = DEFAULT_PROVISIONAL_GAMES,
     solo_rate_min_attempts: int = DEFAULT_SOLO_RATE_MIN_ATTEMPTS,
+    now: datetime | None = None,
 ) -> PublicLeaderboard:
     """Return the cached or freshly-computed public leaderboard.
 
@@ -254,6 +258,7 @@ async def compute_public_leaderboard(
     the previous ``cache_tag`` simply miss the cache once and get the fresh
     aggregate.
     """
+    as_of = _leaderboard_as_of(now)
     ingested_tag = await _ingested_cache_part(
         session,
         ruleset_id=ruleset_id,
@@ -262,7 +267,7 @@ async def compute_public_leaderboard(
     canonical_tag = await _rating_cache_part(session, Rating, ruleset_id=ruleset_id)
     placement_tag = await _rating_cache_part(session, PlacementRating, ruleset_id=ruleset_id)
     solo_tag = await _rating_cache_part(session, SoloRateRating, ruleset_id=ruleset_id)
-    human_tag = await _human_rating_cache_part(session, ruleset_id=ruleset_id)
+    human_tag = await _human_rating_cache_part(session, ruleset_id=ruleset_id, now=as_of)
     cache_tag = (
         f"ingested:{ingested_tag};canonical:{canonical_tag};"
         f"placement:{placement_tag};solo:{solo_tag};human:{human_tag}"
@@ -308,6 +313,7 @@ async def compute_public_leaderboard(
         session,
         ruleset_id=ruleset_id,
         min_games=provisional_games_threshold,
+        now=as_of,
     )
 
     leaderboard = PublicLeaderboard(
@@ -363,6 +369,7 @@ async def _human_rating_cache_part(
     session: AsyncSession,
     *,
     ruleset_id: str | None,
+    now: datetime,
 ) -> str:
     stmt = (
         select(
@@ -391,10 +398,19 @@ async def _human_rating_cache_part(
         session,
         human_player_ids,
     )
+    decay_day = now.date().isoformat() if rows else "empty"
     return (
         f"{_cache_part(max_updated_at, len(rows))}:"
-        f"q:{_dt_cache_token(max_quarantined_at)}:h:{handle_token}:c:{consent_token}"
+        f"q:{_dt_cache_token(max_quarantined_at)}:"
+        f"h:{handle_token}:c:{consent_token}:d:{decay_day}"
     )
+
+
+def _leaderboard_as_of(now: datetime | None) -> datetime:
+    resolved = datetime.now(UTC) if now is None else now
+    if resolved.tzinfo is None:
+        return resolved.replace(tzinfo=UTC)
+    return resolved.astimezone(UTC)
 
 
 def _cache_part(max_dt: datetime | None, count: int) -> str:
@@ -973,6 +989,7 @@ async def _human_cards(
     *,
     ruleset_id: str | None,
     min_games: int,
+    now: datetime,
 ) -> tuple[PublicRatingCard, ...]:
     stmt = (
         select(HumanRating, League)
@@ -1012,15 +1029,21 @@ async def _human_cards(
         entity = entities.get(row.human_player_id)
         if entity is None:
             continue
+        display = project_decayed_display(
+            row.mu,
+            row.sigma,
+            row.last_game_at,
+            now=now,
+        )
         cards.append(
             _human_openskill_card(
                 ruleset_id=league.ruleset_id,
                 entity=entity,
                 scope_type=row.scope_type,
                 scope_value=row.scope_value,
-                mu=row.mu,
-                sigma=row.sigma,
-                conservative_score=row.conservative_score,
+                mu=display.mu,
+                sigma=display.sigma,
+                conservative_score=display.conservative_score,
                 games=row.games,
                 min_games=min_games,
             )
