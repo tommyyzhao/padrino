@@ -31,6 +31,7 @@ from padrino.api.routes.health import router as health_router
 from padrino.api.routes.human import router as human_router
 from padrino.api.routes.ingest import router as ingest_router
 from padrino.api.routes.leagues import router as leagues_router
+from padrino.api.routes.legal import router as legal_router
 from padrino.api.routes.lobbies import router as lobbies_router
 from padrino.api.routes.public import router as public_router
 from padrino.api.routes.scheduled_gauntlets import router as scheduled_gauntlets_router
@@ -203,6 +204,9 @@ def create_app(
         app.include_router(scheduled_gauntlets_router)
     app.include_router(health_router)
     app.include_router(public_router)
+    # Product-authored legal documents are public and hash-bound, so consent UI
+    # can fetch the exact text before a human accepts it.
+    app.include_router(legal_router)
     # Human quickplay (US-128) is always mounted: it carries no API-scope
     # dependency and must be reachable even under auth_required=True and the
     # public-surface-only deployment (humans play from the public site).

@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Legal document registry (US-302): keep content hashing in pure core
+  (`core/legal_documents.py`) with a documented normalization rule, and keep
+  product-authored document bodies in the server registry
+  (`padrino.legal.documents`). Public routes should serve the body and
+  `content_hash` computed from that same registry; future consent writes should
+  treat this server registry as authoritative rather than trusting settings-only
+  dates or client-computed hashes.
 - Ranked ban primitive (US-300): keep the pure predicate in
   `core/ranked_ban.py` typed over injected comparable instants, not
   `datetime`, so the pure-core firewall stays closed. The DB row stores
@@ -4935,3 +4942,29 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2821
   passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
   touch `web/dashboard`.
+
+## 2026-06-27T11:44 PDT - US-302
+- Added pure legal-document normalization and sha256 content hashing under
+  `src/padrino/core/legal_documents.py`, with line-ending and trailing
+  whitespace normalization pinned by tests and covered by the core purity /
+  no-wallclock firewalls.
+- Added a server-owned legal document registry for TOS and PRIVACY, both tagged
+  with version labels and bodies containing the 16+ requirement, MVP/no-warranty
+  disclaimer, and explicit no-cash-prizes statement.
+- Added public `GET /legal/documents` and `GET /legal/documents/{kind}` routes,
+  mounted on the public surface, returning body + version label + content hash
+  computed from the served body.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/legal_documents.py`,
+  `src/padrino/legal/__init__.py`, `src/padrino/legal/documents.py`,
+  `src/padrino/api/routes/legal.py`, `src/padrino/api/app.py`,
+  `tests/core/test_legal_document_hash.py`,
+  `tests/api/test_legal_documents_route.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_legal_document_hash.py tests/api/test_legal_documents_route.py -q`
+  failed first on missing `padrino.core.legal_documents`; focused GREEN same
+  command -> 6 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2831 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
