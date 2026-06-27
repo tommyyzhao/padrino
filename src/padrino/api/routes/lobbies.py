@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.api.auth import _get_auth_settings
 from padrino.api.deps import get_session, get_session_factory
 from padrino.api.human_auth import HumanPrincipalContext, require_human
+from padrino.api.human_consent import client_ip_hash
 from padrino.api.lobby_launch import (
     AutoFillPoolError,
     LobbyNotLaunchableError,
@@ -517,7 +518,13 @@ async def launch(
         request, session, principal_id=ctx.principal_id, action=ACTION_LAUNCH
     )
     try:
-        result = await launch_lobby(session, lobby_id=lobby_id)
+        league = await leagues_repo.get(session, lobby.league_id)
+        source_ip_hash = client_ip_hash(request) if league is not None and league.ranked else None
+        result = await launch_lobby(
+            session,
+            lobby_id=lobby_id,
+            source_ip_hash=source_ip_hash,
+        )
     except (LobbyNotLaunchableError, AutoFillPoolError) as exc:
         # Roll the freshly claimed (unbound) slots back so a failed launch leaks
         # neither a count slot nor a held inference reservation.

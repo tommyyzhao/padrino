@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE, generate_session_token
-from padrino.api.human_consent import record_consent, record_ranked_consent
+from padrino.api.human_consent import hash_source_ip, record_consent, record_ranked_consent
 from padrino.core.enums import LobbySeatKind, LobbyStatus, SeatKind
 from padrino.db.models import (
     AgentBuild,
@@ -285,6 +285,35 @@ async def test_ranked_launch_with_one_host_human_still_succeeds(
         )
     assert len([seat for seat in seats if seat.seat_kind == SeatKind.HUMAN.value]) == 1
     assert len([seat for seat in seats if seat.seat_kind == SeatKind.AI.value]) == 6
+
+
+@pytest.mark.asyncio
+async def test_ranked_launch_persists_request_ip_hash_not_raw_ip(
+    ranked_client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        await _seed_curated_builds(session, count=6)
+    host = await _account_with_session(session_factory, subject=f"host-{uuid.uuid4()}")
+    lobby_id = await _create_ranked_lobby(ranked_client, host)
+    locked = await ranked_client.post(
+        f"/lobbies/{lobby_id}/lock",
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert locked.status_code == 200, locked.text
+
+    launched = await ranked_client.post(
+        f"/lobbies/{lobby_id}/launch",
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+
+    assert launched.status_code == 200, launched.text
+    game_id = uuid.UUID(launched.json()["game_id"])
+    async with session_factory() as session:
+        game = await session.get(Game, game_id)
+    assert game is not None
+    assert game.ranked_source_ip_hash == hash_source_ip("127.0.0.1")
+    assert game.ranked_source_ip_hash != "127.0.0.1"
 
 
 @pytest.mark.asyncio

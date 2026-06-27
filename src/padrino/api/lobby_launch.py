@@ -92,7 +92,12 @@ async def _curated_roster(session: AsyncSession, ruleset_id: str) -> list[str]:
     return await human_eligible_pool(session, ruleset_id)
 
 
-async def launch_lobby(session: AsyncSession, *, lobby_id: uuid.UUID) -> LaunchResult:
+async def launch_lobby(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    source_ip_hash: str | None = None,
+) -> LaunchResult:
     """Materialize a human-lane game from a LOCKED lobby (idempotent).
 
     Raises:
@@ -158,6 +163,7 @@ async def launch_lobby(session: AsyncSession, *, lobby_id: uuid.UUID) -> LaunchR
         status="CREATED",
     )
     game.identity_mode = lobby.identity_mode
+    game.ranked_source_ip_hash = source_ip_hash
 
     member_principal = await _member_principals(session, lobby_id)
 

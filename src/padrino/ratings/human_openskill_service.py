@@ -24,6 +24,7 @@ from padrino.core.rulesets.canonicality import canonical_team_ranks_for_outcome
 from padrino.db.models import Game, GameSeat, HumanRating, HumanRatingEvent, League
 from padrino.db.repositories import human_consents as human_consents_repo
 from padrino.db.repositories import human_ratings as human_ratings_repo
+from padrino.db.repositories import ranked_signals as ranked_signals_repo
 from padrino.legal.documents import DOCUMENT_KIND_RANKED, get_legal_document
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA, SCOPE_GLOBAL
 from padrino.ratings.openskill_service import SCOPE_VALUE_GLOBAL as _SCOPE_VALUE_GLOBAL
@@ -64,6 +65,10 @@ class _TeamEntry:
 
 def _conservative(mu: float, sigma: float) -> float:
     return mu - 3.0 * sigma
+
+
+def _is_sha256_hex(value: str | None) -> bool:
+    return value is not None and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
 def ranked_human_rating_enabled(settings: Any | None = None) -> bool:
@@ -278,6 +283,64 @@ async def _record_ranked_disabled_refusal(
     )
 
 
+async def _record_ranked_game_signal_best_effort(
+    session: AsyncSession,
+    *,
+    game: Game,
+    game_result: HumanGameResult,
+    seats: Sequence[GameSeat],
+    events: Sequence[HumanRatingEvent],
+    now: datetime,
+) -> None:
+    if not events:
+        return
+    source_ip_hash = game.ranked_source_ip_hash
+    if not _is_sha256_hex(source_ip_hash):
+        _logger.warning(
+            "ranked.signals.capture_skipped",
+            game_id=str(game_result.game_id),
+            reason="missing_hashed_source_ip",
+        )
+        return
+    assert source_ip_hash is not None
+
+    seats_by_public_id = {seat.public_player_id: seat for seat in seats}
+    event = sorted(
+        events,
+        key=lambda row: (row.public_player_id or "", row.human_player_id),
+    )[0]
+    if event.public_player_id is None:
+        return
+    seat = seats_by_public_id.get(event.public_player_id)
+    if seat is None:
+        return
+    human_principal_id = seat.occupant_principal_id
+    if human_principal_id is None:
+        try:
+            human_principal_id = uuid.UUID(event.human_player_id)
+        except ValueError:
+            return
+
+    try:
+        await ranked_signals_repo.record_ranked_game_signal(
+            session,
+            game_id=game_result.game_id,
+            human_principal_id=human_principal_id,
+            source_ip_hash=source_ip_hash,
+            winner=game_result.winner,
+            faction=seat.faction,
+            signals={},
+            created_at=now,
+        )
+    except Exception as exc:
+        _logger.warning(
+            "ranked.signals.capture_failed",
+            game_id=str(game_result.game_id),
+            human_principal_id=str(human_principal_id),
+            error=str(exc),
+        )
+
+
 async def update_human_ratings_for_game(
     session: AsyncSession,
     *,
@@ -314,6 +377,7 @@ async def update_human_ratings_for_game(
     )
     if metadata is None:
         return []
+    _league, game = metadata
 
     seats = await _seat_rows(session, game_result.game_id)
     human_principal_ids = {
@@ -373,6 +437,14 @@ async def update_human_ratings_for_game(
         )
         if event is not None:
             events.append(event)
+    await _record_ranked_game_signal_best_effort(
+        session,
+        game=game,
+        game_result=game_result,
+        seats=seats,
+        events=events,
+        now=_now,
+    )
     return events
 
 

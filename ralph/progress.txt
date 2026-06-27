@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked telemetry capture (US-311): capture request-scoped metadata at ranked
+  lobby launch, not in the decoupled human-lane worker. Store only
+  `Game.ranked_source_ip_hash`, then have the ranked human ELO writer append one
+  `RankedGameSignal` only after a real `HumanRatingEvent` insert. Signal insert
+  failures are best-effort/log-only and must never change rating rows.
 - Strangers-only ranked launch (US-310): keep the pure invariant in
   `core/lobby/strangers_only.py` over already-resolved launch facts
   (`lobby_is_ranked`, `human_seat_count`). The impure launch handoff loads the
@@ -5159,4 +5164,46 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 47 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2877 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T13:02 PDT - US-311
+- Added Alembic migration `0063_ranked_game_signals`, chaining after `0062`,
+  with `ranked_game_signals` plus nullable `games.ranked_source_ip_hash` launch
+  context. Updated migration-head tests to the new `0063` head and narrowed the
+  older `0052` single-revision test so it upgrades to `0052`, not symbolic
+  `head`.
+- Added the `RankedGameSignal` ORM model and `ranked_signals` repository using
+  dialect-portable `ON CONFLICT DO NOTHING` keyed by `game_id`.
+- Threaded hashed launch IP from `POST /lobbies/{id}/launch` into
+  `launch_lobby` for ranked lobbies only, using existing `client_ip_hash`
+  behavior so raw IPs are never persisted.
+- Made `update_human_ratings_for_game` append a best-effort telemetry row only
+  after actual `HumanRatingEvent` rows are inserted; capture failure is logged
+  and swallowed, preserving rating rows and idempotency.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/lobby_launch.py`,
+  `src/padrino/api/routes/lobbies.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0063_ranked_game_signals.py`,
+  `src/padrino/db/repositories/ranked_signals.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `tests/api/test_lobbies_ranked_strangers_only.py`,
+  `tests/db/test_migration_0052_game_leases.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_migration_0060_ranked_ban.py`,
+  `tests/db/test_migration_0062_human_consent_content_hash.py`,
+  `tests/db/test_migration_0063_ranked_game_signals.py`,
+  `tests/db/test_migrations.py`, `tests/ratings/test_ranked_signal_capture.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0063_ranked_game_signals.py tests/ratings/test_ranked_signal_capture.py tests/api/test_lobbies_ranked_strangers_only.py::test_ranked_launch_persists_request_ip_hash_not_raw_ip -q`
+  failed first on the missing `RankedGameSignal` model; focused GREEN same
+  command -> 7 passed. Related GREEN
+  `uv run pytest tests/ratings/test_ranked_signal_capture.py tests/ratings/test_human_ranked_elo.py tests/ratings/test_ranked_write_audit.py tests/api/test_lobbies_ranked_strangers_only.py tests/api/test_lobby_launch.py tests/api/test_human_match.py -q`
+  -> 33 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2886 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
