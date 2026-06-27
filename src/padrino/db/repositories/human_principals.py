@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Final
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.core.ranked_handle_policy import RankedHandleReason, validate_ranked_handle
 from padrino.db.models import HumanSession, Principal
 
 PRINCIPAL_KIND_GUEST: Final[str] = "guest"
@@ -28,9 +31,36 @@ SESSION_KIND_GUEST: Final[str] = "guest"
 SESSION_KIND_ACCOUNT: Final[str] = "account"
 
 
+class RankedHandleValidationError(ValueError):
+    """A requested ranked handle failed the pure name policy."""
+
+    status_code: int = 400
+
+    def __init__(self, reason: RankedHandleReason) -> None:
+        self.reason = reason
+        super().__init__(reason.value)
+
+
+class RankedHandleCollisionError(ValueError):
+    """A ranked handle normalized to a value already claimed by another user."""
+
+    status_code: int = 409
+
+    def __init__(self, normalized_handle: str) -> None:
+        self.normalized_handle = normalized_handle
+        super().__init__("ranked_handle_collision")
+
+
 def hash_session_token(raw: str) -> str:
     """Return the sha256 hex digest stored in ``human_sessions.session_hash``."""
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def derive_default_ranked_handle(principal_id: uuid.UUID) -> str:
+    """Return the deterministic pseudonymous handle for a principal id."""
+
+    digest = hashlib.sha256(f"ranked-handle:{principal_id}".encode()).hexdigest()
+    return f"Player-{digest[:10]}"
 
 
 async def create_principal(
@@ -59,6 +89,52 @@ async def set_display_name(
     obj.updated_at = now
     await session.flush()
     return obj
+
+
+async def claim_ranked_handle(
+    session: AsyncSession,
+    principal_id: uuid.UUID,
+    *,
+    candidate: str | None,
+    blocklist: Iterable[str],
+    reserved: Iterable[str],
+    now: datetime,
+) -> Principal | None:
+    """Validate and atomically claim a ranked handle for ``principal_id``.
+
+    ``candidate=None`` applies the deterministic default handle. The unique
+    normalized shadow column is the atomic arbiter; a uniqueness violation is
+    surfaced as a 409-shaped exception for API callers.
+    """
+
+    principal = await session.get(Principal, principal_id)
+    if principal is None:
+        return None
+
+    handle_candidate = (
+        candidate if candidate is not None else derive_default_ranked_handle(principal_id)
+    )
+    decision = validate_ranked_handle(
+        handle_candidate,
+        blocklist=blocklist,
+        reserved=reserved,
+    )
+    if not decision.ok:
+        raise RankedHandleValidationError(decision.reason)
+    if (
+        decision.handle is None or decision.normalized is None
+    ):  # pragma: no cover - ok implies both.
+        raise RuntimeError("valid ranked handle missing normalized form")
+
+    try:
+        async with session.begin_nested():
+            principal.ranked_handle = decision.handle
+            principal.ranked_handle_normalized = decision.normalized
+            principal.updated_at = now
+            await session.flush()
+    except IntegrityError as exc:
+        raise RankedHandleCollisionError(decision.normalized) from exc
+    return principal
 
 
 async def create_session(
@@ -115,8 +191,12 @@ __all__ = [
     "PRINCIPAL_KIND_GUEST",
     "SESSION_KIND_ACCOUNT",
     "SESSION_KIND_GUEST",
+    "RankedHandleCollisionError",
+    "RankedHandleValidationError",
+    "claim_ranked_handle",
     "create_principal",
     "create_session",
+    "derive_default_ranked_handle",
     "get_principal",
     "get_session_by_token",
     "hash_session_token",
