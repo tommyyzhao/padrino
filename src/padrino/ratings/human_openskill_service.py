@@ -22,7 +22,9 @@ from padrino.core.enums import Faction, LeagueKind
 from padrino.core.ranked_eligibility import RankedEligibilityReason
 from padrino.core.rulesets.canonicality import canonical_team_ranks_for_outcome
 from padrino.db.models import Game, GameSeat, HumanRating, HumanRatingEvent, League
+from padrino.db.repositories import human_consents as human_consents_repo
 from padrino.db.repositories import human_ratings as human_ratings_repo
+from padrino.legal.documents import DOCUMENT_KIND_RANKED, get_legal_document
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA, SCOPE_GLOBAL
 from padrino.ratings.openskill_service import SCOPE_VALUE_GLOBAL as _SCOPE_VALUE_GLOBAL
 
@@ -73,6 +75,16 @@ def ranked_human_rating_enabled(settings: Any | None = None) -> bool:
     return getattr(settings, "padrino_ranked_human_rating_enabled", False) is True
 
 
+def _ranked_required_content_hashes() -> dict[str, str]:
+    document = get_legal_document(DOCUMENT_KIND_RANKED)
+    if document is None:
+        return {}
+    return dict.fromkeys(
+        human_consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS,
+        document.content_hash,
+    )
+
+
 async def _resolve_ranked_humans_included_metadata(
     session: AsyncSession,
     *,
@@ -112,6 +124,7 @@ async def _team_entries(
     game_id: uuid.UUID,
     seats: Sequence[GameSeat],
     model: PlackettLuce,
+    withdrawn_principal_ids: set[uuid.UUID],
 ) -> tuple[list[_TeamEntry], list[_TeamEntry]] | None:
     town: list[_TeamEntry] = []
     mafia: list[_TeamEntry] = []
@@ -128,7 +141,10 @@ async def _team_entries(
         existing_event: HumanRatingEvent | None = None
         before_mu = INITIAL_MU
         before_sigma = INITIAL_SIGMA
-        if seat.occupant_principal_id is not None:
+        if (
+            seat.occupant_principal_id is not None
+            and seat.occupant_principal_id not in withdrawn_principal_ids
+        ):
             human_count += 1
             row = await human_ratings_repo.get_or_create_human_rating(
                 session,
@@ -300,6 +316,15 @@ async def update_human_ratings_for_game(
         return []
 
     seats = await _seat_rows(session, game_result.game_id)
+    human_principal_ids = {
+        seat.occupant_principal_id for seat in seats if seat.occupant_principal_id is not None
+    }
+    withdrawn_principal_ids = await human_consents_repo.active_ranked_withdrawn_principal_ids(
+        session,
+        subject_principal_ids=human_principal_ids,
+        required_kinds=human_consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS,
+        required_content_hashes=_ranked_required_content_hashes(),
+    )
     model = PlackettLuce(mu=INITIAL_MU, sigma=INITIAL_SIGMA)
     teams = await _team_entries(
         session,
@@ -307,6 +332,7 @@ async def update_human_ratings_for_game(
         game_id=game_result.game_id,
         seats=seats,
         model=model,
+        withdrawn_principal_ids=withdrawn_principal_ids,
     )
     if teams is None:
         return []

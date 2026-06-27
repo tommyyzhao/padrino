@@ -161,6 +161,27 @@ async def record_ranked_consent(
     return versions
 
 
+async def record_ranked_withdrawal(
+    session: AsyncSession,
+    *,
+    subject_principal_id: uuid.UUID,
+    settings: Settings,
+    withdrawn_at: datetime,
+    source_ip_hash: str | None = None,
+) -> str:
+    """Append a ranked withdrawal marker at the current RANKED document hash."""
+    requirement = next(iter(required_ranked_consent_requirements(settings).values()))
+    await consents_repo.record_ranked_withdrawal(
+        session,
+        subject_principal_id=subject_principal_id,
+        document_version=requirement.version_label,
+        content_hash=requirement.content_hash,
+        withdrawn_at=withdrawn_at,
+        source_ip_hash=source_ip_hash,
+    )
+    return requirement.version_label
+
+
 async def has_current_consent(
     session: AsyncSession,
     *,
@@ -191,14 +212,22 @@ async def has_current_ranked_consent(
         settings=settings,
     ):
         return False
-    return await consents_repo.has_current_consent_for_kinds(
+    ranked_requirements = required_ranked_consent_requirements(settings)
+    ranked_content_hashes = {
+        kind: requirement.content_hash for kind, requirement in ranked_requirements.items()
+    }
+    if not await consents_repo.has_current_consent_for_kinds(
         session,
         subject_principal_id=subject_principal_id,
         required_kinds=consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS,
-        required_content_hashes={
-            kind: requirement.content_hash
-            for kind, requirement in required_ranked_consent_requirements(settings).items()
-        },
+        required_content_hashes=ranked_content_hashes,
+    ):
+        return False
+    return not await consents_repo.has_active_ranked_withdrawal(
+        session,
+        subject_principal_id=subject_principal_id,
+        required_kinds=consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS,
+        required_content_hashes=ranked_content_hashes,
     )
 
 
@@ -252,6 +281,7 @@ __all__ = [
     "hash_source_ip",
     "record_consent",
     "record_ranked_consent",
+    "record_ranked_withdrawal",
     "required_consent_requirements",
     "required_consent_versions",
     "required_ranked_consent_requirements",

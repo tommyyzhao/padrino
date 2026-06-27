@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked consent withdrawal (US-305): keep withdrawal append-only as a
+  `HumanConsent` marker row with `document_kind == "RANKED_WITHDRAWN"` bound to
+  the current `RANKED` document hash. Recency lives in
+  `human_consents.active_ranked_withdrawn_principal_ids`: a withdrawal stays
+  active until every ranked purpose has a current acceptance newer than the
+  withdrawal (use the minimum latest purpose timestamp, not any one row). The
+  human ELO writer treats active-withdrawn seats as transient unrated seats
+  before `get_or_create_human_rating`, and the public human ladder filters the
+  same predicate while including an opaque consent-history token in the human
+  cache part.
 - Ranked lobby eligibility gate (US-291): keep the impure fact resolver in
   `api/ranked_eligibility.py` as a read-only composer over principal kind,
   OAuth verified-email, base/ranked consent, active ranked ban, and settings;
@@ -5083,4 +5093,36 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 68 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2856 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T12:35 PDT - US-305
+- Added append-only ranked consent withdrawal via
+  `POST /human/consent/ranked/withdraw`, recording a `RANKED_WITHDRAWN`
+  `HumanConsent` marker row without deleting or updating prior consent rows.
+- Made `has_current_ranked_consent` recency-aware: a withdrawal newer than the
+  latest complete current ranked-purpose acceptance returns false, while a full
+  later ranked re-acceptance restores current status.
+- Threaded active withdrawal into the ranked human ELO writer so withdrawn
+  principals are skipped before rating-row creation/mutation and participate
+  only as transient unrated seats for the remaining team math.
+- Filtered active-withdrawn principals from public human ladder cards and added
+  an opaque ranked-consent history token to the human cache part so withdrawal
+  and re-acceptance invalidate cached cards without touching rating rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_consent.py`,
+  `src/padrino/api/routes/human.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/ratings/public_leaderboard.py`,
+  `tests/api/test_ranked_consent_withdrawal.py`,
+  `tests/ratings/test_ranked_consent_withdrawal.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_ranked_consent_withdrawal.py tests/ratings/test_ranked_consent_withdrawal.py -q`
+  failed first on the missing withdrawal route/helper; focused GREEN same
+  command -> 4 passed. Related GREEN
+  `uv run pytest tests/api/test_ranked_consent_gate.py tests/api/test_ranked_consent_withdrawal.py tests/ratings/test_human_ranked_elo.py tests/ratings/test_ranked_consent_withdrawal.py tests/ratings/test_human_rating_quarantine.py tests/ratings/test_public_leaderboard_human_handle.py -q`
+  -> 20 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2862 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

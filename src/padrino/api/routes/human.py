@@ -51,6 +51,7 @@ from padrino.api.human_consent import (
     has_current_ranked_consent,
     record_consent,
     record_ranked_consent,
+    record_ranked_withdrawal,
     required_consent_versions,
     required_ranked_consent_versions,
 )
@@ -448,6 +449,31 @@ async def post_ranked_consent(
         session, subject_principal_id=ctx.principal_id, settings=settings
     )
     return ConsentStatus(consented=consented, required_versions=versions)
+
+
+@router.post(
+    "/human/consent/ranked/withdraw",
+    response_model=ConsentStatus,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_ranked_consent_withdrawal(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatus:
+    """Append a ranked consent withdrawal marker for the current human."""
+    settings = _get_auth_settings(request)
+    await record_ranked_withdrawal(
+        session,
+        subject_principal_id=ctx.principal_id,
+        settings=settings,
+        withdrawn_at=datetime.now(UTC),
+        source_ip_hash=client_ip_hash(request),
+    )
+    return ConsentStatus(
+        consented=False,
+        required_versions=required_ranked_consent_versions(settings),
+    )
 
 
 @router.post(
