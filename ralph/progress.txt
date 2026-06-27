@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Identity leak regression guards (US-299): seed real `Principal`,
+  `OAuthIdentity`, and `RankedBan` rows with unique sentinel display names,
+  ranked handles, emails, email hashes, and ban metadata, then assert absence
+  over the serialized route body/SSE text. For terminal reveal, allow AI model
+  identity fields (`provider`, `model_name`, model `display_name`,
+  `agent_build_id`) but assert human sentinel values and ranked-ban/eligibility
+  field names are absent.
 - Dashboard legal consent (US-309): fetch `/legal/documents/{kind}` as the
   source of display text, version labels, and client echo hashes. Base and
   ranked consent POST bodies should carry `content_hashes` copied from those
@@ -5409,3 +5416,30 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2919 passed / 41 skipped /
   10 deselected.
+
+## 2026-06-27T14:30 PDT - US-299
+- Added `tests/api/test_reveal_identity_firewall.py` with route-level
+  regression guards over live seat observation, pre-terminal public/private
+  reveal errors, and terminal public/private reveal payloads.
+- The fixtures seed two human participants with sentinel `display_name`,
+  `ranked_handle`, OAuth verified email, email hash, and active `RankedBan`
+  metadata, plus an AI build with sentinel model identity. Assertions check the
+  full SSE/JSON bodies: pre-terminal surfaces expose only public player ids and
+  no model/human identity markers; terminal reveal still exposes AI model
+  identity but no human PII, principal ids, ranked-ban, or eligibility fields.
+- No production code changes were needed; existing anonymous observation guards
+  and canonical reveal projection already satisfied the regression contract.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/api/test_reveal_identity_firewall.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_reveal_identity_firewall.py -q` failed first
+  on duplicate ranked-handle test fixture setup; focused GREEN
+  `uv run pytest tests/api/test_reveal_identity_firewall.py -q` -> 3 passed.
+  Related GREEN
+  `uv run pytest tests/api/test_endgame_reveal.py tests/api/test_human_reveal.py tests/api/test_seat_observation_stream.py -q`
+  -> 16 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2923 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch
+  `web/dashboard`.
