@@ -9,7 +9,7 @@ build-local configuration.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.api.auth import require_admin, require_read
+from padrino.api.auth import ApiKeyContext, require_admin, require_read
 from padrino.api.deps import get_session
 from padrino.api.pagination import (
     DEFAULT_LIMIT,
@@ -26,14 +26,19 @@ from padrino.api.pagination import (
     CursorPage,
     paginate_keyset,
 )
+from padrino.core.ranked_ban import RankedBanKind
 from padrino.db.models import (
     AgentBuild,
     ModelConfig,
     ModelProvider,
     PromptVersion,
+    RankedBan,
 )
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
+)
+from padrino.db.repositories import (
+    human_principals as human_principals_repo,
 )
 from padrino.db.repositories import (
     model_configs as model_configs_repo,
@@ -44,6 +49,7 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     providers as providers_repo,
 )
+from padrino.db.repositories import ranked_bans as ranked_bans_repo
 from padrino.llm.secrets import SecretResolutionError, resolve_secret
 
 router = APIRouter()
@@ -130,6 +136,94 @@ class AgentBuildResponse(BaseModel):
     inference_params: dict[str, Any]
     active: bool
     created_at: datetime
+
+
+class RankedBanCreate(_StrictModel):
+    principal_id: uuid.UUID
+    kind: RankedBanKind
+    reason: str = Field(min_length=1, max_length=512)
+    expires_at: datetime | None = None
+
+
+class RankedBanResponse(BaseModel):
+    id: uuid.UUID
+    principal_id: uuid.UUID
+    email_hash: str | None
+    kind: str
+    reason: str
+    created_by: str
+    created_at: datetime
+    expires_at: datetime | None
+    lifted_at: datetime | None
+
+
+def _ranked_ban_response(row: RankedBan) -> RankedBanResponse:
+    return RankedBanResponse(
+        id=row.id,
+        principal_id=row.principal_id,
+        email_hash=row.email_hash,
+        kind=row.kind,
+        reason=row.reason,
+        created_by=row.created_by,
+        created_at=row.created_at,
+        expires_at=row.expires_at,
+        lifted_at=row.lifted_at,
+    )
+
+
+def _admin_actor(ctx: ApiKeyContext) -> str:
+    if ctx.id is not None:
+        return str(ctx.id)
+    if ctx.via_admin_token:
+        return "legacy_admin_token"
+    return "synthetic_admin"
+
+
+@router.post(
+    "/admin/ranked-bans",
+    response_model=RankedBanResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def issue_ranked_ban(
+    body: RankedBanCreate,
+    ctx: ApiKeyContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RankedBanResponse:
+    principal = await human_principals_repo.get_principal(session, body.principal_id)
+    if principal is None or principal.deleted_at is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="principal_not_found")
+    if principal.kind != human_principals_repo.PRINCIPAL_KIND_ACCOUNT:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="account_required",
+        )
+    row = await ranked_bans_repo.issue_ban_for_principal(
+        session,
+        principal_id=body.principal_id,
+        kind=body.kind,
+        reason=body.reason,
+        created_by=_admin_actor(ctx),
+        now=datetime.now(UTC),
+        expires_at=body.expires_at,
+    )
+    await session.commit()
+    return _ranked_ban_response(row)
+
+
+@router.post(
+    "/admin/ranked-bans/{ban_id}/lift",
+    response_model=RankedBanResponse,
+)
+async def lift_ranked_ban(
+    ban_id: uuid.UUID,
+    _: ApiKeyContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RankedBanResponse:
+    row = await ranked_bans_repo.lift_ban(session, ban_id, now=datetime.now(UTC))
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ranked_ban_not_found")
+    await session.commit()
+    return _ranked_ban_response(row)
 
 
 @router.post(

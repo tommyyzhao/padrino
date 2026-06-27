@@ -43,6 +43,7 @@ EXPECTED_TABLES = {
     "campaign_pairings",
     "budget_reservation_slots",
     "ranked_write_audit",
+    "ranked_ban",
 }
 
 

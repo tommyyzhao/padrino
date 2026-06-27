@@ -907,6 +907,31 @@ class RankedWriteAudit(Base):
     )
 
 
+class RankedBan(Base):
+    """Manual ranked ban/suspension anchored to an account and optional email hash."""
+
+    __tablename__ = "ranked_ban"
+    __table_args__ = (
+        CheckConstraint("kind IN ('ban', 'suspension')", name="ck_ranked_ban_kind"),
+        Index("ix_ranked_ban_principal_id", "principal_id"),
+        Index("ix_ranked_ban_email_hash", "email_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id"), nullable=False
+    )
+    email_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lifted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ScheduledGauntlet(Base):
     """A cron-scheduled recurring heterogeneous tournament (US-085)."""
 
@@ -1622,6 +1647,7 @@ __all__ = [
     "PlacementRatingEvent",
     "Principal",
     "PromptVersion",
+    "RankedBan",
     "RankedWriteAudit",
     "RateLimitBucket",
     "Rating",

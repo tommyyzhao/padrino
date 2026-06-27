@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked ban primitive (US-300): keep the pure predicate in
+  `core/ranked_ban.py` typed over injected comparable instants, not
+  `datetime`, so the pure-core firewall stays closed. The DB row stores
+  `principal_id` plus one nullable sha256 `email_hash` derived from verified
+  OAuth email (`strip().lower()` before hashing), never raw email. Admin routes
+  are the only writer; route code rejects guest/human-cookie auth via
+  `require_admin`, and repository resolution matches both principal id and any
+  verified-email hash for re-signup inheritance.
 - Human ladder handles (US-298): the public human leaderboard must resolve
   `PublicEntity.display_name` from `Principal.ranked_handle`, falling back to
   `derive_default_ranked_handle(principal_id)` when no handle is claimed. Keep
@@ -4890,3 +4898,40 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2800 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T11:36 PDT - US-300
+- Added pure `is_ranked_banned` over `RankedBanSnapshot`, with injected clock
+  values and no `datetime` import under core.
+- Added Alembic migration `0060_ranked_ban`, ORM model `RankedBan`, and
+  repository helpers that issue/lift bans and resolve active bans by principal
+  id OR the sha256 hash of any verified OAuth email on the account.
+- Extended the existing admin router with `POST /admin/ranked-bans` and
+  `POST /admin/ranked-bans/{ban_id}/lift`; API-key admin auth is required, and
+  human-session cookies alone do not grant admin scope.
+- Added regression coverage for no raw email storage, re-signup inheritance by
+  email hash, admin/non-admin auth, ranked eligibility failing with
+  `ranked_banned`, and a static guard that only the admin route/repository can
+  create `RankedBan` rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/ranked_ban.py`,
+  `src/padrino/api/routes/admin.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0060_ranked_ban.py`,
+  `src/padrino/db/repositories/ranked_bans.py`,
+  `tests/core/test_ranked_ban.py`,
+  `tests/api/test_ranked_ban_admin.py`,
+  `tests/db/test_migration_0060_ranked_ban.py`,
+  `tests/db/test_ranked_bans.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_migrations.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_ranked_ban.py tests/db/test_migration_0060_ranked_ban.py tests/db/test_ranked_bans.py tests/api/test_ranked_ban_admin.py -q`
+  failed first on missing `padrino.core.ranked_ban` / `RankedBan`; focused
+  GREEN same command -> 15 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2821
+  passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
+  touch `web/dashboard`.
