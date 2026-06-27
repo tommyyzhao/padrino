@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.db.models import HumanRating, HumanRatingEvent, RankedWriteAudit
 from padrino.db.repositories import games, human_principals, leagues
+from padrino.db.repositories.human_principals import derive_default_ranked_handle
 from padrino.ratings.openskill_service import SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL
 from padrino.ratings.public_leaderboard import compute_public_leaderboard
 from padrino.ratings.ranked_audit import audit_ranked_human_ratings
@@ -22,7 +23,7 @@ async def _seed_rating(
     display_name: str,
     with_provenance: bool,
     score: float,
-) -> tuple[uuid.UUID, uuid.UUID]:
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     async with session_factory() as session, session.begin():
         league = await leagues.get_or_create_humans_included(
             session,
@@ -79,19 +80,19 @@ async def _seed_rating(
                     created_at=datetime(2026, 6, 25, tzinfo=UTC),
                 )
             )
-    return rating.id, event.id
+    return rating.id, event.id, principal.id
 
 
 async def test_ranked_audit_quarantines_pre_gate_rows_without_mutating_rating_or_events(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    pre_gate_rating_id, pre_gate_event_id = await _seed_rating(
+    pre_gate_rating_id, pre_gate_event_id, _pre_gate_principal_id = await _seed_rating(
         session_factory,
         display_name="Pre Gate",
         with_provenance=False,
         score=40.0,
     )
-    provenanced_rating_id, _provenanced_event_id = await _seed_rating(
+    provenanced_rating_id, _provenanced_event_id, provenanced_principal_id = await _seed_rating(
         session_factory,
         display_name="Provenanced",
         with_provenance=True,
@@ -132,13 +133,15 @@ async def test_ranked_audit_quarantines_pre_gate_rows_without_mutating_rating_or
     async with session_factory() as session:
         leaderboard = await compute_public_leaderboard(session, ruleset_id="mini7_v1")
 
-    assert [card.entity.display_name for card in leaderboard.human_cards] == ["Provenanced"]
+    assert [card.entity.display_name for card in leaderboard.human_cards] == [
+        derive_default_ranked_handle(provenanced_principal_id)
+    ]
 
 
 async def test_quarantined_human_rating_is_excluded_and_cache_invalidates_on_flip(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    rating_id, _event_id = await _seed_rating(
+    rating_id, _event_id, principal_id = await _seed_rating(
         session_factory,
         display_name="Cache Subject",
         with_provenance=True,
@@ -148,7 +151,9 @@ async def test_quarantined_human_rating_is_excluded_and_cache_invalidates_on_fli
     async with session_factory() as session:
         before = await compute_public_leaderboard(session, ruleset_id="mini7_v1")
 
-    assert [card.entity.display_name for card in before.human_cards] == ["Cache Subject"]
+    assert [card.entity.display_name for card in before.human_cards] == [
+        derive_default_ranked_handle(principal_id)
+    ]
 
     async with session_factory() as session, session.begin():
         rating = await session.get(HumanRating, rating_id)

@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human ladder handles (US-298): the public human leaderboard must resolve
+  `PublicEntity.display_name` from `Principal.ranked_handle`, falling back to
+  `derive_default_ranked_handle(principal_id)` when no handle is claimed. Keep
+  `entity_id` as the stable `sha256("human|<id>")[:32]` client reference. The
+  human cache part should compose tokens instead of replacing prior tokens:
+  rating updated/count + quarantine max + an opaque digest of ranked-handle
+  state, never raw principal ids or raw display names in `cache_tag`.
 - Ranked handle claims (US-297): keep name policy pure in
   `core/ranked_handle_policy.py` with injected profanity/reserved lists. Store
   the display handle and a lowercase normalized shadow key on `Principal`, and
@@ -4856,3 +4863,30 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2797
   passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
   touch `web/dashboard`.
+
+## 2026-06-27T11:18 PDT - US-298
+- Migrated public human leaderboard entities from `Principal.display_name` to
+  `Principal.ranked_handle`, with deterministic default handles for unclaimed
+  accounts and the existing stable `sha256("human|<id>")[:32]` entity ids.
+- Extended `_human_rating_cache_part` with an opaque ranked-handle state digest
+  so handle changes invalidate cached human cards without exposing raw
+  principal ids through `cache_tag`.
+- Added regression coverage proving raw display names and raw principal UUIDs
+  are absent from serialized public leaderboard JSON, while handle updates
+  appear on the next read.
+- Updated existing human leaderboard/quarantine tests to expect ranked handles
+  or deterministic defaults rather than raw display names.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `tests/ratings/test_public_leaderboard_human_handle.py`,
+  `tests/ratings/test_human_rating_quarantine.py`,
+  `tests/api/test_public_routes.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py` failed
+  first on raw `display_name` leakage; focused GREEN
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py tests/ratings/test_human_rating_quarantine.py tests/api/test_public_routes.py -q`
+  -> 22 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2800 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

@@ -45,6 +45,7 @@ from padrino.db.models import (
     RatingContext,
     SoloRateRating,
 )
+from padrino.db.repositories.human_principals import derive_default_ranked_handle
 from padrino.ratings.openskill_service import (
     INITIAL_MU,
     INITIAL_SIGMA,
@@ -352,9 +353,9 @@ async def _human_rating_cache_part(
 ) -> str:
     stmt = (
         select(
-            func.max(HumanRating.updated_at),
-            func.max(HumanRating.quarantined_at),
-            func.count(HumanRating.id),
+            HumanRating.human_player_id,
+            HumanRating.updated_at,
+            HumanRating.quarantined_at,
         )
         .select_from(HumanRating)
         .join(League, League.id == HumanRating.league_id)
@@ -365,8 +366,17 @@ async def _human_rating_cache_part(
     )
     if ruleset_id is not None:
         stmt = stmt.where(League.ruleset_id == ruleset_id)
-    max_updated_at, max_quarantined_at, count = (await session.execute(stmt)).one()
-    return f"{_cache_part(max_updated_at, int(count))}:q:{_dt_cache_token(max_quarantined_at)}"
+    rows = list((await session.execute(stmt)).all())
+    max_updated_at = _max_datetime(row.updated_at for row in rows)
+    max_quarantined_at = _max_datetime(row.quarantined_at for row in rows)
+    handle_token = await _human_handle_cache_token(
+        session,
+        (row.human_player_id for row in rows),
+    )
+    return (
+        f"{_cache_part(max_updated_at, len(rows))}:"
+        f"q:{_dt_cache_token(max_quarantined_at)}:h:{handle_token}"
+    )
 
 
 def _cache_part(max_dt: datetime | None, count: int) -> str:
@@ -376,6 +386,44 @@ def _cache_part(max_dt: datetime | None, count: int) -> str:
 
 def _dt_cache_token(max_dt: datetime | None) -> str:
     return max_dt.isoformat() if max_dt is not None else "empty"
+
+
+def _max_datetime(values: Iterable[datetime | None]) -> datetime | None:
+    return max((value for value in values if value is not None), default=None)
+
+
+async def _human_handle_cache_token(
+    session: AsyncSession,
+    human_player_ids: Iterable[str],
+) -> str:
+    ids = list(dict.fromkeys(human_player_ids))
+    if not ids:
+        return "empty"
+
+    uuid_to_raw: dict[uuid.UUID, str] = {}
+    for raw in ids:
+        try:
+            uuid_to_raw[uuid.UUID(raw)] = raw
+        except ValueError:
+            continue
+
+    principal_tokens: dict[str, str] = {}
+    if uuid_to_raw:
+        stmt = select(Principal.id, Principal.ranked_handle, Principal.updated_at).where(
+            Principal.id.in_(list(uuid_to_raw))
+        )
+        for principal_id, ranked_handle, updated_at in (await session.execute(stmt)).all():
+            principal_tokens[uuid_to_raw[principal_id]] = "|".join(
+                [
+                    ranked_handle or "",
+                    _dt_cache_token(updated_at),
+                ]
+            )
+
+    raw = "\n".join(
+        principal_tokens.get(human_player_id, "missing") for human_player_id in sorted(ids)
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
 def _aggregate_entries(
@@ -478,10 +526,16 @@ async def _agent_entities(
     return entities
 
 
-def _human_entity(human_player_id: str, display_name: str | None) -> PublicEntity:
+def _human_entity(human_player_id: str, ranked_handle: str | None) -> PublicEntity:
     digest = hashlib.sha256(f"human|{human_player_id}".encode()).hexdigest()
-    stripped = display_name.strip() if display_name is not None else ""
-    safe_display_name = stripped or f"Human {digest[:8]}"
+    stripped = ranked_handle.strip() if ranked_handle is not None else ""
+    if stripped:
+        safe_display_name = stripped
+    else:
+        try:
+            safe_display_name = derive_default_ranked_handle(uuid.UUID(human_player_id))
+        except ValueError:
+            safe_display_name = f"Player-{digest[:10]}"
     return PublicEntity(
         entity_id=digest[:32],
         display_name=safe_display_name,
@@ -507,15 +561,15 @@ async def _human_entities(
         except ValueError:
             continue
 
-    display_names: dict[str, str | None] = {}
+    ranked_handles: dict[str, str | None] = {}
     if uuid_to_raw:
-        stmt = select(Principal.id, Principal.display_name).where(
+        stmt = select(Principal.id, Principal.ranked_handle).where(
             Principal.id.in_(list(uuid_to_raw))
         )
-        for principal_id, display_name in (await session.execute(stmt)).all():
-            display_names[uuid_to_raw[principal_id]] = display_name
+        for principal_id, ranked_handle in (await session.execute(stmt)).all():
+            ranked_handles[uuid_to_raw[principal_id]] = ranked_handle
 
-    return {raw: _human_entity(raw, display_names.get(raw)) for raw in ids}
+    return {raw: _human_entity(raw, ranked_handles.get(raw)) for raw in ids}
 
 
 def _card_id(
