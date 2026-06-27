@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human rating idempotency (US-292): for ranked human ELO, atomically claim the
+  per-seat `HumanRatingEvent` with dialect-specific `INSERT ... ON CONFLICT DO
+  NOTHING` before mutating `HumanRating`. If an event already exists or the
+  insert loses the conflict, skip the row update entirely; for partial retries,
+  use the existing event's `before_mu` / `before_sigma` as the per-game team
+  baseline so missing seats complete without re-applying already-rated seats.
+  Runner terminal persistence must pass the resolved kill-switch flag from
+  `GamePersistence.settings` / `get_settings()` into the writer.
 - Ranked eligibility predicate (US-290): keep ranked human switch-on logic in
   `padrino.core.ranked_eligibility` as pure data-in/data-out composition over
   shell-resolved facts. The deterministic reason order is kill-switch,
@@ -4641,3 +4649,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2738 passed / 41 skipped /
   10 deselected.
+
+## 2026-06-27T10:47 PDT - US-292
+- Made `update_human_ratings_for_game` fail closed on the write-time ranked
+  human ELO kill-switch before resolving league/game metadata or creating
+  rating rows.
+- Made per-game human ELO writes idempotent by claiming the unique
+  `HumanRatingEvent` before mutating `HumanRating`; duplicate and partial-retry
+  reruns skip already-rated seats and complete missing seats without double
+  incrementing games or moving mu/sigma twice.
+- Threaded the resolved settings flag through terminal persistence so flipping
+  `padrino_ranked_human_rating_enabled` off stops in-flight ranked human game
+  finalization writes.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/runner/game_runner.py`, `tests/ratings/test_human_ranked_elo.py`,
+  `tests/ratings/test_segregation.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_writes_human_rating_rows_only tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_kill_switch_off_writes_zero_rows -q`
+  failed first on missing write-time flag, duplicate unique-event conflict, and
+  runner switch-off behavior. Focused GREEN: same command -> 8 passed. Backend
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2743
+  passed / 41 skipped / 10 deselected.

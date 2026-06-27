@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, LeagueKind
 from padrino.core.rulesets import mini7_v1
 from padrino.db.models import GameSeat, HumanRating, HumanRatingEvent, Rating, RatingEvent
-from padrino.db.repositories import games, human_principals, leagues
+from padrino.db.repositories import games, human_principals, human_ratings, leagues
 from padrino.ratings.human_openskill_service import (
     HumanGameResult,
     update_human_ratings_for_game,
@@ -94,6 +95,7 @@ async def test_ranked_humans_included_updates_only_human_global_rows(
             session,
             league_id=league_id,
             ranked=True,
+            rating_enabled=True,
             game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
         )
 
@@ -157,24 +159,28 @@ async def test_human_writer_fails_closed_for_casual_scientific_and_missing_leagu
             session,
             league_id=casual_league_id,
             ranked=True,
+            rating_enabled=True,
             game_result=HumanGameResult(game_id=casual_game_id, winner="TOWN"),
         )
         runtime_unranked_events = await update_human_ratings_for_game(
             session,
             league_id=casual_league_id,
             ranked=False,
+            rating_enabled=True,
             game_result=HumanGameResult(game_id=casual_game_id, winner="TOWN"),
         )
         scientific_events = await update_human_ratings_for_game(
             session,
             league_id=scientific_league_id,
             ranked=True,
+            rating_enabled=True,
             game_result=HumanGameResult(game_id=scientific_game_id, winner="TOWN"),
         )
         missing_league_events = await update_human_ratings_for_game(
             session,
             league_id=uuid.uuid4(),
             ranked=True,
+            rating_enabled=True,
             game_result=HumanGameResult(game_id=scientific_game_id, winner="TOWN"),
         )
 
@@ -194,3 +200,235 @@ async def test_human_writer_fails_closed_for_casual_scientific_and_missing_leagu
         )
 
     assert counts == (0, 0, 0, 0)
+
+
+async def test_human_writer_kill_switch_off_writes_nothing_for_ranked_league(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, _ = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="ranked-human-switch-off",
+    )
+
+    async with session_factory() as session, session.begin():
+        events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=False,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+        )
+
+    assert events == []
+    async with session_factory() as session:
+        human_rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+    assert human_rows == []
+    assert human_events == []
+
+
+async def test_human_rating_update_is_idempotent_per_game(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, _ = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="ranked-human-idempotent",
+    )
+    first_now = datetime(2026, 6, 1, tzinfo=UTC)
+    retry_now = datetime(2026, 6, 2, tzinfo=UTC)
+
+    async with session_factory() as session, session.begin():
+        first_events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=first_now,
+        )
+    assert len(first_events) == 2
+
+    async with session_factory() as session:
+        first_rows = (await session.execute(select(HumanRating))).scalars().all()
+        first_snapshot = {
+            row.human_player_id: (
+                row.mu,
+                row.sigma,
+                row.conservative_score,
+                row.games,
+                row.last_game_at,
+            )
+            for row in first_rows
+        }
+
+    async with session_factory() as session, session.begin():
+        duplicate_events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=retry_now,
+        )
+
+    assert duplicate_events == []
+    async with session_factory() as session:
+        rows = (await session.execute(select(HumanRating))).scalars().all()
+        event_count = (
+            await session.execute(select(func.count()).select_from(HumanRatingEvent))
+        ).scalar_one()
+    assert event_count == 2
+    assert {
+        row.human_player_id: (
+            row.mu,
+            row.sigma,
+            row.conservative_score,
+            row.games,
+            row.last_game_at,
+        )
+        for row in rows
+    } == first_snapshot
+
+
+async def test_human_rating_partial_retry_completes_missing_seats_only(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, _ = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="ranked-human-partial-retry",
+    )
+    first_now = datetime(2026, 6, 1, tzinfo=UTC)
+    retry_now = datetime(2026, 6, 2, tzinfo=UTC)
+
+    async with session_factory() as session, session.begin():
+        await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=first_now,
+        )
+
+    async with session_factory() as session:
+        first_rows = (await session.execute(select(HumanRating))).scalars().all()
+        first_snapshot = {
+            row.human_player_id: (
+                row.mu,
+                row.sigma,
+                row.conservative_score,
+                row.games,
+                row.last_game_at,
+            )
+            for row in first_rows
+        }
+        first_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+
+    missing_event = first_events[0]
+    missing_human_id = missing_event.human_player_id
+    preserved_human_id = first_events[1].human_player_id
+
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            delete(HumanRatingEvent).where(HumanRatingEvent.human_player_id == missing_human_id)
+        )
+        missing_row = (
+            await session.execute(
+                select(HumanRating).where(HumanRating.human_player_id == missing_human_id)
+            )
+        ).scalar_one()
+        missing_row.mu = INITIAL_MU
+        missing_row.sigma = INITIAL_SIGMA
+        missing_row.conservative_score = INITIAL_MU - 3.0 * INITIAL_SIGMA
+        missing_row.games = 0
+        missing_row.last_game_at = None
+
+    async with session_factory() as session, session.begin():
+        retry_events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=retry_now,
+        )
+
+    assert [event.human_player_id for event in retry_events] == [missing_human_id]
+    async with session_factory() as session:
+        rows = (await session.execute(select(HumanRating))).scalars().all()
+        events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+
+    by_human = {row.human_player_id: row for row in rows}
+    preserved = by_human[preserved_human_id]
+    assert (
+        preserved.mu,
+        preserved.sigma,
+        preserved.conservative_score,
+        preserved.games,
+        preserved.last_game_at,
+    ) == first_snapshot[preserved_human_id]
+
+    repaired = by_human[missing_human_id]
+    expected_mu, expected_sigma, expected_score, expected_games, _expected_time = first_snapshot[
+        missing_human_id
+    ]
+    assert repaired.mu == pytest.approx(expected_mu)
+    assert repaired.sigma == pytest.approx(expected_sigma)
+    assert repaired.conservative_score == pytest.approx(expected_score)
+    assert repaired.games == expected_games
+    assert repaired.last_game_at is not None
+    assert len(events) == 2
+
+
+async def test_record_human_rating_event_conflict_returns_none(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="ranked-human-event-conflict",
+    )
+    public_player_id, principal_id = next(iter(principals.items()))
+
+    async with session_factory() as session, session.begin():
+        first = await human_ratings.record_human_rating_event(
+            session,
+            league_id=league_id,
+            game_id=game_id,
+            human_player_id=str(principal_id),
+            public_player_id=public_player_id,
+            scope_type="GLOBAL",
+            scope_value="global",
+            before_mu=INITIAL_MU,
+            before_sigma=INITIAL_SIGMA,
+            after_mu=INITIAL_MU + 1.0,
+            after_sigma=INITIAL_SIGMA - 1.0,
+        )
+        duplicate = await human_ratings.record_human_rating_event(
+            session,
+            league_id=league_id,
+            game_id=game_id,
+            human_player_id=str(principal_id),
+            public_player_id=public_player_id,
+            scope_type="GLOBAL",
+            scope_value="global",
+            before_mu=INITIAL_MU,
+            before_sigma=INITIAL_SIGMA,
+            after_mu=INITIAL_MU + 1.0,
+            after_sigma=INITIAL_SIGMA - 1.0,
+        )
+
+    assert first is not None
+    assert duplicate is None
+    async with session_factory() as session:
+        event_count = (
+            await session.execute(select(func.count()).select_from(HumanRatingEvent))
+        ).scalar_one()
+    assert event_count == 1

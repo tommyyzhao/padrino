@@ -75,6 +75,24 @@ async def update_human_rating(
     return rating
 
 
+async def get_human_rating_event(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    human_player_id: str,
+    scope_type: str,
+    scope_value: str,
+) -> HumanRatingEvent | None:
+    """Return the per-game human-rating event for the unique scope, if present."""
+    stmt = select(HumanRatingEvent).where(
+        HumanRatingEvent.game_id == game_id,
+        HumanRatingEvent.human_player_id == human_player_id,
+        HumanRatingEvent.scope_type == scope_type,
+        HumanRatingEvent.scope_value == scope_value,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def record_human_rating_event(
     session: AsyncSession,
     *,
@@ -88,20 +106,51 @@ async def record_human_rating_event(
     after_mu: float,
     after_sigma: float,
     public_player_id: str | None = None,
-) -> HumanRatingEvent:
-    """Append a human-rating audit row for the given human and scope."""
-    obj = HumanRatingEvent(
-        league_id=league_id,
-        game_id=game_id,
-        human_player_id=human_player_id,
-        public_player_id=public_player_id,
-        scope_type=scope_type,
-        scope_value=scope_value,
-        before_mu=before_mu,
-        before_sigma=before_sigma,
-        after_mu=after_mu,
-        after_sigma=after_sigma,
-    )
-    session.add(obj)
+) -> HumanRatingEvent | None:
+    """Append a human-rating audit row, returning None on idempotent conflict."""
+    values = {
+        "id": uuid.uuid4(),
+        "league_id": league_id,
+        "game_id": game_id,
+        "human_player_id": human_player_id,
+        "public_player_id": public_player_id,
+        "scope_type": scope_type,
+        "scope_value": scope_value,
+        "before_mu": before_mu,
+        "before_sigma": before_sigma,
+        "after_mu": after_mu,
+        "after_sigma": after_sigma,
+    }
+    index_elements = ["game_id", "human_player_id", "scope_type", "scope_value"]
+    bind = session.get_bind()
+    dialect_name = bind.dialect.name
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = (
+            pg_insert(HumanRatingEvent)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=index_elements)
+            .returning(HumanRatingEvent.id)
+        )
+    elif dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        stmt = (
+            sqlite_insert(HumanRatingEvent)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=index_elements)
+            .returning(HumanRatingEvent.id)
+        )
+    else:
+        raise RuntimeError(f"unsupported dialect for human-rating event insert: {dialect_name!r}")
+
+    inserted_id = (await session.execute(stmt)).scalar_one_or_none()
     await session.flush()
-    return obj
+    if inserted_id is None:
+        return None
+    inserted = await session.get(HumanRatingEvent, inserted_id)
+    if inserted is None:  # pragma: no cover - inserted in the same transaction.
+        msg = f"Human rating event {inserted_id} disappeared after insert"
+        raise RuntimeError(msg)
+    return inserted

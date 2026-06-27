@@ -39,6 +39,9 @@ class HumanGameResult:
 class _TeamEntry:
     public_player_id: str
     row: HumanRating | None
+    existing_event: HumanRatingEvent | None
+    before_mu: float
+    before_sigma: float
     rating: Any
 
 
@@ -102,6 +105,9 @@ async def _team_entries(
             return None
 
         row: HumanRating | None = None
+        existing_event: HumanRatingEvent | None = None
+        before_mu = INITIAL_MU
+        before_sigma = INITIAL_SIGMA
         if seat.occupant_principal_id is not None:
             human_count += 1
             row = await human_ratings_repo.get_or_create_human_rating(
@@ -114,11 +120,31 @@ async def _team_entries(
                 initial_sigma=INITIAL_SIGMA,
                 initial_conservative_score=_conservative(INITIAL_MU, INITIAL_SIGMA),
             )
-            rating = model.create_rating([row.mu, row.sigma], name=str(row.id))
+            existing_event = await human_ratings_repo.get_human_rating_event(
+                session,
+                game_id=game_id,
+                human_player_id=row.human_player_id,
+                scope_type=SCOPE_GLOBAL,
+                scope_value=SCOPE_VALUE_GLOBAL,
+            )
+            if existing_event is None:
+                before_mu = float(row.mu)
+                before_sigma = float(row.sigma)
+            else:
+                before_mu = float(existing_event.before_mu)
+                before_sigma = float(existing_event.before_sigma)
+            rating = model.create_rating([before_mu, before_sigma], name=str(row.id))
         else:
             rating = model.create_rating([INITIAL_MU, INITIAL_SIGMA])
 
-        entry = _TeamEntry(public_player_id=seat.public_player_id, row=row, rating=rating)
+        entry = _TeamEntry(
+            public_player_id=seat.public_player_id,
+            row=row,
+            existing_event=existing_event,
+            before_mu=before_mu,
+            before_sigma=before_sigma,
+            rating=rating,
+        )
         if faction is Faction.TOWN:
             town.append(entry)
         else:
@@ -142,8 +168,23 @@ async def _persist_human_entry(
     row = entry.row
     if row is None:
         return None
-    before_mu = float(row.mu)
-    before_sigma = float(row.sigma)
+    if entry.existing_event is not None:
+        return None
+    event = await human_ratings_repo.record_human_rating_event(
+        session,
+        league_id=league_id,
+        game_id=game_id,
+        human_player_id=row.human_player_id,
+        public_player_id=entry.public_player_id,
+        scope_type=SCOPE_GLOBAL,
+        scope_value=SCOPE_VALUE_GLOBAL,
+        before_mu=entry.before_mu,
+        before_sigma=entry.before_sigma,
+        after_mu=new_mu,
+        after_sigma=new_sigma,
+    )
+    if event is None:
+        return None
     updated = await human_ratings_repo.update_human_rating(
         session,
         row.id,
@@ -156,19 +197,7 @@ async def _persist_human_entry(
     if updated is None:  # pragma: no cover - row was just inserted in this txn.
         msg = f"Human rating row {row.id} disappeared between insert and update"
         raise RuntimeError(msg)
-    return await human_ratings_repo.record_human_rating_event(
-        session,
-        league_id=league_id,
-        game_id=game_id,
-        human_player_id=updated.human_player_id,
-        public_player_id=entry.public_player_id,
-        scope_type=SCOPE_GLOBAL,
-        scope_value=SCOPE_VALUE_GLOBAL,
-        before_mu=before_mu,
-        before_sigma=before_sigma,
-        after_mu=new_mu,
-        after_sigma=new_sigma,
-    )
+    return event
 
 
 async def update_human_ratings_for_game(
@@ -177,6 +206,7 @@ async def update_human_ratings_for_game(
     league_id: uuid.UUID,
     ranked: bool,
     game_result: HumanGameResult,
+    rating_enabled: bool | None = None,
     now: datetime | None = None,
 ) -> list[HumanRatingEvent]:
     """Apply the GLOBAL ranked-human update for one Humans-Included game.
@@ -184,6 +214,9 @@ async def update_human_ratings_for_game(
     AI seats participate as transient initial ratings so the team update reflects
     the full mixed game, but only human principal rows are persisted.
     """
+    if (ranked_human_rating_enabled() if rating_enabled is None else rating_enabled) is not True:
+        return []
+
     metadata = await _resolve_ranked_humans_included_metadata(
         session,
         league_id=league_id,

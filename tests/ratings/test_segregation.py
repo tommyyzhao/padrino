@@ -75,6 +75,7 @@ from padrino.runner.game_runner import (
     GamePersistence,
     run_game,
 )
+from padrino.settings import Settings
 from tests.conftest import make_town_win_script
 
 _GAME_SEED = "seed-segregation-001"
@@ -371,6 +372,7 @@ async def test_ranked_humans_included_terminal_game_writes_human_rating_rows_onl
         game_id=game_id,
         agent_builds=ai_builds,
         league_id=league_id,
+        settings=Settings(_env_file=None, padrino_ranked_human_rating_enabled=True),
     )
     outcome = await run_game(
         GameConfig(game_id="G-SEG-RANKED-HUMAN", game_seed=_GAME_SEED, timeout_s=1.0),
@@ -397,6 +399,41 @@ async def test_ranked_humans_included_terminal_game_writes_human_rating_rows_onl
     assert {row.scope_value for row in human_rows} == {"global"}
     assert {event.scope_type for event in human_events} == {"GLOBAL"}
     assert {event.scope_value for event in human_events} == {"global"}
+
+
+async def test_ranked_humans_included_terminal_game_kill_switch_off_writes_zero_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The terminal write path re-checks the ranked human-rating kill-switch."""
+    mafia, town, doctor, detective = _split_factions()
+    script = make_town_win_script(
+        mafia_ids=mafia, town_ids=town, doctor_id=doctor, detective_id=detective
+    )
+    human_seats = {town[0], mafia[0]}
+    league_id, game_id, ai_builds = await _seed_human_lane_game(
+        session_factory,
+        hash_prefix="us292-ranked-human-disabled",
+        human_seat_ids=human_seats,
+        ranked=True,
+    )
+
+    persistence = GamePersistence(
+        session_factory=session_factory,
+        game_id=game_id,
+        agent_builds=ai_builds,
+        league_id=league_id,
+        settings=Settings(_env_file=None, padrino_ranked_human_rating_enabled=False),
+    )
+    outcome = await run_game(
+        GameConfig(game_id="G-SEG-RANKED-HUMAN-OFF", game_seed=_GAME_SEED, timeout_s=1.0),
+        DeterministicMockAdapter(script),
+        ranked=True,
+        persistence=persistence,
+    )
+    assert outcome.final_state.terminal_result == "TOWN"
+
+    counts = await _count_all_rating_rows(session_factory)
+    assert counts == (0, 0, 0, 0)
 
 
 async def test_human_seat_fails_closed_even_if_ranked_true(

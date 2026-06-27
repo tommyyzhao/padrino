@@ -80,6 +80,7 @@ from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
 from padrino.ratings.human_openskill_service import (
     HumanGameResult,
+    ranked_human_rating_enabled,
     update_human_ratings_for_game,
 )
 from padrino.ratings.openskill_service import (
@@ -640,6 +641,7 @@ async def _persist_terminated_event(
                 )
         if apply_human_ratings:
             assert persistence.league_id is not None
+            settings = persistence.settings or get_settings()
             human_winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
             human_events = await update_human_ratings_for_game(
                 session,
@@ -649,6 +651,7 @@ async def _persist_terminated_event(
                     game_id=persistence.game_id,
                     winner=human_winner,
                 ),
+                rating_enabled=ranked_human_rating_enabled(settings),
             )
             if human_events:
                 _logger.info(
