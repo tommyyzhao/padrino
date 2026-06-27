@@ -79,6 +79,7 @@ from padrino.observability.metrics import record_game_completed
 from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
 from padrino.ratings.human_openskill_service import (
+    FirewallViolation,
     HumanGameResult,
     ranked_human_rating_enabled,
     update_human_ratings_for_game,
@@ -643,16 +644,27 @@ async def _persist_terminated_event(
             assert persistence.league_id is not None
             settings = persistence.settings or get_settings()
             human_winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
-            human_events = await update_human_ratings_for_game(
-                session,
-                league_id=persistence.league_id,
-                ranked=ranked,
-                game_result=HumanGameResult(
-                    game_id=persistence.game_id,
+            try:
+                human_events = await update_human_ratings_for_game(
+                    session,
+                    league_id=persistence.league_id,
+                    ranked=ranked,
+                    game_result=HumanGameResult(
+                        game_id=persistence.game_id,
+                        winner=human_winner,
+                    ),
+                    rating_enabled=ranked_human_rating_enabled(settings),
+                )
+            except FirewallViolation as exc:
+                _logger.error(
+                    "human.rating.finalize_skipped_firewall_violation",
+                    game_id=str(persistence.game_id),
+                    league_id=str(exc.league_id),
+                    kind=exc.league_kind,
                     winner=human_winner,
-                ),
-                rating_enabled=ranked_human_rating_enabled(settings),
-            )
+                    error=str(exc),
+                )
+                human_events = []
             if human_events:
                 _logger.info(
                     "human.rating.updated",

@@ -4674,3 +4674,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   gates: `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2743
   passed / 41 skipped / 10 deselected.
+
+## 2026-06-27T11:29 PDT - US-293
+- Added a typed `FirewallViolation` for ranked human ELO writes that are handed
+  a non-`HUMANS_INCLUDED` league, logging `league_id` and `kind` before raising
+  and before any human-rating rows are created.
+- Made terminal persistence catch that specific firewall violation as an
+  unrated finalize error so the game still commits `COMPLETED` with no human or
+  scientific rating writes.
+- Locked the import-graph invariant that `human_openskill_service.py` imports
+  only shared constants from the scientific OpenSkill module, and extended the
+  ranked human ELO test to assert no `HUMANS_INCLUDED` rows ever attach to a
+  `CANONICAL_TEAM` rating context.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/ratings/test_human_ranked_elo.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py tests/runner/test_rating_integration.py -q`
+  failed first on missing `FirewallViolation`; focused GREEN same command -> 16
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2746 passed / 41 skipped /
+  10 deselected.

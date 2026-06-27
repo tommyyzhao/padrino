@@ -2,25 +2,39 @@
 
 from __future__ import annotations
 
+import ast
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+import structlog
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import LogCapture
 
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import Faction, LeagueKind
+from padrino.core.enums import Faction, LeagueKind, RatingContextKind
 from padrino.core.rulesets import mini7_v1
-from padrino.db.models import GameSeat, HumanRating, HumanRatingEvent, Rating, RatingEvent
+from padrino.db.models import (
+    GameSeat,
+    HumanRating,
+    HumanRatingEvent,
+    League,
+    Rating,
+    RatingContext,
+    RatingEvent,
+)
 from padrino.db.repositories import games, human_principals, human_ratings, leagues
 from padrino.ratings.human_openskill_service import (
+    FirewallViolation,
     HumanGameResult,
     update_human_ratings_for_game,
 )
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA
 
 _GAME_SEED = "seed-human-ranked-elo-001"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 async def _seed_human_rating_game(
@@ -106,9 +120,22 @@ async def test_ranked_humans_included_updates_only_human_global_rows(
         human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
         scientific_rows = (await session.execute(select(Rating))).scalars().all()
         scientific_events = (await session.execute(select(RatingEvent))).scalars().all()
+        humans_included_canonical_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Rating)
+                .join(League, League.id == Rating.league_id)
+                .join(RatingContext, RatingContext.id == Rating.rating_context_id)
+                .where(
+                    League.kind == LeagueKind.HUMANS_INCLUDED.value,
+                    RatingContext.kind == RatingContextKind.CANONICAL_TEAM.value,
+                )
+            )
+        ).scalar_one()
 
     assert scientific_rows == []
     assert scientific_events == []
+    assert humans_included_canonical_count == 0
     assert len(human_rows) == 2
     assert len(human_events) == 2
     assert {row.scope_type for row in human_rows} == {"GLOBAL"}
@@ -138,7 +165,7 @@ async def test_ranked_humans_included_updates_only_human_global_rows(
         assert row.conservative_score == pytest.approx(row.mu - 3.0 * row.sigma)
 
 
-async def test_human_writer_fails_closed_for_casual_scientific_and_missing_league(
+async def test_human_writer_fails_closed_for_casual_runtime_unranked_and_missing_league(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     casual_league_id, casual_game_id, _ = await _seed_human_rating_game(
@@ -147,13 +174,6 @@ async def test_human_writer_fails_closed_for_casual_scientific_and_missing_leagu
         league_ranked=False,
         hash_prefix="casual-human",
     )
-    scientific_league_id, scientific_game_id, _ = await _seed_human_rating_game(
-        session_factory,
-        league_kind=LeagueKind.SCIENTIFIC,
-        league_ranked=True,
-        hash_prefix="scientific",
-    )
-
     async with session_factory() as session, session.begin():
         casual_events = await update_human_ratings_for_game(
             session,
@@ -169,24 +189,16 @@ async def test_human_writer_fails_closed_for_casual_scientific_and_missing_leagu
             rating_enabled=True,
             game_result=HumanGameResult(game_id=casual_game_id, winner="TOWN"),
         )
-        scientific_events = await update_human_ratings_for_game(
-            session,
-            league_id=scientific_league_id,
-            ranked=True,
-            rating_enabled=True,
-            game_result=HumanGameResult(game_id=scientific_game_id, winner="TOWN"),
-        )
         missing_league_events = await update_human_ratings_for_game(
             session,
             league_id=uuid.uuid4(),
             ranked=True,
             rating_enabled=True,
-            game_result=HumanGameResult(game_id=scientific_game_id, winner="TOWN"),
+            game_result=HumanGameResult(game_id=casual_game_id, winner="TOWN"),
         )
 
     assert casual_events == []
     assert runtime_unranked_events == []
-    assert scientific_events == []
     assert missing_league_events == []
 
     async with session_factory() as session:
@@ -200,6 +212,67 @@ async def test_human_writer_fails_closed_for_casual_scientific_and_missing_leagu
         )
 
     assert counts == (0, 0, 0, 0)
+
+
+async def test_human_writer_raises_firewall_violation_for_scientific_league_and_rolls_back(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    scientific_league_id, scientific_game_id, _ = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.SCIENTIFIC,
+        league_ranked=True,
+        hash_prefix="scientific-firewall",
+    )
+    capture = LogCapture()
+    original_config = structlog.get_config()
+    structlog.reset_defaults()
+    structlog.configure(processors=[capture], cache_logger_on_first_use=False)
+    try:
+        with pytest.raises(FirewallViolation) as raised:
+            async with session_factory() as session, session.begin():
+                await update_human_ratings_for_game(
+                    session,
+                    league_id=scientific_league_id,
+                    ranked=True,
+                    rating_enabled=True,
+                    game_result=HumanGameResult(game_id=scientific_game_id, winner="TOWN"),
+                )
+    finally:
+        structlog.reset_defaults()
+        structlog.configure(**original_config)
+
+    assert raised.value.league_id == scientific_league_id
+    assert raised.value.league_kind == LeagueKind.SCIENTIFIC.value
+    assert any(
+        entry["event"] == "human.rating.firewall_violation"
+        and entry["league_id"] == str(scientific_league_id)
+        and entry["kind"] == LeagueKind.SCIENTIFIC.value
+        for entry in capture.entries
+    )
+    async with session_factory() as session:
+        counts = (
+            (await session.execute(select(func.count()).select_from(Rating))).scalar_one(),
+            (await session.execute(select(func.count()).select_from(RatingEvent))).scalar_one(),
+            (await session.execute(select(func.count()).select_from(HumanRating))).scalar_one(),
+            (
+                await session.execute(select(func.count()).select_from(HumanRatingEvent))
+            ).scalar_one(),
+        )
+
+    assert counts == (0, 0, 0, 0)
+
+
+def test_human_writer_import_graph_avoids_scientific_rating_writers() -> None:
+    source_path = _REPO_ROOT / "src" / "padrino" / "ratings" / "human_openskill_service.py"
+    tree = ast.parse(source_path.read_text())
+    allowed = {"INITIAL_MU", "INITIAL_SIGMA", "SCOPE_GLOBAL", "SCOPE_VALUE_GLOBAL"}
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "padrino.ratings.openskill_service":
+            imported.update(alias.name for alias in node.names)
+
+    assert imported
+    assert imported <= allowed
 
 
 async def test_human_writer_kill_switch_off_writes_nothing_for_ranked_league(

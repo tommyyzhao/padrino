@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
+import structlog
 from openskill.models import PlackettLuce
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,19 @@ from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA, SCOPE_G
 from padrino.ratings.openskill_service import SCOPE_VALUE_GLOBAL as _SCOPE_VALUE_GLOBAL
 
 SCOPE_VALUE_GLOBAL: Final[str] = _SCOPE_VALUE_GLOBAL
+_logger = structlog.get_logger("padrino.ratings.human_openskill_service")
+
+
+class FirewallViolation(RuntimeError):
+    """Raised when ranked human ELO is asked to write outside HUMANS_INCLUDED."""
+
+    def __init__(self, *, league_id: uuid.UUID, league_kind: str | None) -> None:
+        self.league_id = league_id
+        self.league_kind = league_kind
+        super().__init__(
+            "human rating firewall violation: "
+            f"league_id={league_id} kind={league_kind!r} is not HUMANS_INCLUDED"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,11 +82,16 @@ async def _resolve_ranked_humans_included_metadata(
     if not ranked:
         return None
     league = await session.get(League, league_id)
-    if (
-        league is None
-        or league.kind != LeagueKind.HUMANS_INCLUDED.value
-        or league.ranked is not True
-    ):
+    if league is None:
+        return None
+    if league.kind != LeagueKind.HUMANS_INCLUDED.value:
+        _logger.error(
+            "human.rating.firewall_violation",
+            league_id=str(league_id),
+            kind=league.kind,
+        )
+        raise FirewallViolation(league_id=league_id, league_kind=league.kind)
+    if league.ranked is not True:
         return None
     game = await session.get(Game, game_id)
     if game is None or game.ruleset_id != league.ruleset_id:
@@ -280,6 +299,7 @@ async def update_human_ratings_for_game(
 
 __all__ = [
     "SCOPE_VALUE_GLOBAL",
+    "FirewallViolation",
     "HumanGameResult",
     "ranked_human_rating_enabled",
     "update_human_ratings_for_game",

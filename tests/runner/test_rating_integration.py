@@ -20,12 +20,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import padrino.runner.game_runner as game_runner_module
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Phase
-from padrino.core.enums import ActionType, Faction, PhaseKind, Role
+from padrino.core.enums import ActionType, Faction, LeagueKind, PhaseKind, Role
 from padrino.core.rulesets import mini7_v1, sk12_v1
 from padrino.db.models import (
     GameEvent,
@@ -55,6 +56,7 @@ from padrino.db.repositories import (
     providers as providers_repo,
 )
 from padrino.llm.mock import DeterministicMockAdapter
+from padrino.ratings.human_openskill_service import FirewallViolation
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA
 from padrino.runner.game_runner import (
     GameConfig,
@@ -514,6 +516,113 @@ async def test_placement_non_faction_winner_skips_scoring_after_finalizing_game(
     assert terminal_events[0].event_hash == game.event_hash_head
     assert placement_rows == []
     assert placement_events == []
+
+
+async def test_human_rating_firewall_violation_completes_terminal_game_without_ratings(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, _builds_by_seat = await _seed_ranked_setup(
+        session_factory, ranked=True, hash_prefix="us293-firewall-finalize"
+    )
+    state = GameState(
+        ruleset_id=mini7_v1.RULESET_ID,
+        game_id="G-HUMAN-FIREWALL",
+        game_seed=_GAME_SEED,
+        current_phase=Phase(kind=PhaseKind.TERMINAL, day=1, round=0),
+        seats=tuple(assign_roles(_GAME_SEED, mini7_v1)),
+        day=1,
+        terminal_result="TOWN",
+        terminal_reason="TEST_TERMINAL",
+    )
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "sequence": 0,
+            "event_type": "GameTerminated",
+            "phase": "DAY_1_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "TOWN", "reason": "TEST_TERMINAL"},
+        }
+    )
+
+    async def fake_should_apply_human_ratings(
+        session: AsyncSession,
+        persistence: GamePersistence,
+        ranked: bool,
+        state: GameState,
+    ) -> bool:
+        del session, persistence, ranked, state
+        return True
+
+    async def fake_update_human_ratings_for_game(
+        *_args: object,
+        **kwargs: object,
+    ) -> list[object]:
+        league_id_arg = kwargs["league_id"]
+        assert isinstance(league_id_arg, uuid.UUID)
+        raise FirewallViolation(
+            league_id=league_id_arg,
+            league_kind=LeagueKind.SCIENTIFIC.value,
+        )
+
+    monkeypatch.setattr(
+        game_runner_module,
+        "_should_apply_human_ratings",
+        fake_should_apply_human_ratings,
+    )
+    monkeypatch.setattr(
+        game_runner_module,
+        "update_human_ratings_for_game",
+        fake_update_human_ratings_for_game,
+    )
+
+    await _persist_terminated_event(
+        GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds={},
+            league_id=league_id,
+        ),
+        stored,
+        state,
+        ranked=True,
+        day_terminated=1,
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+        terminal_events = (
+            (
+                await session.execute(
+                    select(GameEvent).where(
+                        GameEvent.game_id == game_id,
+                        GameEvent.event_type == "GameTerminated",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        scientific_rows = (await session.execute(select(Rating))).scalars().all()
+        scientific_events = (await session.execute(select(RatingEvent))).scalars().all()
+        human_rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+
+    assert game is not None
+    assert game.status == "COMPLETED"
+    assert game.terminal_result == {
+        "winner": "TOWN",
+        "reason": "TEST_TERMINAL",
+        "day_terminated": 1,
+    }
+    assert len(terminal_events) == 1
+    assert terminal_events[0].event_hash == game.event_hash_head
+    assert scientific_rows == []
+    assert scientific_events == []
+    assert human_rows == []
+    assert human_events == []
 
 
 async def test_unranked_game_skips_rating_updates(
