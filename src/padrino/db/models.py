@@ -1153,9 +1153,10 @@ class OAuthIdentity(Base):
 
     Keyed by (``provider``, ``subject``) so an OAuth sign-in is find-or-create:
     a repeat sign-in resolves the same account principal across sessions and
-    devices. Only the stable provider ``subject`` is persisted — provider access
-    tokens are NEVER stored beyond completing the exchange. There is no friends
-    graph and no multi-account merge in v1.
+    devices. Only the stable provider ``subject`` plus provider-asserted email
+    verification facts are persisted — provider access tokens are NEVER stored
+    beyond completing the exchange. There is no friends graph and no multi-account
+    merge in v1.
     """
 
     __tablename__ = "oauth_identities"
@@ -1166,6 +1167,10 @@ class OAuthIdentity(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     provider: Mapped[str] = mapped_column(String, nullable=False)
     subject: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     principal_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
     )

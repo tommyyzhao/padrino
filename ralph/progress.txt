@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- OAuth verified-email signal (US-296): keep provider email facts on
+  `OAuthIdentity`, not `Principal`. `_user_info_from_payload` should carry the
+  raw email claim and coerce `email_verified` to `False` unless the provider
+  sends a real boolean. `find_or_create_account` owns normalization
+  (`strip().lower()` with blank -> `None`) and must refresh the existing
+  identity row on repeat sign-in before returning the account. Do not add an
+  email uniqueness constraint; multi-provider merge remains out of scope.
 - Human rating quarantine (US-295): keep `HumanRating.quarantined_at` as a
   reversible read-side exclusion marker. `ranked-audit` should set only that
   field for untrusted rows, never mutate mu/sigma/games or delete
@@ -4775,3 +4782,36 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2763 passed / 41 skipped /
   10 deselected.
+
+## 2026-06-27T10:57 PDT - US-296
+- Added `OAuthUserInfo.email` / `email_verified` extraction, with non-bool or
+  missing `email_verified` claims coerced to `False`.
+- Added Alembic migration `0058_oauth_identity_email_verified` and the
+  `OAuthIdentity.email` / `email_verified` ORM columns, without adding any
+  uniqueness constraint on raw email.
+- Updated OAuth account creation so create-new, guest-upgrade, and repeat
+  sign-in paths persist normalized email and refresh the provider's latest
+  verified-email assertion on the existing identity row.
+- Added OAuth tests for claim extraction defaults, create/upgrade persistence,
+  repeat sign-in refresh, unverified email, and app-log capture that excludes
+  the provider email claim.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/oauth.py`,
+  `src/padrino/api/routes/human.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/oauth_identities.py`,
+  `src/padrino/db/migrations/versions/0058_oauth_identity_email_verified.py`,
+  `tests/api/test_oauth_signin.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_oauth_signin.py tests/db/test_migration_0058_oauth_identity_email_verified.py -q`
+  failed first on missing OAuth email fields and missing migration `0058`.
+  Focused GREEN:
+  `uv run pytest tests/api/test_oauth_signin.py tests/db/test_migration_0058_oauth_identity_email_verified.py tests/db/test_migration_0055_llm_call_pricing_basis.py tests/db/test_migration_0056_ranked_write_audit.py tests/db/test_migration_0057_human_rating_quarantine.py -q`
+  -> 57 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2778 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

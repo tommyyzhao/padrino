@@ -92,6 +92,8 @@ class OAuthUserInfo:
 
     subject: str
     display_name: str | None
+    email: str | None = None
+    email_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -409,7 +411,14 @@ def _user_info_from_payload(payload: dict[str, Any]) -> OAuthUserInfo:
     if not subject:
         raise OAuthError("provider userinfo is missing a subject")
     display = payload.get("name") or payload.get("email")
-    return OAuthUserInfo(subject=str(subject), display_name=str(display) if display else None)
+    email = payload.get("email")
+    email_verified = payload.get("email_verified")
+    return OAuthUserInfo(
+        subject=str(subject),
+        display_name=str(display) if display else None,
+        email=str(email) if email else None,
+        email_verified=email_verified if isinstance(email_verified, bool) else False,
+    )
 
 
 # Indirection so tests can stub the entire network round-trip (no live provider).

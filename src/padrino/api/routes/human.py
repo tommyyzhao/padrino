@@ -1054,6 +1054,8 @@ async def oauth_callback(
         provider=config.provider,
         subject=user_info.subject,
         display_name=user_info.display_name,
+        email=user_info.email,
+        email_verified=user_info.email_verified,
         now=now,
         upgrade_guest_id=guest_id,
     )

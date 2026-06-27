@@ -28,12 +28,26 @@ async def get_account_by_identity(
     session: AsyncSession, *, provider: str, subject: str
 ) -> Principal | None:
     """Return the account principal linked to ``(provider, subject)``, or None."""
+    row = await _get_identity_and_account(session, provider=provider, subject=subject)
+    if row is None:
+        return None
+    _identity, account = row
+    return account
+
+
+async def _get_identity_and_account(
+    session: AsyncSession, *, provider: str, subject: str
+) -> tuple[OAuthIdentity, Principal] | None:
     stmt = (
-        select(Principal)
-        .join(OAuthIdentity, OAuthIdentity.principal_id == Principal.id)
+        select(OAuthIdentity, Principal)
+        .join(Principal, OAuthIdentity.principal_id == Principal.id)
         .where(OAuthIdentity.provider == provider, OAuthIdentity.subject == subject)
     )
-    return (await session.execute(stmt)).scalar_one_or_none()
+    row = (await session.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    identity, account = row
+    return identity, account
 
 
 async def find_or_create_account(
@@ -42,6 +56,8 @@ async def find_or_create_account(
     provider: str,
     subject: str,
     display_name: str | None,
+    email: str | None,
+    email_verified: bool,
     now: datetime,
     upgrade_guest_id: uuid.UUID | None = None,
 ) -> Principal:
@@ -54,12 +70,15 @@ async def find_or_create_account(
     account already exists, the guest's sessions are re-pointed to that account
     and the guest principal is soft-deleted.
     """
-    existing = await get_account_by_identity(session, provider=provider, subject=subject)
-    if existing is not None:
-        if upgrade_guest_id is not None and upgrade_guest_id != existing.id:
-            await _repoint_sessions(session, src=upgrade_guest_id, dst=existing.id, now=now)
+    row = await _get_identity_and_account(session, provider=provider, subject=subject)
+    if row is not None:
+        identity, account = row
+        _apply_email_claims(identity, email=email, email_verified=email_verified)
+        await session.flush()
+        if upgrade_guest_id is not None and upgrade_guest_id != account.id:
+            await _repoint_sessions(session, src=upgrade_guest_id, dst=account.id, now=now)
             await _soft_delete_principal(session, upgrade_guest_id, now=now)
-        return existing
+        return account
 
     if upgrade_guest_id is not None:
         guest = await session.get(Principal, upgrade_guest_id)
@@ -68,16 +87,46 @@ async def find_or_create_account(
             if display_name is not None and guest.display_name is None:
                 guest.display_name = display_name
             guest.updated_at = now
-            session.add(OAuthIdentity(provider=provider, subject=subject, principal_id=guest.id))
+            session.add(
+                OAuthIdentity(
+                    provider=provider,
+                    subject=subject,
+                    email=_normalize_email(email),
+                    email_verified=email_verified,
+                    principal_id=guest.id,
+                )
+            )
             await session.flush()
             return guest
 
     account = Principal(kind=PRINCIPAL_KIND_ACCOUNT, display_name=display_name)
     session.add(account)
     await session.flush()
-    session.add(OAuthIdentity(provider=provider, subject=subject, principal_id=account.id))
+    session.add(
+        OAuthIdentity(
+            provider=provider,
+            subject=subject,
+            email=_normalize_email(email),
+            email_verified=email_verified,
+            principal_id=account.id,
+        )
+    )
     await session.flush()
     return account
+
+
+def _normalize_email(email: str | None) -> str | None:
+    if email is None:
+        return None
+    normalized = email.strip().lower()
+    return normalized or None
+
+
+def _apply_email_claims(
+    identity: OAuthIdentity, *, email: str | None, email_verified: bool
+) -> None:
+    identity.email = _normalize_email(email)
+    identity.email_verified = email_verified
 
 
 async def _repoint_sessions(
