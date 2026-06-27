@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Strangers-only ranked launch (US-310): keep the pure invariant in
+  `core/lobby/strangers_only.py` over already-resolved launch facts
+  (`lobby_is_ranked`, `human_seat_count`). The impure launch handoff loads the
+  lobby's Humans-Included league and concrete `LobbySeat` layout, calls the
+  pure guard before curated AI autofill or `Game` creation, and translates
+  `RankedSeatingViolation.reason` directly to the 409 machine token. There is
+  no human-seating autofill layer; `core/lobby/autofill.py` only fills AI seats.
 - Ranked consent withdrawal (US-305): keep withdrawal append-only as a
   `HumanConsent` marker row with `document_kind == "RANKED_WITHDRAWN"` bound to
   the current `RANKED` document hash. Recency lives in
@@ -5125,4 +5132,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 20 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2862 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T12:45 PDT - US-310
+- Added pure ranked strangers-only seating guard
+  `assert_strangers_only_ranked`, with typed `RankedSeatingViolation` and the
+  launch reason token `ranked_requires_single_human_seat`.
+- Wired `api/lobby_launch.py` to load the lobby's Humans-Included league and
+  concrete `LobbySeat` count, rejecting ranked multi-human materialization
+  before curated AI autofill or any `Game` / `GameSeat` row is written.
+- Preserved single-human ranked launch and casual multi-human launch behavior;
+  corrected the stale prd acceptance criterion that referenced a non-existent
+  human autofill layer, per the story's review revision.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/lobby_launch.py`,
+  `src/padrino/core/lobby/__init__.py`,
+  `src/padrino/core/lobby/strangers_only.py`,
+  `tests/api/test_lobbies_ranked_strangers_only.py`,
+  `tests/core/lobby/test_strangers_only.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/lobby/test_strangers_only.py tests/api/test_lobbies_ranked_strangers_only.py -q`
+  failed first on missing `padrino.core.lobby.strangers_only`; focused GREEN
+  same command -> 11 passed. Related GREEN
+  `uv run pytest tests/core/lobby/test_strangers_only.py tests/api/test_lobbies_ranked_strangers_only.py tests/api/test_lobby_launch.py tests/api/test_lobbies_ranked_gate.py tests/api/test_lobby_create.py -q`
+  -> 47 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2877 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

@@ -7,9 +7,17 @@ from padrino.core.lobby.autofill import (
     NotEnoughCuratedModelsError,
     autofill_empty_seats,
 )
+from padrino.core.lobby.strangers_only import (
+    RANKED_REQUIRES_SINGLE_HUMAN_SEAT,
+    RankedSeatingViolation,
+    assert_strangers_only_ranked,
+)
 
 __all__ = [
+    "RANKED_REQUIRES_SINGLE_HUMAN_SEAT",
     "AutoFillAssignment",
     "NotEnoughCuratedModelsError",
+    "RankedSeatingViolation",
+    "assert_strangers_only_ranked",
     "autofill_empty_seats",
 ]
