@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked AI-takeover forfeits (US-316): keep `GameSeat.occupant_principal_id`
+  for provenance, but decide forfeit strictly from
+  `GameSeat.seat_kind == AI_TAKEOVER` in
+  `ratings/human_openskill_service.py`. Represent the takeover replacement as
+  a transient initial OpenSkill seat in the actual faction team, and persist
+  the abandoned human through a separate deterministic loss update so draw
+  freezes and faction wins never credit the rage-quit principal. This preserves
+  normal team math for non-forfeiting humans and keeps `HumanRatingEvent`
+  auditability/idempotency intact.
 - Human leaderboard decay (US-315): apply `project_decayed_display` only at
   public card read time in `ratings/public_leaderboard.py`, with an injected
   `now` normalized to UTC. Keep `HumanRating` persisted values untouched, pass
@@ -5604,4 +5613,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 63 passed / 1 warning. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2963 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T15:33 PDT - US-316
+- Added ranked human ELO regression coverage for AI-takeover forfeits:
+  takeover winners are persisted as human losses, takeover losers get a single
+  deterministic loss, draw freezes are overridden by the forfeit, genuine
+  `HUMAN` winners still gain, non-forfeiting humans match an equivalent
+  transient-AI baseline, and all-taken-over human seats still write loss
+  `HumanRatingEvent` rows.
+- Updated `human_openskill_service` so `_team_entries` threads `seat_kind`,
+  keeps `AI_TAKEOVER` seats as transient initial ratings in their actual
+  faction team, and persists the abandoned principal through a separate
+  deterministic Plackett-Luce loss update. Existing per-seat idempotency still
+  skips duplicate `HumanRatingEvent` rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/human_openskill_service.py`,
+  `tests/ratings/test_human_ranked_elo.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py -q` failed first on a
+  takeover winner receiving `mu > INITIAL_MU`; focused GREEN same command -> 15
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2969 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

@@ -511,7 +511,7 @@
         "A HumanRatingEvent is still written for the forfeiting human (before/after reflect the loss); a game where all human seats were taken over still terminates and rates without crediting anyone"
       ],
       "notes": "Epic EPIC-E - Rating integrity: decay, forfeit-on-abandon, provisional & SoS invariant. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-317",

@@ -18,7 +18,7 @@ from openskill.models import PlackettLuce
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.core.enums import Faction, LeagueKind
+from padrino.core.enums import Faction, LeagueKind, SeatKind
 from padrino.core.ranked_eligibility import RankedEligibilityReason
 from padrino.core.rulesets.canonicality import canonical_team_ranks_for_outcome
 from padrino.db.models import Game, GameSeat, HumanRating, HumanRatingEvent, League, Principal
@@ -56,6 +56,7 @@ class HumanGameResult:
 @dataclass(frozen=True, slots=True)
 class _TeamEntry:
     public_player_id: str
+    seat_kind: str
     row: HumanRating | None
     existing_event: HumanRatingEvent | None
     before_mu: float
@@ -143,9 +144,10 @@ async def _team_entries(
     seats: Sequence[GameSeat],
     model: PlackettLuce,
     excluded_principal_ids: set[uuid.UUID],
-) -> tuple[list[_TeamEntry], list[_TeamEntry]] | None:
+) -> tuple[list[_TeamEntry], list[_TeamEntry], list[_TeamEntry]] | None:
     town: list[_TeamEntry] = []
     mafia: list[_TeamEntry] = []
+    forfeits: list[_TeamEntry] = []
     human_count = 0
     for seat in seats:
         try:
@@ -159,6 +161,7 @@ async def _team_entries(
         existing_event: HumanRatingEvent | None = None
         before_mu = INITIAL_MU
         before_sigma = INITIAL_SIGMA
+        is_takeover = seat.seat_kind == SeatKind.AI_TAKEOVER.value
         if (
             seat.occupant_principal_id is not None
             and seat.occupant_principal_id not in excluded_principal_ids
@@ -187,17 +190,32 @@ async def _team_entries(
             else:
                 before_mu = float(existing_event.before_mu)
                 before_sigma = float(existing_event.before_sigma)
-            rating = model.create_rating([before_mu, before_sigma], name=str(row.id))
-        else:
-            rating = model.create_rating([INITIAL_MU, INITIAL_SIGMA])
+            human_entry = _TeamEntry(
+                public_player_id=seat.public_player_id,
+                seat_kind=seat.seat_kind,
+                row=row,
+                existing_event=existing_event,
+                before_mu=before_mu,
+                before_sigma=before_sigma,
+                rating=model.create_rating([before_mu, before_sigma], name=str(row.id)),
+            )
+            if is_takeover:
+                forfeits.append(human_entry)
+                row = None
+                existing_event = None
+                before_mu = INITIAL_MU
+                before_sigma = INITIAL_SIGMA
 
         entry = _TeamEntry(
             public_player_id=seat.public_player_id,
+            seat_kind=seat.seat_kind,
             row=row,
             existing_event=existing_event,
             before_mu=before_mu,
             before_sigma=before_sigma,
-            rating=rating,
+            rating=model.create_rating([before_mu, before_sigma], name=str(row.id))
+            if row is not None
+            else model.create_rating([INITIAL_MU, INITIAL_SIGMA]),
         )
         if faction is Faction.TOWN:
             town.append(entry)
@@ -206,7 +224,16 @@ async def _team_entries(
 
     if human_count == 0 or not town or not mafia:
         return None
-    return town, mafia
+    return town, mafia, forfeits
+
+
+def _rate_forfeit_loss(model: PlackettLuce, entry: _TeamEntry) -> Any:
+    """Return the forfeiting human's rating after one deterministic loss."""
+    _winner, forfeiter = model.rate(
+        [[model.create_rating([INITIAL_MU, INITIAL_SIGMA])], [entry.rating]],
+        ranks=[0, 1],
+    )
+    return forfeiter[0]
 
 
 async def _persist_human_entry(
@@ -414,7 +441,7 @@ async def update_human_ratings_for_game(
     )
     if teams is None:
         return []
-    town_entries, mafia_entries = teams
+    town_entries, mafia_entries, forfeit_entries = teams
 
     ranks = canonical_team_ranks_for_outcome(game_result.winner)
     new_town, new_mafia = model.rate(
@@ -446,6 +473,19 @@ async def update_human_ratings_for_game(
             new_mu=entry.row.mu
             if entry.row is not None and game_result.winner == "DRAW"
             else new.mu,
+            new_sigma=new.sigma,
+            now=_now,
+        )
+        if event is not None:
+            events.append(event)
+    for entry in forfeit_entries:
+        new = _rate_forfeit_loss(model, entry)
+        event = await _persist_human_entry(
+            session,
+            league_id=league_id,
+            game_id=game_result.game_id,
+            entry=entry,
+            new_mu=new.mu,
             new_sigma=new.sigma,
             now=_now,
         )

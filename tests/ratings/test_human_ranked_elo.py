@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import LogCapture
 
 from padrino.core.engine.role_assignment import assign_roles
-from padrino.core.enums import Faction, LeagueKind, RatingContextKind
+from padrino.core.enums import Faction, LeagueKind, RatingContextKind, SeatKind
 from padrino.core.rulesets import mini7_v1
 from padrino.db.models import (
     GameSeat,
@@ -43,11 +43,20 @@ async def _seed_human_rating_game(
     league_kind: LeagueKind,
     league_ranked: bool,
     hash_prefix: str,
+    human_factions: set[Faction] | None = None,
+    takeover_factions: set[Faction] | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, dict[str, uuid.UUID]]:
     seats = assign_roles(_GAME_SEED, mini7_v1)
-    mafia = next(seat.public_player_id for seat in seats if seat.faction is Faction.MAFIA)
-    town = next(seat.public_player_id for seat in seats if seat.faction is Faction.TOWN)
-    human_seats = {mafia, town}
+    requested_human_factions = (
+        {Faction.MAFIA, Faction.TOWN} if human_factions is None else human_factions
+    )
+    requested_takeover_factions = takeover_factions or set()
+    human_seats: dict[str, Faction] = {}
+    assigned_factions: set[Faction] = set()
+    for seat in seats:
+        if seat.faction in requested_human_factions and seat.faction not in assigned_factions:
+            human_seats[seat.public_player_id] = seat.faction
+            assigned_factions.add(seat.faction)
 
     async with session_factory() as session, session.begin():
         if league_kind is LeagueKind.HUMANS_INCLUDED:
@@ -78,13 +87,20 @@ async def _seed_human_rating_game(
                 )
                 principal_id = principal.id
                 principals[seat.public_player_id] = principal.id
+            seat_kind = SeatKind.AI.value
+            if principal_id is not None:
+                seat_kind = (
+                    SeatKind.AI_TAKEOVER.value
+                    if human_seats[seat.public_player_id] in requested_takeover_factions
+                    else SeatKind.HUMAN.value
+                )
             session.add(
                 GameSeat(
                     game_id=game.id,
                     public_player_id=seat.public_player_id,
                     seat_index=seat.seat_index,
                     agent_build_id=None,
-                    seat_kind="HUMAN" if principal_id is not None else "AI",
+                    seat_kind=seat_kind,
                     occupant_principal_id=principal_id,
                     role=seat.role.value,
                     faction=seat.faction.value,
@@ -92,6 +108,43 @@ async def _seed_human_rating_game(
                 )
             )
     return league.id, game.id, principals
+
+
+def _principal_for_faction(principals: dict[str, uuid.UUID], faction: Faction) -> uuid.UUID:
+    seats = assign_roles(_GAME_SEED, mini7_v1)
+    return next(
+        principals[seat.public_player_id]
+        for seat in seats
+        if seat.faction is faction and seat.public_player_id in principals
+    )
+
+
+async def _rating_for_principal(
+    session_factory: async_sessionmaker[AsyncSession],
+    principal_id: uuid.UUID,
+) -> HumanRating:
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                select(HumanRating).where(HumanRating.human_player_id == str(principal_id))
+            )
+        ).scalar_one()
+    return row
+
+
+async def _event_for_principal(
+    session_factory: async_sessionmaker[AsyncSession],
+    principal_id: uuid.UUID,
+) -> HumanRatingEvent:
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                select(HumanRatingEvent).where(
+                    HumanRatingEvent.human_player_id == str(principal_id)
+                )
+            )
+        ).scalar_one()
+    return row
 
 
 async def test_ranked_humans_included_updates_only_human_global_rows(
@@ -163,6 +216,205 @@ async def test_ranked_humans_included_updates_only_human_global_rows(
         assert row.sigma < INITIAL_SIGMA
         assert row.games == 1
         assert row.conservative_score == pytest.approx(row.mu - 3.0 * row.sigma)
+
+
+async def test_ai_takeover_winning_faction_is_forfeit_loss_not_win_credit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="takeover-winner-forfeit",
+        takeover_factions={Faction.TOWN},
+    )
+    town_principal_id = _principal_for_faction(principals, Faction.TOWN)
+
+    async with session_factory() as session, session.begin():
+        events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+
+    assert {event.human_player_id for event in events} == {
+        str(principal_id) for principal_id in principals.values()
+    }
+    town_rating = await _rating_for_principal(session_factory, town_principal_id)
+    town_event = await _event_for_principal(session_factory, town_principal_id)
+    assert town_rating.mu < INITIAL_MU
+    assert town_rating.conservative_score < INITIAL_MU - 3.0 * INITIAL_SIGMA
+    assert town_event.before_mu == pytest.approx(INITIAL_MU)
+    assert town_event.after_mu == pytest.approx(town_rating.mu)
+    assert town_event.after_mu < town_event.before_mu
+
+
+async def test_ai_takeover_losing_faction_is_still_one_loss(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="takeover-loser-forfeit",
+        takeover_factions={Faction.TOWN},
+    )
+    town_principal_id = _principal_for_faction(principals, Faction.TOWN)
+
+    async with session_factory() as session, session.begin():
+        await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="MAFIA"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+
+    town_rating = await _rating_for_principal(session_factory, town_principal_id)
+    town_event = await _event_for_principal(session_factory, town_principal_id)
+    assert town_rating.games == 1
+    assert town_rating.mu < INITIAL_MU
+    assert town_event.after_mu == pytest.approx(town_rating.mu)
+    assert town_event.after_mu < town_event.before_mu
+
+
+async def test_ai_takeover_forfeit_overrides_draw_freeze(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="takeover-draw-forfeit",
+        takeover_factions={Faction.TOWN},
+    )
+    town_principal_id = _principal_for_faction(principals, Faction.TOWN)
+
+    async with session_factory() as session, session.begin():
+        await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="DRAW"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+
+    town_rating = await _rating_for_principal(session_factory, town_principal_id)
+    town_event = await _event_for_principal(session_factory, town_principal_id)
+    assert town_rating.mu < INITIAL_MU
+    assert town_event.after_mu == pytest.approx(town_rating.mu)
+    assert town_event.after_mu < town_event.before_mu
+
+
+async def test_human_seat_that_stays_human_is_rated_by_true_outcome(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="human-winner-regression",
+    )
+    town_principal_id = _principal_for_faction(principals, Faction.TOWN)
+
+    async with session_factory() as session, session.begin():
+        await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+
+    town_rating = await _rating_for_principal(session_factory, town_principal_id)
+    assert town_rating.mu > INITIAL_MU
+    assert town_rating.games == 1
+
+
+async def test_ai_takeover_participates_as_transient_replacement_for_other_humans(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    takeover_league_id, takeover_game_id, takeover_principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="takeover-transient",
+        takeover_factions={Faction.TOWN},
+    )
+    baseline_league_id, baseline_game_id, baseline_principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="ai-baseline",
+        human_factions={Faction.MAFIA},
+    )
+    takeover_mafia_id = _principal_for_faction(takeover_principals, Faction.MAFIA)
+    baseline_mafia_id = _principal_for_faction(baseline_principals, Faction.MAFIA)
+
+    async with session_factory() as session, session.begin():
+        await update_human_ratings_for_game(
+            session,
+            league_id=takeover_league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=takeover_game_id, winner="TOWN"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+    async with session_factory() as session, session.begin():
+        await update_human_ratings_for_game(
+            session,
+            league_id=baseline_league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=baseline_game_id, winner="TOWN"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+
+    takeover_mafia = await _rating_for_principal(session_factory, takeover_mafia_id)
+    baseline_mafia = await _rating_for_principal(session_factory, baseline_mafia_id)
+    assert takeover_mafia.mu == pytest.approx(baseline_mafia.mu)
+    assert takeover_mafia.sigma == pytest.approx(baseline_mafia.sigma)
+    assert takeover_mafia.conservative_score == pytest.approx(baseline_mafia.conservative_score)
+
+
+async def test_all_taken_over_human_seats_write_loss_events_without_win_credit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="all-taken-over",
+        takeover_factions={Faction.TOWN, Faction.MAFIA},
+    )
+
+    async with session_factory() as session, session.begin():
+        events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+
+    assert {event.human_player_id for event in events} == {
+        str(principal_id) for principal_id in principals.values()
+    }
+    async with session_factory() as session:
+        rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+    assert len(rows) == len(principals)
+    assert len(human_events) == len(principals)
+    assert all(row.games == 1 for row in rows)
+    assert all(row.mu < INITIAL_MU for row in rows)
+    assert all(event.after_mu < event.before_mu for event in human_events)
 
 
 async def test_deleted_principal_is_skipped_by_terminal_ranked_write(
