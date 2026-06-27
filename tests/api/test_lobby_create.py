@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.enums import LeagueKind, LobbySeatKind
+from padrino.core.ranked_eligibility import RankedEligibilityReason
 from padrino.db.models import (
     AgentBuild,
     League,
@@ -275,7 +276,7 @@ async def test_lobby_references_humans_included_league(
 
 
 @pytest.mark.asyncio
-async def test_create_ranked_lobby_binds_ranked_humans_included_league(
+async def test_ranked_lobby_switch_off_rejects_before_ranked_league_create(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     casual_token = await _guest_token(client)
@@ -285,6 +286,11 @@ async def test_create_ranked_lobby_binds_ranked_humans_included_league(
         cookies={HUMAN_SESSION_COOKIE: casual_token},
     )
     assert casual.status_code == 201, casual.text
+
+    async with session_factory() as session:
+        league_count = (
+            await session.execute(select(func.count()).select_from(League))
+        ).scalar_one()
 
     ranked_token = await _guest_token(client)
     ranked = await client.post(
@@ -296,26 +302,24 @@ async def test_create_ranked_lobby_binds_ranked_humans_included_league(
         },
         cookies={HUMAN_SESSION_COOKIE: ranked_token},
     )
-    assert ranked.status_code == 201, ranked.text
+    assert ranked.status_code == 403
+    assert ranked.json()["detail"] == RankedEligibilityReason.RANKED_DISABLED.value
 
     casual_league_id = uuid.UUID(casual.json()["league_id"])
-    ranked_league_id = uuid.UUID(ranked.json()["league_id"])
-    assert casual_league_id != ranked_league_id
-
     async with session_factory() as session:
         casual_league = await session.get(League, casual_league_id)
-        ranked_league = await session.get(League, ranked_league_id)
+        after_league_count = (
+            await session.execute(select(func.count()).select_from(League))
+        ).scalar_one()
 
     assert casual_league is not None
     assert casual_league.kind == LeagueKind.HUMANS_INCLUDED.value
     assert casual_league.ranked is False
-    assert ranked_league is not None
-    assert ranked_league.kind == LeagueKind.HUMANS_INCLUDED.value
-    assert ranked_league.ranked is True
+    assert after_league_count == league_count
 
 
 @pytest.mark.asyncio
-async def test_ranked_lobby_requires_and_persists_integrity_acknowledgement(
+async def test_ranked_lobby_requires_integrity_acknowledgement_before_ranked_gate(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     token = await _guest_token(client)
@@ -340,9 +344,8 @@ async def test_ranked_lobby_requires_and_persists_integrity_acknowledgement(
         },
         cookies={HUMAN_SESSION_COOKIE: token},
     )
-    assert ranked.status_code == 201, ranked.text
-    assert ranked.json()["integrity_acknowledged"] is True
-    ranked_lobby_id = uuid.UUID(ranked.json()["id"])
+    assert ranked.status_code == 403
+    assert ranked.json()["detail"] == RankedEligibilityReason.RANKED_DISABLED.value
 
     casual_token = await _guest_token(client)
     casual = await client.post(
@@ -355,11 +358,8 @@ async def test_ranked_lobby_requires_and_persists_integrity_acknowledgement(
     casual_lobby_id = uuid.UUID(casual.json()["id"])
 
     async with session_factory() as session:
-        ranked_lobby = await session.get(Lobby, ranked_lobby_id)
         casual_lobby = await session.get(Lobby, casual_lobby_id)
 
-    assert ranked_lobby is not None
-    assert ranked_lobby.integrity_acknowledged is True
     assert casual_lobby is not None
     assert casual_lobby.integrity_acknowledged is False
 

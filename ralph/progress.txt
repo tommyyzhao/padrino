@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked lobby eligibility gate (US-291): keep the impure fact resolver in
+  `api/ranked_eligibility.py` as a read-only composer over principal kind,
+  OAuth verified-email, base/ranked consent, active ranked ban, and settings;
+  pass those facts into the pure predicate before `POST /lobbies` performs
+  admission, `get_or_create_humans_included(ranked=True)`, or any lobby writes.
+  The route ordering is integrity 422 first, eligibility 403 second, then the
+  existing casual/admission/materialization path.
 - Purpose-segmented ranked consent (US-304): keep one server-authored `RANKED`
   legal document as the content/hash authority, but store one append-only
   `HumanConsent` row per ranked purpose (`RANKED:PERSISTENT_RATING`,
@@ -5046,4 +5053,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 17 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2844 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T12:20 PDT - US-291
+- Added `resolve_ranked_eligibility` in the API shell to read principal kind,
+  OAuth verified-email state, base consent, ranked consent, active ranked ban,
+  and the ranked kill-switch into the existing pure
+  `RankedEligibilityInputs`.
+- Gated `POST /lobbies` for `ranked:true` by evaluating the pure predicate
+  before admission, ranked Humans-Included league creation, or lobby writes;
+  denials return HTTP 403 with the predicate's machine-readable reason token.
+- Preserved the existing integrity acknowledgement ordering as HTTP 422 before
+  eligibility, and left the casual `ranked:false` path guest/unverified-friendly.
+- Updated prior ranked-lobby tests that assumed a guest could author ranked
+  state; added focused coverage for flag-off, guest, missing consent,
+  unverified email, ranked ban, soft-delete, and successful verified/consented
+  creation.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/ranked_eligibility.py`,
+  `src/padrino/api/routes/lobbies.py`,
+  `tests/api/test_lobbies_ranked_gate.py`,
+  `tests/api/test_lobby_create.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_lobbies_ranked_gate.py tests/api/test_lobby_create.py -q`
+  failed first on missing `padrino.api.ranked_eligibility`; focused GREEN same
+  command -> 28 passed. Related GREEN
+  `uv run pytest tests/test_settings.py tests/api/test_lobbies_ranked_gate.py tests/api/test_lobby_create.py tests/api/test_ranked_consent_gate.py tests/api/test_ranked_ban_admin.py tests/db/test_ranked_bans.py -q`
+  -> 68 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2856 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
