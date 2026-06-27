@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human PII retention (US-308): keep the planner pure in `db/retention.py`
+  over lightweight row projections and an injected `now`. Human PII uses a
+  strict `< cutoff` TTL boundary (unlike the older game-bank inclusive cutoff).
+  The guarded `retention_executor` owns DB reads/writes under the existing
+  enable + dry-run flags, redacts chat sidecars, nulls consent IP hashes, and
+  soft-deletes/scrubs abandoned guest principals without selecting or mutating
+  `HumanRating` rows. The default chat TTL is anchored to
+  `DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS` in `legal.documents` so Settings and
+  the served `RANKED:CHAT_RETENTION` consent text stay aligned by default.
 - GDPR delete/anonymization (US-307): keep the stable tombstone token pure in
   `core/gdpr_delete.py` as a deterministic UUID-shaped value. The impure route
   allocates the first token that does not collide with an existing `Principal`,
@@ -5320,4 +5329,41 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 14 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2909 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T14:04 PDT - US-308
+- Extended `db/retention.py` with `HumanPiiRetentionPolicy`,
+  lightweight human chat/consent/guest projections, and
+  `plan_human_pii_retention`, using an injected `now` and strict older-than TTL
+  comparisons so boundary rows stay within retention.
+- Extended `run_retention_executor` to load human-PII projections and, only
+  when `padrino_enable_retention=True` and
+  `padrino_retention_dry_run=False`, redact old `human_chat_messages`, null old
+  `human_consents.source_ip_hash`, and soft-delete/scrub abandoned guest
+  principals. Dry-run still returns zero applied mutations.
+- Added Settings TTLs for human chat retention, consent IP hash retention, and
+  abandoned guest retention. The default chat retention TTL is shared with the
+  ranked legal document text through
+  `DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS`.
+- Added planner and executor tests pinning strict cutoff behavior, dry-run
+  defaults, no rating delete list, rating-row preservation, Settings overrides,
+  and the no `datetime.utcnow` / random planner guard.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/retention.py`,
+  `src/padrino/db/retention_executor.py`, `src/padrino/legal/documents.py`,
+  `src/padrino/settings.py`,
+  `tests/db/test_human_pii_retention_policy.py`,
+  `tests/db/test_human_pii_retention_executor.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_human_pii_retention_policy.py` failed first on
+  missing human-PII planner imports; focused RED
+  `uv run pytest tests/db/test_human_pii_retention_executor.py` failed first on
+  missing executor result fields. Focused GREEN
+  `uv run pytest tests/db/test_human_pii_retention_policy.py tests/db/test_human_pii_retention_executor.py`
+  -> 8 passed. Related GREEN
+  `uv run pytest tests/db/test_human_pii_retention_policy.py tests/db/test_human_pii_retention_executor.py tests/db/test_retention_policy.py tests/db/test_retention_executor.py tests/api/test_legal_documents_route.py tests/api/test_consent_content_hash.py tests/test_settings.py`
+  -> 65 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2919 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

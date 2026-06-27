@@ -14,6 +14,7 @@ DOCUMENT_KIND_TOS = "TOS"
 DOCUMENT_KIND_PRIVACY = "PRIVACY"
 DOCUMENT_KIND_AGE_GATE = "AGE_GATE"
 DOCUMENT_KIND_RANKED = "RANKED"
+DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS = 365
 _BASE_VERSION_LABEL = "2026-06-18"
 _RANKED_VERSION_LABEL = "2026-06-27"
 
@@ -91,7 +92,7 @@ are under 16, do not create a guest session, sign in, join a lobby, or submit
 chat or actions.
 """
 
-_RANKED_BODY = """\
+_RANKED_BODY = f"""\
 Padrino Ranked Human ELO Consent
 Version: 2026-06-27
 
@@ -108,8 +109,9 @@ Public handle: Padrino may display your pseudonymous ranked handle and ranked
 card on public leaderboard surfaces. Raw display names and raw account IDs are
 not used for public ranked display.
 
-Chat retention: Padrino may retain ranked-game chat sidecar rows for game
-integrity, audit, moderation, and future self-serve export/delete flows.
+Chat retention: Padrino may retain ranked-game chat sidecar rows for up to
+{DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS} days for game integrity, audit,
+moderation, and future self-serve export/delete flows.
 
 Anti-cheat profiling: Padrino may compute and retain advisory integrity signals
 such as hashed IP clusters, cadence signals, and ranked-game telemetry for
@@ -163,6 +165,7 @@ def legal_document_payload(document: LegalDocument) -> dict[str, str]:
 
 
 __all__ = [
+    "DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS",
     "DOCUMENT_KIND_AGE_GATE",
     "DOCUMENT_KIND_PRIVACY",
     "DOCUMENT_KIND_RANKED",

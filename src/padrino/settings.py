@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from padrino.legal.documents import DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS
+
 if TYPE_CHECKING:
     from padrino.llm.adapter import RoutingPolicy
 
@@ -346,6 +348,12 @@ class Settings(BaseSettings):
     # kept indefinitely.
     padrino_raw_payload_ttl_days: int = 30
     padrino_non_broadcastable_game_ttl_days: int = 7
+    # Human PII retention (US-308). Chat sidecar redaction defaults to the
+    # RANKED:CHAT_RETENTION consent text's stated window; consent IP hashes and
+    # abandoned guest principals have their own operator-configurable TTLs.
+    padrino_human_chat_retention_ttl_days: int = DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS
+    padrino_human_consent_ip_hash_ttl_days: int = 90
+    padrino_abandoned_guest_ttl_days: int = 30
 
     # Retention executor (US-116). The executor is wired into the scheduler tick
     # but stays inert unless ``padrino_enable_retention`` is True AND

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import delete, func, select, update
@@ -39,13 +39,23 @@ from padrino.db.models import (
     Game,
     GameEvent,
     GameSeat,
+    HumanChatMessage,
+    HumanConsent,
+    HumanSession,
     LlmCall,
+    Principal,
     RatingEvent,
 )
 from padrino.db.retention import (
     GameRetentionInfo,
+    GuestPrincipalRetentionInfo,
+    HumanChatRetentionInfo,
+    HumanConsentRetentionInfo,
+    HumanPiiRetentionPlan,
+    HumanPiiRetentionPolicy,
     RetentionPlan,
     RetentionPolicy,
+    plan_human_pii_retention,
     plan_retention,
 )
 from padrino.settings import Settings
@@ -64,6 +74,9 @@ class RetentionExecutionResult:
     dry_run: bool
     games_deleted: int
     llm_calls_scrubbed: int
+    human_chat_messages_redacted: int = 0
+    human_consent_ip_hashes_nulled: int = 0
+    guest_principals_anonymized: int = 0
 
 
 async def _load_candidates(session: AsyncSession) -> list[GameRetentionInfo]:
@@ -80,6 +93,100 @@ async def _load_candidates(session: AsyncSession) -> list[GameRetentionInfo]:
         )
         for row in rows
     ]
+
+
+def _aware(dt: datetime) -> datetime:
+    """Coerce a naive datetime from SQLite to UTC for comparison."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _latest_datetime(values: list[datetime | None]) -> datetime | None:
+    """Return the latest non-null timestamp, normalizing naive values to UTC."""
+    normalized = [_aware(value) for value in values if value is not None]
+    return max(normalized) if normalized else None
+
+
+async def _load_human_chat_candidates(session: AsyncSession) -> list[HumanChatRetentionInfo]:
+    """Project human chat sidecar rows into the PII planner input."""
+    stmt = select(HumanChatMessage.id, HumanChatMessage.created_at, HumanChatMessage.redacted)
+    rows = (await session.execute(stmt)).all()
+    return [
+        HumanChatRetentionInfo(
+            id=row.id,
+            created_at=row.created_at,
+            redacted=row.redacted,
+        )
+        for row in rows
+    ]
+
+
+async def _load_human_consent_candidates(
+    session: AsyncSession,
+) -> list[HumanConsentRetentionInfo]:
+    """Project consent rows into the PII planner input."""
+    stmt = select(HumanConsent.id, HumanConsent.accepted_at, HumanConsent.source_ip_hash)
+    rows = (await session.execute(stmt)).all()
+    return [
+        HumanConsentRetentionInfo(
+            id=row.id,
+            accepted_at=row.accepted_at,
+            source_ip_hash=row.source_ip_hash,
+        )
+        for row in rows
+    ]
+
+
+async def _load_guest_principal_candidates(
+    session: AsyncSession,
+) -> list[GuestPrincipalRetentionInfo]:
+    """Project guest principals with their latest session activity."""
+    stmt = (
+        select(
+            Principal.id,
+            Principal.kind,
+            Principal.deleted_at,
+            Principal.created_at,
+            Principal.updated_at,
+            HumanSession.issued_at,
+            HumanSession.last_seen_at,
+        )
+        .outerjoin(HumanSession, HumanSession.principal_id == Principal.id)
+        .where(Principal.kind == "guest")
+    )
+    grouped: dict[uuid.UUID, GuestPrincipalRetentionInfo] = {}
+    for row in (await session.execute(stmt)).all():
+        prior = grouped.get(row.id)
+        idle_since = _latest_datetime(
+            [
+                row.created_at,
+                row.updated_at,
+                row.last_seen_at,
+                row.issued_at,
+                prior.idle_since if prior is not None else None,
+            ]
+        )
+        grouped[row.id] = GuestPrincipalRetentionInfo(
+            id=row.id,
+            kind=row.kind,
+            deleted_at=row.deleted_at,
+            idle_since=idle_since,
+        )
+    return list(grouped.values())
+
+
+async def _load_human_pii_candidates(
+    session: AsyncSession,
+) -> tuple[
+    list[HumanChatRetentionInfo],
+    list[HumanConsentRetentionInfo],
+    list[GuestPrincipalRetentionInfo],
+]:
+    """Project every human-PII row type needed by the pure planner."""
+    return (
+        await _load_human_chat_candidates(session),
+        await _load_human_consent_candidates(session),
+        await _load_guest_principal_candidates(session),
+    )
 
 
 async def _delete_game(session: AsyncSession, game_id: uuid.UUID) -> None:
@@ -118,6 +225,87 @@ async def _scrub_llm_calls(session: AsyncSession, game_id: uuid.UUID) -> int:
     return affected
 
 
+async def _redact_human_chat_messages(
+    session: AsyncSession,
+    message_ids: list[uuid.UUID],
+) -> int:
+    """Redact planned human chat sidecar rows, idempotently."""
+    if not message_ids:
+        return 0
+    rows = list(
+        (
+            await session.execute(
+                select(HumanChatMessage).where(
+                    HumanChatMessage.id.in_(message_ids),
+                    HumanChatMessage.redacted.is_(False),
+                )
+            )
+        ).scalars()
+    )
+    for row in rows:
+        row.raw_text = None
+        row.cleaned_text = None
+        row.redacted = True
+    if rows:
+        await session.flush()
+    return len(rows)
+
+
+async def _null_human_consent_ip_hashes(
+    session: AsyncSession,
+    consent_ids: list[uuid.UUID],
+) -> int:
+    """Null planned consent source-IP hashes, idempotently."""
+    if not consent_ids:
+        return 0
+    rows = list(
+        (
+            await session.execute(
+                select(HumanConsent).where(
+                    HumanConsent.id.in_(consent_ids),
+                    HumanConsent.source_ip_hash.is_not(None),
+                )
+            )
+        ).scalars()
+    )
+    for row in rows:
+        row.source_ip_hash = None
+    if rows:
+        await session.flush()
+    return len(rows)
+
+
+async def _anonymize_guest_principals(
+    session: AsyncSession,
+    principal_ids: list[uuid.UUID],
+    *,
+    now: datetime,
+) -> int:
+    """Soft-delete and scrub planned abandoned guest principals."""
+    if not principal_ids:
+        return 0
+    rows = list(
+        (
+            await session.execute(
+                select(Principal).where(
+                    Principal.id.in_(principal_ids),
+                    Principal.kind == "guest",
+                    Principal.deleted_at.is_(None),
+                )
+            )
+        ).scalars()
+    )
+    for row in rows:
+        row.deleted_at = now
+        row.display_name = None
+        row.ranked_handle = None
+        row.ranked_handle_normalized = None
+        row.updated_at = now
+    if rows:
+        await session.flush()
+    return len(rows)
+
+
 async def run_retention_executor(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -144,17 +332,36 @@ async def run_retention_executor(
         raw_payload_ttl_days=settings.padrino_raw_payload_ttl_days,
         non_broadcastable_game_ttl_days=settings.padrino_non_broadcastable_game_ttl_days,
     )
+    human_policy = HumanPiiRetentionPolicy(
+        chat_retention_ttl_days=settings.padrino_human_chat_retention_ttl_days,
+        consent_ip_hash_ttl_days=settings.padrino_human_consent_ip_hash_ttl_days,
+        abandoned_guest_ttl_days=settings.padrino_abandoned_guest_ttl_days,
+    )
 
     async with session_factory() as session:
         candidates = await _load_candidates(session)
+        chat_candidates, consent_candidates, guest_candidates = await _load_human_pii_candidates(
+            session
+        )
 
     plan: RetentionPlan = plan_retention(candidates, policy, now=now, dry_run=dry_run)
+    human_plan: HumanPiiRetentionPlan = plan_human_pii_retention(
+        chat_messages=chat_candidates,
+        consents=consent_candidates,
+        guest_principals=guest_candidates,
+        policy=human_policy,
+        now=now,
+        dry_run=dry_run,
+    )
 
     if dry_run:
         _logger.info(
             "retention.dry_run",
             games_to_delete=len(plan.games_to_delete),
             llm_calls_to_scrub=len(plan.llm_calls_to_scrub),
+            human_chat_messages_to_redact=len(human_plan.chat_messages_to_redact),
+            human_consent_ip_hashes_to_null=len(human_plan.consent_ip_hashes_to_null),
+            guest_principals_to_anonymize=len(human_plan.guest_principals_to_anonymize),
         )
         return RetentionExecutionResult(
             dry_run=True,
@@ -168,16 +375,35 @@ async def run_retention_executor(
             await _delete_game(session, game_id)
         for game_id in plan.llm_calls_to_scrub:
             scrubbed_total += await _scrub_llm_calls(session, game_id)
+        redacted_total = await _redact_human_chat_messages(
+            session,
+            human_plan.chat_messages_to_redact,
+        )
+        nulled_total = await _null_human_consent_ip_hashes(
+            session,
+            human_plan.consent_ip_hashes_to_null,
+        )
+        anonymized_total = await _anonymize_guest_principals(
+            session,
+            human_plan.guest_principals_to_anonymize,
+            now=now,
+        )
 
     _logger.info(
         "retention.applied",
         games_deleted=len(plan.games_to_delete),
         llm_calls_scrubbed=scrubbed_total,
+        human_chat_messages_redacted=redacted_total,
+        human_consent_ip_hashes_nulled=nulled_total,
+        guest_principals_anonymized=anonymized_total,
     )
     return RetentionExecutionResult(
         dry_run=False,
         games_deleted=len(plan.games_to_delete),
         llm_calls_scrubbed=scrubbed_total,
+        human_chat_messages_redacted=redacted_total,
+        human_consent_ip_hashes_nulled=nulled_total,
+        guest_principals_anonymized=anonymized_total,
     )
 
 
