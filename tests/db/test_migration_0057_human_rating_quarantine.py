@@ -49,7 +49,8 @@ def test_0057_is_linear_head_after_0056() -> None:
     script = ScriptDirectory.from_config(cfg)
 
     assert script.get_heads() == ["0064"]
-    assert script.get_revision("0062").down_revision == "0060"
+    assert script.get_revision("0061").down_revision == "0060"
+    assert script.get_revision("0062").down_revision == "0061"
     assert script.get_revision("0060").down_revision == "0059"
     assert script.get_revision("0059").down_revision == "0058"
     assert script.get_revision("0058").down_revision == "0057"

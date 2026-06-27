@@ -61,7 +61,8 @@ def test_0055_chains_after_0054_and_later_revisions_stay_linear() -> None:
     assert script.get_revision("0058").down_revision == "0057"
     assert script.get_revision("0059").down_revision == "0058"
     assert script.get_revision("0060").down_revision == "0059"
-    assert script.get_revision("0062").down_revision == "0060"
+    assert script.get_revision("0061").down_revision == "0060"
+    assert script.get_revision("0062").down_revision == "0061"
     assert script.get_revision("0063").down_revision == "0062"
 
 

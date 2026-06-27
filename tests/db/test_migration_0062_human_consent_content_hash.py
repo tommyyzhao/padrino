@@ -44,14 +44,14 @@ def _column_info(db_path: Path, table_name: str) -> dict[str, sqlite3.Row]:
     return {str(row["name"]): row for row in rows}
 
 
-def test_0062_is_linear_head_after_0060() -> None:
+def test_0062_is_linear_head_after_0061() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
     assert script.get_heads() == ["0064"]
     assert script.get_revision("0063").down_revision == "0062"
-    assert script.get_revision("0062").down_revision == "0060"
-    assert script.get_revision("0060").down_revision == "0059"
+    assert script.get_revision("0062").down_revision == "0061"
+    assert script.get_revision("0061").down_revision == "0060"
 
 
 def test_0062_adds_nullable_human_consent_content_hash(sqlite_db: Path) -> None:

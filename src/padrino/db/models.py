@@ -909,6 +909,60 @@ class RankedWriteAudit(Base):
     )
 
 
+class RankedGameExclusion(Base):
+    """Manual exclusion of one ranked game from one human rating history."""
+
+    __tablename__ = "ranked_game_exclusions"
+    __table_args__ = (
+        Index(
+            "uq_ranked_game_exclusions_principal_game",
+            "principal_id",
+            "game_id",
+            unique=True,
+        ),
+        Index("ix_ranked_game_exclusions_game_id", "game_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id"), nullable=False
+    )
+    human_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class RankedRatingRollbackAudit(Base):
+    """Idempotent append-only audit row for a manual ranked-rating rollback."""
+
+    __tablename__ = "ranked_rating_rollback_audit"
+    __table_args__ = (
+        Index(
+            "uq_ranked_rating_rollback_audit_principal_hash",
+            "principal_id",
+            "exclusion_hash",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id"), nullable=False
+    )
+    human_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    excluded_game_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    exclusion_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class RankedGameSignal(Base):
     """Append-only per-game ranked human telemetry for manual anti-cheat review."""
 

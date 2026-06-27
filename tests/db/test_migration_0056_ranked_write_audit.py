@@ -80,7 +80,8 @@ def test_0056_chains_after_0055_and_0057_chains_after_0056() -> None:
     assert script.get_revision("0058").down_revision == "0057"
     assert script.get_revision("0059").down_revision == "0058"
     assert script.get_revision("0060").down_revision == "0059"
-    assert script.get_revision("0062").down_revision == "0060"
+    assert script.get_revision("0061").down_revision == "0060"
+    assert script.get_revision("0062").down_revision == "0061"
     assert script.get_revision("0063").down_revision == "0062"
     assert script.get_revision("0055").down_revision == "0054"
 

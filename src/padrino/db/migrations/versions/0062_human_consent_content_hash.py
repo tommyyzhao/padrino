@@ -1,7 +1,7 @@
 """Bind human consent rows to legal document content hashes.
 
 Revision ID: 0062
-Revises: 0060
+Revises: 0061
 Create Date: 2026-06-27
 """
 
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0062"
-down_revision: str | None = "0060"
+down_revision: str | None = "0061"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

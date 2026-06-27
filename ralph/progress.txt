@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Manual ranked rollback (US-301): reserve the missing `0061` migration by
+  inserting it between `0060` and `0062`, then update only `0062+` lineage
+  tests; never edit migrations `<=0060`. Keep the recompute pure in
+  `core/anticheat/rating_rollback.py` over ordered game projections, with AI
+  seats reconstructed as transient initial ratings and other humans using their
+  persisted per-game `before_*` values. The impure rollback shell should update
+  only the current `HumanRating` aggregate, leave `HumanRatingEvent` and
+  `game_events` append-only/byte-identical, and use unique
+  `(principal_id, game_id)` exclusions plus `(principal_id, exclusion_hash)`
+  audit rows so rerunning the same exclusion set is idempotent.
 - Admin anti-cheat review (US-313): keep review endpoints read-only under
   `api/routes/admin_anticheat.py` with `require_admin` at the router prefix.
   Resolve public human identity by selecting only `Principal.id` +
@@ -5530,3 +5540,36 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2946 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T15:12 PDT - US-301
+- Added the manual ranked human-rating rollback primitive: pure recompute over
+  ordered game projections, `0061_ranked_game_exclusions`, ORM/repository
+  support for exclusions + rollback audit rows, and
+  `POST /admin/anticheat/principals/{id}/rollback` on the existing admin
+  router.
+- Rollback recomputes only the current `HumanRating` aggregate and inserts
+  idempotent exclusion/audit rows; historical `HumanRatingEvent` rows and
+  `game_events` remain unchanged, so replay/hash-chain evidence stays
+  byte-identical.
+- Inserted `0061` into the existing gap between `0060` and `0062`, updating
+  only `0062+` migration lineage tests.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/anticheat/rating_rollback.py`,
+  `src/padrino/ratings/human_rating_rollback.py`,
+  `src/padrino/db/repositories/ranked_game_exclusions.py`,
+  `src/padrino/db/migrations/versions/0061_ranked_game_exclusions.py`,
+  `src/padrino/db/migrations/versions/0062_human_consent_content_hash.py`,
+  `src/padrino/db/models.py`, `src/padrino/api/routes/admin.py`,
+  `tests/core/anticheat/test_rating_rollback.py`,
+  `tests/api/test_admin_ranked_rollback.py`,
+  `tests/db/test_migration_0061_ranked_game_exclusions.py`,
+  `tests/db/test_migrations.py`, migration lineage tests for `0055`-`0063`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/anticheat/test_rating_rollback.py tests/db/test_migration_0061_ranked_game_exclusions.py tests/api/test_admin_ranked_rollback.py -q`
+  failed first on missing rollback module/models; focused GREEN same command ->
+  9 passed. Nearby migration/rating tests -> 42 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2960
+  passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
+  touch `web/dashboard`.

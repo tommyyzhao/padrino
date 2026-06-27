@@ -82,7 +82,8 @@ def test_0063_is_linear_head_after_0062() -> None:
 
     assert script.get_heads() == ["0064"]
     assert script.get_revision("0063").down_revision == "0062"
-    assert script.get_revision("0062").down_revision == "0060"
+    assert script.get_revision("0062").down_revision == "0061"
+    assert script.get_revision("0061").down_revision == "0060"
 
 
 def test_0063_creates_ranked_game_signals_and_game_ip_hash(

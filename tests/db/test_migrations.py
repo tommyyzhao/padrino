@@ -44,6 +44,8 @@ EXPECTED_TABLES = {
     "budget_reservation_slots",
     "ranked_write_audit",
     "ranked_ban",
+    "ranked_game_exclusions",
+    "ranked_rating_rollback_audit",
     "ranked_game_signals",
     "ranked_flags",
 }

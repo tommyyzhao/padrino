@@ -51,6 +51,10 @@ from padrino.db.repositories import (
 )
 from padrino.db.repositories import ranked_bans as ranked_bans_repo
 from padrino.llm.secrets import SecretResolutionError, resolve_secret
+from padrino.ratings.human_rating_rollback import (
+    RankedRollbackError,
+    rollback_ranked_human_rating,
+)
 
 router = APIRouter()
 
@@ -157,6 +161,22 @@ class RankedBanResponse(BaseModel):
     lifted_at: datetime | None
 
 
+class RankedRollbackRequest(_StrictModel):
+    reason: str = Field(min_length=1, max_length=512)
+    excluded_game_ids: list[uuid.UUID] = Field(min_length=1)
+
+
+class RankedRollbackResponse(BaseModel):
+    principal_id: uuid.UUID
+    human_player_id: str
+    excluded_game_ids: list[uuid.UUID]
+    mu: float
+    sigma: float
+    conservative_score: float
+    games: int
+    audit_created: bool
+
+
 def _ranked_ban_response(row: RankedBan) -> RankedBanResponse:
     return RankedBanResponse(
         id=row.id,
@@ -177,6 +197,40 @@ def _admin_actor(ctx: ApiKeyContext) -> str:
     if ctx.via_admin_token:
         return "legacy_admin_token"
     return "synthetic_admin"
+
+
+@router.post(
+    "/admin/anticheat/principals/{principal_id}/rollback",
+    response_model=RankedRollbackResponse,
+)
+async def rollback_ranked_human_principal_rating(
+    principal_id: uuid.UUID,
+    body: RankedRollbackRequest,
+    ctx: ApiKeyContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> RankedRollbackResponse:
+    try:
+        result = await rollback_ranked_human_rating(
+            session,
+            principal_id=principal_id,
+            excluded_game_ids=body.excluded_game_ids,
+            reason=body.reason,
+            created_by=_admin_actor(ctx),
+            now=datetime.now(UTC),
+        )
+    except RankedRollbackError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    await session.commit()
+    return RankedRollbackResponse(
+        principal_id=result.principal_id,
+        human_player_id=result.human_player_id,
+        excluded_game_ids=list(result.excluded_game_ids),
+        mu=result.mu,
+        sigma=result.sigma,
+        conservative_score=result.conservative_score,
+        games=result.games,
+        audit_created=result.audit_created,
+    )
 
 
 @router.post(
