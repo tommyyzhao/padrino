@@ -19,7 +19,7 @@ async def test_legal_documents_index_serves_hash_bound_tos_and_privacy() -> None
 
     assert resp.status_code == 200
     documents = {doc["kind"]: doc for doc in resp.json()["documents"]}
-    assert set(documents) == {"TOS", "PRIVACY", "AGE_GATE"}
+    assert set(documents) == {"TOS", "PRIVACY", "AGE_GATE", "RANKED"}
     for doc in documents.values():
         assert doc["version_label"]
         assert doc["body"].strip()
@@ -30,6 +30,8 @@ async def test_legal_documents_index_serves_hash_bound_tos_and_privacy() -> None
         body = documents[kind]["body"].lower()
         assert "no warranty" in body
         assert "no cash prizes" in body
+    assert documents["RANKED"]["version_label"] != documents["TOS"]["version_label"]
+    assert "persistent rating" in documents["RANKED"]["body"].lower()
 
 
 @pytest.mark.asyncio

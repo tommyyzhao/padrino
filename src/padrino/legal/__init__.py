@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from padrino.legal.documents import (
+    DOCUMENT_KIND_AGE_GATE,
     DOCUMENT_KIND_PRIVACY,
+    DOCUMENT_KIND_RANKED,
     DOCUMENT_KIND_TOS,
     LegalDocument,
     get_legal_document,
@@ -12,7 +14,9 @@ from padrino.legal.documents import (
 )
 
 __all__ = [
+    "DOCUMENT_KIND_AGE_GATE",
     "DOCUMENT_KIND_PRIVACY",
+    "DOCUMENT_KIND_RANKED",
     "DOCUMENT_KIND_TOS",
     "LegalDocument",
     "get_legal_document",

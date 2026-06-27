@@ -231,7 +231,7 @@
         "Editing the ranked document invalidates ranked consent and re-prompts only the ranked purposes; this story does not re-open the client-boolean ranked path"
       ],
       "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-291",

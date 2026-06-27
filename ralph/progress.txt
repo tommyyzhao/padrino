@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Purpose-segmented ranked consent (US-304): keep one server-authored `RANKED`
+  legal document as the content/hash authority, but store one append-only
+  `HumanConsent` row per ranked purpose (`RANKED:PERSISTENT_RATING`,
+  `RANKED:PUBLIC_HANDLE`, `RANKED:CHAT_RETENTION`,
+  `RANKED:ANTICHEAT_PROFILING`). `has_current_ranked_consent` composes current
+  base TOS/PRIVACY/AGE consent plus all four current ranked-purpose rows; a
+  ranked document body change invalidates only the ranked-purpose rows.
 - Content-hash-bound consent (US-303): keep the server legal-document registry
   as the only authority for `HumanConsent.document_version` and
   `HumanConsent.content_hash`. The API may continue returning
@@ -5010,4 +5017,33 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 33 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2839 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T12:09 PDT - US-304
+- Added a server-authored `RANKED` legal document with an independent version
+  label/content hash and public legal-document route coverage.
+- Added four purpose-segmented ranked consent kinds, stored as distinct
+  append-only `human_consents` rows bound to the current `RANKED` document hash.
+- Added ranked consent helpers and `/human/ranked-consent` status/record routes;
+  `has_current_ranked_consent` requires current base consent plus all four
+  ranked purposes, and `enforce_ranked_consent` fails with HTTP 412 otherwise.
+- Locked the base-vs-ranked gap and ranked-document re-prompt behavior in API
+  tests without touching the lobby ranked boolean path.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_consent.py`,
+  `src/padrino/api/routes/human.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/legal/__init__.py`, `src/padrino/legal/documents.py`,
+  `tests/api/test_legal_documents_route.py`,
+  `tests/api/test_ranked_consent_gate.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_ranked_consent_gate.py tests/api/test_legal_documents_route.py -q`
+  failed first on missing ranked legal document, ranked consent helpers, and
+  `/human/ranked-consent`; focused GREEN same command -> 7 passed. Related
+  GREEN
+  `uv run pytest tests/api/test_consent_gate.py tests/api/test_consent_content_hash.py tests/api/test_legal_documents_route.py tests/api/test_ranked_consent_gate.py -q`
+  -> 17 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2844 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

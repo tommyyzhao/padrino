@@ -13,7 +13,9 @@ from padrino.core.legal_documents import hash_legal_document
 DOCUMENT_KIND_TOS = "TOS"
 DOCUMENT_KIND_PRIVACY = "PRIVACY"
 DOCUMENT_KIND_AGE_GATE = "AGE_GATE"
+DOCUMENT_KIND_RANKED = "RANKED"
 _BASE_VERSION_LABEL = "2026-06-18"
+_RANKED_VERSION_LABEL = "2026-06-27"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +91,35 @@ are under 16, do not create a guest session, sign in, join a lobby, or submit
 chat or actions.
 """
 
+_RANKED_BODY = """\
+Padrino Ranked Human ELO Consent
+Version: 2026-06-27
+
+Ranked play is an optional human-vs-AI Mafia skill experiment. It is separate
+from casual games and from the scientific benchmark. You must be 16+ and hold
+current Terms, Privacy, and age confirmation consent before ranked play.
+
+By opting into ranked play, you consent to the following ranked purposes:
+
+Persistent rating: Padrino may write and retain a Human ELO rating, rating
+events, game counts, and conservative score derived from ranked games.
+
+Public handle: Padrino may display your pseudonymous ranked handle and ranked
+card on public leaderboard surfaces. Raw display names and raw account IDs are
+not used for public ranked display.
+
+Chat retention: Padrino may retain ranked-game chat sidecar rows for game
+integrity, audit, moderation, and future self-serve export/delete flows.
+
+Anti-cheat profiling: Padrino may compute and retain advisory integrity signals
+such as hashed IP clusters, cadence signals, and ranked-game telemetry for
+manual review. v1 uses these signals for flagging only, not automatic penalties.
+
+No cash prizes are offered. Human ratings and handles have no cash value and
+are not redeemable for money or paid benefits. Ranked mode is provided as-is for
+MVP testing with no warranty of availability, ranking value, or legal effect.
+"""
+
 _DOCUMENTS: tuple[LegalDocument, ...] = (
     LegalDocument(kind=DOCUMENT_KIND_TOS, version_label=_BASE_VERSION_LABEL, body=_TOS_BODY),
     LegalDocument(
@@ -100,6 +131,11 @@ _DOCUMENTS: tuple[LegalDocument, ...] = (
         kind=DOCUMENT_KIND_AGE_GATE,
         version_label=_BASE_VERSION_LABEL,
         body=_AGE_GATE_BODY,
+    ),
+    LegalDocument(
+        kind=DOCUMENT_KIND_RANKED,
+        version_label=_RANKED_VERSION_LABEL,
+        body=_RANKED_BODY,
     ),
 )
 
@@ -129,6 +165,7 @@ def legal_document_payload(document: LegalDocument) -> dict[str, str]:
 __all__ = [
     "DOCUMENT_KIND_AGE_GATE",
     "DOCUMENT_KIND_PRIVACY",
+    "DOCUMENT_KIND_RANKED",
     "DOCUMENT_KIND_TOS",
     "LegalDocument",
     "get_legal_document",

@@ -48,8 +48,11 @@ from padrino.api.human_consent import (
     client_ip_hash,
     enforce_consent,
     has_current_consent,
+    has_current_ranked_consent,
     record_consent,
+    record_ranked_consent,
     required_consent_versions,
+    required_ranked_consent_versions,
 )
 from padrino.api.human_observation import build_seat_observation_snapshot, stream_snapshot
 from padrino.api.human_seat_auth import HUMAN_LANE_SEAT_KINDS
@@ -403,6 +406,48 @@ async def post_consent(
         source_ip_hash=client_ip_hash(request),
     )
     return ConsentStatus(consented=True, required_versions=versions)
+
+
+@router.get("/human/ranked-consent", response_model=ConsentStatus)
+async def get_ranked_consent_status(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatus:
+    """Report whether the principal holds current base and ranked consent."""
+    settings = _get_auth_settings(request)
+    consented = await has_current_ranked_consent(
+        session, subject_principal_id=ctx.principal_id, settings=settings
+    )
+    return ConsentStatus(
+        consented=consented,
+        required_versions=required_ranked_consent_versions(settings),
+    )
+
+
+@router.post(
+    "/human/ranked-consent",
+    response_model=ConsentStatus,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_ranked_consent(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatus:
+    """Record purpose-segmented ranked consent rows for the current human."""
+    settings = _get_auth_settings(request)
+    versions = await record_ranked_consent(
+        session,
+        subject_principal_id=ctx.principal_id,
+        settings=settings,
+        accepted_at=datetime.now(UTC),
+        source_ip_hash=client_ip_hash(request),
+    )
+    consented = await has_current_ranked_consent(
+        session, subject_principal_id=ctx.principal_id, settings=settings
+    )
+    return ConsentStatus(consented=consented, required_versions=versions)
 
 
 @router.post(
