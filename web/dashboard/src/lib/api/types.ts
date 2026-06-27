@@ -226,6 +226,17 @@ export interface PublicRulesetsResponse {
   items: PublicRulesetEntry[];
 }
 
+export interface LegalDocumentResponse {
+  kind: string;
+  version_label: string;
+  content_hash: string;
+  body: string;
+}
+
+export interface LegalDocumentsResponse {
+  documents: LegalDocumentResponse[];
+}
+
 export interface VotingAccuracyAnalytics {
   total_votes: number;
   accurate_votes: number;
@@ -359,6 +370,11 @@ export interface GuestSummary {
 export interface ConsentStatus {
   consented: boolean;
   required_versions: Record<string, string>;
+}
+
+/** Client echo of the server-served document hashes accepted by the user. */
+export interface ConsentAcceptancePayload {
+  content_hashes: Record<string, string>;
 }
 
 /** A structured action a human submits for their seat (US-134). */

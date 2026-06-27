@@ -8,6 +8,7 @@
   // Guests can see their current-session stats; account sign-in is an upsell
   // for persistence, not a gate for the profile surface.
   import { onMount } from 'svelte';
+  import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
   import { PadrinoApiError } from '$lib/api/client';
@@ -24,6 +25,8 @@
   let signedOut = $state(false);
   let statsLoading = $state(false);
   let historyLoading = $state(false);
+  let selfServeBusy = $state<'export' | 'withdraw' | 'delete' | null>(null);
+  let selfServeStatus = $state<string | null>(null);
 
   const isGuest = $derived(me?.kind === 'guest');
 
@@ -93,6 +96,46 @@
     }
     statsLoading = false;
     historyLoading = false;
+  }
+
+  async function exportData(): Promise<void> {
+    selfServeBusy = 'export';
+    selfServeStatus = null;
+    try {
+      await padrino.client.exportHumanData();
+      selfServeStatus = 'Export ready.';
+    } catch (e) {
+      selfServeStatus = (e as Error).message;
+    } finally {
+      selfServeBusy = null;
+    }
+  }
+
+  async function withdrawRankedConsent(): Promise<void> {
+    selfServeBusy = 'withdraw';
+    selfServeStatus = null;
+    try {
+      await padrino.client.withdrawRankedConsent();
+      selfServeStatus = 'Ranked consent withdrawn.';
+    } catch (e) {
+      selfServeStatus = (e as Error).message;
+    } finally {
+      selfServeBusy = null;
+    }
+  }
+
+  async function deleteAccount(): Promise<void> {
+    if (!window.confirm('Delete and anonymize this human account?')) return;
+    selfServeBusy = 'delete';
+    selfServeStatus = null;
+    try {
+      await padrino.client.deleteHumanData();
+      selfServeStatus = 'Delete request completed.';
+    } catch (e) {
+      selfServeStatus = (e as Error).message;
+    } finally {
+      selfServeBusy = null;
+    }
   }
 
   onMount(() => {
@@ -184,6 +227,48 @@
 {/if}
 
 {#if sessionChecked && !signedOut}
+  <Card class="mb-4" data-testid="profile-self-serve">
+    <section>
+      <div class="mb-3">
+        <h2 class="text-sm font-semibold">Data controls</h2>
+        <p class="mt-1 text-xs text-muted-foreground">
+          Export your human data, withdraw ranked consent, or delete and anonymize your account.
+        </p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <Button
+          variant="outline"
+          testid="profile-export-data"
+          onclick={() => void exportData()}
+          disabled={selfServeBusy !== null}
+        >
+          {selfServeBusy === 'export' ? 'Exporting...' : 'Export data'}
+        </Button>
+        <Button
+          variant="outline"
+          testid="profile-withdraw-ranked"
+          onclick={() => void withdrawRankedConsent()}
+          disabled={selfServeBusy !== null}
+        >
+          {selfServeBusy === 'withdraw' ? 'Withdrawing...' : 'Withdraw ranked consent'}
+        </Button>
+        <Button
+          variant="outline"
+          testid="profile-delete-account"
+          onclick={() => void deleteAccount()}
+          disabled={selfServeBusy !== null}
+        >
+          {selfServeBusy === 'delete' ? 'Deleting...' : 'Delete account'}
+        </Button>
+      </div>
+      {#if selfServeStatus}
+        <p class="mt-3 text-sm text-muted-foreground" data-testid="profile-self-serve-status">
+          {selfServeStatus}
+        </p>
+      {/if}
+    </section>
+  </Card>
+
   <Card class="mt-4">
     <section data-testid="profile-history">
       <div class="mb-3 flex items-center justify-between gap-3">

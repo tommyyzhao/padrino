@@ -399,7 +399,7 @@
         "A 412 consent_required response re-renders the current document version (re-prompt) rather than a generic error"
       ],
       "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-299",

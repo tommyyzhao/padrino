@@ -81,10 +81,9 @@
       }
       if (isConsentRequired(error)) {
         // 412: the match endpoint refused for lack of current consent and minted
-        // a fresh guest session. Route back to the home 'Play vs AI' CTA, which
-        // collects consent inline before re-attempting the match (rather than
-        // showing the generic 'table finder stopped' timeout error).
-        void goto('/');
+        // a fresh guest session. Route back with an explicit re-prompt marker so
+        // the home consent card reloads the current legal document versions.
+        void goto('/?consent=required');
         return;
       }
       stage = 'error';

@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Dashboard legal consent (US-309): fetch `/legal/documents/{kind}` as the
+  source of display text, version labels, and client echo hashes. Base and
+  ranked consent POST bodies should carry `content_hashes` copied from those
+  served documents for observability/testability, while the backend still
+  stores its registry hash as the authority. For 412 `consent_required` from a
+  route handoff, redirect with an explicit home re-prompt marker and let the
+  home card reload the current document versions instead of surfacing a generic
+  queue error.
 - Human PII retention (US-308): keep the planner pure in `db/retention.py`
   over lightweight row projections and an injected `now`. Human PII uses a
   strict `< cutoff` TTL boundary (unlike the older game-bank inclusive cutoff).
@@ -5367,3 +5375,37 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2919 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T15:03 PDT - US-309
+- Added public `/terms` and `/privacy` Svelte routes that render the
+  server-served legal document body and `version_label`.
+- Added `/play/ranked-consent` with four independent ranked-purpose checkboxes;
+  submit stays disabled until every purpose is checked and posts the served
+  ranked document hash for each purpose.
+- Updated the home base-consent flow to fetch TOS/PRIVACY/AGE_GATE documents,
+  link to the real legal routes, echo served `content_hashes` on POST, and
+  re-prompt with current versions after a 412 match handoff.
+- Wired `/profile` data controls to self-export, ranked-consent withdrawal, and
+  delete/anonymize endpoints; the client mutation helper now handles 204 empty
+  responses.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/play/match/+page.svelte`,
+  `web/dashboard/src/routes/play/ranked-consent/+page.svelte`,
+  `web/dashboard/src/routes/privacy/+page.svelte`,
+  `web/dashboard/src/routes/profile/+page.svelte`,
+  `web/dashboard/src/routes/terms/+page.svelte`,
+  `web/dashboard/tests/e2e/legal-consent.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- legal-consent.spec.ts` failed first on
+  missing `/terms`, missing home legal links/hash echo, missing 412 re-prompt,
+  missing ranked consent route, and missing profile self-serve controls.
+  Focused GREEN `pnpm -C web/dashboard test:e2e -- legal-consent.spec.ts`
+  -> 5 passed. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e`
+  -> 59 passed / 3 skipped. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2919 passed / 41 skipped /
+  10 deselected.
