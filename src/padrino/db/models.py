@@ -8,7 +8,8 @@ Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 siblings ``human_rating`` / ``human_rating_event``, the
 non-canonical context sibling rating tables, generic budget reservation slots,
 and the browser-human identity layer ``principals`` / ``human_sessions`` (Wave
-9, US-127), plus human-lane cost admission slots.
+9, US-127), human-lane cost admission slots, and ranked anti-cheat telemetry /
+advisory flags.
 """
 
 from __future__ import annotations
@@ -933,6 +934,38 @@ class RankedGameSignal(Base):
     )
 
 
+class RankedFlag(Base):
+    """Read-side advisory ranked anti-cheat flag for manual review."""
+
+    __tablename__ = "ranked_flags"
+    __table_args__ = (
+        CheckConstraint(
+            "severity IN ('low', 'medium', 'high')",
+            name="ck_ranked_flags_severity",
+        ),
+        Index(
+            "uq_ranked_flags_kind_principal_evidence_hash",
+            "kind",
+            "principal_id",
+            "evidence_hash",
+            unique=True,
+        ),
+        Index("ix_ranked_flags_kind", "kind"),
+        Index("ix_ranked_flags_severity", "severity"),
+        Index("ix_ranked_flags_principal_id", "principal_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str] = mapped_column(String, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class RankedBan(Base):
     """Manual ranked ban/suspension anchored to an account and optional email hash."""
 
@@ -1675,6 +1708,8 @@ __all__ = [
     "Principal",
     "PromptVersion",
     "RankedBan",
+    "RankedFlag",
+    "RankedGameSignal",
     "RankedWriteAudit",
     "RateLimitBucket",
     "Rating",

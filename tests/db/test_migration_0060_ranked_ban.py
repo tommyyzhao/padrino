@@ -80,7 +80,7 @@ def test_0060_is_linear_head_after_0059() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0063"]
+    assert script.get_heads() == ["0064"]
     assert script.get_revision("0062").down_revision == "0060"
     assert script.get_revision("0063").down_revision == "0062"
     assert script.get_revision("0060").down_revision == "0059"

@@ -45,6 +45,7 @@ EXPECTED_TABLES = {
     "ranked_write_audit",
     "ranked_ban",
     "ranked_game_signals",
+    "ranked_flags",
 }
 
 

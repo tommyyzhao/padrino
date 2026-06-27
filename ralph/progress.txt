@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked advisory anti-cheat (US-312): keep signal scoring pure in
+  `core/anticheat/signals.py` over `RankedSignalRow` projections and an
+  injected integer `now`; the impure
+  `ratings/anticheat_scoring_service.py` converts ORM rows and persists only
+  `ranked_flags` off the rating hot path. Thresholds live in `Settings`, and
+  `ranked_flags` idempotency uses a deterministic `evidence_hash` unique key.
 - Identity leak regression guards (US-299): seed real `Principal`,
   `OAuthIdentity`, and `RankedBan` rows with unique sentinel display names,
   ranked handles, emails, email hashes, and ban metadata, then assert absence
@@ -5443,3 +5449,45 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run pytest -m "not integration"` -> 2923 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch
   `web/dashboard`.
+
+## 2026-06-27T14:44 PDT - US-312
+- Added pure ranked telemetry scoring in `core/anticheat/signals.py` for
+  same-IP clusters, cross-game co-occurrence, abnormal win/loss streaks, and
+  precomputed bot-cadence latency features, with deterministic evidence
+  payloads and no clock/RNG imports.
+- Added migration `0064_ranked_flags`, ORM model, and `ranked_flags`
+  repository. Existing head assertions now point at `0064`; no migration
+  `<=0063` was edited.
+- Added the batch/admin-triggered `ratings/anticheat_scoring_service.py` wrapper
+  that reads `ranked_game_signals`, builds thresholds from `Settings`, and
+  inserts advisory flags without mutating `HumanRating` or `HumanRatingEvent`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/anticheat/__init__.py`,
+  `src/padrino/core/anticheat/signals.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0064_ranked_flags.py`,
+  `src/padrino/db/repositories/ranked_flags.py`,
+  `src/padrino/ratings/anticheat_scoring_service.py`,
+  `src/padrino/settings.py`, `tests/core/anticheat/test_signals.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_migration_0060_ranked_ban.py`,
+  `tests/db/test_migration_0062_human_consent_content_hash.py`,
+  `tests/db/test_migration_0063_ranked_game_signals.py`,
+  `tests/db/test_migration_0064_ranked_flags.py`,
+  `tests/db/test_migrations.py`,
+  `tests/ratings/test_anticheat_scoring_service.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/anticheat/test_signals.py tests/db/test_migration_0064_ranked_flags.py tests/ratings/test_anticheat_scoring_service.py -q`
+  failed first on missing `padrino.core.anticheat`, missing `RankedFlag`, and
+  missing scorer service. Focused GREEN same command -> 11 passed. Related GREEN
+  `uv run pytest tests/db/test_migration_0055_llm_call_pricing_basis.py tests/db/test_migration_0056_ranked_write_audit.py tests/db/test_migration_0057_human_rating_quarantine.py tests/db/test_migration_0058_oauth_identity_email_verified.py tests/db/test_migration_0059_principal_ranked_handle.py tests/db/test_migration_0060_ranked_ban.py tests/db/test_migration_0062_human_consent_content_hash.py tests/db/test_migration_0063_ranked_game_signals.py tests/db/test_migration_0064_ranked_flags.py tests/db/test_migrations.py -q`
+  -> 30 passed. Core firewall GREEN
+  `uv run pytest tests/core/test_purity.py tests/core/test_no_wallclock.py tests/core/anticheat/test_signals.py -q`
+  -> 138 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2941 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
