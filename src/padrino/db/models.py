@@ -867,6 +867,45 @@ class HumanRatingEvent(Base):
     )
 
 
+class RankedWriteAudit(Base):
+    """Append-only provenance for ranked human-rating write decisions."""
+
+    __tablename__ = "ranked_write_audit"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('APPLIED', 'REFUSED')",
+            name="ck_ranked_write_audit_decision",
+        ),
+        Index(
+            "uq_ranked_write_audit_applied_game_human",
+            "game_id",
+            "human_player_id",
+            unique=True,
+            sqlite_where=text("decision = 'APPLIED' AND human_player_id IS NOT NULL"),
+            postgresql_where=text("decision = 'APPLIED' AND human_player_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_ranked_write_audit_refused_game_reason",
+            "game_id",
+            "reason",
+            unique=True,
+            sqlite_where=text("decision = 'REFUSED' AND human_player_id IS NULL"),
+            postgresql_where=text("decision = 'REFUSED' AND human_player_id IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    human_player_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    decision: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    flag_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class ScheduledGauntlet(Base):
     """A cron-scheduled recurring heterogeneous tournament (US-085)."""
 
@@ -1568,6 +1607,7 @@ __all__ = [
     "PlacementRatingEvent",
     "Principal",
     "PromptVersion",
+    "RankedWriteAudit",
     "RateLimitBucket",
     "Rating",
     "RatingContext",

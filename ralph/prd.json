@@ -92,7 +92,7 @@
         "The alembic head assertion in tests/db/test_migration_0055_llm_call_pricing_basis.py is updated to the new head (or relaxed to assert down_revision chains onto 0055); NO migration <= 0055 body is edited."
       ],
       "notes": "Epic EPIC-A - Gate, kill-switch, idempotency, firewall & audit. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-295",

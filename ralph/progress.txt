@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked write provenance (US-294): keep `ranked_write_audit` writes in the
+  same DB transaction as the human-rating decision they describe. Insert
+  APPLIED audit rows only after `HumanRatingEvent` is successfully claimed and
+  before mutating `HumanRating`; insert a single REFUSED row for a genuine
+  ranked HUMANS_INCLUDED flag-off short-circuit before any `HumanRating` row is
+  created. Use `RankedEligibilityReason` enum values for audit `reason`, not
+  ad-hoc strings. Older migration tests that assert a single-revision delta
+  should upgrade to that revision explicitly, not symbolic `head`.
 - Human rating idempotency (US-292): for ranked human ELO, atomically claim the
   per-seat `HumanRatingEvent` with dialect-specific `INSERT ... ON CONFLICT DO
   NOTHING` before mutating `HumanRating`. If an event already exists or the
@@ -4698,4 +4706,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2746 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-27T10:33 PDT - US-294
+- Added Alembic migration `0056_ranked_write_audit` and the ORM model for
+  append-only ranked human ELO write provenance rows, with APPLIED and REFUSED
+  uniqueness indexes for idempotent reruns.
+- Wired `update_human_ratings_for_game` to write APPLIED audit rows alongside
+  newly inserted `HumanRatingEvent` rows and a REFUSED `ranked_disabled` row
+  when a ranked HUMANS_INCLUDED league is short-circuited by the kill switch.
+- Added coverage for migration round-trip/head chaining, applied/refused audit
+  rows, duplicate applied reruns, and transaction rollback with the rating
+  write.
+- Updated the existing `0055` head assertion for the new `0056` head, and made
+  the older `0054` single-revision table-delta test target `0054` instead of
+  symbolic `head`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/migrations/versions/0056_ranked_write_audit.py`,
+  `src/padrino/db/models.py`, `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `tests/db/test_migration_0054_budget_reservations.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migrations.py`, `tests/ratings/test_ranked_write_audit.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0056_ranked_write_audit.py tests/db/test_migration_0055_llm_call_pricing_basis.py tests/ratings/test_ranked_write_audit.py`
+  failed first on missing `RankedWriteAudit`; focused GREEN same command -> 9
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2754 passed / 41 skipped /
   10 deselected.

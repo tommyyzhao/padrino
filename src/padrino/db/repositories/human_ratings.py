@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.db.models import HumanRating, HumanRatingEvent
+from padrino.db.models import HumanRating, HumanRatingEvent, RankedWriteAudit
 
 
 async def get_or_create_human_rating(
@@ -152,5 +153,61 @@ async def record_human_rating_event(
     inserted = await session.get(HumanRatingEvent, inserted_id)
     if inserted is None:  # pragma: no cover - inserted in the same transaction.
         msg = f"Human rating event {inserted_id} disappeared after insert"
+        raise RuntimeError(msg)
+    return inserted
+
+
+async def record_ranked_write_audit(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    game_id: uuid.UUID,
+    human_player_id: str | None,
+    decision: Literal["APPLIED", "REFUSED"],
+    reason: str,
+    flag_enabled: bool,
+    created_at: datetime,
+) -> RankedWriteAudit | None:
+    """Append a ranked write-decision audit row, returning None on conflict."""
+    values = {
+        "id": uuid.uuid4(),
+        "league_id": league_id,
+        "game_id": game_id,
+        "human_player_id": human_player_id,
+        "decision": decision,
+        "reason": reason,
+        "flag_enabled": flag_enabled,
+        "created_at": created_at,
+    }
+    bind = session.get_bind()
+    dialect_name = bind.dialect.name
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = (
+            pg_insert(RankedWriteAudit)
+            .values(**values)
+            .on_conflict_do_nothing()
+            .returning(RankedWriteAudit.id)
+        )
+    elif dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        stmt = (
+            sqlite_insert(RankedWriteAudit)
+            .values(**values)
+            .on_conflict_do_nothing()
+            .returning(RankedWriteAudit.id)
+        )
+    else:
+        raise RuntimeError(f"unsupported dialect for ranked-write audit insert: {dialect_name!r}")
+
+    inserted_id = (await session.execute(stmt)).scalar_one_or_none()
+    await session.flush()
+    if inserted_id is None:
+        return None
+    inserted = await session.get(RankedWriteAudit, inserted_id)
+    if inserted is None:  # pragma: no cover - inserted in the same transaction.
+        msg = f"Ranked write-audit row {inserted_id} disappeared after insert"
         raise RuntimeError(msg)
     return inserted

@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import Faction, LeagueKind
+from padrino.core.ranked_eligibility import RankedEligibilityReason
 from padrino.core.rulesets.canonicality import canonical_team_ranks_for_outcome
 from padrino.db.models import Game, GameSeat, HumanRating, HumanRatingEvent, League
 from padrino.db.repositories import human_ratings as human_ratings_repo
@@ -204,6 +205,16 @@ async def _persist_human_entry(
     )
     if event is None:
         return None
+    await human_ratings_repo.record_ranked_write_audit(
+        session,
+        league_id=league_id,
+        game_id=game_id,
+        human_player_id=row.human_player_id,
+        decision="APPLIED",
+        reason=RankedEligibilityReason.ELIGIBLE.value,
+        flag_enabled=True,
+        created_at=now,
+    )
     updated = await human_ratings_repo.update_human_rating(
         session,
         row.id,
@@ -217,6 +228,38 @@ async def _persist_human_entry(
         msg = f"Human rating row {row.id} disappeared between insert and update"
         raise RuntimeError(msg)
     return event
+
+
+async def _record_ranked_disabled_refusal(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    ranked: bool,
+    game_id: uuid.UUID,
+    now: datetime,
+) -> None:
+    if not ranked:
+        return
+    league = await session.get(League, league_id)
+    if (
+        league is None
+        or league.kind != LeagueKind.HUMANS_INCLUDED.value
+        or league.ranked is not True
+    ):
+        return
+    game = await session.get(Game, game_id)
+    if game is None or game.ruleset_id != league.ruleset_id:
+        return
+    await human_ratings_repo.record_ranked_write_audit(
+        session,
+        league_id=league_id,
+        game_id=game_id,
+        human_player_id=None,
+        decision="REFUSED",
+        reason=RankedEligibilityReason.RANKED_DISABLED.value,
+        flag_enabled=False,
+        created_at=now,
+    )
 
 
 async def update_human_ratings_for_game(
@@ -233,7 +276,18 @@ async def update_human_ratings_for_game(
     AI seats participate as transient initial ratings so the team update reflects
     the full mixed game, but only human principal rows are persisted.
     """
-    if (ranked_human_rating_enabled() if rating_enabled is None else rating_enabled) is not True:
+    flag_enabled = (
+        ranked_human_rating_enabled() if rating_enabled is None else rating_enabled
+    ) is True
+    _now = now if now is not None else datetime.now(UTC)
+    if not flag_enabled:
+        await _record_ranked_disabled_refusal(
+            session,
+            league_id=league_id,
+            ranked=ranked,
+            game_id=game_result.game_id,
+            now=_now,
+        )
         return []
 
     metadata = await _resolve_ranked_humans_included_metadata(
@@ -264,7 +318,6 @@ async def update_human_ratings_for_game(
         ranks=[ranks[Faction.TOWN.value], ranks[Faction.MAFIA.value]],
     )
 
-    _now = now if now is not None else datetime.now(UTC)
     events: list[HumanRatingEvent] = []
     for entry, new in zip(town_entries, new_town, strict=True):
         event = await _persist_human_entry(
