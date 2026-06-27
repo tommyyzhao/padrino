@@ -46,6 +46,15 @@ def _conservative(mu: float, sigma: float) -> float:
     return mu - 3.0 * sigma
 
 
+def ranked_human_rating_enabled(settings: Any | None = None) -> bool:
+    """Read the ranked human-rating kill-switch, failing closed if absent."""
+    if settings is None:
+        from padrino.settings import get_settings
+
+        settings = get_settings()
+    return getattr(settings, "padrino_ranked_human_rating_enabled", False) is True
+
+
 async def _resolve_ranked_humans_included_metadata(
     session: AsyncSession,
     *,
@@ -239,5 +248,6 @@ async def update_human_ratings_for_game(
 __all__ = [
     "SCOPE_VALUE_GLOBAL",
     "HumanGameResult",
+    "ranked_human_rating_enabled",
     "update_human_ratings_for_game",
 ]

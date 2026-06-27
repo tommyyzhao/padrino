@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # never require real provider credentials or network calls.
     padrino_human_lane_mock_ai: bool = False
 
+    # Ranked human ELO kill-switch (US-289). Defaults OFF and is read only from
+    # impure API/ratings shells; pure core receives resolved facts only.
+    padrino_ranked_human_rating_enabled: bool = False
+
     # Human-aware tick (US-138). A human-friendly per-phase deadline the tick
     # barrier waits on (slow humans and slow LLMs alike are coerced to a safe
     # action past it), plus a FIXED release delay applied symmetrically to ALL

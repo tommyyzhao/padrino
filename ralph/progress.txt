@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked human-rating kill-switch (US-289): keep
+  `padrino_ranked_human_rating_enabled` as the single default-OFF `Settings`
+  flag. API routes should read it through request-scoped `auth_settings`
+  falling back to `get_settings()`, ratings code should accept an injected
+  settings object or use `get_settings()`, and both accessors should fail
+  closed with missing/non-Settings objects. Do not import settings from
+  `src/padrino/core/**`; pure eligibility receives the already-resolved boolean.
 - Human-lane smoke harness (US-288): keep deterministic human-lane AI mocking
   behind `PADRINO_HUMAN_LANE_MOCK_AI` / `padrino_human_lane_mock_ai` and wire it
   through the existing `ai_adapter_factory` seam, not through the production
@@ -4584,3 +4591,23 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   10 deselected. Frontend gates: `pnpm -C web/dashboard lint`;
   `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
   `pnpm -C web/dashboard test:e2e` -> 54 passed / 3 skipped.
+
+## 2026-06-27T09:46 PDT - US-289
+- Added the default-OFF `padrino_ranked_human_rating_enabled` settings flag as
+  the server-authoritative ranked human ELO kill-switch.
+- Added thin read accessors in the lobby route shell and human OpenSkill service
+  so the same injected `Settings` instance is observable from API and ratings
+  code without new global state.
+- Locked fail-closed behavior and the no-core-settings-import invariant in
+  `tests/test_settings.py`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/settings.py`,
+  `src/padrino/api/routes/lobbies.py`,
+  `src/padrino/ratings/human_openskill_service.py`, `tests/test_settings.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest tests/test_settings.py`
+  failed first on missing route/rating accessors; focused GREEN
+  `uv run pytest tests/test_settings.py` -> 30 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2714
+  passed / 41 skipped / 10 deselected.

@@ -73,6 +73,14 @@ def _idle_seconds() -> float:
     return get_settings().padrino_lobby_idle_cancel_seconds
 
 
+def ranked_human_rating_enabled_from_request(request: Request) -> bool:
+    """Read the ranked human-rating kill-switch from request-scoped settings."""
+    from padrino.settings import get_settings
+
+    settings = getattr(request.app.state, "auth_settings", None) or get_settings()
+    return getattr(settings, "padrino_ranked_human_rating_enabled", False) is True
+
+
 # Map an admission-denial reason to its HTTP status. A breaker-open or per-user
 # cap denial is a 429 (too many requests / rate-limited admission); the body
 # carries the structured reason so the caller never parses prose.
