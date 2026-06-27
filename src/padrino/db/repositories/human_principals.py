@@ -166,6 +166,20 @@ async def get_session_by_token(session: AsyncSession, raw_token: str) -> HumanSe
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def list_sessions_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> list[HumanSession]:
+    """Return all browser sessions for one principal in stable order."""
+    stmt = (
+        select(HumanSession)
+        .where(HumanSession.principal_id == principal_id)
+        .order_by(HumanSession.issued_at, HumanSession.id)
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
 async def mark_session_seen(session: AsyncSession, session_id: uuid.UUID, *, now: datetime) -> None:
     obj = await session.get(HumanSession, session_id)
     if obj is None:
@@ -200,6 +214,7 @@ __all__ = [
     "get_principal",
     "get_session_by_token",
     "hash_session_token",
+    "list_sessions_for_principal",
     "mark_session_seen",
     "revoke_session",
     "set_display_name",

@@ -13,7 +13,7 @@ import uuid
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.db.models import HumanChatMessage
+from padrino.db.models import GameSeat, HumanChatMessage
 
 
 async def append_human_chat(
@@ -55,6 +55,25 @@ async def list_for_game(session: AsyncSession, game_id: uuid.UUID) -> list[Human
         select(HumanChatMessage)
         .where(HumanChatMessage.game_id == game_id)
         .order_by(HumanChatMessage.sequence)
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
+async def list_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> list[HumanChatMessage]:
+    """Return chat authored by a principal via the game-seat ownership join."""
+    stmt = (
+        select(HumanChatMessage)
+        .join(
+            GameSeat,
+            (GameSeat.game_id == HumanChatMessage.game_id)
+            & (GameSeat.public_player_id == HumanChatMessage.public_player_id),
+        )
+        .where(GameSeat.occupant_principal_id == principal_id)
+        .order_by(HumanChatMessage.game_id, HumanChatMessage.sequence, HumanChatMessage.id)
     )
     return list((await session.execute(stmt)).scalars())
 

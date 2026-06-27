@@ -81,11 +81,35 @@ from padrino.api.pagination import (
 from padrino.api.reveal import build_participant_reveal, winner_from_terminal_result
 from padrino.core.engine.actions import Action
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStatus
+from padrino.core.gdpr_export import (
+    ChatExportInput,
+    ConsentExportInput,
+    HumanDataExportBundle,
+    HumanRatingEventExportInput,
+    HumanRatingExportInput,
+    PrincipalExportInput,
+    SessionExportInput,
+    assemble_human_data_export,
+)
 from padrino.core.reveal import EndgameReveal
 from padrino.core.rulesets import get_ruleset
 from padrino.db.game_status import GAME_STATUS_COMPLETED
-from padrino.db.models import Game, GameSeat, HumanPlayerStats, HumanTuringGuess, Principal
+from padrino.db.models import (
+    Game,
+    GameSeat,
+    HumanChatMessage,
+    HumanConsent,
+    HumanPlayerStats,
+    HumanRating,
+    HumanRatingEvent,
+    HumanSession,
+    HumanTuringGuess,
+    Principal,
+)
+from padrino.db.repositories import human_chat as human_chat_repo
+from padrino.db.repositories import human_consents as human_consents_repo
 from padrino.db.repositories import human_principals as principals_repo
+from padrino.db.repositories import human_ratings as human_ratings_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
@@ -990,6 +1014,58 @@ async def get_me(
     )
 
 
+@router.get("/human/me/export", response_model=HumanDataExportBundle)
+async def get_me_export(
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> HumanDataExportBundle:
+    """Return the authenticated principal's deterministic self-export bundle."""
+    principal = await principals_repo.get_principal(session, ctx.principal_id)
+    if principal is None:  # pragma: no cover - require_human already checked it.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="principal_not_found",
+        )
+    return assemble_human_data_export(
+        principal=_principal_export_input(principal),
+        sessions=[
+            _session_export_input(row)
+            for row in await principals_repo.list_sessions_for_principal(
+                session,
+                principal_id=ctx.principal_id,
+            )
+        ],
+        consents=[
+            _consent_export_input(row)
+            for row in await human_consents_repo.list_for_principal(
+                session,
+                subject_principal_id=ctx.principal_id,
+            )
+        ],
+        chat_messages=[
+            _chat_export_input(row)
+            for row in await human_chat_repo.list_for_principal(
+                session,
+                principal_id=ctx.principal_id,
+            )
+        ],
+        human_ratings=[
+            _human_rating_export_input(row)
+            for row in await human_ratings_repo.list_human_ratings_for_principal(
+                session,
+                principal_id=ctx.principal_id,
+            )
+        ],
+        human_rating_events=[
+            _human_rating_event_export_input(row)
+            for row in await human_ratings_repo.list_human_rating_events_for_principal(
+                session,
+                principal_id=ctx.principal_id,
+            )
+        ],
+    )
+
+
 @router.patch("/human/me", response_model=GuestSummary)
 async def patch_me(
     body: DisplayNameUpdate,
@@ -1008,6 +1084,91 @@ async def patch_me(
         principal_id=updated.id,
         kind=updated.kind,
         display_name=updated.display_name,
+    )
+
+
+def _principal_export_input(row: Principal) -> PrincipalExportInput:
+    return PrincipalExportInput(
+        id=row.id,
+        kind=row.kind,
+        display_name=row.display_name,
+        ranked_handle=row.ranked_handle,
+        ranked_handle_normalized=row.ranked_handle_normalized,
+        deleted_at=row.deleted_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _session_export_input(row: HumanSession) -> SessionExportInput:
+    return SessionExportInput(
+        id=row.id,
+        principal_id=row.principal_id,
+        session_hash=row.session_hash,
+        kind=row.kind,
+        issued_at=row.issued_at,
+        expires_at=row.expires_at,
+        revoked_at=row.revoked_at,
+        last_seen_at=row.last_seen_at,
+    )
+
+
+def _consent_export_input(row: HumanConsent) -> ConsentExportInput:
+    return ConsentExportInput(
+        id=row.id,
+        subject_principal_id=row.subject_principal_id,
+        document_kind=row.document_kind,
+        document_version=row.document_version,
+        content_hash=row.content_hash,
+        accepted_at=row.accepted_at,
+        source_ip_hash=row.source_ip_hash,
+    )
+
+
+def _chat_export_input(row: HumanChatMessage) -> ChatExportInput:
+    return ChatExportInput(
+        id=row.id,
+        game_id=row.game_id,
+        sequence=row.sequence,
+        public_player_id=row.public_player_id,
+        raw_text=row.raw_text,
+        cleaned_text=row.cleaned_text,
+        redacted=row.redacted,
+        created_at=row.created_at,
+    )
+
+
+def _human_rating_export_input(row: HumanRating) -> HumanRatingExportInput:
+    return HumanRatingExportInput(
+        id=row.id,
+        league_id=row.league_id,
+        human_player_id=row.human_player_id,
+        scope_type=row.scope_type,
+        scope_value=row.scope_value,
+        mu=row.mu,
+        sigma=row.sigma,
+        conservative_score=row.conservative_score,
+        games=row.games,
+        last_game_at=row.last_game_at,
+        quarantined_at=row.quarantined_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _human_rating_event_export_input(row: HumanRatingEvent) -> HumanRatingEventExportInput:
+    return HumanRatingEventExportInput(
+        id=row.id,
+        league_id=row.league_id,
+        game_id=row.game_id,
+        human_player_id=row.human_player_id,
+        public_player_id=row.public_player_id,
+        scope_type=row.scope_type,
+        scope_value=row.scope_value,
+        before_mu=row.before_mu,
+        before_sigma=row.before_sigma,
+        after_mu=row.after_mu,
+        after_sigma=row.after_sigma,
+        created_at=row.created_at,
     )
 
 

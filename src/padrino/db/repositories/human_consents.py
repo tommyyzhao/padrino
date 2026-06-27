@@ -154,6 +154,20 @@ async def current_consent_kinds(
     return current
 
 
+async def list_for_principal(
+    session: AsyncSession,
+    *,
+    subject_principal_id: uuid.UUID,
+) -> list[HumanConsent]:
+    """Return all append-only consent rows for one principal in stable order."""
+    stmt = (
+        select(HumanConsent)
+        .where(HumanConsent.subject_principal_id == subject_principal_id)
+        .order_by(HumanConsent.accepted_at, HumanConsent.document_kind, HumanConsent.id)
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
 def _complete_acceptance_cutoff(
     rows: Iterable[tuple[str, str | None, datetime]],
     *,

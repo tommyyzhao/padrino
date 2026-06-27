@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- GDPR self-export (US-306): keep the bundle assembler pure in
+  `core/gdpr_export.py` over already-scoped row projections. The impure route
+  owns all DB reads, enumerates chat through the `human_chat_messages` ->
+  `game_seats` join on `(game_id, public_player_id)` for the caller's
+  `occupant_principal_id`, and passes sensitive fields (`session_hash`,
+  `source_ip_hash`) only as strip-inputs. Core modules cannot import
+  `datetime`; treat fetched timestamps as opaque values and sort via
+  `isoformat()` when present.
 - Human rating decay projection (US-314): keep read-side human rating decay
   pure in `ratings/provisional_and_decay.py` via `project_decayed_display`.
   Inject `now`, use the human-specific `HUMAN_RATING_DECAY_IDLE_DAYS` constant
@@ -5233,4 +5241,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2893 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T13:26 PDT - US-306
+- Added pure GDPR human export shaping in `core/gdpr_export.py`, returning a
+  deterministic `padrino.gdpr_human_export.v1` bundle with principal profile,
+  session metadata, consent history, authored chat sidecars, current
+  `HumanRating` rows, and `HumanRatingEvent` history.
+- Added authenticated `GET /human/me/export`, with read helpers for principal
+  sessions, consent rows, principal-owned chat through the required
+  `game_seats` join, and human rating history.
+- Redacted chat rows now export as `redacted=true` with no raw/cleaned text,
+  while `session_hash` and `source_ip_hash` are stripped from the response.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/human.py`,
+  `src/padrino/core/gdpr_export.py`,
+  `src/padrino/db/repositories/human_chat.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/db/repositories/human_principals.py`,
+  `src/padrino/db/repositories/human_ratings.py`,
+  `tests/api/test_human_export_route.py`,
+  `tests/core/test_gdpr_export_bundle.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_gdpr_export_bundle.py tests/api/test_human_export_route.py -q`
+  failed first on missing `padrino.core.gdpr_export`; focused GREEN same
+  command -> 5 passed. Related GREEN
+  `uv run pytest tests/core/test_gdpr_export_bundle.py tests/api/test_human_export_route.py tests/core/test_purity.py -q`
+  -> 70 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2902 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

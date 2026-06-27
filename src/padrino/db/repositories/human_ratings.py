@@ -76,6 +76,25 @@ async def update_human_rating(
     return rating
 
 
+async def list_human_ratings_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> list[HumanRating]:
+    """Return current human-rating rows for one principal in stable order."""
+    stmt = (
+        select(HumanRating)
+        .where(HumanRating.human_player_id == str(principal_id))
+        .order_by(
+            HumanRating.league_id,
+            HumanRating.scope_type,
+            HumanRating.scope_value,
+            HumanRating.id,
+        )
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
 async def get_human_rating_event(
     session: AsyncSession,
     *,
@@ -92,6 +111,26 @@ async def get_human_rating_event(
         HumanRatingEvent.scope_value == scope_value,
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def list_human_rating_events_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> list[HumanRatingEvent]:
+    """Return per-game human-rating history for one principal in stable order."""
+    stmt = (
+        select(HumanRatingEvent)
+        .where(HumanRatingEvent.human_player_id == str(principal_id))
+        .order_by(
+            HumanRatingEvent.created_at,
+            HumanRatingEvent.game_id,
+            HumanRatingEvent.scope_type,
+            HumanRatingEvent.scope_value,
+            HumanRatingEvent.id,
+        )
+    )
+    return list((await session.execute(stmt)).scalars())
 
 
 async def record_human_rating_event(
