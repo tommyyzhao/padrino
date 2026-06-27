@@ -13,6 +13,7 @@ Subcommands:
 - ``padrino bootstrap`` — take a fresh database to a ready-to-serve state
   (migrations, canonical prompts, default league, optional admin key, optional
   provider registration).
+- ``padrino ranked-audit`` — quarantine untrusted ranked human-rating rows.
 - ``padrino campaign report`` — print campaign cost/progress/ETA/convergence.
 - ``padrino export game`` — emit a signed JSON bundle for one completed game.
 - ``padrino game verify-restore`` — verify a restored completed game's
@@ -112,6 +113,37 @@ def metrics(
 
     payload = asyncio.run(_run())
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("ranked-audit")
+def ranked_audit(
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino.db",
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL for the Padrino database.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report rows that would be quarantined without mutating human_rating.",
+    ),
+) -> None:
+    """Audit ranked human-rating rows and quarantine untrusted rows."""
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.ratings.ranked_audit import audit_ranked_human_ratings
+
+    async def _run() -> dict[str, int | bool]:
+        engine = create_engine(db_url)
+        try:
+            session_factory = create_session_factory(engine)
+            async with session_factory() as session, session.begin():
+                summary = await audit_ranked_human_ratings(session, dry_run=dry_run)
+        finally:
+            await engine.dispose()
+        return summary.to_dict()
+
+    typer.echo(json.dumps(asyncio.run(_run()), indent=2, sort_keys=True))
 
 
 @app.command("demo-gauntlet")

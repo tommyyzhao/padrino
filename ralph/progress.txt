@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Human rating quarantine (US-295): keep `HumanRating.quarantined_at` as a
+  reversible read-side exclusion marker. `ranked-audit` should set only that
+  field for untrusted rows, never mutate mu/sigma/games or delete
+  `HumanRatingEvent` rows. The public human ladder must filter
+  `HumanRating.quarantined_at.is_(None)`, and `_human_rating_cache_part` must
+  include `max(quarantined_at)` so quarantine flips invalidate cached cards
+  without touching `updated_at`.
 - Ranked write provenance (US-294): keep `ranked_write_audit` writes in the
   same DB transaction as the human-rating decision they describe. Insert
   APPLIED audit rows only after `HumanRatingEvent` is successfully claimed and
@@ -4736,4 +4743,35 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2754 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-27T14:24 PDT - US-295
+- Added Alembic migration `0057_human_rating_quarantine` and the ORM
+  `HumanRating.quarantined_at` marker for reversible quarantine of historical
+  ranked human-rating rows.
+- Added `padrino.ratings.ranked_audit.audit_ranked_human_ratings` and registered
+  `padrino ranked-audit` on the existing `src/padrino/cli.py` Typer app. The
+  audit quarantines ranked HUMANS_INCLUDED rows whose events lack clean APPLIED
+  provenance, or whose principal is not a live account, while preserving rating
+  values and event rows.
+- Updated the public human ladder to filter quarantined rows and to include
+  `max(HumanRating.quarantined_at)` in the human cache token so a quarantine
+  flip invalidates cached cards without touching `updated_at`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/cli.py`,
+  `src/padrino/db/migrations/versions/0057_human_rating_quarantine.py`,
+  `src/padrino/db/models.py`, `src/padrino/ratings/public_leaderboard.py`,
+  `src/padrino/ratings/ranked_audit.py`,
+  `tests/cli/test_ranked_audit_cli.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/ratings/test_human_rating_quarantine.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0057_human_rating_quarantine.py tests/ratings/test_human_rating_quarantine.py tests/cli/test_ranked_audit_cli.py tests/db/test_migration_0055_llm_call_pricing_basis.py tests/db/test_migration_0056_ranked_write_audit.py`
+  failed first on missing `padrino.ratings.ranked_audit`; focused GREEN same
+  command -> 11 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2763 passed / 41 skipped /
   10 deselected.

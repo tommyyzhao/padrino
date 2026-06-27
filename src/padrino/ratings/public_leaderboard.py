@@ -351,7 +351,11 @@ async def _human_rating_cache_part(
     ruleset_id: str | None,
 ) -> str:
     stmt = (
-        select(func.max(HumanRating.updated_at), func.count(HumanRating.id))
+        select(
+            func.max(HumanRating.updated_at),
+            func.max(HumanRating.quarantined_at),
+            func.count(HumanRating.id),
+        )
         .select_from(HumanRating)
         .join(League, League.id == HumanRating.league_id)
         .where(
@@ -361,13 +365,17 @@ async def _human_rating_cache_part(
     )
     if ruleset_id is not None:
         stmt = stmt.where(League.ruleset_id == ruleset_id)
-    max_dt, count = (await session.execute(stmt)).one()
-    return _cache_part(max_dt, int(count))
+    max_updated_at, max_quarantined_at, count = (await session.execute(stmt)).one()
+    return f"{_cache_part(max_updated_at, int(count))}:q:{_dt_cache_token(max_quarantined_at)}"
 
 
 def _cache_part(max_dt: datetime | None, count: int) -> str:
     tag = max_dt.isoformat() if max_dt is not None else "empty"
     return f"{tag}:{count}"
+
+
+def _dt_cache_token(max_dt: datetime | None) -> str:
+    return max_dt.isoformat() if max_dt is not None else "empty"
 
 
 def _aggregate_entries(
@@ -841,6 +849,7 @@ async def _human_cards(
             League.ranked.is_(True),
             HumanRating.scope_type == SCOPE_GLOBAL,
             HumanRating.scope_value == SCOPE_VALUE_GLOBAL,
+            HumanRating.quarantined_at.is_(None),
         )
     )
     if ruleset_id is not None:

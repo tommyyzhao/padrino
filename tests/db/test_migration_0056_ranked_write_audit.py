@@ -70,12 +70,13 @@ def _index_names(db_path: Path, table_name: str) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-def test_0056_is_linear_head_after_0055() -> None:
+def test_0056_chains_after_0055_and_0057_chains_after_0056() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0056"]
+    assert script.get_heads() == ["0057"]
     assert script.get_revision("0056").down_revision == "0055"
+    assert script.get_revision("0057").down_revision == "0056"
     assert script.get_revision("0055").down_revision == "0054"
 
 
@@ -85,7 +86,7 @@ def test_0056_creates_ranked_write_audit_round_trip(sqlite_db: Path) -> None:
 
     assert TABLE_NAME not in _table_names(sqlite_db)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0056")
 
     assert TABLE_NAME in _table_names(sqlite_db)
     info = _column_info(sqlite_db, TABLE_NAME)

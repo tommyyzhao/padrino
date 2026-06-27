@@ -828,6 +828,7 @@ class HumanRating(Base):
     conservative_score: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     games: Mapped[int] = mapped_column(Integer, nullable=False)
     last_game_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
