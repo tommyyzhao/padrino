@@ -427,13 +427,19 @@ async def _human_handle_cache_token(
 
     principal_tokens: dict[str, str] = {}
     if uuid_to_raw:
-        stmt = select(Principal.id, Principal.ranked_handle, Principal.updated_at).where(
-            Principal.id.in_(list(uuid_to_raw))
-        )
-        for principal_id, ranked_handle, updated_at in (await session.execute(stmt)).all():
+        stmt = select(
+            Principal.id,
+            Principal.ranked_handle,
+            Principal.deleted_at,
+            Principal.updated_at,
+        ).where(Principal.id.in_(list(uuid_to_raw)))
+        for principal_id, ranked_handle, deleted_at, updated_at in (
+            await session.execute(stmt)
+        ).all():
             principal_tokens[uuid_to_raw[principal_id]] = "|".join(
                 [
                     ranked_handle or "",
+                    _dt_cache_token(deleted_at),
                     _dt_cache_token(updated_at),
                 ]
             )
@@ -634,13 +640,15 @@ async def _human_entities(
 
     ranked_handles: dict[str, str | None] = {}
     if uuid_to_raw:
-        stmt = select(Principal.id, Principal.ranked_handle).where(
+        stmt = select(Principal.id, Principal.ranked_handle, Principal.deleted_at).where(
             Principal.id.in_(list(uuid_to_raw))
         )
-        for principal_id, ranked_handle in (await session.execute(stmt)).all():
+        for principal_id, ranked_handle, deleted_at in (await session.execute(stmt)).all():
+            if deleted_at is not None:
+                continue
             ranked_handles[uuid_to_raw[principal_id]] = ranked_handle
 
-    return {raw: _human_entity(raw, ranked_handles.get(raw)) for raw in ids}
+    return {raw: _human_entity(raw, ranked_handles[raw]) for raw in ids if raw in ranked_handles}
 
 
 def _card_id(

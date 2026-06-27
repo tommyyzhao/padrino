@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- GDPR delete/anonymization (US-307): keep the stable tombstone token pure in
+  `core/gdpr_delete.py` as a deterministic UUID-shaped value. The impure route
+  allocates the first token that does not collide with an existing `Principal`,
+  redacts chat through the `human_chat_messages` -> `game_seats` ownership join,
+  nulls consent `source_ip_hash`, and tombstones `HumanRating` /
+  `HumanRatingEvent` identifiers while leaving `game_events` byte-identical.
+  Deleted principals must be filtered explicitly from human leaderboard entity
+  resolution and skipped by terminal ranked writes as transient/unrated seats.
 - GDPR self-export (US-306): keep the bundle assembler pure in
   `core/gdpr_export.py` over already-scoped row projections. The impure route
   owns all DB reads, enumerates chat through the `human_chat_messages` ->
@@ -5271,4 +5279,45 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 70 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2902 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T13:48 PDT - US-307
+- Added `POST /human/me/delete` to anonymize the current human principal:
+  `Principal.deleted_at` is set, display/ranked handles are scrubbed, authored
+  sidecar chat is redacted, and consent `source_ip_hash` values are nulled.
+- Added deterministic UUID-shaped GDPR tombstone tokens and repository helpers
+  that replace `HumanRating.human_player_id`,
+  `HumanRatingEvent.human_player_id`, and
+  `HumanRatingEvent.public_player_id` without deleting rating history. Current
+  rating rows are quarantined so the public ladder excludes them explicitly.
+- Kept replay and benchmark firewalls locked: delete leaves `game_events` and
+  `games.event_hash_head` byte-identical, does not mutate scientific
+  `Rating`/`RatingEvent`, refuses deleted-cookie match replacement, filters
+  deleted/tombstoned humans from leaderboard entity resolution, and skips
+  soft-deleted principals in terminal ranked human writes.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_auth.py`,
+  `src/padrino/api/routes/human.py`, `src/padrino/core/gdpr_delete.py`,
+  `src/padrino/db/repositories/human_chat.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/db/repositories/human_principals.py`,
+  `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/ratings/public_leaderboard.py`,
+  `tests/api/test_human_delete_route.py`,
+  `tests/ratings/test_human_ranked_elo.py`,
+  `tests/ratings/test_public_leaderboard_human_handle.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_delete_route.py -q` failed first on
+  missing `padrino.core.gdpr_delete`; focused RED
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py -q`
+  failed first on deleted humans still appearing in `human_cards`; focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py::test_deleted_principal_is_skipped_by_terminal_ranked_write -q`
+  failed first on the terminal writer recreating a deleted principal row.
+  Focused GREEN
+  `uv run pytest tests/api/test_human_delete_route.py tests/ratings/test_public_leaderboard_human_handle.py tests/ratings/test_human_ranked_elo.py -q`
+  -> 14 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2909 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

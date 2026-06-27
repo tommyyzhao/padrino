@@ -34,6 +34,7 @@ from padrino.api.human_actions import submit_action
 from padrino.api.human_auth import (
     HUMAN_SESSION_COOKIE,
     HumanPrincipalContext,
+    deleted_human_session_present,
     generate_session_token,
     get_human_context,
     require_human,
@@ -519,6 +520,11 @@ async def post_match(
     """
     settings = _get_auth_settings(request)
     if ctx is None:
+        if await deleted_human_session_present(request, session):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="principal_deleted",
+            )
         _principal, raw_token = await _create_guest_session(
             session,
             settings=settings,
@@ -1064,6 +1070,41 @@ async def get_me_export(
             )
         ],
     )
+
+
+@router.post("/human/me/delete", status_code=status.HTTP_204_NO_CONTENT)
+async def post_me_delete(
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Anonymize the current human principal while preserving replay/rating rows."""
+    now = datetime.now(UTC)
+    anonymized_token = await principals_repo.allocate_anonymized_principal_token(
+        session,
+        ctx.principal_id,
+    )
+    await human_chat_repo.redact_for_principal(session, principal_id=ctx.principal_id)
+    await human_consents_repo.null_source_ip_hashes_for_principal(
+        session,
+        subject_principal_id=ctx.principal_id,
+    )
+    await human_ratings_repo.tombstone_human_rating_identity(
+        session,
+        principal_id=ctx.principal_id,
+        anonymized_token=anonymized_token,
+        tombstoned_at=now,
+    )
+    deleted = await principals_repo.anonymize_principal_for_delete(
+        session,
+        ctx.principal_id,
+        now=now,
+    )
+    if deleted is None:  # pragma: no cover - require_human already checked it.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="principal_not_found",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch("/human/me", response_model=GuestSummary)

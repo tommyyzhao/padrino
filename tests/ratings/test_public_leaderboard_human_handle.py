@@ -153,3 +153,37 @@ async def test_human_leaderboard_cache_changes_when_ranked_handle_changes(
         after = await compute_public_leaderboard(session, ruleset_id="mini7_v1")
 
     assert [card.entity.display_name for card in after.human_cards] == ["SecondHandle"]
+
+
+async def test_deleted_principal_is_excluded_from_human_leaderboard(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_cache()
+    active_id = await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Active Realname",
+        ranked_handle="ActiveHandle",
+        score=30.0,
+    )
+    deleted_id = await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Deleted Realname",
+        ranked_handle="DeletedHandle",
+        score=50.0,
+    )
+    async with session_factory() as session, session.begin():
+        principal = await human_principals.get_principal(session, deleted_id)
+        assert principal is not None
+        principal.deleted_at = NOW
+        principal.updated_at = NOW
+
+    async with session_factory() as session:
+        leaderboard = await compute_public_leaderboard(session, ruleset_id="mini7_v1")
+
+    cards = [card_to_response(card) for card in leaderboard.human_cards]
+    assert [card["display_name"] for card in cards] == ["ActiveHandle"]
+    serialized = json.dumps(cards, sort_keys=True)
+    assert "DeletedHandle" not in serialized
+    assert "Deleted Realname" not in serialized
+    assert str(deleted_id) not in serialized
+    assert str(active_id) not in serialized

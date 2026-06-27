@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.core.gdpr_delete import anonymized_principal_token
 from padrino.core.ranked_handle_policy import RankedHandleReason, validate_ranked_handle
 from padrino.db.models import HumanSession, Principal
 
@@ -86,6 +87,40 @@ async def set_display_name(
     if obj is None:
         return None
     obj.display_name = display_name
+    obj.updated_at = now
+    await session.flush()
+    return obj
+
+
+async def allocate_anonymized_principal_token(
+    session: AsyncSession,
+    principal_id: uuid.UUID,
+) -> str:
+    """Return the first stable tombstone UUID not used by a principal row."""
+    for collision_index in range(1024):
+        token = anonymized_principal_token(principal_id, collision_index=collision_index)
+        if token == str(principal_id):
+            continue
+        if await session.get(Principal, uuid.UUID(token)) is None:
+            return token
+    raise RuntimeError("unable to allocate non-colliding anonymized principal token")
+
+
+async def anonymize_principal_for_delete(
+    session: AsyncSession,
+    principal_id: uuid.UUID,
+    *,
+    now: datetime,
+) -> Principal | None:
+    """Soft-delete a principal and scrub display/ranked handle fields."""
+    obj = await session.get(Principal, principal_id)
+    if obj is None:
+        return None
+    if obj.deleted_at is None:
+        obj.deleted_at = now
+    obj.display_name = None
+    obj.ranked_handle = None
+    obj.ranked_handle_normalized = None
     obj.updated_at = now
     await session.flush()
     return obj
@@ -207,6 +242,8 @@ __all__ = [
     "SESSION_KIND_GUEST",
     "RankedHandleCollisionError",
     "RankedHandleValidationError",
+    "allocate_anonymized_principal_token",
+    "anonymize_principal_for_delete",
     "claim_ranked_handle",
     "create_principal",
     "create_session",

@@ -95,6 +95,41 @@ async def list_human_ratings_for_principal(
     return list((await session.execute(stmt)).scalars())
 
 
+async def tombstone_human_rating_identity(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    anonymized_token: str,
+    tombstoned_at: datetime,
+) -> None:
+    """Replace a principal id in human-rating rows with an anonymized token."""
+    original = str(principal_id)
+    rating_rows = list(
+        (
+            await session.execute(
+                select(HumanRating).where(HumanRating.human_player_id == original)
+            )
+        ).scalars()
+    )
+    for rating_row in rating_rows:
+        rating_row.human_player_id = anonymized_token
+        rating_row.quarantined_at = rating_row.quarantined_at or tombstoned_at
+
+    event_rows = list(
+        (
+            await session.execute(
+                select(HumanRatingEvent).where(HumanRatingEvent.human_player_id == original)
+            )
+        ).scalars()
+    )
+    for event_row in event_rows:
+        event_row.human_player_id = anonymized_token
+        event_row.public_player_id = anonymized_token
+
+    if rating_rows or event_rows:
+        await session.flush()
+
+
 async def get_human_rating_event(
     session: AsyncSession,
     *,

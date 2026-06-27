@@ -165,6 +165,52 @@ async def test_ranked_humans_included_updates_only_human_global_rows(
         assert row.conservative_score == pytest.approx(row.mu - 3.0 * row.sigma)
 
 
+async def test_deleted_principal_is_skipped_by_terminal_ranked_write(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="deleted-human",
+    )
+    deleted_public_id, deleted_principal_id = next(iter(principals.items()))
+    active_principal_ids = {
+        principal_id
+        for public_id, principal_id in principals.items()
+        if public_id != deleted_public_id
+    }
+
+    async with session_factory() as session, session.begin():
+        principal = await human_principals.get_principal(session, deleted_principal_id)
+        assert principal is not None
+        principal.deleted_at = datetime(2026, 6, 27, tzinfo=UTC)
+        events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+
+    assert {event.human_player_id for event in events} == {
+        str(principal_id) for principal_id in active_principal_ids
+    }
+
+    async with session_factory() as session:
+        human_rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+
+    assert {row.human_player_id for row in human_rows} == {
+        str(principal_id) for principal_id in active_principal_ids
+    }
+    assert {event.human_player_id for event in human_events} == {
+        str(principal_id) for principal_id in active_principal_ids
+    }
+    assert str(deleted_principal_id) not in {row.human_player_id for row in human_rows}
+
+
 async def test_human_writer_fails_closed_for_casual_runtime_unranked_and_missing_league(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

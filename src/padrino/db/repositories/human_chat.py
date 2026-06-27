@@ -100,3 +100,19 @@ async def redact(session: AsyncSession, *, game_id: uuid.UUID, sequence: int) ->
     )
     await session.flush()
     return affected
+
+
+async def redact_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> int:
+    """Redact every sidecar chat row authored by ``principal_id``."""
+    rows = await list_for_principal(session, principal_id=principal_id)
+    for row in rows:
+        row.raw_text = None
+        row.cleaned_text = None
+        row.redacted = True
+    if rows:
+        await session.flush()
+    return len(rows)

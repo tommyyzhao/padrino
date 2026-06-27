@@ -27,7 +27,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.db.models import HumanConsent
@@ -166,6 +166,20 @@ async def list_for_principal(
         .order_by(HumanConsent.accepted_at, HumanConsent.document_kind, HumanConsent.id)
     )
     return list((await session.execute(stmt)).scalars())
+
+
+async def null_source_ip_hashes_for_principal(
+    session: AsyncSession,
+    *,
+    subject_principal_id: uuid.UUID,
+) -> None:
+    """Remove stored consent IP hashes for one principal in place."""
+    await session.execute(
+        update(HumanConsent)
+        .where(HumanConsent.subject_principal_id == subject_principal_id)
+        .values(source_ip_hash=None)
+    )
+    await session.flush()
 
 
 def _complete_acceptance_cutoff(
