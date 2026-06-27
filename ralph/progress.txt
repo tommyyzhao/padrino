@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Provisional human leaderboard ranks (US-317): keep the exclusion centralized in
+  `ratings/public_leaderboard.py::_rank_cards`, which builds numeric ranks only
+  from `not card.provisional` rows and leaves provisional cards visible with
+  `rank=None`. Use `DEFAULT_PROVISIONAL_GAMES` as the single threshold source;
+  writer-side forfeit losses count by incrementing `HumanRating.games`, while
+  the read path simply treats the stored game count as the graduation tally.
 - Ranked AI-takeover forfeits (US-316): keep `GameSeat.occupant_principal_id`
   for provenance, but decide forfeit strictly from
   `GameSeat.seat_kind == AI_TAKEOVER` in
@@ -5638,3 +5644,27 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2969 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T15:42 PDT - US-317
+- Locked the ranked human leaderboard's provisional rank treatment with
+  regression tests: provisional humans stay visible with `rank=None`, a
+  high-scoring provisional card does not consume a published rank slot, and the
+  exact `DEFAULT_PROVISIONAL_GAMES` boundary graduates into numeric ranks.
+- Added read-path coverage showing provisional labels and rank quarantine still
+  compose with idle sigma decay, and writer-side coverage showing an
+  AI-takeover forfeit loss increments `HumanRating.games` through the shared
+  provisional threshold.
+- No production implementation changes were needed; existing `_rank_cards`
+  already ranks only non-provisional cards and the human ELO writer already
+  increments `HumanRating.games` for forfeit-loss events.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/ratings/test_public_leaderboard_human_handle.py`,
+  `tests/ratings/test_human_ranked_elo.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused check
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py tests/ratings/test_human_ranked_elo.py -q`
+  first failed on a missing test import, then passed -> 24 passed. Backend
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2972
+  passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
+  touch `web/dashboard`.

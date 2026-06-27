@@ -18,6 +18,7 @@ from padrino.db.repositories.human_principals import (
     derive_default_ranked_handle,
 )
 from padrino.ratings.openskill_service import SCOPE_GLOBAL, SCOPE_VALUE_GLOBAL
+from padrino.ratings.provisional_and_decay import DEFAULT_PROVISIONAL_GAMES
 from padrino.ratings.public_leaderboard import (
     card_to_response,
     compute_public_leaderboard,
@@ -88,6 +89,111 @@ async def _load_human_rating(
         )
     ).scalar_one()
     return rating
+
+
+async def test_provisional_human_cards_do_not_consume_published_rank_slots(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_cache()
+    await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Graduated Leader",
+        ranked_handle="GraduatedLeader",
+        score=40.0,
+        games=DEFAULT_PROVISIONAL_GAMES,
+    )
+    await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Graduated Chaser",
+        ranked_handle="GraduatedChaser",
+        score=25.0,
+        games=DEFAULT_PROVISIONAL_GAMES + 4,
+    )
+    await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Provisional Rocket",
+        ranked_handle="ProvisionalRocket",
+        score=80.0,
+        games=DEFAULT_PROVISIONAL_GAMES - 1,
+    )
+    await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Provisional Seed",
+        ranked_handle="ProvisionalSeed",
+        score=20.0,
+        games=1,
+    )
+
+    async with session_factory() as session:
+        leaderboard = await compute_public_leaderboard(
+            session,
+            ruleset_id="mini7_v1",
+            now=NOW,
+        )
+
+    assert [card.entity.display_name for card in leaderboard.human_cards] == [
+        "GraduatedLeader",
+        "GraduatedChaser",
+        "ProvisionalRocket",
+        "ProvisionalSeed",
+    ]
+    by_name = {card.entity.display_name: card for card in leaderboard.human_cards}
+
+    assert by_name["GraduatedLeader"].games == DEFAULT_PROVISIONAL_GAMES
+    assert by_name["GraduatedLeader"].sample_count == DEFAULT_PROVISIONAL_GAMES
+    assert by_name["GraduatedLeader"].provisional is False
+    assert by_name["GraduatedLeader"].provisional_reason is None
+    assert by_name["GraduatedLeader"].rank == 1
+    assert by_name["GraduatedChaser"].rank == 2
+
+    rocket = by_name["ProvisionalRocket"]
+    assert rocket.score > by_name["GraduatedLeader"].score
+    assert rocket.games == DEFAULT_PROVISIONAL_GAMES - 1
+    assert rocket.sample_count == DEFAULT_PROVISIONAL_GAMES - 1
+    assert rocket.provisional is True
+    assert rocket.rank is None
+    assert rocket.provisional_reason is not None
+    assert f"{DEFAULT_PROVISIONAL_GAMES} games" in rocket.provisional_reason
+
+    seed = by_name["ProvisionalSeed"]
+    assert seed.provisional is True
+    assert seed.rank is None
+    assert [card.rank for card in leaderboard.human_cards if not card.provisional] == [1, 2]
+
+
+async def test_provisional_idle_human_card_keeps_label_while_decay_projects_sigma(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_cache()
+    idle_id = await _seed_ranked_human_rating(
+        session_factory,
+        display_name="Idle Placement",
+        ranked_handle="IdlePlacement",
+        score=40.0,
+        games=DEFAULT_PROVISIONAL_GAMES - 1,
+        last_game_at=NOW - timedelta(days=26),
+    )
+
+    async with session_factory() as session:
+        persisted = await _load_human_rating(session, idle_id)
+        leaderboard = await compute_public_leaderboard(
+            session,
+            ruleset_id="mini7_v1",
+            now=NOW,
+        )
+
+    card = leaderboard.human_cards[0]
+    assert card.entity.display_name == "IdlePlacement"
+    assert card.provisional is True
+    assert card.provisional_reason is not None
+    assert card.rank is None
+    assert card.games == DEFAULT_PROVISIONAL_GAMES - 1
+    assert card.sample_count == DEFAULT_PROVISIONAL_GAMES - 1
+    assert card.mu == pytest.approx(persisted.mu)
+    assert card.sigma is not None
+    assert card.conservative_score is not None
+    assert card.sigma > persisted.sigma
+    assert card.conservative_score < persisted.conservative_score
 
 
 async def test_human_cards_project_idle_decay_without_mutating_persisted_rating(

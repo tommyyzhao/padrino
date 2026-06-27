@@ -31,7 +31,13 @@ from padrino.ratings.human_openskill_service import (
     HumanGameResult,
     update_human_ratings_for_game,
 )
-from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA
+from padrino.ratings.openskill_service import (
+    INITIAL_MU,
+    INITIAL_SIGMA,
+    SCOPE_GLOBAL,
+    SCOPE_VALUE_GLOBAL,
+)
+from padrino.ratings.provisional_and_decay import DEFAULT_PROVISIONAL_GAMES, is_provisional
 
 _GAME_SEED = "seed-human-ranked-elo-001"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -280,6 +286,51 @@ async def test_ai_takeover_losing_faction_is_still_one_loss(
     assert town_rating.mu < INITIAL_MU
     assert town_event.after_mu == pytest.approx(town_rating.mu)
     assert town_event.after_mu < town_event.before_mu
+
+
+async def test_ai_takeover_forfeit_loss_counts_toward_provisional_threshold(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="takeover-provisional-boundary",
+        takeover_factions={Faction.TOWN},
+    )
+    town_principal_id = _principal_for_faction(principals, Faction.TOWN)
+    assert is_provisional(DEFAULT_PROVISIONAL_GAMES - 1)
+
+    async with session_factory() as session, session.begin():
+        session.add(
+            HumanRating(
+                league_id=league_id,
+                human_player_id=str(town_principal_id),
+                scope_type=SCOPE_GLOBAL,
+                scope_value=SCOPE_VALUE_GLOBAL,
+                mu=INITIAL_MU,
+                sigma=INITIAL_SIGMA,
+                conservative_score=INITIAL_MU - 3.0 * INITIAL_SIGMA,
+                games=DEFAULT_PROVISIONAL_GAMES - 1,
+                last_game_at=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        )
+
+    async with session_factory() as session, session.begin():
+        await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
+
+    town_rating = await _rating_for_principal(session_factory, town_principal_id)
+    assert town_rating.games == DEFAULT_PROVISIONAL_GAMES
+    assert is_provisional(town_rating.games) is False
+    assert town_rating.mu < INITIAL_MU
+    assert town_rating.conservative_score < INITIAL_MU - 3.0 * INITIAL_SIGMA
 
 
 async def test_ai_takeover_forfeit_overrides_draw_freeze(
