@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Ranked eligibility predicate (US-290): keep ranked human switch-on logic in
+  `padrino.core.ranked_eligibility` as pure data-in/data-out composition over
+  shell-resolved facts. The deterministic reason order is kill-switch,
+  account/non-guest, verified email, base consent, ranked consent, ranked ban,
+  then HUMANS_INCLUDED+ranked league; tokens are machine-readable strings and
+  `RankedConsentFacts` is the forward-compatible legal-lens slot.
 - Ranked human-rating kill-switch (US-289): keep
   `padrino_ranked_human_rating_enabled` as the single default-OFF `Settings`
   flag. API routes should read it through request-scoped `auth_settings`
@@ -4611,3 +4617,27 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2714
   passed / 41 skipped / 10 deselected.
+
+## 2026-06-27T10:22 PDT - US-290
+- Added `padrino.core.ranked_eligibility` with frozen input/decision types,
+  machine-readable `RankedEligibilityReason` tokens, and a fail-closed
+  `evaluate_ranked_eligibility` predicate for the ranked human ELO switch-on
+  gate.
+- Added a typed `RankedConsentFacts` slot so future content-hash/purpose
+  consent stories can extend ranked consent facts without changing the predicate
+  signature.
+- Locked the truth table, deterministic reason precedence, None/missing-input
+  fail-closed behavior, and module import purity in core tests.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/ranked_eligibility.py`,
+  `tests/core/test_ranked_eligibility.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_ranked_eligibility.py` failed first on missing
+  `padrino.core.ranked_eligibility`; focused GREEN
+  `uv run pytest tests/core/test_ranked_eligibility.py` -> 21 passed;
+  `uv run pytest tests/core/test_purity.py tests/core/test_no_wallclock.py` ->
+  116 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2738 passed / 41 skipped /
+  10 deselected.
