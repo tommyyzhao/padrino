@@ -224,21 +224,37 @@ def test_user_info_from_payload_extracts_email_claims() -> None:
     assert info.email_verified is True
 
 
-@pytest.mark.parametrize("value", [None, "true", "false", 1, 0])
-def test_user_info_from_payload_coerces_non_bool_email_verified_false(
+@pytest.mark.parametrize(
+    ("claim_present", "value", "expected"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (True, "true", True),
+        (True, "True", True),
+        (True, "1", True),
+        (True, None, False),
+        (False, None, False),
+        (True, "false", False),
+        (True, 1, False),
+        (True, "yes", False),
+    ],
+)
+def test_user_info_from_payload_parses_email_verified_claim_fail_closed(
+    claim_present: bool,
     value: object,
+    expected: bool,
 ) -> None:
     payload: dict[str, object] = {
-        "sub": "subject-email-unverified",
+        "sub": "subject-email-verified-parse",
         "email": "alice@example.test",
     }
-    if value is not None:
+    if claim_present:
         payload["email_verified"] = value
 
     info = oauth_module._user_info_from_payload(payload)
 
     assert info.email == "alice@example.test"
-    assert info.email_verified is False
+    assert info.email_verified is expected
 
 
 @pytest.mark.asyncio

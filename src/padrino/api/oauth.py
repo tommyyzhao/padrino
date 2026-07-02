@@ -417,8 +417,16 @@ def _user_info_from_payload(payload: dict[str, Any]) -> OAuthUserInfo:
         subject=str(subject),
         display_name=str(display) if display else None,
         email=str(email) if email else None,
-        email_verified=email_verified if isinstance(email_verified, bool) else False,
+        email_verified=_parse_email_verified_claim(email_verified),
     )
+
+
+def _parse_email_verified_claim(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1"}
+    return False
 
 
 # Indirection so tests can stub the entire network round-trip (no live provider).

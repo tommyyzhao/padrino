@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- OAuth verified-email parsing (US-321): keep provider claim coercion
+  fail-closed in `api/oauth.py`. `email_verified` is true only for bool `True`
+  or a stripped lowercase string of `true` / `1`; integer `1`, `yes`, missing,
+  `None`, and every other value stay false so ranked eligibility remains
+  conservative.
 - Manual rollback AI-takeover parity (US-320): thread `GameSeat.seat_kind`
   into `core/anticheat/rating_rollback.py` instead of inferring takeover from
   occupant ids. In rollback recompute, every `AI_TAKEOVER` seat is a transient
@@ -5771,4 +5776,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   4 passed / 1 warning. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2981 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T05:59 PDT - US-321
+- Accepted string-form OAuth `email_verified` claims without broadening to
+  generic truthiness: `_parse_email_verified_claim` now treats bool `True` and
+  stripped case-insensitive strings `true` / `1` as verified, while `false`,
+  missing, `None`, integer `1`, and `yes` stay unverified.
+- Expanded the OAuth payload extraction regression table to cover bool,
+  string-true, string-false, missing, and review-pinned fail-closed variants.
+  Existing ranked lobby denial coverage confirms unverified emails remain
+  ineligible.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/oauth.py`, `tests/api/test_oauth_signin.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_oauth_signin.py::test_user_info_from_payload_parses_email_verified_claim_fail_closed -q`
+  first failed for string `true`, `True`, and `1`; focused GREEN same command
+  -> 10 passed / 1 warning. Related GREEN
+  `uv run pytest tests/api/test_lobbies_ranked_gate.py::test_ranked_lobby_denials_return_predicate_reason_tokens -q`
+  -> 4 passed / 5 warnings. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2986 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

@@ -47,7 +47,7 @@
         "Genuinely-unverified emails remain fail-closed (ineligible)."
       ],
       "notes": "Fix from code-review LOW #4. Files: src/padrino/api/oauth.py, tests/api/*.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-322",
