@@ -1,553 +1,109 @@
 {
   "project": "Padrino",
   "branchName": "ralph/padrino-v14",
-  "description": "Wave 14 - \"Trustworthy Human ELO + Consent\" (DRAFT, not run). 30 stories US-289..318 across 5 epics, sequenced GATE-FIRST. The wave makes ranked human ELO trustworthy enough to deliberately switch ON.\n\nCRITICAL CONTEXT (reframes the wave): ranked human ELO is NOT actually dormant. TODAY the ONLY authority for writing HumanRating rows is the client-supplied LobbyCreate.ranked boolean: POST /lobbies {ranked:true} -> League.ranked -> run_human_lane -> update_human_ratings_for_game persists HumanRating/HumanRatingEvent rows (api/routes/lobbies.py:119-123,174,203,213; runner/human_lane.py:1088-1146; ratings/human_openskill_service.py). There is NO server gate, NO eligibility check, NO kill-switch, and a forfeit BUG that credits a rage-quitting human with the AI-takeover's result (game_runner.py:405-418). A real DB may already contain ranked rows written with zero controls; US-295 audits and quarantines them.\n\nLOCKED PRODUCT DECISIONS: (1) Ranked = human-vs-AI ONLY (no human-vs-human matchmaker; human ELO measures human-vs-AI Mafia skill - the imitation-game north star). (2) Entry bar = VERIFIED OAuth account (non-guest) with a verified email; guests are NEVER ranked-eligible (phone/device verification deferred to fast-follow). (3) Legal = MVP product-authored Terms & Conditions + Privacy with clear disclaimers + 16+ self-attestation + GDPR self-serve export/delete + content-hash-bound consent; NO cash prizes; flagged for formal legal review before any prizes/paid features/marketing. (4) Anti-cheat v1 = telemetry + flagging ONLY (log collusion/smurf/bot signals for manual review), with kill-switch + ranked-ban + manual rollback PRIMITIVES but NO auto-penalties; ranked is STRANGERS-ONLY (no friend/invite-seated ranked lobbies).\n\nCARRIED DEFAULTS: public ladder shows a pseudonymous ranked_handle (NEVER raw Principal.display_name, NEVER a raw UUID - AGENTS.md rule 7); rating decay applied READ-SIDE (replays stay byte-deterministic); rage-quit / AI-takeover in a ranked game = FORFEIT LOSS for the human; single GLOBAL human rating scope; GDPR delete = anonymize/tombstone the rating rows (preserve ladder integrity + deterministic replay).\n\nTHE SINGLE SHARED PREDICATE (US-290, pure core): composes kill-switch ON AND non-guest verified-OAuth AND verified email AND all base+ranked consents current AND not ranked-banned AND league is HUMANS_INCLUDED+ranked. Fail-closed everywhere (None/unknown -> ineligible, never raises). Reused at BOTH lobby-create (US-291) AND rating-write (US-292). Its frozen fact-dataclass is the shared contract the gate/identity/consent stories wire into WITHOUT changing the predicate signature.\n\nSEQUENCING (gate-first - prove ranked can be turned OFF + audited before making it eligible to turn ON): EPIC-A (kill-switch flag default OFF -> pure predicate -> idempotent firewalled write + write-time kill-switch re-check -> provenance audit -> quarantine pre-gate rows) lands first. EPIC-B supplies the predicate's identity inputs (verified-email signal, pseudonymous handle + ladder migration that closes the rule-7 leak, ban + rollback primitives). EPIC-C builds the consent substrate (content-hash docs -> content-hash consent -> purpose-segmented ranked consent -> withdrawal-freeze/GDPR/UI). US-291 (the lobby-create gate) is the CONVERGENCE point - sequenced late because it needs A + verified-email + ban + ranked-consent. EPIC-D is observe-and-flag anti-cheat (strangers-only seating + telemetry + advisory scorer + admin review). EPIC-E fixes the rating math (read-side decay, forfeit-loss fix, provisional quarantine, no-strength-of-schedule invariant).\n\nHARD RULES: pure core (NO random, NO datetime.utcnow - inject now/clock); all decision logic lives in core/ and is unit-testable. NEVER edit shipped Alembic migrations (<=0055) - add NEW ones only; this wave uses 0056..0064: 0056 ranked_write_audit, 0057 human_rating_quarantine, 0058 oauth_identity_email_verified, 0059 principal_ranked_handle, 0060 ranked_ban, 0061 ranked_game_exclusions, 0062 human_consent_content_hash, 0063 ranked_game_signals, 0064 ranked_flags (renumber if a story adds/removes a migration; never reuse <=0055). Canonical firewall (HUMANS_INCLUDED writes ONLY human_rating, NEVER CANONICAL_TEAM) asserted at runtime AND by an import-graph test (US-293/US-318). Rule 7 (pseudonymous handle; no raw display_name/UUID on any public OR pre-reveal surface). Human/scientific rating segregation. Byte-identical deterministic replay (decay read-side; GDPR delete preserves replay). Dashboard stories MUST pass the pnpm gates (pnpm -C web/dashboard lint + check, and e2e where the AC names it).\n\nSWITCH-ON = a one-flag flip (settings.padrino_ranked_human_rating_enabled) gated by a go/no-go checklist: flag confirmed OFF in prod + an e2e test proves ZERO HumanRating/Rating writes when off; all 25 blocker stories green; the pre-gate quarantine swept; server is the sole authority (guest/unverified/no-consent/banned rejected with machine-readable reason tokens); ladder shows only handles (rule-7 regression test); strangers-only enforced at launch AND autofill; kill-switch/ban/rollback verified (flag OFF stops in-flight finalize writes with no deploy; a rollback recompute leaves the hash chain byte-identical); forfeit-loss live; firewall invariants pass; legal text flagged for formal review before prizes.\n\nSCOPE: 25 of 30 stories are switch-on BLOCKERS; 5 are fast-follow (GDPR export/delete US-306/307/308; advisory scorer US-312; admin UI US-313; no-leak regression guard US-299; provisional placement quarantine US-317; strength-of-schedule lock US-318).\n\nOUT OF SCOPE (Wave 14): human-vs-human PvP matchmaker; phone/device-fingerprint verification; automated anti-cheat penalties; faction/role-scoped human ladders; cash prizes / monetization; OAuth provider-account merge; Wave 15 social fabric (friends graph, rematch, host-control UI, deeper game-feel).\n\nFINALIZED (post adversarial review): 30 stories US-289..318.\n\nADVERSARIAL REVIEW APPLIED (pre-run): 41 findings raised, 30 verified-surviving applied as per-story REVIEW REVISIONS + structural fixes. Key: US-301 re-homed off the fast-follow US-313 (rollback route -> existing admin.py; deps [US-292,US-300]); US-294/299/302/306/307 reclassified BLOCKER for must-land consistency; CLI command path collision fixed (US-295); alembic-head test update flagged (US-294); IP captured at create-time not in the decoupled worker (US-311); GDPR tombstone token must be UUID-shaped (US-307); chat enumerated via game_seats join (US-306/307); strangers-only enforced at launch (one-human-seat rule), no phantom autofill layer (US-310); single _human_rating_cache_part extended by US-295/298/315; forfeit composes with DRAW + idempotent write (US-316); US-317 right-sized to a lock/verify (provisional rank-exclusion already exists).",
+  "description": "Wave 14 FIXES (post-implementation adversarial code-review of ralph/padrino-v14). The 30-story wave passed its gates (2974 tests) with NO blockers; these 7 stories close the verified findings from the code-review (12 raised, 10 survived; 2 high + 5 accepted low). Stacks on the SAME branch ralph/padrino-v14 (one merge). Excluded by product decision: the pre-existing unsalted source_ip_hash -> HMAC hardening (pre-existing scope, advisory-only use; tracked separately). Deferred (unreachable in v1): multi-email ranked-ban evasion.\n\nHARD RULES unchanged: no random/datetime.utcnow under core/ (inject now/clock); NEVER edit shipped migrations (add new if needed); canonical firewall (HUMANS_INCLUDED writes only human_rating, never CANONICAL_TEAM); rule 7 (pseudonymous handle, no raw display_name/UUID); byte-identical deterministic replay; dashboard stories pass pnpm lint+check. Ranked stays flag-OFF (padrino_ranked_human_rating_enabled default False) throughout. Test-first: failing test -> implement -> green -> refactor -> commit.\n\nFIXES: US-319 (HIGH fail-open) savepoint-isolate ranked telemetry capture so a real DB fault cannot roll back the rating write; US-320 (HIGH determinism) make the manual rating-rollback recompute model AI_TAKEOVER forfeit-loss so it is byte-identical to the write path; US-321..325 (LOW) string email_verified claim, firewall-violation metric/audit, abandoned-guest chat redaction, ORM __all__ omissions, and ranked-ban re-check at rating-write time (defense-in-depth).\n\nFIX-PRD ADVERSARIAL REVIEW APPLIED (pre-run): 13 findings, all spec-tightening (0 'fix is wrong'; US-319/US-320 approach confirmed GO). Key: US-320 must model AI_TAKEOVER teammates/opponents (not just the target) as INITIAL placeholders, forfeit-loss overrides DRAW, core must not import ratings/, pin INITIAL constants + last_game_at for byte-identity, and test all 3 seat roles; US-325 reframed to per-principal exclusion; US-324 adds all missing Base subclasses to __all__ + completeness test; line refs corrected (US-322/324); US-319 keeps the broad except + savepoint inside; US-321 exact parse; US-323 reuses the tested redaction primitive.",
   "userStories": [
     {
-      "id": "US-289",
-      "title": "Add server-authoritative ranked kill-switch flag (default OFF, fail-closed)",
-      "priority": 1,
+      "id": "US-319",
+      "priority": 319,
       "dependencies": [],
-      "description": "[EPIC-A] BLOCKER for ranked switch-on. Introduce the single global authority for whether ANY human-rating write may happen: a new setting padrino_ranked_human_rating_enabled (bool, default False). This is the kill-switch: flipping it OFF must (later stories) block new ranked league mint at create AND make the terminal rating write a no-op, with no deploy. This story only lands the flag + a default-False assertion test and a thin accessor usable from the impure shell (api + ratings layers) without crossing pure-core boundaries. Test-first: assert a default-constructed Settings has the flag False; assert it is readable from both the lobby route layer and the ratings service layer.\n\nLikely files: src/padrino/settings.py, tests/test_settings.py",
+      "title": "Savepoint-isolate ranked telemetry capture so a DB fault cannot roll back the rating write",
+      "description": "HIGH (fail-open). The wave guarantee is 'telemetry capture NEVER blocks/alters a rating write'. The best-effort wrapper _record_ranked_game_signal_best_effort (src/padrino/ratings/human_openskill_service.py ~372-389, called ~:502) catches the Python exception but does NOT isolate the SQLAlchemy transaction: ranked_signals_repo.record_ranked_game_signal runs session.execute()+flush() on the SAME AsyncSession that persisted the HumanRatingEvent rows, inside the single _persistence_transaction opened at game_runner.py:581. A REAL DB error not swallowed by on_conflict_do_nothing (OperationalError/connection drop, serialization failure, an unexpected constraint/NOT NULL violation) leaves the session in pending-rollback; the outer commit then raises PendingRollbackError OUTSIDE the wrapper and rolls back the already-persisted rating events. FIX: wrap the telemetry insert in a SAVEPOINT (async with session.begin_nested(): await ranked_signals_repo.record_ranked_game_signal(...)) keeping the outer except for logging, matching the existing in-repo idiom (leagues.py:73-75, human_principals.py:165). begin_nested() rolls back to the savepoint on any DB error, leaving the flushed HumanRatingEvent rows committable.\n\nREVIEW REVISIONS (fix-PRD hardening): Keep the pre-existing broad `except Exception` wrapper (human_openskill_service.py ~:383) as the OUTER catch (the point is to survive ARBITRARY DB faults, not only IntegrityError), and put `async with session.begin_nested():` INSIDE it around the ranked_signals_repo.record_ranked_game_signal call. begin_nested() rolls the savepoint back on ANY DB error; the outer except then just logs. The in-repo begin_nested idioms (leagues.py, human_principals.py) catch only IntegrityError \u2014 do NOT narrow the catch to IntegrityError here.",
       "acceptanceCriteria": [
-        "New setting padrino_ranked_human_rating_enabled exists and defaults to False; test asserts a default-constructed Settings has it False",
-        "The flag is reachable from the api route layer and the ratings service layer via the existing settings accessor (no new global state)",
-        "No file under src/padrino/core/ imports settings (the flag is read only in the impure shell)",
-        "Flipping the flag in a test Settings instance is observable by both layers in the same process"
+        "The ranked telemetry insert is wrapped in session.begin_nested() so a DB error unwinds only the savepoint, not the outer transaction.",
+        "A NEW regression test injects a REAL DB error AFTER a statement runs in record_ranked_game_signal (e.g. monkeypatch the repo's session.execute to raise sqlalchemy.exc.OperationalError, or seed a non-game_id constraint violation) and asserts the HumanRatingEvent rows STILL commit while the ranked_game_signals row is absent.",
+        "The existing failure-isolation test (raise BEFORE any DB statement) still passes.",
+        "No change to the happy path: a normal ranked finalize writes exactly one signals row and the rating events."
       ],
-      "notes": "Epic EPIC-A - Gate, kill-switch, idempotency, firewall & audit. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
+      "notes": "Fix from code-review HIGH #1. Files: src/padrino/ratings/human_openskill_service.py, tests/ratings/test_ranked_signal_capture.py. Flag-off-gated + needs a DB fault, but it violates a stated wave guarantee.",
+      "passes": false
     },
     {
-      "id": "US-290",
-      "title": "Pure ranked-eligibility predicate (single source of truth, fail-closed)",
-      "priority": 2,
-      "dependencies": [
-        "US-289"
-      ],
-      "description": "[EPIC-A] BLOCKER for ranked switch-on. Add ONE pure core predicate evaluate_ranked_eligibility(facts: RankedEligibilityInputs) -> RankedDecision composing ALL preconditions: kill-switch ON, principal kind == account (non-guest), email verified, all required base consents current, all required ranked consents current, principal not ranked-banned, league is HUMANS_INCLUDED+ranked. The function is pure: it takes a frozen dataclass of already-resolved facts and imports no random, no datetime, no db, no settings. It returns allowed plus a machine-readable reason TOKEN (enum/string, never prose) with deterministic reason precedence. This is the merge of the gate, identity and anti-cheat lens predicates into one. Consent facts are passed in as booleans (has_current_base_consent, has_current_ranked_consent) so the legal lens owns the consent query while this predicate owns the composition. Test-first: a truth-table covering each single-failure case plus the all-pass case; None/unknown inputs fail closed (allowed=False), never raise.\n\nLikely files: src/padrino/core/ranked_eligibility.py, tests/core/test_ranked_eligibility.py",
-      "acceptanceCriteria": [
-        "evaluate_ranked_eligibility lives under src/padrino/core/ and a purity test greps its imports asserting no random, no datetime, no db, no settings",
-        "Returns allowed=False with a structured reason token when ANY of: kill-switch off, guest principal, email unverified, base consent missing, ranked consent missing, ranked-banned, league not HUMANS_INCLUDED-ranked",
-        "Returns allowed=True only when EVERY precondition holds; truth-table test covers each single-failure case plus the all-pass case",
-        "RankedDecision.reason is a machine-readable token (enum/string), never free prose; reason precedence is deterministic and pinned by test",
-        "None / missing inputs fail closed (allowed=False) and never raise",
-        "The predicate has a typed forward-compatible slot for ranked-consent facts so the legal lens can wire them without changing the signature"
-      ],
-      "notes": "Epic EPIC-A - Gate, kill-switch, idempotency, firewall & audit. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-292",
-      "title": "Idempotent human-rating write per (game, principal) + kill-switch re-check at write time",
-      "priority": 3,
-      "dependencies": [
-        "US-289"
-      ],
-      "description": "[EPIC-A] BLOCKER for ranked switch-on. Defense-in-depth at the terminal write. Two merged changes (gate + rating lenses). (1) In update_human_ratings_for_game, re-read the kill-switch flag and re-confirm the league is genuinely HUMANS_INCLUDED+ranked BEFORE persisting; if the flag is OFF, return [] (write nothing) even for an already-ranked league, so flipping the switch instantly stops in-flight games at finalize. (2) Make the write idempotent on the existing uq_human_rating_event_scope (game_id, human_player_id, scope_type, scope_value): pre-check for an existing event per seat; if present, skip the mu/sigma/games mutation entirely; record_human_rating_event uses a dialect-portable ON CONFLICT DO NOTHING (sqlite + postgres). Today a re-run would IntegrityError or double-count games. Test-first: calling update_human_ratings_for_game twice for one game yields exactly one event per human and a single +1 games increment with identical mu/sigma.\n\nLikely files: src/padrino/ratings/human_openskill_service.py, src/padrino/db/repositories/human_ratings.py, tests/ratings/test_human_openskill_idempotent.py, tests/runner/test_human_rating_killswitch.py\n\nREVIEW REVISIONS (pre-run hardening): Idempotent write must not break the typed return contract: record_human_rating_event is currently typed -> HumanRatingEvent and unconditionally returns the inserted row; an ON CONFLICT DO NOTHING that hits a conflict yields no RETURNING row, so change the signature to return HumanRatingEvent | None (or fetch-existing) and have callers tolerate None on conflict. Settings ORDERING bug to fix: game_runner currently invokes the human-rating write (~line 644) BEFORE it resolves `settings = persistence.settings or get_settings()` (~line 713); resolve settings (and the kill-switch flag) BEFORE the rating write and thread it in. The write-time kill-switch re-read lives in ratings/ (impure shell, so importing settings is allowed) \u2014 pass the resolved flag into update_human_ratings_for_game (do NOT add a settings import to core).",
-      "acceptanceCriteria": [
-        "update_human_ratings_for_game returns [] and writes nothing when the kill-switch is OFF, even when league.ranked is True",
-        "Calling update_human_ratings_for_game twice with the same game_id produces exactly one HumanRatingEvent per human seat (per-seat idempotency)",
-        "After a duplicate call, each HumanRating row's games counter increased by exactly 1 and mu/sigma/conservative_score/last_game_at equal the first-call result (no double-apply)",
-        "record_human_rating_event uses ON CONFLICT DO NOTHING on uq_human_rating_event_scope and returns without raising on conflict; the mu/sigma/games update is skipped when the per-seat event already exists",
-        "Partial-retry safety: a re-run completes seats not yet rated without re-applying already-committed seats",
-        "A non-ranked or non-HUMANS_INCLUDED league still writes nothing (existing fail-closed preserved); no shipped migration edited (the existing uq constraint suffices)"
-      ],
-      "notes": "Epic EPIC-A - Gate, kill-switch, idempotency, firewall & audit. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-293",
-      "title": "Firewall runtime assertion + import-graph invariant (HUMANS_INCLUDED never touches CANONICAL_TEAM)",
-      "priority": 4,
-      "dependencies": [
-        "US-292"
-      ],
-      "description": "[EPIC-A] BLOCKER for ranked switch-on. Lock the sacred invariant so a refactor can never cross the streams. (1) In update_human_ratings_for_game, assert league.kind == HUMANS_INCLUDED before any write and raise a typed FirewallViolation (writing nothing, rolling back) if not; the human-lane finalizer treats this as a finalize error that COMPLETES the game with no rating rather than wedging the lane. (2) Add an import-graph test asserting human_openskill_service.py never imports the scientific openskill_service rating-write functions. (3) Add an invariant test asserting that after a completed ranked human game, no HUMANS_INCLUDED league is ever linked to a RatingContext of kind CANONICAL_TEAM and zero scientific Rating/RatingEvent rows were produced. Test-first: construct a mislabeled league and assert FirewallViolation; run a kill-switch-OFF ranked game end to end and assert zero HumanRating AND zero scientific Rating rows.\n\nLikely files: src/padrino/ratings/human_openskill_service.py, src/padrino/core/enums.py, src/padrino/runner/human_lane.py, tests/ratings/test_humans_included_firewall.py, tests/runner/test_ranked_killswitch_e2e.py",
-      "acceptanceCriteria": [
-        "update_human_ratings_for_game raises a typed FirewallViolation (and writes nothing, rolls back) if asked to rate a league whose kind != HUMANS_INCLUDED; the violation logs league_id + kind",
-        "An import-graph test confirms human_openskill_service.py does not import the scientific rating writer functions (only shared INITIAL_MU/INITIAL_SIGMA/scope constants permitted)",
-        "After a completed ranked human game, no HUMANS_INCLUDED league is linked to a CANONICAL_TEAM rating_context and zero scientific Rating/RatingEvent rows exist (asserted in a fresh DB)",
-        "With the kill-switch OFF, an end-to-end ranked human game completes and writes ZERO HumanRating and ZERO scientific Rating rows",
-        "The human-lane worker treats FirewallViolation as a game-completing finalize error (no rating, lane not wedged)"
-      ],
-      "notes": "Epic EPIC-A - Gate, kill-switch, idempotency, firewall & audit. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-294",
-      "title": "Ranked-write provenance audit row for every decision (applied & refused)",
-      "priority": 5,
-      "dependencies": [
-        "US-292"
-      ],
-      "description": "[EPIC-A] BLOCKER for ranked switch-on. Add an append-only audit trail so an auditor can reconstruct who was rated under which flag/eligibility state. Migration 0056 creates ranked_write_audit (id, game_id, human_player_id nullable, league_id, decision APPLIED|REFUSED, reason token, flag_enabled bool, created_at). update_human_ratings_for_game writes one APPLIED row alongside each persisted HumanRatingEvent and a single REFUSED row (with reason) when it short-circuits a ranked-looking league (e.g. flag off). The provenance write is in the SAME transaction as the rating write so they commit/rollback atomically, and is idempotent with US-292 (no duplicate APPLIED rows on re-run). Decision/reason values are the same machine-readable tokens as the pure predicate. Test-first: an applied game writes APPLIED provenance with reason 'eligible'; a flag-off short-circuit writes REFUSED with reason 'ranked_disabled' and flag_enabled=False and no HumanRatingEvent.\n\nLikely files: src/padrino/db/models.py, src/padrino/db/migrations/versions/0056_ranked_write_audit.py, src/padrino/ratings/human_openskill_service.py, src/padrino/db/repositories/human_ratings.py, tests/ratings/test_ranked_write_audit.py, tests/db/test_migrations.py\n\nREVIEW REVISIONS (pre-run hardening): An EXISTING test hard-codes the alembic head: tests/db/test_migration_0055_llm_call_pricing_basis.py asserts `script.get_heads() == [\"0055\"]`. Adding migration 0056 flips the head and reds that test. Add an explicit AC + change: update that head assertion to the new head (or relax it to assert the new revision chains onto 0055 via down_revision) WITHOUT editing the body of any migration <= 0055. This is the ONLY get_heads() head assertion in tests/ (test_migrations.py uses the symbolic 'head').",
-      "acceptanceCriteria": [
-        "Migration 0056 creates ranked_write_audit; upgrade/downgrade tested round-trip; no migration <= 0055 edited",
-        "Each persisted HumanRatingEvent has a matching APPLIED ranked_write_audit row with reason 'eligible'",
-        "A flag-off short-circuit on a ranked league writes a REFUSED row with reason 'ranked_disabled' and flag_enabled=False, and writes NO HumanRatingEvent",
-        "Audit rows are append-only (writer never updates/deletes); a re-run does not duplicate APPLIED rows for an already-rated (game, principal)",
-        "Audit decision/reason values are the same tokens as the pure predicate",
-        "Provenance write commits/rolls back atomically with the rating write (same transaction)",
-        "The alembic head assertion in tests/db/test_migration_0055_llm_call_pricing_basis.py is updated to the new head (or relaxed to assert down_revision chains onto 0055); NO migration <= 0055 body is edited."
-      ],
-      "notes": "Epic EPIC-A - Gate, kill-switch, idempotency, firewall & audit. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-295",
-      "title": "Quarantine pre-gate HumanRating rows + exclude quarantined from the published ladder",
-      "priority": 6,
-      "dependencies": [
-        "US-294"
-      ],
-      "description": "[EPIC-A] BLOCKER for ranked switch-on. Before the gate landed, POST /lobbies {ranked:true} could already write HumanRating/HumanRatingEvent rows with no eligibility check. Find, mark, and exclude them. Migration 0057 adds human_rating.quarantined_at (nullable). An offline CLI padrino ranked-audit flags any HumanRating whose contributing games lack a clean APPLIED provenance row (US-294) OR whose principal is not currently ranked-eligible, setting quarantined_at without deleting rows or events. public_leaderboard._human_cards adds HumanRating.quarantined_at IS NULL, and the human cache part (_human_rating_cache_part) includes quarantined_at so flips invalidate. Quarantine is reversible (nullable, not a tombstone). Test-first: seed a pre-gate row with no provenance, run the audit, assert it is quarantined and absent from the leaderboard while a provenance-backed row remains.\n\nLikely files: src/padrino/db/models.py, src/padrino/db/migrations/versions/0057_human_rating_quarantine.py, src/padrino/ratings/public_leaderboard.py, src/padrino/cli/ranked_audit.py, tests/ratings/test_human_rating_quarantine.py, tests/public/test_leaderboard_excludes_quarantined.py\n\nREVIEW REVISIONS (pre-run hardening): CLI PATH COLLISION: the project CLI is a single Typer module src/padrino/cli.py registered as `padrino = padrino.cli:app` (pyproject.toml). Do NOT create a src/padrino/cli/ package (a module cli.py and a package cli/ cannot coexist). Register the audit command as @app.command(\"ranked-audit\") on the existing Typer `app` in src/padrino/cli.py, with the async body in a NON-colliding helper module src/padrino/ratings/ranked_audit.py. AC: `padrino ranked-audit` is invokable via the console script. (Dependency US-294 is now a blocker, so this no longer depends on a fast-follow.)",
-      "acceptanceCriteria": [
-        "Migration 0057 adds human_rating.quarantined_at nullable; upgrade/downgrade tested; no migration <= 0056 edited",
-        "_human_cards filters HumanRating.quarantined_at.is_(None) so a quarantined row is absent from human_cards",
-        "padrino ranked-audit marks HumanRating rows lacking a matching APPLIED provenance row as quarantined and is idempotent (re-run marks nothing new)",
-        "A quarantined row's quarantined_at is set without deleting the row or its events (ladder integrity + replay preserved); it never mutates mu/sigma/games",
-        "Seed test: a pre-gate row is quarantined + excluded while a provenance-backed row remains ranked",
-        "The human cache part includes quarantined_at so a quarantine flip invalidates the cached card",
-        "The `padrino ranked-audit` command is registered via @app.command on the existing Typer app in src/padrino/cli.py (no new src/padrino/cli/ package) and is invokable through the `padrino` console script."
-      ],
-      "notes": "Epic EPIC-A - Gate, kill-switch, idempotency, firewall & audit. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-296",
-      "title": "Persist OAuth verified-email signal on account creation",
-      "priority": 7,
+      "id": "US-320",
+      "priority": 320,
       "dependencies": [],
-      "description": "[EPIC-B] BLOCKER for ranked switch-on. The ranked entry bar requires a verified email, but the OAuth flow (_user_info_from_payload) only extracts sub + a display string and OAuthIdentity has no email/email_verified column. Migration 0058 adds oauth_identities.email (String, nullable) and oauth_identities.email_verified (Boolean, NOT NULL, server_default false). OAuthUserInfo gains email + email_verified; _user_info_from_payload reads them and coerces a missing/non-bool email_verified claim to False (fail-closed). find_or_create_account persists email (lowercased, trimmed) + email_verified on both create-new and upgrade-guest paths; a repeat sign-in refreshes email_verified. The email claim is never logged. No core/ changes. This is the single home for the verified-email signal (resolved into the predicate's facts by US-291); guests are never eligible regardless. Test-first: claim extraction defaults, persistence on both paths, migration round-trip.\n\nLikely files: src/padrino/api/oauth.py, src/padrino/db/repositories/oauth_identities.py, src/padrino/db/models.py, src/padrino/db/migrations/versions/0058_oauth_identity_email_verified.py, tests/api/test_oauth.py, tests/db/test_oauth_identities.py\n\nREVIEW REVISIONS (pre-run hardening): Repeat sign-in refresh: find_or_create_account early-returns the existing Principal (oauth_identities.py ~57-62) WITHOUT touching the OAuthIdentity row. The email_verified refresh must update the existing OAuthIdentity on that existing-principal path too, not only on first creation.",
+      "title": "Make manual rating-rollback recompute model AI_TAKEOVER forfeit-loss (byte-identical to the write path)",
+      "description": "HIGH (determinism). The ranked WRITE path (human_openskill_service.update_human_ratings_for_game) scores an AI_TAKEOVER seat specially: is_takeover = seat.seat_kind == SeatKind.AI_TAKEOVER.value (~:172); the human is pulled from the team and replaced by a transient INITIAL_MU/INITIAL_SIGMA AI placeholder (~:210-215), then rated a FORFEIT LOSS via _rate_forfeit_loss (ranks=[0,1], always loser, NO draw exception; ~:489-501). The MANUAL rollback recompute does NOT model this: human_rating_rollback._player_for_seat (~:238-266) keys only on seat.public_player_id/occupant_principal_id and never reads seat.seat_kind, and core/anticheat/rating_rollback (~:97-141) places the seat into the team as a full-strength human receiving the team win/loss/DRAW outcome. So any history containing an AI_TAKEOVER game recomputes DIFFERENTLY from a byte-identical replay, violating 'rollback recompute leaves the hash chain byte-identical' and the locked forfeit-loss decision. FIX: thread seat_kind (and takeover provenance) through _player_for_seat + _rate_one_game and apply the SAME forfeit-loss logic as the write path (takeover seat -> transient INITIAL placeholder in the team + forfeit LOSS, overriding the DRAW branch). Prefer reusing the write-path's rating primitive over reimplementing it, to prevent future drift. Also fold finding #8: set last_game_at with the same time-source semantics as the write path (do not use datetime.utcnow in core; inject/thread the time).\n\nREVIEW REVISIONS (fix-PRD hardening): TIGHTENED SPEC (byte-identity is achievable but has 3 seat-role sub-cases the loop MUST cover):\n(1) Thread seat.seat_kind onto the core RatingRollbackPlayer dataclass (src/padrino/core/anticheat/rating_rollback.py) via _player_for_seat (human_rating_rollback.py) \u2014 do NOT infer takeover from occupant_principal_id.\n(2) In _rate_one_game, ANY seat with seat_kind == SeatKind.AI_TAKEOVER.value must be modeled as a transient INITIAL placeholder in the team (model.create_rating([initial_mu, initial_sigma])) EVEN IF it has a non-None occupant/human_player_id. This is the write-path behavior (human_openskill_service.py ~:172,210-215,224-226) and is REQUIRED for a takeover seat that is the target's TEAMMATE or OPPONENT \u2014 otherwise the target's team update diverges (empirically: target mu 25.861 correct vs 25.589 buggy).\n(3) TARGET-as-takeover: score the target as a forfeit LOSS exactly like the write path's _rate_forfeit_loss (1v1 vs a single transient INITIAL rating, ranks=[0,1]), and this forfeit-loss OVERRIDES the DRAW freeze (the write-path forfeit loop ~:489-501 never consults winner; there is NO draw exception). Do NOT route a target-takeover through the normal team/DRAW branch (core/anticheat/rating_rollback.py DRAW freeze must be skipped for that seat). Oracle: tests/ratings/test_human_ranked_elo.py::test_ai_takeover_forfeit_overrides_draw_freeze.\n(4) CORE PURITY (hard rule): core/anticheat/rating_rollback.py must NOT import padrino.ratings (human_openskill_service lives in the impure ratings/ shell). Replicate the forfeit primitive as a PURE helper in core (or extract a shared pure helper both call) \u2014 do not add a ratings import to core.\n(5) INITIAL constant pinning: core/anticheat/rating_rollback.py defines its own INITIAL_MU/INITIAL_SIGMA; ratings/openskill_service.py defines INITIAL_MU=25.0/INITIAL_SIGMA=25/3 too. The rollback placeholder MUST use values equal to the write path's; add a drift-guard test asserting the two constants are equal.\n(6) last_game_at byte-identity: the write path sets HumanRating.last_game_at from the injected `now`; the rollback must produce the SAME last_game_at for a byte-identical result (thread the injected time / align record_human_rating_event). No datetime.utcnow/random in core.\n(7) ACCEPTANCE TESTS MUST include ALL THREE seat roles, not just target-takeover: (a) takeover seat is the target's TEAMMATE, (b) takeover seat is the target's OPPONENT, (c) target itself is the takeover \u2014 each asserting rollback recompute == a fresh write-path replay of the non-excluded game sequence (mu/sigma byte-identical); PLUS a DRAW-winner variant locking forfeit-overrides-draw. Without (a) and (b) the new takeover branch stays uncovered.",
       "acceptanceCriteria": [
-        "OAuthUserInfo gains email: str|None and email_verified: bool; _user_info_from_payload coerces a missing/non-bool email_verified claim to False",
-        "find_or_create_account persists email (lowercased, stripped) and email_verified on create-new and upgrade-guest paths; a repeat sign-in refreshes email_verified to the latest provider assertion",
-        "Migration 0058 adds oauth_identities.email (nullable) + oauth_identities.email_verified (NOT NULL server_default false); upgrade+downgrade tested; no migration <= 0057 edited",
-        "An unverified-email sign-in leaves email_verified False (account is simply not ranked-eligible)",
-        "Provider id_token email claim is never logged (asserted via log-capture); no uniqueness constraint on email (multi-provider merge out of scope)"
+        "seat_kind is threaded onto the core RatingRollbackPlayer and read in _rate_one_game (not inferred from occupant_principal_id).",
+        "ANY AI_TAKEOVER seat (target, teammate, OR opponent) is modeled as a transient INITIAL placeholder in the team recompute, matching the write path.",
+        "A TARGET-as-takeover seat is scored as a forfeit LOSS (1v1 vs a single INITIAL rating, ranks=[0,1]) that OVERRIDES the DRAW freeze (no draw exception), matching human_openskill_service.",
+        "core/anticheat/rating_rollback.py does NOT import padrino.ratings; the forfeit/INITIAL logic is a pure core helper; INITIAL_MU/INITIAL_SIGMA equal the write path's (drift-guard test asserts equality).",
+        "last_game_at (and games/sigma) recompute byte-identically to a fresh write-path replay; no datetime.utcnow/random in core.",
+        "Tests cover THREE seat roles \u2014 takeover as (a) target's teammate, (b) target's opponent, (c) the target itself \u2014 each asserting rollback recompute == fresh write-path replay of the non-excluded sequence; plus a DRAW-winner forfeit-overrides-draw variant."
       ],
-      "notes": "Epic EPIC-B - Verified identity, pseudonymous ladder & enforcement primitives. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
+      "notes": "Fix from code-review HIGH #2 (+ folds LOW #8). Files: src/padrino/ratings/human_rating_rollback.py, src/padrino/core/anticheat/rating_rollback.py, tests. Manual/flag-gated primitive but must be trustworthy.",
+      "passes": false
     },
     {
-      "id": "US-297",
-      "title": "Pure ranked_handle name-policy validator + handle column & atomic claim",
-      "priority": 8,
+      "id": "US-321",
+      "priority": 321,
       "dependencies": [],
-      "description": "[EPIC-B] BLOCKER for ranked switch-on. public_leaderboard._human_entity puts raw Principal.display_name on the public ladder (rule-7 violation). Introduce a separate stable moderated pseudonymous handle. Migration 0059 adds principals.ranked_handle (String, nullable, case-insensitive UNIQUE via a normalized lowercase shadow column portable across sqlite + postgres). Add a PURE validator validate_ranked_handle(candidate, blocklist, reserved) -> Ok|Reason covering length bounds, allowed charset, case-insensitive uniqueness intent, profanity blocklist, and an impersonation/reserved guard; blocklist + reserved lists are injected, not hardcoded in core. A repository claim_ranked_handle is atomic (collision -> 409) and auto-derives a deterministic safe default (e.g. Player-<short hash of principal id>) containing neither raw display_name nor raw UUID. Test-first: validator unit tests for too_short/too_long/bad_charset/profane/impersonation/ok; atomic collision; deterministic stable default.\n\nLikely files: src/padrino/core/ranked_handle_policy.py, src/padrino/db/models.py, src/padrino/db/migrations/versions/0059_principal_ranked_handle.py, src/padrino/db/repositories/human_principals.py, tests/core/test_ranked_handle_policy.py, tests/db/test_ranked_handle.py",
+      "title": "Accept string-form OAuth email_verified claims (\"true\"/\"false\"), not only bool",
+      "description": "LOW (correctness; over-restriction, not a hole). src/padrino/api/oauth.py ~:420 coerces a non-bool email_verified claim to False, but some OIDC providers send email_verified as the STRING \"true\"/\"false\". A legitimately verified user with a string claim is thus treated as unverified and BLOCKED from ranked (friction). FIX: parse the claim robustly - treat bool True or the case-insensitive strings \"true\"/\"1\" as verified; everything else (incl. missing/None/\"false\") as unverified (still fail-closed for genuinely-unverified).\n\nREVIEW REVISIONS (fix-PRD hardening): Pin the parse EXACTLY: email_verified is True only when the claim is bool True, OR a str whose stripped lowercase is 'true' or '1'. Integer 1, 'yes', other truthy values -> False (fail-closed). Do NOT use naive bool(claim) truthiness. Add the integer-1-stays-False and 'yes'-stays-False cases to the parametrized test.",
       "acceptanceCriteria": [
-        "validate_ranked_handle is pure (no db, no clock, no random) with unit tests for too_short, too_long, bad_charset, profane, impersonation/reserved, and ok",
-        "Migration 0059 adds principals.ranked_handle with portable case-insensitive uniqueness (normalized shadow column); no migration <= 0058 edited",
-        "claim_ranked_handle is atomic: a second principal claiming an equivalent (case-insensitive) handle gets a collision surfaced as 409",
-        "Auto-derived default handle is deterministic, stable across calls, and contains neither the raw display_name nor a raw UUID",
-        "Profanity + reserved/impersonation lists are injected so they can be updated without a core change"
+        "email_verified is True for bool True and for the strings 'true'/'True'/'1'; False for None, missing, 'false', and other values.",
+        "A test covers bool, string-true, string-false, and missing claim variants.",
+        "Genuinely-unverified emails remain fail-closed (ineligible)."
       ],
-      "notes": "Epic EPIC-B - Verified identity, pseudonymous ladder & enforcement primitives. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
+      "notes": "Fix from code-review LOW #4. Files: src/padrino/api/oauth.py, tests/api/*.",
+      "passes": false
     },
     {
-      "id": "US-298",
-      "title": "Migrate the public human ladder to the pseudonymous handle (close the rule-7 leak)",
-      "priority": 9,
-      "dependencies": [
-        "US-297"
-      ],
-      "description": "[EPIC-B] BLOCKER for ranked switch-on. Stop reading Principal.display_name in public_leaderboard._human_entity / _human_entities; resolve the public name from ranked_handle (or the deterministic auto-derived default). entity_id derivation stays the stable hashed human|<id> so client references don't break, but the human-readable field becomes the handle. The human cache part must invalidate when a principal's ranked_handle changes (add ranked_handle versioning into _human_rating_cache_part, or reset_cache on handle change). Test-first: a principal whose display_name is 'Alice Realname' renders the ranked_handle, and the raw display_name AND the raw principal UUID appear NOWHERE in the serialized leaderboard JSON (only the sha256 entity_id).\n\nLikely files: src/padrino/ratings/public_leaderboard.py, src/padrino/api/routes/public.py, tests/ratings/test_public_leaderboard_human_handle.py\n\nREVIEW REVISIONS (pre-run hardening): The human leaderboard cache part _human_rating_cache_part (public_leaderboard.py ~348) is ONE function that US-295 (quarantined_at), US-298 (ranked_handle version), and US-315 (decay as-of day bucket) all extend. Coordinate: each story ADDS its token to the single composed cache part (never replaces it); the part must compose with the AI/placement/solo parts without collision. For US-298, include a handle-version/updated-at token so the cache invalidates when a ranked_handle changes.",
-      "acceptanceCriteria": [
-        "_human_entity / _human_entities resolve the public name from ranked_handle (or deterministic default), never from Principal.display_name",
-        "A known display_name string is absent from the full leaderboard JSON, and the raw principal UUID is absent (only the existing sha256 entity_id may appear)",
-        "entity_id derivation remains the stable hashed human|<id> so existing client references don't break",
-        "The human cache part invalidates when a principal's ranked_handle changes (handle update reflected on next read)"
-      ],
-      "notes": "Epic EPIC-B - Verified identity, pseudonymous ladder & enforcement primitives. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-300",
-      "title": "Ranked-ban / suspension primitive bound to verified account + email hash",
-      "priority": 10,
-      "dependencies": [
-        "US-296"
-      ],
-      "description": "[EPIC-B] BLOCKER for ranked switch-on. Anti-cheat v1 requires ban/suspension primitives (no auto-penalty). None exist. Migration 0060 creates ranked_ban (id, principal_id, email_hash nullable sha256, kind ban|suspension, reason, created_by, created_at, expires_at nullable, lifted_at nullable). A PURE is_ranked_banned(active_bans, now) -> bool (clock injected): permanent ban -> True; expired suspension -> False; lifted -> False; future-expiry suspension -> True. Because guests are never eligible, the ban anchors on the verified account; it ALSO records a sha256 email_hash (IP-hash style, never raw email) so a re-signup with the same verified email inherits the ban. An admin-scoped route issues/lifts bans (reuse require_admin; rejects human session cookie + non-admin key). The eligibility predicate (US-290) consumes is_ranked_banned via the resolver (US-291). Test-first: pure predicate truth table; migration round-trip; admin auth; ban makes the principal fail the gate with reason ranked_banned.\n\nLikely files: src/padrino/core/ranked_ban.py, src/padrino/db/models.py, src/padrino/db/migrations/versions/0060_ranked_ban.py, src/padrino/db/repositories/ranked_bans.py, src/padrino/api/routes/admin.py, tests/core/test_ranked_ban.py, tests/api/test_ranked_ban_admin.py",
-      "acceptanceCriteria": [
-        "Pure is_ranked_banned(bans, now) unit-tested: active permanent -> True; expired suspension -> False; lifted -> False; future-expiry suspension -> True; clock injected, no datetime.utcnow in core",
-        "Migration 0060 creates ranked_ban; upgrade+downgrade tested; no migration <= 0059 edited",
-        "Ban binds to principal_id AND a sha256 email_hash (never raw email); a NEW account with the same verified email resolves as ranked-banned via the email_hash match; email_hash is nullable for principal-only bans",
-        "Admin route to issue/lift a ban is admin-scoped (rejects human session cookie and non-admin api key); issuing a ban makes the principal fail the ranked gate with reason ranked_banned",
-        "No automatic penalty: a ban is only ever set by the admin route, never by any signal/scorer"
-      ],
-      "notes": "Epic EPIC-B - Verified identity, pseudonymous ladder & enforcement primitives. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-302",
-      "title": "Author + serve versioned legal documents (Terms, Privacy) with content-hash binding",
-      "priority": 11,
+      "id": "US-322",
+      "priority": 322,
       "dependencies": [],
-      "description": "[EPIC-C] BLOCKER for ranked switch-on. Introduce a backend document registry holding product-authored Terms & Conditions and Privacy Policy bodies (MVP disclaimers, no-cash-prizes statement, 16+ requirement), each tagged with a human-readable version_label. Add a PURE core helper hash_legal_document(text) -> sha256 over a normalized body (fixed, documented normalization rule for line endings/trailing whitespace). Expose GET /legal/documents and GET /legal/documents/{kind} returning {kind, version_label, content_hash, body}. Today document_version is a hand-typed date in settings with no tie to the displayed text. Test-first: hash is stable for identical normalized text and changes when body changes; served content_hash == hash_legal_document(served body); every kind has non-empty body containing the required disclaimers + 16+ string.\n\nLikely files: src/padrino/core/legal_documents.py, src/padrino/api/routes/legal.py, src/padrino/legal/documents.py, tests/core/test_legal_document_hash.py, tests/api/test_legal_documents_route.py",
+      "title": "Surface human-rating firewall violations via a metric/audit, not just a swallowed log",
+      "description": "LOW (observability of a security invariant). game_runner.py ~:655 catches FirewallViolation during human-rating finalize and logs it, but emits no metric/audit signal - a firewall breach (HUMANS_INCLUDED trying to write CANONICAL_TEAM) would be invisible to monitoring. FIX: on FirewallViolation, emit a counter metric (and/or a structured audit row) in addition to the log, so the security invariant is observable/alertable. Keep the existing swallow-and-continue behavior (do not crash the finalize).\n\nREVIEW REVISIONS (fix-PRD hardening): Line ref retarget: at HEAD the FirewallViolation is raised inside update_human_ratings_for_game and CAUGHT in the except block around game_runner.py:648-657 (~:655). Add a dedicated firewall-violation COUNTER in the metrics module and increment it in that except block beside the existing logger; keep the swallow-and-continue behavior; add a test asserting the counter increments on a firewall violation at finalize.",
       "acceptanceCriteria": [
-        "hash_legal_document(text) is pure (no I/O, no random, no datetime), deterministic, and lives under src/padrino/core/",
-        "GET /legal/documents returns TOS and PRIVACY entries each with version_label, content_hash, and non-empty body",
-        "For every served document, response.content_hash == hash_legal_document(response.body)",
-        "TOS and PRIVACY bodies contain the 16+ statement, an MVP/no-warranty disclaimer, and an explicit 'no cash prizes' line",
-        "Changing a document body changes its content_hash (regression test pins this); normalization rule is documented in code"
+        "A FirewallViolation during finalize increments a dedicated metric (and/or writes an audit row) in addition to the log line.",
+        "A test asserts the metric/audit is emitted when a firewall violation is raised on the finalize path.",
+        "The finalize still does not crash on a firewall violation (behavior preserved)."
       ],
-      "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
+      "notes": "Fix from code-review LOW #6. Files: src/padrino/runner/game_runner.py, observability/metrics, tests.",
+      "passes": false
     },
     {
-      "id": "US-303",
-      "title": "Bind stored consent to document content-hash",
-      "priority": 12,
-      "dependencies": [
-        "US-302"
-      ],
-      "description": "[EPIC-C] BLOCKER for ranked switch-on. Migration 0062 adds a nullable content_hash column to human_consents (document_version stays the human-readable version_label). Change required_consent_versions()/record_consent() to resolve {kind: (version_label, content_hash)} from the document registry (US-302) rather than settings date strings, and make has_current_consent compare on content_hash. This satisfies the content-hash-bound-consent requirement: editing a doc body changes the hash and auto-triggers the existing 412 re-prompt. Existing date-string consents (null content_hash) are treated as stale -> re-prompt (do not backfill fake hashes). Consent rows remain append-only. Test-first: a recorded consent stores the registry hash; editing the body invalidates has_current_consent; a stale null-hash row does not satisfy the gate.\n\nLikely files: src/padrino/db/migrations/versions/0062_human_consent_content_hash.py, src/padrino/db/models.py, src/padrino/api/human_consent.py, src/padrino/db/repositories/human_consents.py, tests/api/test_consent_content_hash.py\n\nREVIEW REVISIONS (pre-run hardening): Content-hash AUTHORITY reconciliation with US-309: the SERVER is authoritative \u2014 record_consent computes/stores content_hash from the document registry (US-302) as the source of truth. US-309's client 'echoes the served hash' for display/optimistic UX only; the persisted hash is always the server's registry hash, never a client-recomputed value. Normalize the document bytes deterministically so the registry hash is stable. NOTE (product-accepted): existing date-string consents (null content_hash) are treated as stale -> a one-time global re-consent wave on next gated action; this is expected. (US-302 is now a blocker.)",
-      "acceptanceCriteria": [
-        "Migration 0062 adds nullable human_consents.content_hash; upgrade/downgrade tested; no migration <= 0061 edited",
-        "record_consent persists content_hash equal to the registry's current hash for each kind",
-        "has_current_consent returns True only when stored content_hash matches the current registry hash for every required kind",
-        "Editing a document body causes has_current_consent to return False until re-acceptance (412 re-prompt)",
-        "Consent rows remain append-only; a pre-existing null-content_hash row is treated as stale (re-prompt), never backfilled with a fake hash"
-      ],
-      "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-304",
-      "title": "Purpose-segmented RANKED consent + ranked consent gate",
-      "priority": 13,
-      "dependencies": [
-        "US-303"
-      ],
-      "description": "[EPIC-C] BLOCKER for ranked switch-on. Add a new RANKED legal document plus FOUR purpose-segmented consent kinds \u2014 RANKED:PERSISTENT_RATING, RANKED:PUBLIC_HANDLE, RANKED:CHAT_RETENTION, RANKED:ANTICHEAT_PROFILING \u2014 each recorded as its own append-only, content-hash-bound consent row (reusing US-303). Add enforce_ranked_consent() / has_current_ranked_consent() requiring all four ranked purposes current AND base TOS/PRIVACY/AGE current. Expose has_current_ranked_consent as a fact for the eligibility predicate (US-291) \u2014 this story owns ONLY the consent dimension and must NOT re-open the client-boolean ranked path. RANKED doc versions independently of base docs. Test-first: ranked play refused with 412 unless every ranked purpose is current; base consent alone does not satisfy ranked; each purpose independently recordable + independently invalidated by a doc edit.\n\nLikely files: src/padrino/api/human_consent.py, src/padrino/db/repositories/human_consents.py, src/padrino/legal/documents.py, tests/api/test_ranked_consent_gate.py",
-      "acceptanceCriteria": [
-        "RANKED document is served with its own version_label/content_hash, independent of TOS/PRIVACY versioning",
-        "Four purpose-segmented consent kinds are defined, each recorded as a distinct append-only human_consents row",
-        "has_current_ranked_consent returns True only when all four ranked purposes AND base TOS/PRIVACY/AGE are current; enforce_ranked_consent raises 412 otherwise",
-        "Base (casual) consent satisfies casual play but NOT ranked play (test asserts the gap)",
-        "Editing the ranked document invalidates ranked consent and re-prompts only the ranked purposes; this story does not re-open the client-boolean ranked path"
-      ],
-      "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-291",
-      "title": "Resolve eligibility facts in the shell + gate lobby-create on the predicate",
-      "priority": 14,
-      "dependencies": [
-        "US-290",
-        "US-296",
-        "US-300",
-        "US-304"
-      ],
-      "description": "[EPIC-A] BLOCKER for ranked switch-on. Build the impure resolver resolve_ranked_eligibility(session, principal_id, settings) -> RankedEligibilityInputs that reads principal.kind, the OAuth verified-email signal (US-296), base consent (existing has_current_consent), ranked consent (US-304), and active ranked ban (US-300), returning the facts the pure predicate consumes. Then replace the client authority in create_lobby: when body.ranked is True, resolve facts + evaluate the predicate BEFORE writing any lobby/league row. If allowed, bind league ranked=True; if not, fail closed with 403 carrying the predicate's reason token. The existing integrity_acknowledged 422 check is preserved and ordered before eligibility. Casual (ranked:false) path is unchanged. Test-first: matrix of (flag on/off) x (guest/verified) x (consent present/absent) x (banned/not) asserting league.ranked and HTTP status; denial writes no rows.\n\nLikely files: src/padrino/api/ranked_eligibility.py, src/padrino/api/routes/lobbies.py, tests/api/test_lobbies_ranked_gate.py",
-      "acceptanceCriteria": [
-        "resolve_ranked_eligibility performs only reads, never mutates rows, and returns is_guest=True for a guest regardless of other fields; a soft-deleted (deleted_at) principal resolves ineligible",
-        "With flag OFF, POST /lobbies {ranked:true, integrity_acknowledged:true} by a verified user returns 403 with reason ranked_disabled and creates NO ranked league (row count unchanged)",
-        "With flag ON + guest, the request returns 403 with the guest-ineligible reason token",
-        "With flag ON + verified + all consents + integrity_ack, the created league has ranked=True",
-        "With flag ON + verified but integrity_acknowledged=false, returns 422 integrity_acknowledgement_required (existing behavior preserved, ordered before eligibility)",
-        "A casual (ranked:false) create is unaffected for guests and unverified accounts; get_or_create_humans_included(ranked=False) path unchanged",
-        "The 403 detail is the predicate's machine-readable reason token"
-      ],
-      "notes": "Epic EPIC-A - Gate, kill-switch, idempotency, firewall & audit. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-305",
-      "title": "Ranked consent WITHDRAWAL: freeze rating + drop from public ladder",
-      "priority": 15,
-      "dependencies": [
-        "US-304",
-        "US-292"
-      ],
-      "description": "[EPIC-C] BLOCKER for ranked switch-on. Add POST /human/consent/ranked/withdraw appending a RANKED_WITHDRAWN marker row (append-only; history preserved). has_current_ranked_consent returns False once a withdrawal is newer than the latest ranked acceptance, which the predicate (US-290) already treats as ranked-ineligible. Wire two effects: (1) the ranked rating writer skips human_rating/human_rating_event writes for a withdrawn principal (FREEZE at prior value), and (2) the public ladder read-side filters out withdrawn principals. Re-accepting clears the freeze. Test-first: after withdraw, ranked consent not current; a subsequent ranked game does not mutate the principal's human_rating; the ladder excludes them; re-accepting un-freezes.\n\nLikely files: src/padrino/api/routes/human.py, src/padrino/db/repositories/human_consents.py, src/padrino/ratings/human_openskill_service.py, src/padrino/ratings/public_leaderboard.py, tests/api/test_ranked_consent_withdrawal.py, tests/ratings/test_ranked_rating_freeze_on_withdrawal.py\n\nREVIEW REVISIONS (pre-run hardening): The current consent layer has NO recency logic: current_consent_kinds (human_consents.py ~65-85) matches purely on (document_kind, version) across ALL rows. has_current_ranked_consent must ADD recency: it returns False when the latest WITHDRAWAL row is newer than the latest ranked ACCEPTANCE (compare by created_at, injected/deterministic \u2014 do not use utcnow in core).",
-      "acceptanceCriteria": [
-        "Withdrawal appends a marker row and never deletes/updates prior consent rows",
-        "has_current_ranked_consent returns False when the latest withdrawal is newer than the latest ranked acceptance",
-        "A ranked game completion for a withdrawn principal writes no new human_rating/human_rating_event rows (rating frozen at prior value)",
-        "Public ladder query excludes withdrawn principals (read-side filter, no row deletion)",
-        "Re-accepting ranked consent after withdrawal restores eligibility and un-freezes future rating writes"
-      ],
-      "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-310",
-      "title": "Strangers-only ranked: forbid ranked launch from any multi-human/invite-seated lobby",
-      "priority": 16,
+      "id": "US-323",
+      "priority": 323,
       "dependencies": [],
-      "description": "[EPIC-D] BLOCKER for ranked switch-on. Close the worst collusion surface. join_lobby lets invite_token holders co-seat as HUMAN and launch materializes one HUMAN GameSeat per human member, so a ranked lobby launched this way produces a multi-human ranked game whose humans coordinated out-of-band. v1 ranked is STRANGERS-ONLY: exactly ONE human seat, no invite-coordinated co-seating. Add a PURE assert_strangers_only_ranked(lobby_is_ranked, human_member_count, joined_via_invite) raising a typed RankedSeatingViolation. Wire it into the launch handoff so ranked launch raises 409 ranked_requires_single_human_seat BEFORE any Game/GameSeat row is written. Double-enforce at the matchmaking/autofill seat-assignment layer (defense in depth). Casual/friend-lobby behavior is unchanged. Test-first: ranked + 2 humans -> reject; ranked + 1 host -> allow; casual + N -> allow; no ranked multi-human game can reach the rating path.\n\nLikely files: src/padrino/core/lobby/strangers_only.py, src/padrino/api/routes/lobbies.py, tests/core/lobby/test_strangers_only.py, tests/api/test_lobbies_ranked_strangers_only.py\n\nREVIEW REVISIONS (pre-run hardening): CORRECTION: there is NO matchmaking/autofill layer that seats HUMANS \u2014 core/lobby/autofill.py:autofill_empty_seats fills ONLY empty AI seats from the curated build pool. Strangers-only for human-vs-AI ranked therefore means: a ranked game must have EXACTLY ONE human seat (rest AI); REJECT a ranked launch from any lobby whose materialized seats contain >1 human (HUMAN GameSeat). Enforce at the point where HUMAN GameSeat rows are materialized / the lobby is locked+launched (api/lobby_launch.py launch_lobby path), NOT at a non-existent matchmaking seat layer. Drop the AC mandating a second autofill-layer check; replace with: 'a ranked launch from a lobby with >1 human seat is rejected with a reason token, asserted at launch.'",
+      "title": "Redact abandoned-guest free-text chat during retention anonymization (GDPR completeness)",
+      "description": "LOW (GDPR completeness). src/padrino/db/retention_executor.py ~:278-306 anonymizes abandoned guests but leaves their free-text human_chat_messages PII un-redacted. FIX: extend the abandoned-guest anonymization to also redact/scrub the guest's authored chat rows (via the human_chat_messages -> game_seats join on (game_id, public_player_id) where occupant_principal_id = the guest), consistent with the GDPR-delete redaction (US-307) and the human-chat sidecar redactability requirement.\n\nREVIEW REVISIONS (fix-PRD hardening): Reuse the EXISTING tested chat-redaction primitive: in _anonymize_guest_principals (src/padrino/db/retention_executor.py ~:278-306), for each soft-deleted abandoned guest principal, resolve their authored human_chat_messages via the game_seats join (game_id, public_player_id where occupant_principal_id = the guest) and apply the same redaction used by the GDPR-delete path (US-307) rather than a new ad-hoc scrub. Chat is an out-of-band sidecar; redaction must NOT alter the hash-chained event log (replay stays byte-identical).",
       "acceptanceCriteria": [
-        "A pure function (no DB/clock/random) rejects a ranked lobby whose materialized seating would contain more than one HUMAN seat, and accepts a single-human ranked lobby and any casual lobby",
-        "POST /lobbies/{id}/launch on a ranked lobby with >=2 human members returns 409 ranked_requires_single_human_seat and writes no Game/GameSeat rows (row counts before/after)",
-        "POST /lobbies/{id}/launch on a ranked lobby with exactly one host human still succeeds and materializes the game unchanged",
-        "A casual lobby with multiple human members is unaffected (regression)",
-        "The launch-path test asserts no ranked multi-human game is materialized, so no ranked multi-human game can reach the rating path",
-        "A ranked launch from a lobby whose materialized seats contain more than one HUMAN seat is rejected with a machine-readable reason token, asserted at the launch path."
+        "Abandoned-guest retention anonymization redacts/scrubs the guest's authored human_chat_messages free-text (using the game_seats join to resolve the principal's chat rows).",
+        "A test seeds an abandoned guest with chat, runs retention, and asserts the chat text is redacted while non-guest chat is untouched.",
+        "Deterministic replay is preserved (chat is an out-of-band sidecar; redaction does not alter the hash-chained event log)."
       ],
-      "notes": "Epic EPIC-D - Anti-cheat v1: strangers-only, telemetry, advisory flags & admin review. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
+      "notes": "Fix from code-review LOW #7. Files: src/padrino/db/retention_executor.py, tests. Consistent with US-307/US-308.",
+      "passes": false
     },
     {
-      "id": "US-311",
-      "title": "ranked_game_signals telemetry table + best-effort per-game capture (no gating)",
-      "priority": 17,
+      "id": "US-324",
+      "priority": 324,
       "dependencies": [],
-      "description": "[EPIC-D] BLOCKER for ranked switch-on. Create an append-only telemetry store recording anti-cheat signals per ranked human game WITHOUT gating any rating write (zero core changes; determinism preserved). Migration 0063 creates ranked_game_signals keyed by game_id with human_principal_id, source_ip_hash (sha256, reuse hash_source_ip), session_fingerprint_hash nullable, winner, faction, created_at, and a JSON signals blob. The human session/game does not capture IP today, so thread the hashed IP from the launch request (request.client available in the route) into the runner. Capture is best-effort: a capture failure is logged, never raised into the rating path, and rating writes are byte-identical with capture enabled vs stubbed-failing. Raw IP is never persisted. Test-first: a completed ranked game writes exactly one row with game_id, human_principal_id, non-null source_ip_hash; a casual game writes zero; rating events byte-identical regardless of capture outcome.\n\nLikely files: src/padrino/db/migrations/versions/0063_ranked_game_signals.py, src/padrino/db/models.py, src/padrino/db/repositories/ranked_signals.py, src/padrino/runner/game_runner.py, src/padrino/api/routes/lobbies.py, tests/runner/test_ranked_signal_capture.py, tests/db/test_ranked_game_signals_migration.py\n\nREVIEW REVISIONS (pre-run hardening): IP CAPTURE is architecturally infeasible in the worker: run_human_lane is a decoupled DB-polling worker (discovers CREATED games via list_human_lane_games) and has NO access to request.client. Capture source_ip_hash at game CREATE / lobby-launch time (where the request IS available) and PERSIST it (e.g. on the lobby/game row or a launch-context row) so the worker/finalize can read it for the signals row. ROW-COUNT AC: the fail-closed rating path writes NOTHING for non-ranked / kill-switch-off / firewall-violation / ineligible games (human_openskill_service.py returns [] in several cases); so scope the AC to 'exactly one ranked_game_signals row per game that ACTUALLY wrote human ratings' (capture at the same gated point as the rating write), not 'per completed ranked game'. Capture failure must NEVER block or alter a rating write.",
+      "title": "Add RankedGameExclusion and RankedRatingRollbackAudit ORM models to db.models __all__",
+      "description": "LOW (correctness/hygiene). src/padrino/db/models.py ~:1761-1768 defines RankedGameExclusion and RankedRatingRollbackAudit but omits them from the module __all__, so `from padrino.db.models import *` does not export them and the public model surface is inconsistent. FIX: add both names to __all__ (and any other Wave-14 ORM models missing from it).\n\nREVIEW REVISIONS (fix-PRD hardening): Line-ref correction: the CLASS definitions are at src/padrino/db/models.py ~:912 (RankedGameExclusion) and ~:939 (RankedRatingRollbackAudit); lines 1761-1768 are inside the __all__ list. There are EIGHT Base subclasses currently missing from __all__, not just the two Wave-14 models. To make the completeness test (AC2) pass test-first, add ALL currently-missing Base subclasses to __all__ (including the two named), and add a test asserting every Base subclass defined in models.py appears in __all__.",
       "acceptanceCriteria": [
-        "Migration 0063 creates ranked_game_signals; upgrade/downgrade tested; no migration <= 0062 edited",
-        "A completed ranked human game writes exactly one ranked_game_signals row with game_id, human_principal_id, hashed source_ip, winner and faction",
-        "A completed casual game writes zero ranked_game_signals rows",
-        "HumanRatingEvent rows are byte-identical with telemetry capture enabled vs a stubbed-failing capture (capture never blocks or alters ratings)",
-        "Raw IP is never persisted anywhere; only sha256 hashes are stored (asserted)",
-        "No file under src/padrino/core/ is modified by this story"
+        "RankedGameExclusion and RankedRatingRollbackAudit (and every other currently-missing Base subclass) appear in src/padrino/db/models.py __all__.",
+        "A test asserts every Base subclass defined in models.py is present in __all__ (and passes)."
       ],
-      "notes": "Epic EPIC-D - Anti-cheat v1: strangers-only, telemetry, advisory flags & admin review. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
+      "notes": "Fix from code-review LOW #9. Files: src/padrino/db/models.py, tests/db/*.",
+      "passes": false
     },
     {
-      "id": "US-314",
-      "title": "Pure read-side decay projection for human ratings",
-      "priority": 18,
+      "id": "US-325",
+      "priority": 325,
       "dependencies": [],
-      "description": "[EPIC-E] BLOCKER for ranked switch-on. apply_decay/days_idle exist in provisional_and_decay.py but are NOT applied on read; _human_cards reads conservative_score raw and last_game_at is persisted-but-unused. Persisted rows must NOT be mutated on read (byte-deterministic replay), so add a pure projection project_decayed_display(mu, sigma, last_game_at, *, now, idle_threshold_days, decay_per_day) returning display (mu, sigma_inflated, conservative_score) with zero DB access and now injected (no module-level datetime.now/random). Lives in ratings/ (now injected, hard-rule-1 compliant). Human idle threshold is a named constant distinct from DEFAULT_DECAY_IDLE_DAYS. Test-first: below threshold -> sigma unchanged; above -> only days beyond threshold inflate sigma; last_game_at None -> no decay; naive vs aware datetimes handled; decay only widens sigma / lowers conservative_score, never raises it; provisional players get the same projection.\n\nLikely files: src/padrino/ratings/provisional_and_decay.py, tests/ratings/test_provisional_and_decay.py\n\nREVIEW REVISIONS (pre-run hardening): Test file references: the real ranked-human test file is tests/ratings/test_human_ranked_elo.py (there is NO tests/ratings/test_human_openskill_service.py). Leaderboard tests: there is NO tests/ratings/test_public_leaderboard.py today \u2014 create it or extend the existing public-leaderboard test surface. Apply the same correction to US-315/US-316/US-317 file references.",
+      "title": "Re-check ranked-ban at rating-write time (defense-in-depth)",
+      "description": "LOW (defense-in-depth). The ranked-ban is enforced at lobby-create (US-291) but NOT re-checked at the rating-write gate (human_openskill_service ~:430-449), so a principal banned AFTER their ranked lobby was created (game in flight) could still get a rating written at finalize. FIX: re-check the ban (is_ranked_banned) at rating-write time as part of the write-time predicate re-evaluation, mirroring the existing write-time kill-switch re-check - if banned, write nothing (return []) and record a refused provenance row. Resolve the ban fact in the impure shell and pass it in (do not add a DB import to core).\n\nREVIEW REVISIONS (fix-PRD hardening): Specify a PER-PRINCIPAL exclusion, NOT a whole-game 'return []'. Resolve a banned set (is_principal_ranked_banned) in the impure shell and pass it in; at rating-write time SKIP writing the rating for any seat whose occupant principal is ranked-banned (record a refused-provenance row per US-294 for the skipped principal), while still writing eligible principals. For human-vs-AI strangers-only ranked there is exactly one human seat, so a banned human yields zero writes for that game \u2014 but frame it as per-principal for correctness/future-proofing. Mirror the write-time kill-switch re-check (US-292). Resolve the ban fact in the shell; add NO db import to core.",
       "acceptanceCriteria": [
-        "project_decayed_display returns display mu/sigma/conservative_score with zero DB access and no module-level datetime.now/random; now is injected",
-        "days_idle <= idle_threshold_days returns sigma unchanged and conservative_score == mu - 3*sigma exactly",
-        "Idle beyond threshold: only (days_idle - idle_threshold_days) days drive apply_decay (threshold=14, idle=20 inflates by 6, not 20)",
-        "Human idle threshold is a named constant separate from DEFAULT_DECAY_IDLE_DAYS and documented as human-specific",
-        "last_game_at None returns input mu/sigma unchanged; returned conservative_score is always <= raw mu - 3*sigma (decay never improves a stale player)",
-        "Provisional players (games < threshold) get the same decay projection (decay orthogonal to provisional)"
+        "At rating-write time, a ranked-banned principal's seat is SKIPPED (zero HumanRating writes for that principal) even if a ranked league/lobby already exists; eligible principals in the same call are unaffected.",
+        "A refused-provenance audit row (per US-294) is recorded for the skipped banned principal.",
+        "A test bans a principal AFTER a ranked game is created, finalizes it, and asserts no HumanRating rows are written for that principal.",
+        "The ban fact is resolved in the impure shell and injected; no db import added to core."
       ],
-      "notes": "Epic EPIC-E - Rating integrity: decay, forfeit-on-abandon, provisional & SoS invariant. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-306",
-      "title": "GDPR self-serve EXPORT endpoint (full human data bundle)",
-      "priority": 19,
-      "dependencies": [
-        "US-304"
-      ],
-      "description": "[EPIC-C] BLOCKER for ranked switch-on. Add GET /human/me/export returning a deterministic JSON bundle of all data tied to the authenticated principal: Principal profile, consent history (all kinds incl. ranked + withdrawals), authored human_chat_messages, human_rating + human_rating_event history, and session metadata (no secrets/hashes that aid impersonation). Build a PURE assembler that shapes already-fetched rows (no I/O in core); the impure route does the reads. Test-first: export includes exactly the caller's rows and no other principal's; redacted chat appears as redacted; session tokens/session_hash and source_ip_hash are NOT included; the bundle-assembly function is unit-tested independently of the route.\n\nLikely files: src/padrino/api/routes/human.py, src/padrino/core/gdpr_export.py, src/padrino/db/repositories/human_consents.py, src/padrino/db/repositories/human_chat.py, tests/core/test_gdpr_export_bundle.py, tests/api/test_human_export_route.py\n\nREVIEW REVISIONS (pre-run hardening): Chat enumeration has NO principal_id shortcut: HumanChatMessage is keyed by (game_id, sequence, public_player_id) and has no principal_id column. Enumerate a principal's chat via the join human_chat_messages -> game_seats ON (game_id, public_player_id=public_id) WHERE game_seats.occupant_principal_id = :principal_id. Same join applies to US-307.",
-      "acceptanceCriteria": [
-        "GET /human/me/export returns the caller's Principal, consents, chat messages, and ranked rating history",
-        "Export contains NO other principal's data (isolation test with two principals)",
-        "Already-redacted chat rows are represented as redacted, not raw text",
-        "Session tokens/session_hash and source_ip_hash are NOT included in the export",
-        "The bundle-assembly function is pure (no DB access) and unit-tested independently of the route"
-      ],
-      "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-307",
-      "title": "GDPR self-serve DELETE = anonymize/tombstone (preserve ladder + replay)",
-      "priority": 20,
-      "dependencies": [
-        "US-306",
-        "US-305"
-      ],
-      "description": "[EPIC-C] BLOCKER for ranked switch-on. Add POST /human/me/delete performing erasure-by-anonymization: set Principal.deleted_at + scrub display_name (and ranked_handle), redact authored human_chat_messages (reuse existing redact), null source_ip_hash on the principal's consents, and tombstone human_rating/human_rating_event by replacing human_player_id/public_player_id with a stable unique anonymized token while leaving rating math + the hash-chained game_events log UNTOUCHED. After delete the principal is excluded from the public ladder and refused play. Only human_* + principal tables are written (firewall: never touch CANONICAL_TEAM). The anon token must be unique-stable per principal and never collide with a live principal (preserves human_rating uniqueness). Test-first: post-delete chat redacted, display_name scrubbed, ip hashes nulled, rating rows carry anon token, game_events hash head byte-identical, replay still verifies.\n\nLikely files: src/padrino/api/routes/human.py, src/padrino/core/gdpr_delete.py, src/padrino/db/repositories/human_chat.py, src/padrino/db/repositories/human_consents.py, src/padrino/ratings/human_openskill_service.py, tests/api/test_human_delete_route.py, tests/db/test_gdpr_delete_preserves_replay.py\n\nREVIEW REVISIONS (pre-run hardening): Add src/padrino/ratings/public_leaderboard.py to the touched files: AC3 (deleted principal excluded from the public ladder) is enforced there. CRITICAL tombstone format: _human_entities parses human_player_id as uuid.UUID(raw) and silently SKIPS non-UUID values (ValueError -> continue); the anonymized token that replaces human_player_id MUST be a valid (synthetic) UUID, not an arbitrary string, or the row vanishes by accident rather than by design \u2014 make exclusion explicit (a quarantined/tombstoned flag) AND keep the token UUID-shaped. The anon token must be stable enough for anti-cheat audit yet not re-identify the user (reconcile with US-312). Chat enumeration uses the game_seats join (see US-306).",
-      "acceptanceCriteria": [
-        "POST /human/me/delete sets Principal.deleted_at, scrubs display_name and ranked_handle, redacts the principal's chat, and nulls source_ip_hash on their consents",
-        "human_rating/human_rating_event rows are tombstoned with a stable unique anonymized token, not deleted; the token never collides with a live principal",
-        "game_events rows and the chain hash head are byte-identical before and after delete (replay still verifies)",
-        "A deleted principal is excluded from the public ladder and refused play/ranked actions",
-        "Delete writes only human_* + principal tables; CANONICAL_TEAM/scientific ratings are never touched (firewall test)"
-      ],
-      "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-308",
-      "title": "Extend retention planner to human PII (chat, consent IP hashes, abandoned guests)",
-      "priority": 21,
-      "dependencies": [
-        "US-307"
-      ],
-      "description": "[EPIC-C] Fast-follow (not a switch-on blocker). Extend the PURE retention planner with a human-PII arm: given lightweight projections + a HumanPiiRetentionPolicy and an injected now, return candidates to (a) redact human_chat_messages older than a chat-retention TTL, (b) null source_ip_hash on human_consents older than an ip-hash TTL, and (c) anonymize abandoned guest principals (no account upgrade, idle past a guest TTL). The impure executor applies the plan (dry_run default True). The chat-retention TTL must match the RANKED:CHAT_RETENTION consent text. human_rating rows are never selected for deletion. TTLs are Settings-driven, not hardcoded in core. Test-first: planner selects exactly rows past TTL given an injected now; boundary (== cutoff) pinned; rating rows never selected; dry_run default advisory.\n\nLikely files: src/padrino/db/retention.py, src/padrino/db/retention_executor.py, src/padrino/settings.py, tests/db/test_human_pii_retention_policy.py, tests/db/test_human_pii_retention_executor.py",
-      "acceptanceCriteria": [
-        "A pure planner selects human_chat_messages, consent ip-hashes, and abandoned-guest principals strictly older than their respective TTLs, using an injected now (no datetime.utcnow, no random in core)",
-        "Rows within TTL are never selected; boundary (== cutoff) behavior pinned by test",
-        "human_rating rows are never placed in any delete list (rating history preserved)",
-        "Plan defaults to dry_run=True; executor applies redaction/null/anonymize only when dry_run=False",
-        "Policy TTLs are config-driven via Settings, not hardcoded in core; chat TTL aligns with the RANKED:CHAT_RETENTION consent text"
-      ],
-      "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. Fast-follow. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-309",
-      "title": "SvelteKit /terms, /privacy, /ranked-consent routes + purpose-segmented consent UI",
-      "priority": 22,
-      "dependencies": [
-        "US-304",
-        "US-305",
-        "US-307"
-      ],
-      "description": "[EPIC-C] BLOCKER for ranked switch-on. Add public SvelteKit /terms and /privacy routes rendering the server-served document bodies (US-302) with version_label, and a ranked-consent screen presenting the four purposes as SEPARATE checkboxes (submit disabled until all checked). Replace the one-line home consent card so base consent links to real /terms + /privacy and POSTs the served content_hash-bound acceptance; the ranked path POSTs the four purpose acceptances. Surface GDPR export/delete + ranked-withdrawal entry points in /profile. The client must ECHO the served content_hash (never recompute it) to avoid JS/Python normalization drift. Test-first (web): /terms /privacy render non-empty served bodies; ranked consent cannot submit until all four checked; posted acceptance carries the served content_hash; a 412 re-prompt re-renders the updated document.\n\nLikely files: web/dashboard/src/routes/terms/+page.svelte, web/dashboard/src/routes/privacy/+page.svelte, web/dashboard/src/routes/play/ranked-consent/+page.svelte, web/dashboard/src/routes/+page.svelte, web/dashboard/src/routes/profile/+page.svelte, web/dashboard/src/lib/api/client.ts, web/dashboard/src/routes/play/match/+page.svelte\n\nREVIEW REVISIONS (pre-run hardening): Client echoes the SERVER-served content_hash in the POST body (display/optimistic only); the stored hash is the server registry hash (see US-303). Export/Delete/Ranked-withdraw actions wire to US-306/US-307/US-305 endpoints (all now blockers). Dashboard story: MUST pass pnpm -C web/dashboard lint + check (+ e2e where the AC names it).",
-      "acceptanceCriteria": [
-        "/terms and /privacy render the server-served document body and show the version_label",
-        "Ranked consent UI shows four independent purpose checkboxes and disables submit until all are checked",
-        "Base and ranked consent POSTs include the served content_hash (echoed, not recomputed client-side)",
-        "Profile exposes working Export, Delete, and Ranked-withdraw actions wired to the new endpoints",
-        "A 412 consent_required response re-renders the current document version (re-prompt) rather than a generic error"
-      ],
-      "notes": "Epic EPIC-C - Legal docs, content-hash consent, ranked consent & GDPR self-serve. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-299",
-      "title": "Regression guard: no identity leak on pre-reveal observation/reveal surfaces",
-      "priority": 23,
-      "dependencies": [
-        "US-298"
-      ],
-      "description": "[EPIC-B] BLOCKER for ranked switch-on. With ranked_handle, email, eligibility and ban plumbing added, it is easy to accidentally surface PII on an in-game observation or pre-reveal endpoint. Add regression-guard tests over human_observation and the reveal path asserting that for an in-progress (non-terminal) game the response contains NEITHER any other seat's display_name, ranked_handle, email, NOR ranked/ban status \u2014 only anonymized public_player_ids. Confirm the terminal endgame reveal still exposes only AI model identity (existing behavior) and never a human's email or ban flag. Test-first: string-absence assertions over the full JSON of both the public reveal route and the human-private participant reveal route.\n\nLikely files: src/padrino/api/human_observation.py, src/padrino/api/reveal.py, src/padrino/api/human_turing.py, tests/api/test_reveal_identity_firewall.py",
-      "acceptanceCriteria": [
-        "A pre-terminal observation response for a multi-seat game exposes no other participant's display_name, ranked_handle, email, or eligibility/ban flag (string-absence over full JSON)",
-        "The terminal endgame reveal exposes AI model identity as today but never a human's email or ranked-ban status",
-        "Adding the eligibility/handle/email features added no new PII-carrying field to these endpoints (test fails if a future change leaks one)",
-        "Test covers both the public reveal route and the human-private participant reveal route"
-      ],
-      "notes": "Epic EPIC-B - Verified identity, pseudonymous ladder & enforcement primitives. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-312",
-      "title": "Compute advisory collusion/smurf/bot signals over ranked telemetry (read-side, no gating)",
-      "priority": 24,
-      "dependencies": [
-        "US-311"
-      ],
-      "description": "[EPIC-D] Fast-follow (not a switch-on blocker). Add a PURE deterministic signal-scoring module that, given ranked_game_signals rows + thresholds + injected now, derives advisory flags: same-IP/device clustering (>=N distinct principals sharing one source_ip_hash within a window), repeated co-occurrence across games, abnormal win/loss streaks (binomial-tail outlier), and a coarse bot-cadence heuristic (precomputed timing features). It returns typed RankedFlag(kind, principal_id, severity, evidence); it NEVER writes ratings and NEVER gates. Migration 0064 adds ranked_flags. An impure thin wrapper loads rows + persists flags off the hot path (batch/admin-triggered). Thresholds are Settings-driven. Test-first: table-driven tests where each flag fires at threshold and is silent below it; determinism (same input -> same flags, no random/datetime in core); running the scorer modifies no HumanRating/HumanRatingEvent row.\n\nLikely files: src/padrino/core/anticheat/signals.py, src/padrino/db/migrations/versions/0064_ranked_flags.py, src/padrino/db/repositories/ranked_flags.py, src/padrino/ratings/anticheat_scoring_service.py, tests/core/anticheat/test_signals.py\n\nREVIEW REVISIONS (pre-run hardening): Under the LOCKED strangers-only single-human ranked rule, exactly ONE human occupies a ranked game, so WITHIN-game co-occurrence is structurally impossible. Reframe co-occurrence as a CROSS-game / cross-account smurf signal (same source_ip_hash or device cluster appearing across many ranked accounts/games over time), NOT a within-game collusion signal. Advisory only; no gating; NAT/proxy false positives are acceptable because it never auto-penalizes.",
-      "acceptanceCriteria": [
-        "A pure function maps signal rows + thresholds to a deterministic list of RankedFlag, with above- and below-threshold unit tests for same-IP clustering, repeated co-occurrence, abnormal win-streak, and bot-cadence; evidence payload asserted",
-        "Determinism: identical inputs yield identical flags; module imports no random and no datetime.utcnow (grep-asserted)",
-        "Migration 0064 adds ranked_flags; upgrade/downgrade tested; no migration <= 0063 edited",
-        "Running the scorer does NOT modify any HumanRating/HumanRatingEvent row (before/after snapshot)",
-        "Scorer runs off the hot path (batch/admin-triggered), not inside the rating write transaction; thresholds are Settings-driven"
-      ],
-      "notes": "Epic EPIC-D - Anti-cheat v1: strangers-only, telemetry, advisory flags & admin review. Fast-follow. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-313",
-      "title": "Admin review surface: list flagged principals/games + inspect evidence",
-      "priority": 25,
-      "dependencies": [
-        "US-312",
-        "US-298"
-      ],
-      "description": "[EPIC-D] Fast-follow (not a switch-on blocker). Add admin-only read routes (reuse require_admin + keyset pagination) to make telemetry actionable: GET /admin/anticheat/flags (paginated, filter by kind/severity/principal), GET /admin/anticheat/principals/{id} (rollup: ranked games, flags, distinct source_ip_hash count, win-rate), GET /admin/anticheat/games/{game_id}/signals. No raw IPs and no raw display_name leak \u2014 only hashes + the pseudonymous handle (rule 7); prefer the handle (US-298) and never expose raw display_name. Responses are read-only. Test-first: unauthenticated -> 401, non-admin -> 403; admin sees flagged principals with evidence; responses contain no raw IP and no raw display_name; pagination is stable; calling them mutates nothing.\n\nLikely files: src/padrino/api/routes/admin_anticheat.py, src/padrino/api/app.py, tests/api/test_admin_anticheat_review.py",
-      "acceptanceCriteria": [
-        "GET /admin/anticheat/flags requires admin scope; non-admin -> 403, unauthenticated -> 401",
-        "Admin can list flags filtered by kind/severity and paginate deterministically (keyset)",
-        "Principal rollup returns ranked game count, flag list, distinct source_ip_hash count, and win-rate for one principal",
-        "No endpoint response contains a raw IP address or a raw Principal.display_name; only hashes + pseudonymous handle exposed (asserted)",
-        "Responses are read-only: calling them mutates no rating, flag, or game row"
-      ],
-      "notes": "Epic EPIC-D - Anti-cheat v1: strangers-only, telemetry, advisory flags & admin review. Fast-follow. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-301",
-      "title": "Manual ranked rating ROLLBACK primitive (recompute excluding flagged games)",
-      "priority": 26,
-      "dependencies": [
-        "US-292",
-        "US-300"
-      ],
-      "description": "[EPIC-B] BLOCKER for ranked switch-on. Wire (but never auto-trigger) the enforcement primitive that undoes ratings tainted by cheating, and the shared game-exclusion store. Migration 0061 adds ranked_game_exclusions (principal/human_player_id, game_id, reason, created_by, created_at). A PURE recompute function takes ordered HumanRatingEvent history + an exclusion set and returns final mu/sigma/games equal to a fresh sequence that never included the excluded games (no DB/clock/random in core). An admin-scoped POST /admin/anticheat/principals/{id}/rollback marks games excluded for that principal, recomputes their HumanRating, and writes an append-only rollback audit row (operator, reason, excluded game ids). game_events / hash chain are NEVER modified (hard rule 4) \u2014 exclusion is at rating aggregation only, so replay stays byte-identical. Excluded games drop from the provisional/published-rank game count. AI opponents are reconstructed as transient mu=25 placeholders so recompute is deterministic and matches the live path. Test-first: 3-game ladder excluding game 2 == sequence that never had game 2; idempotent; audit row; non-admin 403; replay unchanged.\n\nLikely files: src/padrino/core/anticheat/rating_rollback.py, src/padrino/ratings/human_openskill_service.py, src/padrino/db/repositories/human_ratings.py, src/padrino/db/migrations/versions/0061_ranked_game_exclusions.py, src/padrino/api/routes/admin_anticheat.py, tests/core/anticheat/test_rating_rollback.py, tests/api/test_admin_rollback.py\n\nREVIEW REVISIONS (pre-run hardening): Re-homed off the fast-follow US-313: add POST /admin/anticheat/principals/{id}/rollback to the EXISTING src/padrino/api/routes/admin.py (mirror US-300's ban route, reuse require_admin from auth.py). Do NOT depend on or import src/padrino/api/routes/admin_anticheat.py (US-313 owns that file for its read-only review surface). Dependencies are now [US-292, US-300] (both blockers). AC: the rollback route lives in/extends the existing admin router.",
-      "acceptanceCriteria": [
-        "Migration 0061 creates ranked_game_exclusions; upgrade/downgrade tested; no migration <= 0060 edited",
-        "A pure recompute function over ordered events + an exclusion set returns final mu/sigma/games matching a fresh sequence that never included the excluded games; AI opponents reconstructed as transient mu=25",
-        "POST /admin/anticheat/principals/{id}/rollback requires admin (non-admin -> 403); writes an append-only rollback audit row recording operator id, reason, and excluded game ids",
-        "Rollback is idempotent: re-running with the same exclusion set yields the same HumanRating and no duplicate audit churn",
-        "game_events / hash chain rows are never modified or deleted; replay of any affected game stays byte-identical (asserted)",
-        "Excluded games are removed from the games-count used by provisional/published-rank gating; a cross-check test confirms recompute agrees with the live OpenSkill update path",
-        "The rollback endpoint is added to the existing src/padrino/api/routes/admin.py (reusing require_admin); it does not import or depend on src/padrino/api/routes/admin_anticheat.py."
-      ],
-      "notes": "Epic EPIC-B - Verified identity, pseudonymous ladder & enforcement primitives. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-315",
-      "title": "Apply read-side decay to human leaderboard cards",
-      "priority": 27,
-      "dependencies": [
-        "US-314"
-      ],
-      "description": "[EPIC-E] BLOCKER for ranked switch-on. Wire project_decayed_display into _human_cards so published Human ELO cards reflect sigma-inflation + lowered conservative_score for idle players, computed from HumanRating.last_game_at at read time. Persisted rows are never written here. Inject now into compute_public_leaderboard (default clock for callers, tests must inject). Card mu/sigma/conservative_score/score reflect decayed display values; games/sample_count stay the true persisted counts. The human cache part must incorporate the decay clock day bucket so a stale player's card invalidates as time passes (without colliding with AI/quarantine/handle cache parts). Test-first: idle row -> inflated sigma + strictly lower score; fresh row -> equal to persisted; persisted row byte-unchanged after computing leaderboard; cards re-sort by decayed score; cache key changes on day boundary.\n\nLikely files: src/padrino/ratings/public_leaderboard.py, tests/ratings/test_public_leaderboard.py\n\nREVIEW REVISIONS (pre-run hardening): Read-side decay + cache key: decay is applied at DISPLAY time from HumanRating.last_game_at against an injected 'as-of' clock, so persisted rows + replays stay byte-identical. AC5 (cache key changes at a day boundary for an idle player) requires adding the decay AS-OF day bucket (derived from the injected clock) into _human_rating_cache_part \u2014 the current part is max(updated_at):count and does NOT change as wall-clock days pass. Compose this token with US-295/US-298's tokens in the single cache part (see US-298).",
-      "acceptanceCriteria": [
-        "A HumanRating idle beyond the human threshold produces a card whose sigma is inflated and conservative_score/score is strictly lower than the raw persisted conservative_score",
-        "A freshly-played row (last_game_at == now) produces a card whose mu/sigma/conservative_score equal the persisted values exactly",
-        "compute_public_leaderboard accepts an injected now/clock; the persisted HumanRating row is byte-unchanged after computing the leaderboard (re-fetch asserts mu/sigma/conservative_score/last_game_at unchanged)",
-        "Cards sort by decayed conservative_score (an idle high-raw player can rank below an active player)",
-        "The cache key changes when the decay clock crosses a day boundary for an idle player; games/sample_count remain true persisted integer counts"
-      ],
-      "notes": "Epic EPIC-E - Rating integrity: decay, forfeit-on-abandon, provisional & SoS invariant. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-316",
-      "title": "Forfeit-loss on ranked AI-takeover: stop crediting rage-quit humans",
-      "priority": 28,
-      "dependencies": [
-        "US-292"
-      ],
-      "description": "[EPIC-E] BLOCKER for ranked switch-on. BUG: human_lane sets seat.seat_kind=AI_TAKEOVER + takeover_agent_build_id on takeover but never clears occupant_principal_id; at rating-write _team_entries credits ANY seat with occupant_principal_id is not None, so a rage-quit human is credited the AI's final result. Product decision: a ranked AI-takeover = FORFEIT LOSS for the human, NOT a credit. Gate at rating-write on seat provenance: a seat with seat_kind == AI_TAKEOVER is rated as a forfeit-loss for its occupant_principal_id (human still gets a HumanRatingEvent reflecting a LOSS), while the AI replacement participates as a transient mu=25 seat for the rest of the team math. KEEP occupant_principal_id for provenance (coordinate: gate purely on seat_kind, do not clear it). Test-first: a takeover seat whose faction WON -> human rated a LOSS (mu does not rise); a genuine HUMAN winner still gains (regression); forfeit decided by seat_kind not occupant_principal_id; HumanRatingEvent still written for auditability; all-seats-taken-over game still terminates and rates.\n\nLikely files: src/padrino/ratings/human_openskill_service.py, src/padrino/runner/human_lane.py, src/padrino/db/models.py, tests/ratings/test_human_openskill_service.py\n\nREVIEW REVISIONS (pre-run hardening): Forfeit-loss threading: _TeamEntry (~line 38-42) does NOT carry seat.seat_kind and _team_entries discards it; thread seat_kind (and takeover provenance) through _TeamEntry + the persistence loop so the forfeit decision can key on seat_kind == AI_TAKEOVER (not occupant_principal_id). Compose with the existing DRAW special-case (keeps entry.row.mu unchanged at ~213-235): a takeover seat in a DRAW game is still a forfeit LOSS, not a draw \u2014 forfeit OVERRIDES the draw branch for that seat. Build a well-formed two-team PlackettLuce structure that ranks the forfeiter last; cross-check against the live path with a test. Now depends on US-292 (composes with idempotent write). Real test file: tests/ratings/test_human_ranked_elo.py.",
-      "acceptanceCriteria": [
-        "A ranked HUMANS_INCLUDED game where a human seat became seat_kind==AI_TAKEOVER and that seat's faction WON: the human's HumanRating reflects a LOSS (conservative_score does not increase; mu does not rise)",
-        "The same takeover seat whose faction LOST: human rated a loss (no double penalty), deterministic",
-        "A seat that stayed seat_kind==HUMAN through terminal is rated by true outcome (regression: a genuine winner still gains)",
-        "Forfeit is decided by seat_kind/takeover provenance, NOT occupant_principal_id alone (unit test: AI_TAKEOVER seat with non-null occupant is NOT credited the AI's win)",
-        "The AI replacement participates as a transient mu=25 seat (no human credit) so non-forfeiting humans in the same game are rated correctly",
-        "A HumanRatingEvent is still written for the forfeiting human (before/after reflect the loss); a game where all human seats were taken over still terminates and rates without crediting anyone"
-      ],
-      "notes": "Epic EPIC-E - Rating integrity: decay, forfeit-on-abandon, provisional & SoS invariant. SWITCH-ON BLOCKER. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-317",
-      "title": "Quarantine provisional placement results from the published rank",
-      "priority": 29,
-      "dependencies": [
-        "US-315"
-      ],
-      "description": "[EPIC-E] Fast-follow (not a switch-on blocker). is_provisional (<10 games) exists and the card sets provisional=True with a reason, but the published-rank treatment must be explicit and tested for the ranked human ladder: provisional players (games < DEFAULT_PROVISIONAL_GAMES) are EXCLUDED from the published/ranked ordering (still visible as provisional, rank=None) and their placement games count toward graduation. Add an explicit predicate + tests: a provisional card carries provisional=True, provisional_reason, rank=None and is filtered out of the ranked ordering; a graduated (>=10) human gets a numeric rank assigned among graduated cards only. Provisional and decay compose. Forfeit-loss placement games (US-316) still count toward the provisional tally. Test-first: boundary at exactly threshold; provisional excluded from rank assignment; rank numbering not disturbed by interleaved provisional cards.\n\nLikely files: src/padrino/ratings/public_leaderboard.py, src/padrino/ratings/provisional_and_decay.py, tests/ratings/test_public_leaderboard.py\n\nREVIEW REVISIONS (pre-run hardening): RIGHT-SIZED (reviewer confirmed the core already exists): provisional human cards ALREADY get rank=None \u2014 _rank_cards sorts only `not card.provisional` cards into the numeric rank map and _human_cards marks provisional via games < threshold. So this story is a LOCK/VERIFY, not new feature work: add a regression test asserting provisional human players are excluded from the numeric published rank (rank=None) and are clearly labeled 'provisional' on the card, and confirm provisional placement games do not influence other players' ratings (consistent with the v1 no-strength-of-schedule decision, US-318). Do NOT rebuild the existing exclusion.",
-      "acceptanceCriteria": [
-        "A human with games < threshold yields a card with provisional=True, provisional_reason set, and rank=None",
-        "A human with games >= threshold yields provisional=False and a numeric rank assigned among graduated cards only",
-        "Provisional cards are excluded from the ordering that assigns published numeric ranks (never occupy a published rank slot)",
-        "The 10th rated game graduates a player on the next leaderboard read (boundary test at exactly threshold)",
-        "Provisional and decay compose: a provisional idle human shows provisional=True AND a decayed (inflated) sigma; forfeit-loss placement games count toward the provisional tally; threshold is a single shared constant"
-      ],
-      "notes": "Epic EPIC-E - Rating integrity: decay, forfeit-on-abandon, provisional & SoS invariant. Fast-follow. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
-    },
-    {
-      "id": "US-318",
-      "title": "Lock the v1 no-AI-strength-of-schedule firewall invariant in code + tests",
-      "priority": 30,
-      "dependencies": [
-        "US-293"
-      ],
-      "description": "[EPIC-E] Fast-follow (not a switch-on blocker). v1 keeps AI opponents as transient mu=25 placeholders and does NOT inject real AI scientific strength-of-schedule into the human update, because pulling real AI Rating rows would couple the HUMANS_INCLUDED lane to the CANONICAL_TEAM scientific ladder and risk the firewall. Capture this as a tested invariant + docstring (no .md file per CLAUDE.md) so a future story revisits it deliberately. Test-first: update_human_ratings_for_game reads/writes NO scientific Rating/RatingEvent rows; AI seats enter team math with INITIAL_MU/INITIAL_SIGMA independent of any persisted AI strength; two games with differently-strong AI opponents produce the SAME human delta for an identical human outcome (proving strength-of-schedule is intentionally ignored); no new dependency on the scientific rating-write paths beyond shared constants.\n\nLikely files: src/padrino/ratings/human_openskill_service.py, tests/ratings/test_human_openskill_service.py",
-      "acceptanceCriteria": [
-        "A regression test asserts update_human_ratings_for_game reads/writes NO scientific Rating/RatingEvent rows (only human_rating/human_rating_event touched)",
-        "AI (non-human) seats enter the team math with INITIAL_MU/INITIAL_SIGMA, independent of any persisted AI strength",
-        "The service module carries a clearly-marked docstring stating the v1 no-strength-of-schedule decision + firewall rationale + a future-work marker",
-        "Two games with differently-strong AI opponents produce the SAME human delta for an identical human outcome",
-        "No new dependency from human_openskill_service on the scientific rating-write paths beyond shared INITIAL_MU/INITIAL_SIGMA/scope constants"
-      ],
-      "notes": "Epic EPIC-E - Rating integrity: decay, forfeit-on-abandon, provisional & SoS invariant. Fast-follow. Honor hard rules: pure core (no random/utcnow), never edit shipped migrations (add new), firewall (HUMANS_INCLUDED never CANONICAL_TEAM), rule 7 (pseudonymous handle, no raw display_name/UUID), deterministic replay. Test-first: write the failing test, implement, green, refactor, commit.",
-      "passes": true
+      "notes": "Fix from code-review LOW #10. Files: src/padrino/ratings/human_openskill_service.py, src/padrino/runner/game_runner.py, db/repositories/ranked_bans.py, tests. Mirrors the write-time kill-switch re-check (US-292).",
+      "passes": false
     }
   ]
 }
