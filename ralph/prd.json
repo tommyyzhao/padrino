@@ -16,7 +16,7 @@
         "No change to the happy path: a normal ranked finalize writes exactly one signals row and the rating events."
       ],
       "notes": "Fix from code-review HIGH #1. Files: src/padrino/ratings/human_openskill_service.py, tests/ratings/test_ranked_signal_capture.py. Flag-off-gated + needs a DB fault, but it violates a stated wave guarantee.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-320",

@@ -370,16 +370,17 @@ async def _record_ranked_game_signal_best_effort(
             return
 
     try:
-        await ranked_signals_repo.record_ranked_game_signal(
-            session,
-            game_id=game_result.game_id,
-            human_principal_id=human_principal_id,
-            source_ip_hash=source_ip_hash,
-            winner=game_result.winner,
-            faction=seat.faction,
-            signals={},
-            created_at=now,
-        )
+        async with session.begin_nested():
+            await ranked_signals_repo.record_ranked_game_signal(
+                session,
+                game_id=game_result.game_id,
+                human_principal_id=human_principal_id,
+                source_ip_hash=source_ip_hash,
+                winner=game_result.winner,
+                faction=seat.faction,
+                signals={},
+                created_at=now,
+            )
     except Exception as exc:
         _logger.warning(
             "ranked.signals.capture_failed",

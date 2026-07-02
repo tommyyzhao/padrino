@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.human_consent import hash_source_ip
@@ -201,6 +202,65 @@ async def test_signal_capture_failure_never_alters_rating_event_payload(
         failing_payloads = [_rating_event_payload(event) for event in failing_events]
 
     assert failing_payloads == enabled_payloads
+    async with session_factory() as session:
+        signal_count = (
+            await session.execute(select(func.count()).select_from(RankedGameSignal))
+        ).scalar_one()
+        rating_event_count = (
+            await session.execute(select(func.count()).select_from(HumanRatingEvent))
+        ).scalar_one()
+    assert signal_count == 0
+    assert rating_event_count == 1
+
+
+@pytest.mark.asyncio
+async def test_signal_capture_db_fault_after_insert_rolls_back_signal_only(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ip_hash = hash_source_ip(_RAW_IP)
+    assert ip_hash is not None
+    league_id, game_id, _principal_id, _public_id, _faction = await _seed_one_human_game(
+        session_factory,
+        league_ranked=True,
+        source_ip_hash=ip_hash,
+    )
+
+    original_execute = AsyncSession.execute
+    faulted = False
+
+    async def execute_then_fail_on_signal_insert(
+        self: AsyncSession,
+        statement: object,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        nonlocal faulted
+        result = await cast(Any, original_execute)(self, statement, *args, **kwargs)
+        statement_text = str(statement).lower()
+        if not faulted and "insert" in statement_text and "ranked_game_signals" in statement_text:
+            faulted = True
+            raise OperationalError(
+                "INSERT ranked_game_signals",
+                {},
+                RuntimeError("simulated post-statement telemetry fault"),
+            )
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", execute_then_fail_on_signal_insert)
+
+    async with session_factory() as session, session.begin():
+        events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            now=_NOW,
+        )
+
+    assert faulted is True
+    assert len(events) == 1
     async with session_factory() as session:
         signal_count = (
             await session.execute(select(func.count()).select_from(RankedGameSignal))

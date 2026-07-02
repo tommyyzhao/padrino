@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Savepoint-isolated telemetry (US-319): when ranked human ELO writes a
+  best-effort side effect inside the same outer transaction, wrap only that
+  side-effect repository call in `async with session.begin_nested()` and keep
+  the broad outer exception logger. Let DB exceptions propagate out of the
+  savepoint context so SQLAlchemy rolls back the side effect while already
+  flushed `HumanRatingEvent` rows remain committable.
 - No-AI-strength-of-schedule firewall (US-318): keep ranked human ELO AI seats
   as transient `INITIAL_MU` / `INITIAL_SIGMA` OpenSkill ratings in
   `ratings/human_openskill_service.py`. Do not select or mutate scientific
@@ -5700,4 +5706,27 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   18 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2974 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T05:41 PDT - US-319
+- Savepoint-isolated ranked telemetry capture so a telemetry DB fault cannot
+  roll back the already-persisted ranked human rating event rows. The
+  `ranked_signals_repo.record_ranked_game_signal` call now runs under
+  `session.begin_nested()` inside the existing broad best-effort logger.
+- Added a regression that monkeypatches `AsyncSession.execute` to run the
+  `ranked_game_signals` insert statement and then raise `OperationalError`;
+  the savepoint rolls the signal back while the outer `HumanRatingEvent`
+  commits. Existing pre-statement failure isolation and happy-path one-signal
+  capture remain covered in the same module.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/human_openskill_service.py`,
+  `tests/ratings/test_ranked_signal_capture.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_ranked_signal_capture.py::test_signal_capture_db_fault_after_insert_rolls_back_signal_only -q`
+  failed first because the signal row committed (`signal_count == 1`);
+  focused GREEN `uv run pytest tests/ratings/test_ranked_signal_capture.py -q`
+  -> 4 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2975 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
