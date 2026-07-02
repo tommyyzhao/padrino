@@ -181,6 +181,7 @@ async def record_human_rating_event(
     after_mu: float,
     after_sigma: float,
     public_player_id: str | None = None,
+    created_at: datetime | None = None,
 ) -> HumanRatingEvent | None:
     """Append a human-rating audit row, returning None on idempotent conflict."""
     values = {
@@ -196,6 +197,8 @@ async def record_human_rating_event(
         "after_mu": after_mu,
         "after_sigma": after_sigma,
     }
+    if created_at is not None:
+        values["created_at"] = created_at
     index_elements = ["game_id", "human_player_id", "scope_type", "scope_value"]
     bind = session.get_bind()
     dialect_name = bind.dialect.name

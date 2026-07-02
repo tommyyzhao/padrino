@@ -260,6 +260,7 @@ def _player_for_seat(
     return RatingRollbackPlayer(
         public_player_id=seat.public_player_id,
         faction=faction,
+        seat_kind=seat.seat_kind,
         human_player_id=human_player_id,
         before_mu=before_mu,
         before_sigma=before_sigma,

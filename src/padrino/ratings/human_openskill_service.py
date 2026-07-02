@@ -271,6 +271,7 @@ async def _persist_human_entry(
         before_sigma=entry.before_sigma,
         after_mu=new_mu,
         after_sigma=new_sigma,
+        created_at=now,
     )
     if event is None:
         return None

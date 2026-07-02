@@ -33,7 +33,7 @@
         "Tests cover THREE seat roles \u2014 takeover as (a) target's teammate, (b) target's opponent, (c) the target itself \u2014 each asserting rollback recompute == fresh write-path replay of the non-excluded sequence; plus a DRAW-winner forfeit-overrides-draw variant."
       ],
       "notes": "Fix from code-review HIGH #2 (+ folds LOW #8). Files: src/padrino/ratings/human_rating_rollback.py, src/padrino/core/anticheat/rating_rollback.py, tests. Manual/flag-gated primitive but must be trustworthy.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-321",

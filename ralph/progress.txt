@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Manual rollback AI-takeover parity (US-320): thread `GameSeat.seat_kind`
+  into `core/anticheat/rating_rollback.py` instead of inferring takeover from
+  occupant ids. In rollback recompute, every `AI_TAKEOVER` seat is a transient
+  `INITIAL_MU` / `INITIAL_SIGMA` team placeholder; if the target is the takeover
+  seat, score the target through the pure forfeit-loss helper (`ranks=[0, 1]`)
+  before the normal team/DRAW branch. Stamp `HumanRatingEvent.created_at` from
+  the same injected `now` used by the write path so rollback can reconstruct
+  `last_game_at` from included audit rows.
 - Savepoint-isolated telemetry (US-319): when ranked human ELO writes a
   best-effort side effect inside the same outer transaction, wrap only that
   side-effect repository call in `async with session.begin_nested()` and keep
@@ -5729,4 +5737,38 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 4 passed / 1 warning. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2975 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T05:51 PDT - US-320
+- Made manual ranked human-rating rollback byte-match the ranked write path for
+  AI takeover histories: `RatingRollbackPlayer` now carries `seat_kind`, any
+  `AI_TAKEOVER` seat is a transient initial team placeholder, and a target
+  takeover is rated as a deterministic forfeit loss that bypasses the normal
+  team/DRAW freeze.
+- Aligned `HumanRatingEvent.created_at` with the injected write-path `now`, so
+  rollback recomputes `last_game_at` from persisted included event rows rather
+  than a database default wall-clock timestamp.
+- Added regression coverage that compares rollback recompute to a fresh
+  write-path replay for takeover as the target's teammate, target's opponent,
+  and the target itself, plus a DRAW target-forfeit override and an
+  INITIAL-constant drift guard.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/anticheat/rating_rollback.py`,
+  `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/ratings/human_rating_rollback.py`,
+  `tests/ratings/test_human_rating_rollback.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_rating_rollback.py -q` first failed
+  on takeover-role rating drift, target takeover forfeit drift, and
+  `last_game_at` timestamp drift; focused GREEN same command -> 5 passed.
+  Related GREEN
+  `uv run pytest tests/core/anticheat/test_rating_rollback.py -q` -> 3 passed;
+  `uv run pytest tests/api/test_admin_ranked_rollback.py -q` -> 3 passed /
+  1 warning; `uv run pytest tests/ratings/test_human_ranked_elo.py -q` ->
+  18 passed; `uv run pytest tests/ratings/test_ranked_signal_capture.py -q` ->
+  4 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2981 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
