@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
 
 from sqlalchemy import or_, select
@@ -121,6 +122,21 @@ async def is_principal_ranked_banned(
     return is_ranked_banned(snapshots, now)
 
 
+async def active_ranked_banned_principal_ids(
+    session: AsyncSession,
+    *,
+    principal_ids: Iterable[uuid.UUID | str],
+    now: datetime,
+) -> set[uuid.UUID]:
+    """Return the subset of supplied principals with an active ranked ban."""
+
+    banned: set[uuid.UUID] = set()
+    for principal_id in sorted({_principal_uuid(value) for value in principal_ids}, key=str):
+        if await is_principal_ranked_banned(session, principal_id=principal_id, now=now):
+            banned.add(principal_id)
+    return banned
+
+
 async def _verified_email_hashes(session: AsyncSession, principal_id: uuid.UUID) -> set[str]:
     stmt = select(OAuthIdentity.email).where(
         OAuthIdentity.principal_id == principal_id,
@@ -148,6 +164,7 @@ def _ban_uuid(value: uuid.UUID | str) -> uuid.UUID:
 
 
 __all__ = [
+    "active_ranked_banned_principal_ids",
     "get",
     "hash_email_for_ranked_ban",
     "is_principal_ranked_banned",

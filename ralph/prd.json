@@ -103,7 +103,7 @@
         "The ban fact is resolved in the impure shell and injected; no db import added to core."
       ],
       "notes": "Fix from code-review LOW #10. Files: src/padrino/ratings/human_openskill_service.py, src/padrino/runner/game_runner.py, db/repositories/ranked_bans.py, tests. Mirrors the write-time kill-switch re-check (US-292).",
-      "passes": false
+      "passes": true
     }
   ]
 }

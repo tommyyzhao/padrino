@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Write-time ranked-ban defense (US-325): resolve active ranked-banned
+  principal ids in the impure runner shell from persisted `game_seats`, inject
+  that set into `update_human_ratings_for_game`, and let the writer record a
+  per-principal `REFUSED/ranked_banned` audit row before excluding the seat
+  from HumanRating/HumanRatingEvent writes. Use the game row's persisted
+  `completed_at` as the injected instant in runner finalization; do not import
+  `datetime` into `runner/game_runner.py`, which has a no-wall-clock guard.
 - ORM model export completeness (US-324): keep `src/padrino/db/models.py`
   `__all__` synchronized with every concrete `Base` subclass defined in the
   module. The regression belongs in `tests/db/test_models.py` and should
@@ -5887,4 +5894,33 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   21 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2989 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T06:44 PDT - US-325
+- Added write-time ranked-ban defense-in-depth for ranked human ELO: the runner
+  resolves active banned principals from persisted game seats after the game is
+  created and injects that set into `update_human_ratings_for_game`.
+- The human rating writer now records a per-principal `REFUSED` provenance row
+  with reason `ranked_banned`, skips HumanRating/HumanRatingEvent writes for
+  those banned seats, and still applies eligible principals in the same call.
+- Preserved the runner no-wall-clock guard by using the terminal game row's
+  persisted `completed_at` as the ban-check/rating-write instant instead of
+  importing `datetime` into `runner/game_runner.py`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/ranked_bans.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/ratings/test_human_ranked_elo.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py::test_ranked_banned_principal_is_skipped_by_terminal_ranked_write -q`
+  first failed on the missing `active_ranked_banned_principal_ids` resolver;
+  focused GREEN
+  `uv run pytest tests/ratings/test_human_ranked_elo.py::test_ranked_banned_principal_is_skipped_by_terminal_ranked_write tests/runner/test_rating_integration.py::test_terminal_human_rating_finalize_resolves_ranked_ban_after_game_creation -q`
+  -> 2 passed. Related GREEN
+  `uv run pytest tests/ratings/test_human_ranked_elo.py tests/ratings/test_ranked_write_audit.py tests/runner/test_rating_integration.py -q`
+  -> 32 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2991 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

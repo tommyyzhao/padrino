@@ -16,7 +16,7 @@ design.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
@@ -78,6 +78,12 @@ def _conservative(mu: float, sigma: float) -> float:
 
 def _is_sha256_hex(value: str | None) -> bool:
     return value is not None and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _principal_uuid_set(values: Iterable[uuid.UUID | str] | None) -> set[uuid.UUID]:
+    if values is None:
+        return set()
+    return {value if isinstance(value, uuid.UUID) else uuid.UUID(str(value)) for value in values}
 
 
 def ranked_human_rating_enabled(settings: Any | None = None) -> bool:
@@ -332,6 +338,37 @@ async def _record_ranked_disabled_refusal(
     )
 
 
+async def _record_ranked_banned_refusals(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    game_id: uuid.UUID,
+    seats: Sequence[GameSeat],
+    ranked_banned_principal_ids: set[uuid.UUID],
+    now: datetime,
+) -> None:
+    banned_seat_principal_ids = sorted(
+        {
+            seat.occupant_principal_id
+            for seat in seats
+            if seat.occupant_principal_id is not None
+            and seat.occupant_principal_id in ranked_banned_principal_ids
+        },
+        key=str,
+    )
+    for principal_id in banned_seat_principal_ids:
+        await human_ratings_repo.record_ranked_write_audit(
+            session,
+            league_id=league_id,
+            game_id=game_id,
+            human_player_id=str(principal_id),
+            decision="REFUSED",
+            reason=RankedEligibilityReason.RANKED_BANNED.value,
+            flag_enabled=True,
+            created_at=now,
+        )
+
+
 async def _record_ranked_game_signal_best_effort(
     session: AsyncSession,
     *,
@@ -398,6 +435,7 @@ async def update_human_ratings_for_game(
     ranked: bool,
     game_result: HumanGameResult,
     rating_enabled: bool | None = None,
+    ranked_banned_principal_ids: Iterable[uuid.UUID | str] | None = None,
     now: datetime | None = None,
 ) -> list[HumanRatingEvent]:
     """Apply the GLOBAL ranked-human update for one Humans-Included game.
@@ -433,6 +471,15 @@ async def update_human_ratings_for_game(
     human_principal_ids = {
         seat.occupant_principal_id for seat in seats if seat.occupant_principal_id is not None
     }
+    banned_principal_ids = _principal_uuid_set(ranked_banned_principal_ids) & human_principal_ids
+    await _record_ranked_banned_refusals(
+        session,
+        league_id=league_id,
+        game_id=game_result.game_id,
+        seats=seats,
+        ranked_banned_principal_ids=banned_principal_ids,
+        now=_now,
+    )
     withdrawn_principal_ids = await human_consents_repo.active_ranked_withdrawn_principal_ids(
         session,
         subject_principal_ids=human_principal_ids,
@@ -447,7 +494,9 @@ async def update_human_ratings_for_game(
         game_id=game_result.game_id,
         seats=seats,
         model=model,
-        excluded_principal_ids=withdrawn_principal_ids | deleted_principal_ids,
+        excluded_principal_ids=withdrawn_principal_ids
+        | deleted_principal_ids
+        | banned_principal_ids,
     )
     if teams is None:
         return []

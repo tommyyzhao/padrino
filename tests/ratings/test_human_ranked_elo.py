@@ -17,12 +17,15 @@ from structlog.testing import LogCapture
 
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, LeagueKind, RatingContextKind, SeatKind
+from padrino.core.ranked_ban import RankedBanKind
+from padrino.core.ranked_eligibility import RankedEligibilityReason
 from padrino.core.rulesets import mini7_v1
 from padrino.db.models import (
     GameSeat,
     HumanRating,
     HumanRatingEvent,
     League,
+    RankedWriteAudit,
     Rating,
     RatingContext,
     RatingEvent,
@@ -36,6 +39,7 @@ from padrino.db.repositories import (
     model_configs,
     prompt_versions,
     providers,
+    ranked_bans,
 )
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.ratings.human_openskill_service import (
@@ -800,6 +804,79 @@ async def test_deleted_principal_is_skipped_by_terminal_ranked_write(
         str(principal_id) for principal_id in active_principal_ids
     }
     assert str(deleted_principal_id) not in {row.human_player_id for row in human_rows}
+
+
+async def test_ranked_banned_principal_is_skipped_by_terminal_ranked_write(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    league_id, game_id, principals = await _seed_human_rating_game(
+        session_factory,
+        league_kind=LeagueKind.HUMANS_INCLUDED,
+        league_ranked=True,
+        hash_prefix="ranked-banned-human",
+    )
+    banned_public_id, banned_principal_id = sorted(principals.items())[0]
+    eligible_principal_ids = {
+        principal_id
+        for public_id, principal_id in principals.items()
+        if public_id != banned_public_id
+    }
+    now = datetime(2026, 6, 27, tzinfo=UTC)
+
+    async with session_factory() as session, session.begin():
+        await ranked_bans.issue_ban_for_principal(
+            session,
+            principal_id=banned_principal_id,
+            kind=RankedBanKind.BAN,
+            reason="manual_review_after_game_created",
+            created_by="admin-key",
+            now=now,
+        )
+        banned_principal_ids = await ranked_bans.active_ranked_banned_principal_ids(
+            session,
+            principal_ids=set(principals.values()),
+            now=now,
+        )
+        events = await update_human_ratings_for_game(
+            session,
+            league_id=league_id,
+            ranked=True,
+            rating_enabled=True,
+            game_result=HumanGameResult(game_id=game_id, winner="TOWN"),
+            ranked_banned_principal_ids=banned_principal_ids,
+            now=now,
+        )
+
+    assert banned_principal_ids == {banned_principal_id}
+    assert {event.human_player_id for event in events} == {
+        str(principal_id) for principal_id in eligible_principal_ids
+    }
+
+    async with session_factory() as session:
+        human_rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+        audit_rows = (await session.execute(select(RankedWriteAudit))).scalars().all()
+
+    assert {row.human_player_id for row in human_rows} == {
+        str(principal_id) for principal_id in eligible_principal_ids
+    }
+    assert {event.human_player_id for event in human_events} == {
+        str(principal_id) for principal_id in eligible_principal_ids
+    }
+    assert str(banned_principal_id) not in {row.human_player_id for row in human_rows}
+
+    refused_rows = [row for row in audit_rows if row.decision == "REFUSED"]
+    applied_rows = [row for row in audit_rows if row.decision == "APPLIED"]
+    assert len(refused_rows) == 1
+    refused = refused_rows[0]
+    assert refused.league_id == league_id
+    assert refused.game_id == game_id
+    assert refused.human_player_id == str(banned_principal_id)
+    assert refused.reason == RankedEligibilityReason.RANKED_BANNED.value
+    assert refused.flag_enabled is True
+    assert {row.human_player_id for row in applied_rows} == {
+        str(principal_id) for principal_id in eligible_principal_ids
+    }
 
 
 async def test_human_writer_fails_closed_for_casual_runtime_unranked_and_missing_league(
