@@ -12,6 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.db import models as db_models
+from padrino.db.base import Base
 from padrino.db.models import (
     AgentBuild,
     Campaign,
@@ -491,3 +493,16 @@ def test_models_module_has_no_forbidden_imports() -> None:
                 assert alias.name.split(".")[0] not in forbidden, alias.name
         elif isinstance(node, ast.ImportFrom):
             assert (node.module or "").split(".")[0] not in forbidden, node.module
+
+
+def test_models_all_exports_every_base_subclass() -> None:
+    model_names = {
+        name
+        for name, value in vars(db_models).items()
+        if isinstance(value, type)
+        and issubclass(value, Base)
+        and value is not Base
+        and value.__module__ == db_models.__name__
+    }
+
+    assert model_names <= set(db_models.__all__)

@@ -88,7 +88,7 @@
         "A test asserts every Base subclass defined in models.py is present in __all__ (and passes)."
       ],
       "notes": "Fix from code-review LOW #9. Files: src/padrino/db/models.py, tests/db/*.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-325",

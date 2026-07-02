@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- ORM model export completeness (US-324): keep `src/padrino/db/models.py`
+  `__all__` synchronized with every concrete `Base` subclass defined in the
+  module. The regression belongs in `tests/db/test_models.py` and should
+  introspect `vars(padrino.db.models)` with `issubclass(value, Base)` plus a
+  `value.__module__ == models.__name__` guard, so future model additions fail
+  closed until exported.
 - Abandoned guest chat retention (US-323): reuse
   `db.repositories.human_chat.redact_for_principal` from the retention
   executor before soft-deleting a guest principal. The helper owns the
@@ -5860,4 +5866,25 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 13 passed / 5 warnings. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2988 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T06:27 PDT - US-324
+- Added every missing concrete ORM `Base` subclass to
+  `src/padrino/db/models.py` `__all__`: `BudgetReservationSlot`, `Campaign`,
+  `CampaignPairing`, `HumanInferenceReservation`, `HumanPlayerStats`,
+  `HumanTuringGuess`, `RankedGameExclusion`, and
+  `RankedRatingRollbackAudit`.
+- Added a regression in `tests/db/test_models.py` that introspects
+  `padrino.db.models` and asserts every locally defined `Base` subclass is
+  exported through `__all__`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`, `tests/db/test_models.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_models.py::test_models_all_exports_every_base_subclass`
+  failed first on the missing export set; focused GREEN same command ->
+  1 passed. Related GREEN `uv run pytest tests/db/test_models.py` ->
+  21 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2989 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
