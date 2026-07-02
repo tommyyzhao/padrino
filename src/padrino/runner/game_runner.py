@@ -75,7 +75,10 @@ from padrino.observability.events import (
     EVENT_PRIVACY_AUDIT_LEAK_DETECTED,
     EVENT_RATING_UPDATED,
 )
-from padrino.observability.metrics import record_game_completed
+from padrino.observability.metrics import (
+    record_game_completed,
+    record_human_rating_firewall_violation,
+)
 from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
 from padrino.ratings.human_openskill_service import (
@@ -656,6 +659,7 @@ async def _persist_terminated_event(
                     rating_enabled=ranked_human_rating_enabled(settings),
                 )
             except FirewallViolation as exc:
+                record_human_rating_firewall_violation(league_kind=exc.league_kind)
                 _logger.error(
                     "human.rating.finalize_skipped_firewall_violation",
                     game_id=str(persistence.game_id),

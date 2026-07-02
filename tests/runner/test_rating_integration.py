@@ -56,6 +56,11 @@ from padrino.db.repositories import (
     providers as providers_repo,
 )
 from padrino.llm.mock import DeterministicMockAdapter
+from padrino.observability.metrics import (
+    render_prometheus_text,
+    reset_metrics,
+    text_string_to_metric_families,
+)
 from padrino.ratings.human_openskill_service import FirewallViolation
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA
 from padrino.runner.game_runner import (
@@ -86,6 +91,18 @@ def _response(action_type: ActionType, target: str | None = None) -> AgentRespon
         memory_update="",
         rationale_summary=None,
     )
+
+
+def _metric_sum(metric_name: str, required_labels: dict[str, str]) -> float:
+    payload = render_prometheus_text().decode("utf-8")
+    total = 0.0
+    for family in text_string_to_metric_families(payload):
+        if family.name != metric_name:
+            continue
+        for sample in family.samples:
+            if all(sample.labels.get(key) == value for key, value in required_labels.items()):
+                total += sample.value
+    return total
 
 
 def _phase_default(phase_id: str) -> AgentResponse:
@@ -522,6 +539,7 @@ async def test_human_rating_firewall_violation_completes_terminal_game_without_r
     monkeypatch: pytest.MonkeyPatch,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    reset_metrics()
     league_id, game_id, _builds_by_seat = await _seed_ranked_setup(
         session_factory, ranked=True, hash_prefix="us293-firewall-finalize"
     )
@@ -623,6 +641,14 @@ async def test_human_rating_firewall_violation_completes_terminal_game_without_r
     assert scientific_events == []
     assert human_rows == []
     assert human_events == []
+    assert (
+        _metric_sum(
+            "padrino_human_rating_firewall_violations",
+            {"league_kind": LeagueKind.SCIENTIFIC.value},
+        )
+        == 1.0
+    )
+    reset_metrics()
 
 
 async def test_unranked_game_skips_rating_updates(

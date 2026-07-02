@@ -3,6 +3,11 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Observable swallowed invariants (US-322): when a security invariant is
+  intentionally swallowed to preserve terminal persistence, emit a dedicated
+  low-cardinality metric beside the structured log. For human-rating firewall
+  finalize skips, use `record_human_rating_firewall_violation` with only
+  `league_kind` as the label; do not put game ids or league ids into the metric.
 - OAuth verified-email parsing (US-321): keep provider claim coercion
   fail-closed in `api/oauth.py`. `email_verified` is true only for bool `True`
   or a stripped lowercase string of `true` / `1`; integer `1`, `yes`, missing,
@@ -5798,4 +5803,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 4 passed / 5 warnings. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2986 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T06:07 PDT - US-322
+- Surfaced human-rating firewall finalize skips as a Prometheus counter:
+  `padrino_human_rating_firewall_violations_total{league_kind}` increments in
+  `game_runner._persist_terminated_event` beside the existing structured error
+  log while preserving the swallow-and-continue behavior.
+- Added metric helper/reset/export coverage and extended the existing runner
+  firewall regression to assert the counter increments for a mocked
+  `FirewallViolation` while the terminal game still completes with zero
+  rating rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/observability/metrics.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/observability/test_metrics_endpoint.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_rating_integration.py::test_human_rating_firewall_violation_completes_terminal_game_without_ratings -q`
+  failed first on missing metric (`0.0 == 1.0`); focused GREEN
+  `uv run pytest tests/runner/test_rating_integration.py::test_human_rating_firewall_violation_completes_terminal_game_without_ratings tests/observability/test_metrics_endpoint.py -q`
+  -> 20 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2987 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

@@ -25,6 +25,7 @@ from padrino.observability.metrics import (
     budget_global_spend_usd,
     cost_drift_fraction,
     games_total,
+    human_rating_firewall_violations_total,
     invalid_action_total,
     llm_calls_total,
     llm_latency_seconds,
@@ -32,6 +33,7 @@ from padrino.observability.metrics import (
     record_budget_burn,
     record_cost_drift,
     record_game_completed,
+    record_human_rating_firewall_violation,
     record_invalid_action,
     record_llm_call,
     record_phase_duration,
@@ -174,6 +176,17 @@ def test_record_invalid_action_counts_by_reason() -> None:
     assert _sum_with_labels(counts, {"reason": "INVALID_JSON"}) == 1.0
 
 
+def test_record_human_rating_firewall_violation_counts_by_league_kind() -> None:
+    record_human_rating_firewall_violation(league_kind="SCIENTIFIC")
+    record_human_rating_firewall_violation(league_kind="SCIENTIFIC")
+    record_human_rating_firewall_violation(league_kind=None)
+
+    payload = render_prometheus_text().decode("utf-8")
+    counts = _samples(payload, "padrino_human_rating_firewall_violations")
+    assert _sum_with_labels(counts, {"league_kind": "SCIENTIFIC"}) == 2.0
+    assert _sum_with_labels(counts, {"league_kind": "unknown"}) == 1.0
+
+
 def test_scheduler_inflight_gauge_inc_dec() -> None:
     scheduler_inflight_gauntlets.inc()
     scheduler_inflight_gauntlets.inc()
@@ -242,6 +255,7 @@ def test_reset_clears_every_collector() -> None:
     record_phase_duration(ruleset="mini7_v1", phase_kind="DAY_VOTE", duration_s=0.5)
     record_game_completed(outcome="TOWN", ruleset="mini7_v1")
     record_invalid_action(reason="TIMEOUT")
+    record_human_rating_firewall_violation(league_kind="SCIENTIFIC")
     scheduler_inflight_gauntlets.inc()
     record_budget_burn(scope_type="campaign", scope_id="campaign-1", spent_usd=1.0, cap_usd=2.0)
     record_cost_drift(
@@ -258,6 +272,7 @@ def test_reset_clears_every_collector() -> None:
     assert not _samples(payload, "padrino_phase_duration_seconds")
     assert not _samples(payload, "padrino_games")
     assert not _samples(payload, "padrino_invalid_action")
+    assert not _samples(payload, "padrino_human_rating_firewall_violations")
     assert not _samples(payload, "padrino_budget_campaign_spend_usd")
     assert not _samples(payload, "padrino_budget_fraction_of_cap")
     assert not _samples(payload, "padrino_cost_drift_fraction")
@@ -372,6 +387,7 @@ def test_metrics_module_exposes_canonical_instruments() -> None:
     phase_duration_seconds.labels(ruleset="r", phase_kind="DAY_VOTE").observe(0.01)
     games_total.labels(outcome="DRAW", ruleset="r").inc()
     invalid_action_total.labels(reason="REASON").inc()
+    human_rating_firewall_violations_total.labels(league_kind="SCIENTIFIC").inc()
     api_requests_total.labels(route="/x", method="GET", status="200").inc()
     budget_global_spend_usd.set(1.0)
     budget_campaign_spend_usd.labels(campaign_id="campaign-1").set(1.0)
@@ -385,6 +401,7 @@ def test_metrics_module_exposes_canonical_instruments() -> None:
         "padrino_phase_duration_seconds",
         "padrino_games",
         "padrino_invalid_action",
+        "padrino_human_rating_firewall_violations",
         "padrino_api_requests",
         "padrino_scheduler_inflight_gauntlets",
         "padrino_budget_global_spend_usd",

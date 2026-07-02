@@ -61,7 +61,7 @@
         "The finalize still does not crash on a firewall violation (behavior preserved)."
       ],
       "notes": "Fix from code-review LOW #6. Files: src/padrino/runner/game_runner.py, observability/metrics, tests.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-323",
