@@ -75,7 +75,7 @@
         "Deterministic replay is preserved (chat is an out-of-band sidecar; redaction does not alter the hash-chained event log)."
       ],
       "notes": "Fix from code-review LOW #7. Files: src/padrino/db/retention_executor.py, tests. Consistent with US-307/US-308.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-324",

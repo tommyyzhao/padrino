@@ -46,6 +46,7 @@ from padrino.db.models import (
     Principal,
     RatingEvent,
 )
+from padrino.db.repositories import human_chat as human_chat_repo
 from padrino.db.retention import (
     GameRetentionInfo,
     GuestPrincipalRetentionInfo,
@@ -280,10 +281,10 @@ async def _anonymize_guest_principals(
     principal_ids: list[uuid.UUID],
     *,
     now: datetime,
-) -> int:
-    """Soft-delete and scrub planned abandoned guest principals."""
+) -> tuple[int, int]:
+    """Soft-delete planned abandoned guests and redact their authored chat."""
     if not principal_ids:
-        return 0
+        return 0, 0
     rows = list(
         (
             await session.execute(
@@ -295,7 +296,12 @@ async def _anonymize_guest_principals(
             )
         ).scalars()
     )
+    redacted_chat_total = 0
     for row in rows:
+        redacted_chat_total += await human_chat_repo.redact_for_principal(
+            session,
+            principal_id=row.id,
+        )
         row.deleted_at = now
         row.display_name = None
         row.ranked_handle = None
@@ -303,7 +309,7 @@ async def _anonymize_guest_principals(
         row.updated_at = now
     if rows:
         await session.flush()
-    return len(rows)
+    return len(rows), redacted_chat_total
 
 
 async def run_retention_executor(
@@ -383,11 +389,12 @@ async def run_retention_executor(
             session,
             human_plan.consent_ip_hashes_to_null,
         )
-        anonymized_total = await _anonymize_guest_principals(
+        anonymized_total, guest_chat_redacted_total = await _anonymize_guest_principals(
             session,
             human_plan.guest_principals_to_anonymize,
             now=now,
         )
+        redacted_total += guest_chat_redacted_total
 
     _logger.info(
         "retention.applied",

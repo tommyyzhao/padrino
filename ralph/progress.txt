@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Abandoned guest chat retention (US-323): reuse
+  `db.repositories.human_chat.redact_for_principal` from the retention
+  executor before soft-deleting a guest principal. The helper owns the
+  `human_chat_messages` -> `game_seats` join and filters to unredacted sidecar
+  rows, so retention counts actual new redactions while `game_events` remain
+  byte-identical.
 - Observable swallowed invariants (US-322): when a security invariant is
   intentionally swallowed to preserve terminal persistence, emit a dedicated
   low-cardinality metric beside the structured log. For human-rating firewall
@@ -5827,4 +5833,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 20 passed / 1 warning. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2987 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T06:15 PDT - US-323
+- Extended abandoned-guest retention anonymization to redact the guest's
+  authored human-chat sidecar rows via the shared
+  `human_chat.redact_for_principal` ownership join before scrubbing the
+  `Principal` row.
+- Made `redact_for_principal` count and mutate only unredacted sidecar rows, so
+  retention's `human_chat_messages_redacted` total remains idempotent and does
+  not double-count rows already handled by the age-based chat TTL pass.
+- Added a regression with an abandoned guest and an account in the same game:
+  fresh guest chat is redacted, account chat is untouched, and the paired
+  `game_events` hashes still verify byte-identically.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/human_chat.py`,
+  `src/padrino/db/retention_executor.py`,
+  `tests/db/test_human_pii_retention_executor.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_human_pii_retention_executor.py::test_abandoned_guest_retention_redacts_owned_fresh_chat_without_touching_events -q`
+  failed first with `human_chat_messages_redacted == 0`; focused GREEN same
+  command -> 1 passed. Related GREEN
+  `uv run pytest tests/db/test_human_pii_retention_executor.py -q` -> 3 passed;
+  `uv run pytest tests/api/test_human_delete_route.py tests/db/test_human_chat_sidecar.py tests/db/test_human_pii_retention_policy.py -q`
+  -> 13 passed / 5 warnings. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2988 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

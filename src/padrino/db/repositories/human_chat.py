@@ -108,7 +108,20 @@ async def redact_for_principal(
     principal_id: uuid.UUID,
 ) -> int:
     """Redact every sidecar chat row authored by ``principal_id``."""
-    rows = await list_for_principal(session, principal_id=principal_id)
+    stmt = (
+        select(HumanChatMessage)
+        .join(
+            GameSeat,
+            (GameSeat.game_id == HumanChatMessage.game_id)
+            & (GameSeat.public_player_id == HumanChatMessage.public_player_id),
+        )
+        .where(
+            GameSeat.occupant_principal_id == principal_id,
+            HumanChatMessage.redacted.is_(False),
+        )
+        .order_by(HumanChatMessage.game_id, HumanChatMessage.sequence, HumanChatMessage.id)
+    )
+    rows = list((await session.execute(stmt)).scalars())
     for row in rows:
         row.raw_text = None
         row.cleaned_text = None
