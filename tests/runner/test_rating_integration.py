@@ -15,24 +15,30 @@ ranked-league ``league_id`` + per-seat ``agent_builds``, then asserts:
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import padrino.runner.game_runner as game_runner_module
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Phase
-from padrino.core.enums import ActionType, Faction, PhaseKind, Role
+from padrino.core.enums import ActionType, Faction, LeagueKind, PhaseKind, Role
+from padrino.core.ranked_ban import RankedBanKind
+from padrino.core.ranked_eligibility import RankedEligibilityReason
 from padrino.core.rulesets import mini7_v1, sk12_v1
 from padrino.db.models import (
     GameEvent,
+    GameSeat,
     HumanRating,
     HumanRatingEvent,
     PlacementRating,
     PlacementRatingEvent,
+    RankedWriteAudit,
     Rating,
     RatingEvent,
 )
@@ -41,6 +47,9 @@ from padrino.db.repositories import (
 )
 from padrino.db.repositories import (
     games as games_repo,
+)
+from padrino.db.repositories import (
+    human_principals as human_principals_repo,
 )
 from padrino.db.repositories import (
     leagues as leagues_repo,
@@ -54,7 +63,14 @@ from padrino.db.repositories import (
 from padrino.db.repositories import (
     providers as providers_repo,
 )
+from padrino.db.repositories import ranked_bans as ranked_bans_repo
 from padrino.llm.mock import DeterministicMockAdapter
+from padrino.observability.metrics import (
+    render_prometheus_text,
+    reset_metrics,
+    text_string_to_metric_families,
+)
+from padrino.ratings.human_openskill_service import FirewallViolation
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA
 from padrino.runner.game_runner import (
     GameConfig,
@@ -62,6 +78,7 @@ from padrino.runner.game_runner import (
     _persist_terminated_event,
     run_game,
 )
+from padrino.settings import Settings
 from tests.conftest import make_town_win_script
 
 _GAME_SEED = "seed-rating-001"
@@ -84,6 +101,18 @@ def _response(action_type: ActionType, target: str | None = None) -> AgentRespon
         memory_update="",
         rationale_summary=None,
     )
+
+
+def _metric_sum(metric_name: str, required_labels: dict[str, str]) -> float:
+    payload = render_prometheus_text().decode("utf-8")
+    total = 0.0
+    for family in text_string_to_metric_families(payload):
+        if family.name != metric_name:
+            continue
+        for sample in family.samples:
+            if all(sample.labels.get(key) == value for key, value in required_labels.items()):
+                total += sample.value
+    return total
 
 
 def _phase_default(phase_id: str) -> AgentResponse:
@@ -514,6 +543,234 @@ async def test_placement_non_faction_winner_skips_scoring_after_finalizing_game(
     assert terminal_events[0].event_hash == game.event_hash_head
     assert placement_rows == []
     assert placement_events == []
+
+
+async def test_human_rating_firewall_violation_completes_terminal_game_without_ratings(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_metrics()
+    league_id, game_id, _builds_by_seat = await _seed_ranked_setup(
+        session_factory, ranked=True, hash_prefix="us293-firewall-finalize"
+    )
+    state = GameState(
+        ruleset_id=mini7_v1.RULESET_ID,
+        game_id="G-HUMAN-FIREWALL",
+        game_seed=_GAME_SEED,
+        current_phase=Phase(kind=PhaseKind.TERMINAL, day=1, round=0),
+        seats=tuple(assign_roles(_GAME_SEED, mini7_v1)),
+        day=1,
+        terminal_result="TOWN",
+        terminal_reason="TEST_TERMINAL",
+    )
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "sequence": 0,
+            "event_type": "GameTerminated",
+            "phase": "DAY_1_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "TOWN", "reason": "TEST_TERMINAL"},
+        }
+    )
+
+    async def fake_should_apply_human_ratings(
+        session: AsyncSession,
+        persistence: GamePersistence,
+        ranked: bool,
+        state: GameState,
+    ) -> bool:
+        del session, persistence, ranked, state
+        return True
+
+    async def fake_update_human_ratings_for_game(
+        *_args: object,
+        **kwargs: object,
+    ) -> list[object]:
+        league_id_arg = kwargs["league_id"]
+        assert isinstance(league_id_arg, uuid.UUID)
+        raise FirewallViolation(
+            league_id=league_id_arg,
+            league_kind=LeagueKind.SCIENTIFIC.value,
+        )
+
+    monkeypatch.setattr(
+        game_runner_module,
+        "_should_apply_human_ratings",
+        fake_should_apply_human_ratings,
+    )
+    monkeypatch.setattr(
+        game_runner_module,
+        "update_human_ratings_for_game",
+        fake_update_human_ratings_for_game,
+    )
+
+    await _persist_terminated_event(
+        GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds={},
+            league_id=league_id,
+        ),
+        stored,
+        state,
+        ranked=True,
+        day_terminated=1,
+    )
+
+    async with session_factory() as session:
+        game = await games_repo.get(session, game_id)
+        terminal_events = (
+            (
+                await session.execute(
+                    select(GameEvent).where(
+                        GameEvent.game_id == game_id,
+                        GameEvent.event_type == "GameTerminated",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        scientific_rows = (await session.execute(select(Rating))).scalars().all()
+        scientific_events = (await session.execute(select(RatingEvent))).scalars().all()
+        human_rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+
+    assert game is not None
+    assert game.status == "COMPLETED"
+    assert game.terminal_result == {
+        "winner": "TOWN",
+        "reason": "TEST_TERMINAL",
+        "day_terminated": 1,
+    }
+    assert len(terminal_events) == 1
+    assert terminal_events[0].event_hash == game.event_hash_head
+    assert scientific_rows == []
+    assert scientific_events == []
+    assert human_rows == []
+    assert human_events == []
+    assert (
+        _metric_sum(
+            "padrino_human_rating_firewall_violations",
+            {"league_kind": LeagueKind.SCIENTIFIC.value},
+        )
+        == 1.0
+    )
+    reset_metrics()
+
+
+async def test_terminal_human_rating_finalize_resolves_ranked_ban_after_game_creation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seats = assign_roles(_GAME_SEED, mini7_v1)
+    town_public_id = next(seat.public_player_id for seat in seats if seat.faction is Faction.TOWN)
+    mafia_public_id = next(seat.public_player_id for seat in seats if seat.faction is Faction.MAFIA)
+    human_public_ids = {town_public_id, mafia_public_id}
+
+    async with session_factory() as session, session.begin():
+        league = await leagues_repo.get_or_create_humans_included(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            ranked=True,
+        )
+        game = await games_repo.create(
+            session,
+            ruleset_id=mini7_v1.RULESET_ID,
+            game_seed=_GAME_SEED,
+            status="RUNNING",
+        )
+        principals: dict[str, uuid.UUID] = {}
+        for seat in seats:
+            principal_id: uuid.UUID | None = None
+            if seat.public_player_id in human_public_ids:
+                principal = await human_principals_repo.create_principal(
+                    session,
+                    kind=human_principals_repo.PRINCIPAL_KIND_ACCOUNT,
+                    display_name=None,
+                )
+                principal_id = principal.id
+                principals[seat.public_player_id] = principal.id
+            session.add(
+                GameSeat(
+                    game_id=game.id,
+                    public_player_id=seat.public_player_id,
+                    seat_index=seat.seat_index,
+                    agent_build_id=None,
+                    seat_kind="HUMAN" if principal_id is not None else "AI",
+                    occupant_principal_id=principal_id,
+                    role=seat.role.value,
+                    faction=seat.faction.value,
+                    alive=True,
+                )
+            )
+        league_id = league.id
+        game_id = game.id
+
+    banned_principal_id = principals[town_public_id]
+    eligible_principal_id = principals[mafia_public_id]
+    now = datetime(2026, 6, 27, tzinfo=UTC)
+    async with session_factory() as session, session.begin():
+        await ranked_bans_repo.issue_ban_for_principal(
+            session,
+            principal_id=banned_principal_id,
+            kind=RankedBanKind.BAN,
+            reason="manual_review_after_game_created",
+            created_by="admin-key",
+            now=now,
+        )
+
+    state = GameState(
+        ruleset_id=mini7_v1.RULESET_ID,
+        game_id="G-HUMAN-BAN-FINALIZE",
+        game_seed=_GAME_SEED,
+        current_phase=Phase(kind=PhaseKind.TERMINAL, day=1, round=0),
+        seats=tuple(seats),
+        day=1,
+        terminal_result="TOWN",
+        terminal_reason="TEST_TERMINAL",
+    )
+    event_log = EventLog()
+    stored = event_log.append(
+        {
+            "sequence": 0,
+            "event_type": "GameTerminated",
+            "phase": "DAY_1_VOTE",
+            "visibility": "PUBLIC",
+            "actor_player_id": None,
+            "payload": {"winner": "TOWN", "reason": "TEST_TERMINAL"},
+        }
+    )
+
+    await _persist_terminated_event(
+        GamePersistence(
+            session_factory=session_factory,
+            game_id=game_id,
+            agent_builds={},
+            league_id=league_id,
+            settings=Settings(padrino_ranked_human_rating_enabled=True),
+        ),
+        stored,
+        state,
+        ranked=True,
+        day_terminated=1,
+    )
+
+    async with session_factory() as session:
+        human_rows = (await session.execute(select(HumanRating))).scalars().all()
+        human_events = (await session.execute(select(HumanRatingEvent))).scalars().all()
+        audit_rows = (await session.execute(select(RankedWriteAudit))).scalars().all()
+
+    assert {row.human_player_id for row in human_rows} == {str(eligible_principal_id)}
+    assert {event.human_player_id for event in human_events} == {str(eligible_principal_id)}
+    refused = [row for row in audit_rows if row.decision == "REFUSED"]
+    assert len(refused) == 1
+    assert refused[0].human_player_id == str(banned_principal_id)
+    assert refused[0].reason == RankedEligibilityReason.RANKED_BANNED.value
+    assert {row.human_player_id for row in audit_rows if row.decision == "APPLIED"} == {
+        str(eligible_principal_id)
+    }
 
 
 async def test_unranked_game_skips_rating_updates(

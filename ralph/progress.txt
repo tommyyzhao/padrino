@@ -3,6 +3,263 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Write-time ranked-ban defense (US-325): resolve active ranked-banned
+  principal ids in the impure runner shell from persisted `game_seats`, inject
+  that set into `update_human_ratings_for_game`, and let the writer record a
+  per-principal `REFUSED/ranked_banned` audit row before excluding the seat
+  from HumanRating/HumanRatingEvent writes. Use the game row's persisted
+  `completed_at` as the injected instant in runner finalization; do not import
+  `datetime` into `runner/game_runner.py`, which has a no-wall-clock guard.
+- ORM model export completeness (US-324): keep `src/padrino/db/models.py`
+  `__all__` synchronized with every concrete `Base` subclass defined in the
+  module. The regression belongs in `tests/db/test_models.py` and should
+  introspect `vars(padrino.db.models)` with `issubclass(value, Base)` plus a
+  `value.__module__ == models.__name__` guard, so future model additions fail
+  closed until exported.
+- Abandoned guest chat retention (US-323): reuse
+  `db.repositories.human_chat.redact_for_principal` from the retention
+  executor before soft-deleting a guest principal. The helper owns the
+  `human_chat_messages` -> `game_seats` join and filters to unredacted sidecar
+  rows, so retention counts actual new redactions while `game_events` remain
+  byte-identical.
+- Observable swallowed invariants (US-322): when a security invariant is
+  intentionally swallowed to preserve terminal persistence, emit a dedicated
+  low-cardinality metric beside the structured log. For human-rating firewall
+  finalize skips, use `record_human_rating_firewall_violation` with only
+  `league_kind` as the label; do not put game ids or league ids into the metric.
+- OAuth verified-email parsing (US-321): keep provider claim coercion
+  fail-closed in `api/oauth.py`. `email_verified` is true only for bool `True`
+  or a stripped lowercase string of `true` / `1`; integer `1`, `yes`, missing,
+  `None`, and every other value stay false so ranked eligibility remains
+  conservative.
+- Manual rollback AI-takeover parity (US-320): thread `GameSeat.seat_kind`
+  into `core/anticheat/rating_rollback.py` instead of inferring takeover from
+  occupant ids. In rollback recompute, every `AI_TAKEOVER` seat is a transient
+  `INITIAL_MU` / `INITIAL_SIGMA` team placeholder; if the target is the takeover
+  seat, score the target through the pure forfeit-loss helper (`ranks=[0, 1]`)
+  before the normal team/DRAW branch. Stamp `HumanRatingEvent.created_at` from
+  the same injected `now` used by the write path so rollback can reconstruct
+  `last_game_at` from included audit rows.
+- Savepoint-isolated telemetry (US-319): when ranked human ELO writes a
+  best-effort side effect inside the same outer transaction, wrap only that
+  side-effect repository call in `async with session.begin_nested()` and keep
+  the broad outer exception logger. Let DB exceptions propagate out of the
+  savepoint context so SQLAlchemy rolls back the side effect while already
+  flushed `HumanRatingEvent` rows remain committable.
+- No-AI-strength-of-schedule firewall (US-318): keep ranked human ELO AI seats
+  as transient `INITIAL_MU` / `INITIAL_SIGMA` OpenSkill ratings in
+  `ratings/human_openskill_service.py`. Do not select or mutate scientific
+  `Rating` / `RatingEvent` rows from that writer; regression coverage can seed
+  real AI `agent_build_id` seats plus scientific ladder rows and install a
+  SQL statement listener around `update_human_ratings_for_game` to prove those
+  tables are untouched while human deltas remain identical across strong/weak
+  persisted AI opponents.
+- Provisional human leaderboard ranks (US-317): keep the exclusion centralized in
+  `ratings/public_leaderboard.py::_rank_cards`, which builds numeric ranks only
+  from `not card.provisional` rows and leaves provisional cards visible with
+  `rank=None`. Use `DEFAULT_PROVISIONAL_GAMES` as the single threshold source;
+  writer-side forfeit losses count by incrementing `HumanRating.games`, while
+  the read path simply treats the stored game count as the graduation tally.
+- Ranked AI-takeover forfeits (US-316): keep `GameSeat.occupant_principal_id`
+  for provenance, but decide forfeit strictly from
+  `GameSeat.seat_kind == AI_TAKEOVER` in
+  `ratings/human_openskill_service.py`. Represent the takeover replacement as
+  a transient initial OpenSkill seat in the actual faction team, and persist
+  the abandoned human through a separate deterministic loss update so draw
+  freezes and faction wins never credit the rage-quit principal. This preserves
+  normal team math for non-forfeiting humans and keeps `HumanRatingEvent`
+  auditability/idempotency intact.
+- Human leaderboard decay (US-315): apply `project_decayed_display` only at
+  public card read time in `ratings/public_leaderboard.py`, with an injected
+  `now` normalized to UTC. Keep `HumanRating` persisted values untouched, pass
+  decayed `mu`/`sigma`/`conservative_score` into `_human_openskill_card`, and
+  compose the human cache token as rating updated/count + quarantine + handle +
+  consent + decay day bucket so daily idle-score changes do not collide with
+  the AI/placement/solo cache parts.
+- Manual ranked rollback (US-301): reserve the missing `0061` migration by
+  inserting it between `0060` and `0062`, then update only `0062+` lineage
+  tests; never edit migrations `<=0060`. Keep the recompute pure in
+  `core/anticheat/rating_rollback.py` over ordered game projections, with AI
+  seats reconstructed as transient initial ratings and other humans using their
+  persisted per-game `before_*` values. The impure rollback shell should update
+  only the current `HumanRating` aggregate, leave `HumanRatingEvent` and
+  `game_events` append-only/byte-identical, and use unique
+  `(principal_id, game_id)` exclusions plus `(principal_id, exclusion_hash)`
+  audit rows so rerunning the same exclusion set is idempotent.
+- Admin anti-cheat review (US-313): keep review endpoints read-only under
+  `api/routes/admin_anticheat.py` with `require_admin` at the router prefix.
+  Resolve public human identity by selecting only `Principal.id` +
+  `Principal.ranked_handle`, falling back to
+  `derive_default_ranked_handle`; never select `display_name`. Sanitize
+  evidence recursively so raw IP-shaped values are redacted while existing
+  `*_hash` fields remain inspectable, and snapshot rating/flag/game/signal rows
+  around GET calls to prove the surface is read-only.
+- Ranked advisory anti-cheat (US-312): keep signal scoring pure in
+  `core/anticheat/signals.py` over `RankedSignalRow` projections and an
+  injected integer `now`; the impure
+  `ratings/anticheat_scoring_service.py` converts ORM rows and persists only
+  `ranked_flags` off the rating hot path. Thresholds live in `Settings`, and
+  `ranked_flags` idempotency uses a deterministic `evidence_hash` unique key.
+- Identity leak regression guards (US-299): seed real `Principal`,
+  `OAuthIdentity`, and `RankedBan` rows with unique sentinel display names,
+  ranked handles, emails, email hashes, and ban metadata, then assert absence
+  over the serialized route body/SSE text. For terminal reveal, allow AI model
+  identity fields (`provider`, `model_name`, model `display_name`,
+  `agent_build_id`) but assert human sentinel values and ranked-ban/eligibility
+  field names are absent.
+- Dashboard legal consent (US-309): fetch `/legal/documents/{kind}` as the
+  source of display text, version labels, and client echo hashes. Base and
+  ranked consent POST bodies should carry `content_hashes` copied from those
+  served documents for observability/testability, while the backend still
+  stores its registry hash as the authority. For 412 `consent_required` from a
+  route handoff, redirect with an explicit home re-prompt marker and let the
+  home card reload the current document versions instead of surfacing a generic
+  queue error.
+- Human PII retention (US-308): keep the planner pure in `db/retention.py`
+  over lightweight row projections and an injected `now`. Human PII uses a
+  strict `< cutoff` TTL boundary (unlike the older game-bank inclusive cutoff).
+  The guarded `retention_executor` owns DB reads/writes under the existing
+  enable + dry-run flags, redacts chat sidecars, nulls consent IP hashes, and
+  soft-deletes/scrubs abandoned guest principals without selecting or mutating
+  `HumanRating` rows. The default chat TTL is anchored to
+  `DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS` in `legal.documents` so Settings and
+  the served `RANKED:CHAT_RETENTION` consent text stay aligned by default.
+- GDPR delete/anonymization (US-307): keep the stable tombstone token pure in
+  `core/gdpr_delete.py` as a deterministic UUID-shaped value. The impure route
+  allocates the first token that does not collide with an existing `Principal`,
+  redacts chat through the `human_chat_messages` -> `game_seats` ownership join,
+  nulls consent `source_ip_hash`, and tombstones `HumanRating` /
+  `HumanRatingEvent` identifiers while leaving `game_events` byte-identical.
+  Deleted principals must be filtered explicitly from human leaderboard entity
+  resolution and skipped by terminal ranked writes as transient/unrated seats.
+- GDPR self-export (US-306): keep the bundle assembler pure in
+  `core/gdpr_export.py` over already-scoped row projections. The impure route
+  owns all DB reads, enumerates chat through the `human_chat_messages` ->
+  `game_seats` join on `(game_id, public_player_id)` for the caller's
+  `occupant_principal_id`, and passes sensitive fields (`session_hash`,
+  `source_ip_hash`) only as strip-inputs. Core modules cannot import
+  `datetime`; treat fetched timestamps as opaque values and sort via
+  `isoformat()` when present.
+- Human rating decay projection (US-314): keep read-side human rating decay
+  pure in `ratings/provisional_and_decay.py` via `project_decayed_display`.
+  Inject `now`, use the human-specific `HUMAN_RATING_DECAY_IDLE_DAYS` constant
+  instead of the model-ladder `DEFAULT_DECAY_IDLE_DAYS`, and never mutate
+  persisted `HumanRating` rows when projecting stale display scores.
+- Ranked telemetry capture (US-311): capture request-scoped metadata at ranked
+  lobby launch, not in the decoupled human-lane worker. Store only
+  `Game.ranked_source_ip_hash`, then have the ranked human ELO writer append one
+  `RankedGameSignal` only after a real `HumanRatingEvent` insert. Signal insert
+  failures are best-effort/log-only and must never change rating rows.
+- Strangers-only ranked launch (US-310): keep the pure invariant in
+  `core/lobby/strangers_only.py` over already-resolved launch facts
+  (`lobby_is_ranked`, `human_seat_count`). The impure launch handoff loads the
+  lobby's Humans-Included league and concrete `LobbySeat` layout, calls the
+  pure guard before curated AI autofill or `Game` creation, and translates
+  `RankedSeatingViolation.reason` directly to the 409 machine token. There is
+  no human-seating autofill layer; `core/lobby/autofill.py` only fills AI seats.
+- Ranked consent withdrawal (US-305): keep withdrawal append-only as a
+  `HumanConsent` marker row with `document_kind == "RANKED_WITHDRAWN"` bound to
+  the current `RANKED` document hash. Recency lives in
+  `human_consents.active_ranked_withdrawn_principal_ids`: a withdrawal stays
+  active until every ranked purpose has a current acceptance newer than the
+  withdrawal (use the minimum latest purpose timestamp, not any one row). The
+  human ELO writer treats active-withdrawn seats as transient unrated seats
+  before `get_or_create_human_rating`, and the public human ladder filters the
+  same predicate while including an opaque consent-history token in the human
+  cache part.
+- Ranked lobby eligibility gate (US-291): keep the impure fact resolver in
+  `api/ranked_eligibility.py` as a read-only composer over principal kind,
+  OAuth verified-email, base/ranked consent, active ranked ban, and settings;
+  pass those facts into the pure predicate before `POST /lobbies` performs
+  admission, `get_or_create_humans_included(ranked=True)`, or any lobby writes.
+  The route ordering is integrity 422 first, eligibility 403 second, then the
+  existing casual/admission/materialization path.
+- Purpose-segmented ranked consent (US-304): keep one server-authored `RANKED`
+  legal document as the content/hash authority, but store one append-only
+  `HumanConsent` row per ranked purpose (`RANKED:PERSISTENT_RATING`,
+  `RANKED:PUBLIC_HANDLE`, `RANKED:CHAT_RETENTION`,
+  `RANKED:ANTICHEAT_PROFILING`). `has_current_ranked_consent` composes current
+  base TOS/PRIVACY/AGE consent plus all four current ranked-purpose rows; a
+  ranked document body change invalidates only the ranked-purpose rows.
+- Content-hash-bound consent (US-303): keep the server legal-document registry
+  as the only authority for `HumanConsent.document_version` and
+  `HumanConsent.content_hash`. The API may continue returning
+  `required_versions` as version labels for client compatibility, but
+  `has_current_consent` must compare stored hashes to current registry hashes.
+  Null `content_hash` rows are intentionally stale and should never be
+  backfilled with guessed hashes; re-acceptance appends fresh rows.
+- Legal document registry (US-302): keep content hashing in pure core
+  (`core/legal_documents.py`) with a documented normalization rule, and keep
+  product-authored document bodies in the server registry
+  (`padrino.legal.documents`). Public routes should serve the body and
+  `content_hash` computed from that same registry; future consent writes should
+  treat this server registry as authoritative rather than trusting settings-only
+  dates or client-computed hashes.
+- Ranked ban primitive (US-300): keep the pure predicate in
+  `core/ranked_ban.py` typed over injected comparable instants, not
+  `datetime`, so the pure-core firewall stays closed. The DB row stores
+  `principal_id` plus one nullable sha256 `email_hash` derived from verified
+  OAuth email (`strip().lower()` before hashing), never raw email. Admin routes
+  are the only writer; route code rejects guest/human-cookie auth via
+  `require_admin`, and repository resolution matches both principal id and any
+  verified-email hash for re-signup inheritance.
+- Human ladder handles (US-298): the public human leaderboard must resolve
+  `PublicEntity.display_name` from `Principal.ranked_handle`, falling back to
+  `derive_default_ranked_handle(principal_id)` when no handle is claimed. Keep
+  `entity_id` as the stable `sha256("human|<id>")[:32]` client reference. The
+  human cache part should compose tokens instead of replacing prior tokens:
+  rating updated/count + quarantine max + an opaque digest of ranked-handle
+  state, never raw principal ids or raw display names in `cache_tag`.
+- Ranked handle claims (US-297): keep name policy pure in
+  `core/ranked_handle_policy.py` with injected profanity/reserved lists. Store
+  the display handle and a lowercase normalized shadow key on `Principal`, and
+  let the repository claim through a savepoint-backed unique index so equivalent
+  case-insensitive collisions surface as 409 without hardcoding moderation data
+  in core. Deterministic defaults should be derived from a salted hash of the
+  principal id and never include `display_name`, `str(uuid)`, or `uuid.hex`.
+- OAuth verified-email signal (US-296): keep provider email facts on
+  `OAuthIdentity`, not `Principal`. `_user_info_from_payload` should carry the
+  raw email claim and coerce `email_verified` to `False` unless the provider
+  sends a real boolean. `find_or_create_account` owns normalization
+  (`strip().lower()` with blank -> `None`) and must refresh the existing
+  identity row on repeat sign-in before returning the account. Do not add an
+  email uniqueness constraint; multi-provider merge remains out of scope.
+- Human rating quarantine (US-295): keep `HumanRating.quarantined_at` as a
+  reversible read-side exclusion marker. `ranked-audit` should set only that
+  field for untrusted rows, never mutate mu/sigma/games or delete
+  `HumanRatingEvent` rows. The public human ladder must filter
+  `HumanRating.quarantined_at.is_(None)`, and `_human_rating_cache_part` must
+  include `max(quarantined_at)` so quarantine flips invalidate cached cards
+  without touching `updated_at`.
+- Ranked write provenance (US-294): keep `ranked_write_audit` writes in the
+  same DB transaction as the human-rating decision they describe. Insert
+  APPLIED audit rows only after `HumanRatingEvent` is successfully claimed and
+  before mutating `HumanRating`; insert a single REFUSED row for a genuine
+  ranked HUMANS_INCLUDED flag-off short-circuit before any `HumanRating` row is
+  created. Use `RankedEligibilityReason` enum values for audit `reason`, not
+  ad-hoc strings. Older migration tests that assert a single-revision delta
+  should upgrade to that revision explicitly, not symbolic `head`.
+- Human rating idempotency (US-292): for ranked human ELO, atomically claim the
+  per-seat `HumanRatingEvent` with dialect-specific `INSERT ... ON CONFLICT DO
+  NOTHING` before mutating `HumanRating`. If an event already exists or the
+  insert loses the conflict, skip the row update entirely; for partial retries,
+  use the existing event's `before_mu` / `before_sigma` as the per-game team
+  baseline so missing seats complete without re-applying already-rated seats.
+  Runner terminal persistence must pass the resolved kill-switch flag from
+  `GamePersistence.settings` / `get_settings()` into the writer.
+- Ranked eligibility predicate (US-290): keep ranked human switch-on logic in
+  `padrino.core.ranked_eligibility` as pure data-in/data-out composition over
+  shell-resolved facts. The deterministic reason order is kill-switch,
+  account/non-guest, verified email, base consent, ranked consent, ranked ban,
+  then HUMANS_INCLUDED+ranked league; tokens are machine-readable strings and
+  `RankedConsentFacts` is the forward-compatible legal-lens slot.
+- Ranked human-rating kill-switch (US-289): keep
+  `padrino_ranked_human_rating_enabled` as the single default-OFF `Settings`
+  flag. API routes should read it through request-scoped `auth_settings`
+  falling back to `get_settings()`, ratings code should accept an injected
+  settings object or use `get_settings()`, and both accessors should fail
+  closed with missing/non-Settings objects. Do not import settings from
+  `src/padrino/core/**`; pure eligibility receives the already-resolved boolean.
 - Human-lane smoke harness (US-288): keep deterministic human-lane AI mocking
   behind `PADRINO_HUMAN_LANE_MOCK_AI` / `padrino_human_lane_mock_ai` and wire it
   through the existing `ai_adapter_factory` seam, not through the production
@@ -4584,3 +4841,1086 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   10 deselected. Frontend gates: `pnpm -C web/dashboard lint`;
   `pnpm -C web/dashboard check` -> 0 errors / 0 warnings;
   `pnpm -C web/dashboard test:e2e` -> 54 passed / 3 skipped.
+
+## 2026-06-27T09:46 PDT - US-289
+- Added the default-OFF `padrino_ranked_human_rating_enabled` settings flag as
+  the server-authoritative ranked human ELO kill-switch.
+- Added thin read accessors in the lobby route shell and human OpenSkill service
+  so the same injected `Settings` instance is observable from API and ratings
+  code without new global state.
+- Locked fail-closed behavior and the no-core-settings-import invariant in
+  `tests/test_settings.py`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/settings.py`,
+  `src/padrino/api/routes/lobbies.py`,
+  `src/padrino/ratings/human_openskill_service.py`, `tests/test_settings.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest tests/test_settings.py`
+  failed first on missing route/rating accessors; focused GREEN
+  `uv run pytest tests/test_settings.py` -> 30 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2714
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-27T10:22 PDT - US-290
+- Added `padrino.core.ranked_eligibility` with frozen input/decision types,
+  machine-readable `RankedEligibilityReason` tokens, and a fail-closed
+  `evaluate_ranked_eligibility` predicate for the ranked human ELO switch-on
+  gate.
+- Added a typed `RankedConsentFacts` slot so future content-hash/purpose
+  consent stories can extend ranked consent facts without changing the predicate
+  signature.
+- Locked the truth table, deterministic reason precedence, None/missing-input
+  fail-closed behavior, and module import purity in core tests.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/ranked_eligibility.py`,
+  `tests/core/test_ranked_eligibility.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_ranked_eligibility.py` failed first on missing
+  `padrino.core.ranked_eligibility`; focused GREEN
+  `uv run pytest tests/core/test_ranked_eligibility.py` -> 21 passed;
+  `uv run pytest tests/core/test_purity.py tests/core/test_no_wallclock.py` ->
+  116 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2738 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-27T10:47 PDT - US-292
+- Made `update_human_ratings_for_game` fail closed on the write-time ranked
+  human ELO kill-switch before resolving league/game metadata or creating
+  rating rows.
+- Made per-game human ELO writes idempotent by claiming the unique
+  `HumanRatingEvent` before mutating `HumanRating`; duplicate and partial-retry
+  reruns skip already-rated seats and complete missing seats without double
+  incrementing games or moving mu/sigma twice.
+- Threaded the resolved settings flag through terminal persistence so flipping
+  `padrino_ranked_human_rating_enabled` off stops in-flight ranked human game
+  finalization writes.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/runner/game_runner.py`, `tests/ratings/test_human_ranked_elo.py`,
+  `tests/ratings/test_segregation.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_writes_human_rating_rows_only tests/ratings/test_segregation.py::test_ranked_humans_included_terminal_game_kill_switch_off_writes_zero_rows -q`
+  failed first on missing write-time flag, duplicate unique-event conflict, and
+  runner switch-off behavior. Focused GREEN: same command -> 8 passed. Backend
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2743
+  passed / 41 skipped / 10 deselected.
+
+## 2026-06-27T11:29 PDT - US-293
+- Added a typed `FirewallViolation` for ranked human ELO writes that are handed
+  a non-`HUMANS_INCLUDED` league, logging `league_id` and `kind` before raising
+  and before any human-rating rows are created.
+- Made terminal persistence catch that specific firewall violation as an
+  unrated finalize error so the game still commits `COMPLETED` with no human or
+  scientific rating writes.
+- Locked the import-graph invariant that `human_openskill_service.py` imports
+  only shared constants from the scientific OpenSkill module, and extended the
+  ranked human ELO test to assert no `HUMANS_INCLUDED` rows ever attach to a
+  `CANONICAL_TEAM` rating context.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/ratings/test_human_ranked_elo.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py tests/runner/test_rating_integration.py -q`
+  failed first on missing `FirewallViolation`; focused GREEN same command -> 16
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2746 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-27T10:33 PDT - US-294
+- Added Alembic migration `0056_ranked_write_audit` and the ORM model for
+  append-only ranked human ELO write provenance rows, with APPLIED and REFUSED
+  uniqueness indexes for idempotent reruns.
+- Wired `update_human_ratings_for_game` to write APPLIED audit rows alongside
+  newly inserted `HumanRatingEvent` rows and a REFUSED `ranked_disabled` row
+  when a ranked HUMANS_INCLUDED league is short-circuited by the kill switch.
+- Added coverage for migration round-trip/head chaining, applied/refused audit
+  rows, duplicate applied reruns, and transaction rollback with the rating
+  write.
+- Updated the existing `0055` head assertion for the new `0056` head, and made
+  the older `0054` single-revision table-delta test target `0054` instead of
+  symbolic `head`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/migrations/versions/0056_ranked_write_audit.py`,
+  `src/padrino/db/models.py`, `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `tests/db/test_migration_0054_budget_reservations.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migrations.py`, `tests/ratings/test_ranked_write_audit.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0056_ranked_write_audit.py tests/db/test_migration_0055_llm_call_pricing_basis.py tests/ratings/test_ranked_write_audit.py`
+  failed first on missing `RankedWriteAudit`; focused GREEN same command -> 9
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2754 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-27T14:24 PDT - US-295
+- Added Alembic migration `0057_human_rating_quarantine` and the ORM
+  `HumanRating.quarantined_at` marker for reversible quarantine of historical
+  ranked human-rating rows.
+- Added `padrino.ratings.ranked_audit.audit_ranked_human_ratings` and registered
+  `padrino ranked-audit` on the existing `src/padrino/cli.py` Typer app. The
+  audit quarantines ranked HUMANS_INCLUDED rows whose events lack clean APPLIED
+  provenance, or whose principal is not a live account, while preserving rating
+  values and event rows.
+- Updated the public human ladder to filter quarantined rows and to include
+  `max(HumanRating.quarantined_at)` in the human cache token so a quarantine
+  flip invalidates cached cards without touching `updated_at`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/cli.py`,
+  `src/padrino/db/migrations/versions/0057_human_rating_quarantine.py`,
+  `src/padrino/db/models.py`, `src/padrino/ratings/public_leaderboard.py`,
+  `src/padrino/ratings/ranked_audit.py`,
+  `tests/cli/test_ranked_audit_cli.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/ratings/test_human_rating_quarantine.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0057_human_rating_quarantine.py tests/ratings/test_human_rating_quarantine.py tests/cli/test_ranked_audit_cli.py tests/db/test_migration_0055_llm_call_pricing_basis.py tests/db/test_migration_0056_ranked_write_audit.py`
+  failed first on missing `padrino.ratings.ranked_audit`; focused GREEN same
+  command -> 11 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2763 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-27T10:57 PDT - US-296
+- Added `OAuthUserInfo.email` / `email_verified` extraction, with non-bool or
+  missing `email_verified` claims coerced to `False`.
+- Added Alembic migration `0058_oauth_identity_email_verified` and the
+  `OAuthIdentity.email` / `email_verified` ORM columns, without adding any
+  uniqueness constraint on raw email.
+- Updated OAuth account creation so create-new, guest-upgrade, and repeat
+  sign-in paths persist normalized email and refresh the provider's latest
+  verified-email assertion on the existing identity row.
+- Added OAuth tests for claim extraction defaults, create/upgrade persistence,
+  repeat sign-in refresh, unverified email, and app-log capture that excludes
+  the provider email claim.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/oauth.py`,
+  `src/padrino/api/routes/human.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/oauth_identities.py`,
+  `src/padrino/db/migrations/versions/0058_oauth_identity_email_verified.py`,
+  `tests/api/test_oauth_signin.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_oauth_signin.py tests/db/test_migration_0058_oauth_identity_email_verified.py -q`
+  failed first on missing OAuth email fields and missing migration `0058`.
+  Focused GREEN:
+  `uv run pytest tests/api/test_oauth_signin.py tests/db/test_migration_0058_oauth_identity_email_verified.py tests/db/test_migration_0055_llm_call_pricing_basis.py tests/db/test_migration_0056_ranked_write_audit.py tests/db/test_migration_0057_human_rating_quarantine.py -q`
+  -> 57 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2778 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T11:08 PDT - US-297
+- Added pure `validate_ranked_handle` policy with stable reason tokens for
+  `too_short`, `too_long`, `bad_charset`, `profane`, `reserved`, and `ok`.
+  Profanity and reserved/impersonation lists are injected at the call site.
+- Added Alembic migration `0059_principal_ranked_handle` and ORM columns
+  `Principal.ranked_handle` / `ranked_handle_normalized`, with a portable
+  unique index over the normalized shadow column.
+- Added `claim_ranked_handle` plus deterministic `Player-<hash>` defaults in
+  `human_principals`; duplicate normalized handles raise a 409-shaped
+  `RankedHandleCollisionError`.
+- Updated migration head assertions in tests only for the new `0059` head; no
+  shipped migration `<=0058` was edited.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/ranked_handle_policy.py`,
+  `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0059_principal_ranked_handle.py`,
+  `src/padrino/db/repositories/human_principals.py`,
+  `tests/core/test_ranked_handle_policy.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_ranked_handle.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_ranked_handle_policy.py tests/db/test_migration_0059_principal_ranked_handle.py tests/db/test_ranked_handle.py`
+  failed first on missing `ranked_handle_policy` and repository claim API;
+  focused GREEN same command -> 14 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2797
+  passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
+  touch `web/dashboard`.
+
+## 2026-06-27T11:18 PDT - US-298
+- Migrated public human leaderboard entities from `Principal.display_name` to
+  `Principal.ranked_handle`, with deterministic default handles for unclaimed
+  accounts and the existing stable `sha256("human|<id>")[:32]` entity ids.
+- Extended `_human_rating_cache_part` with an opaque ranked-handle state digest
+  so handle changes invalidate cached human cards without exposing raw
+  principal ids through `cache_tag`.
+- Added regression coverage proving raw display names and raw principal UUIDs
+  are absent from serialized public leaderboard JSON, while handle updates
+  appear on the next read.
+- Updated existing human leaderboard/quarantine tests to expect ranked handles
+  or deterministic defaults rather than raw display names.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `tests/ratings/test_public_leaderboard_human_handle.py`,
+  `tests/ratings/test_human_rating_quarantine.py`,
+  `tests/api/test_public_routes.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py` failed
+  first on raw `display_name` leakage; focused GREEN
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py tests/ratings/test_human_rating_quarantine.py tests/api/test_public_routes.py -q`
+  -> 22 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2800 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T11:36 PDT - US-300
+- Added pure `is_ranked_banned` over `RankedBanSnapshot`, with injected clock
+  values and no `datetime` import under core.
+- Added Alembic migration `0060_ranked_ban`, ORM model `RankedBan`, and
+  repository helpers that issue/lift bans and resolve active bans by principal
+  id OR the sha256 hash of any verified OAuth email on the account.
+- Extended the existing admin router with `POST /admin/ranked-bans` and
+  `POST /admin/ranked-bans/{ban_id}/lift`; API-key admin auth is required, and
+  human-session cookies alone do not grant admin scope.
+- Added regression coverage for no raw email storage, re-signup inheritance by
+  email hash, admin/non-admin auth, ranked eligibility failing with
+  `ranked_banned`, and a static guard that only the admin route/repository can
+  create `RankedBan` rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/ranked_ban.py`,
+  `src/padrino/api/routes/admin.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0060_ranked_ban.py`,
+  `src/padrino/db/repositories/ranked_bans.py`,
+  `tests/core/test_ranked_ban.py`,
+  `tests/api/test_ranked_ban_admin.py`,
+  `tests/db/test_migration_0060_ranked_ban.py`,
+  `tests/db/test_ranked_bans.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_migrations.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_ranked_ban.py tests/db/test_migration_0060_ranked_ban.py tests/db/test_ranked_bans.py tests/api/test_ranked_ban_admin.py -q`
+  failed first on missing `padrino.core.ranked_ban` / `RankedBan`; focused
+  GREEN same command -> 15 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2821
+  passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
+  touch `web/dashboard`.
+
+## 2026-06-27T11:44 PDT - US-302
+- Added pure legal-document normalization and sha256 content hashing under
+  `src/padrino/core/legal_documents.py`, with line-ending and trailing
+  whitespace normalization pinned by tests and covered by the core purity /
+  no-wallclock firewalls.
+- Added a server-owned legal document registry for TOS and PRIVACY, both tagged
+  with version labels and bodies containing the 16+ requirement, MVP/no-warranty
+  disclaimer, and explicit no-cash-prizes statement.
+- Added public `GET /legal/documents` and `GET /legal/documents/{kind}` routes,
+  mounted on the public surface, returning body + version label + content hash
+  computed from the served body.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/legal_documents.py`,
+  `src/padrino/legal/__init__.py`, `src/padrino/legal/documents.py`,
+  `src/padrino/api/routes/legal.py`, `src/padrino/api/app.py`,
+  `tests/core/test_legal_document_hash.py`,
+  `tests/api/test_legal_documents_route.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_legal_document_hash.py tests/api/test_legal_documents_route.py -q`
+  failed first on missing `padrino.core.legal_documents`; focused GREEN same
+  command -> 6 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2831 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T11:58 PDT - US-303
+- Added nullable `human_consents.content_hash` via Alembic revision
+  `0062_human_consent_content_hash`, chained after the current `0060` head.
+- Made the consent shell resolve version labels and content hashes from the
+  server-owned legal document registry, and made current-consent checks compare
+  stored hashes rather than settings date strings.
+- Added the age self-attestation to the legal registry so every required
+  consent kind has a server-owned content hash.
+- Locked append-only behavior for stale null-hash rows and body-change
+  re-prompt behavior in focused API/repository tests.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_consent.py`,
+  `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0062_human_consent_content_hash.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/legal/documents.py`, `tests/api/test_consent_content_hash.py`,
+  `tests/api/test_consent_gate.py`, `tests/api/test_legal_documents_route.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_migration_0060_ranked_ban.py`,
+  `tests/db/test_migration_0062_human_consent_content_hash.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_consent_content_hash.py tests/db/test_migration_0062_human_consent_content_hash.py -q`
+  failed first on missing registry-backed `AGE_GATE`, missing monkeypatch seam,
+  missing `0062`, and missing ORM `content_hash`; focused GREEN same command ->
+  6 passed. Related GREEN
+  `uv run pytest tests/api/test_consent_gate.py tests/api/test_consent_content_hash.py tests/api/test_legal_documents_route.py tests/db/test_migration_0055_llm_call_pricing_basis.py tests/db/test_migration_0056_ranked_write_audit.py tests/db/test_migration_0057_human_rating_quarantine.py tests/db/test_migration_0058_oauth_identity_email_verified.py tests/db/test_migration_0059_principal_ranked_handle.py tests/db/test_migration_0060_ranked_ban.py tests/db/test_migration_0062_human_consent_content_hash.py -q`
+  -> 33 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2839 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T12:09 PDT - US-304
+- Added a server-authored `RANKED` legal document with an independent version
+  label/content hash and public legal-document route coverage.
+- Added four purpose-segmented ranked consent kinds, stored as distinct
+  append-only `human_consents` rows bound to the current `RANKED` document hash.
+- Added ranked consent helpers and `/human/ranked-consent` status/record routes;
+  `has_current_ranked_consent` requires current base consent plus all four
+  ranked purposes, and `enforce_ranked_consent` fails with HTTP 412 otherwise.
+- Locked the base-vs-ranked gap and ranked-document re-prompt behavior in API
+  tests without touching the lobby ranked boolean path.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_consent.py`,
+  `src/padrino/api/routes/human.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/legal/__init__.py`, `src/padrino/legal/documents.py`,
+  `tests/api/test_legal_documents_route.py`,
+  `tests/api/test_ranked_consent_gate.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_ranked_consent_gate.py tests/api/test_legal_documents_route.py -q`
+  failed first on missing ranked legal document, ranked consent helpers, and
+  `/human/ranked-consent`; focused GREEN same command -> 7 passed. Related
+  GREEN
+  `uv run pytest tests/api/test_consent_gate.py tests/api/test_consent_content_hash.py tests/api/test_legal_documents_route.py tests/api/test_ranked_consent_gate.py -q`
+  -> 17 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2844 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T12:20 PDT - US-291
+- Added `resolve_ranked_eligibility` in the API shell to read principal kind,
+  OAuth verified-email state, base consent, ranked consent, active ranked ban,
+  and the ranked kill-switch into the existing pure
+  `RankedEligibilityInputs`.
+- Gated `POST /lobbies` for `ranked:true` by evaluating the pure predicate
+  before admission, ranked Humans-Included league creation, or lobby writes;
+  denials return HTTP 403 with the predicate's machine-readable reason token.
+- Preserved the existing integrity acknowledgement ordering as HTTP 422 before
+  eligibility, and left the casual `ranked:false` path guest/unverified-friendly.
+- Updated prior ranked-lobby tests that assumed a guest could author ranked
+  state; added focused coverage for flag-off, guest, missing consent,
+  unverified email, ranked ban, soft-delete, and successful verified/consented
+  creation.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/ranked_eligibility.py`,
+  `src/padrino/api/routes/lobbies.py`,
+  `tests/api/test_lobbies_ranked_gate.py`,
+  `tests/api/test_lobby_create.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_lobbies_ranked_gate.py tests/api/test_lobby_create.py -q`
+  failed first on missing `padrino.api.ranked_eligibility`; focused GREEN same
+  command -> 28 passed. Related GREEN
+  `uv run pytest tests/test_settings.py tests/api/test_lobbies_ranked_gate.py tests/api/test_lobby_create.py tests/api/test_ranked_consent_gate.py tests/api/test_ranked_ban_admin.py tests/db/test_ranked_bans.py -q`
+  -> 68 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2856 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T12:35 PDT - US-305
+- Added append-only ranked consent withdrawal via
+  `POST /human/consent/ranked/withdraw`, recording a `RANKED_WITHDRAWN`
+  `HumanConsent` marker row without deleting or updating prior consent rows.
+- Made `has_current_ranked_consent` recency-aware: a withdrawal newer than the
+  latest complete current ranked-purpose acceptance returns false, while a full
+  later ranked re-acceptance restores current status.
+- Threaded active withdrawal into the ranked human ELO writer so withdrawn
+  principals are skipped before rating-row creation/mutation and participate
+  only as transient unrated seats for the remaining team math.
+- Filtered active-withdrawn principals from public human ladder cards and added
+  an opaque ranked-consent history token to the human cache part so withdrawal
+  and re-acceptance invalidate cached cards without touching rating rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_consent.py`,
+  `src/padrino/api/routes/human.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/ratings/public_leaderboard.py`,
+  `tests/api/test_ranked_consent_withdrawal.py`,
+  `tests/ratings/test_ranked_consent_withdrawal.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_ranked_consent_withdrawal.py tests/ratings/test_ranked_consent_withdrawal.py -q`
+  failed first on the missing withdrawal route/helper; focused GREEN same
+  command -> 4 passed. Related GREEN
+  `uv run pytest tests/api/test_ranked_consent_gate.py tests/api/test_ranked_consent_withdrawal.py tests/ratings/test_human_ranked_elo.py tests/ratings/test_ranked_consent_withdrawal.py tests/ratings/test_human_rating_quarantine.py tests/ratings/test_public_leaderboard_human_handle.py -q`
+  -> 20 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2862 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T12:45 PDT - US-310
+- Added pure ranked strangers-only seating guard
+  `assert_strangers_only_ranked`, with typed `RankedSeatingViolation` and the
+  launch reason token `ranked_requires_single_human_seat`.
+- Wired `api/lobby_launch.py` to load the lobby's Humans-Included league and
+  concrete `LobbySeat` count, rejecting ranked multi-human materialization
+  before curated AI autofill or any `Game` / `GameSeat` row is written.
+- Preserved single-human ranked launch and casual multi-human launch behavior;
+  corrected the stale prd acceptance criterion that referenced a non-existent
+  human autofill layer, per the story's review revision.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/lobby_launch.py`,
+  `src/padrino/core/lobby/__init__.py`,
+  `src/padrino/core/lobby/strangers_only.py`,
+  `tests/api/test_lobbies_ranked_strangers_only.py`,
+  `tests/core/lobby/test_strangers_only.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/lobby/test_strangers_only.py tests/api/test_lobbies_ranked_strangers_only.py -q`
+  failed first on missing `padrino.core.lobby.strangers_only`; focused GREEN
+  same command -> 11 passed. Related GREEN
+  `uv run pytest tests/core/lobby/test_strangers_only.py tests/api/test_lobbies_ranked_strangers_only.py tests/api/test_lobby_launch.py tests/api/test_lobbies_ranked_gate.py tests/api/test_lobby_create.py -q`
+  -> 47 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2877 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T13:02 PDT - US-311
+- Added Alembic migration `0063_ranked_game_signals`, chaining after `0062`,
+  with `ranked_game_signals` plus nullable `games.ranked_source_ip_hash` launch
+  context. Updated migration-head tests to the new `0063` head and narrowed the
+  older `0052` single-revision test so it upgrades to `0052`, not symbolic
+  `head`.
+- Added the `RankedGameSignal` ORM model and `ranked_signals` repository using
+  dialect-portable `ON CONFLICT DO NOTHING` keyed by `game_id`.
+- Threaded hashed launch IP from `POST /lobbies/{id}/launch` into
+  `launch_lobby` for ranked lobbies only, using existing `client_ip_hash`
+  behavior so raw IPs are never persisted.
+- Made `update_human_ratings_for_game` append a best-effort telemetry row only
+  after actual `HumanRatingEvent` rows are inserted; capture failure is logged
+  and swallowed, preserving rating rows and idempotency.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/lobby_launch.py`,
+  `src/padrino/api/routes/lobbies.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0063_ranked_game_signals.py`,
+  `src/padrino/db/repositories/ranked_signals.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `tests/api/test_lobbies_ranked_strangers_only.py`,
+  `tests/db/test_migration_0052_game_leases.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_migration_0060_ranked_ban.py`,
+  `tests/db/test_migration_0062_human_consent_content_hash.py`,
+  `tests/db/test_migration_0063_ranked_game_signals.py`,
+  `tests/db/test_migrations.py`, `tests/ratings/test_ranked_signal_capture.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_migration_0063_ranked_game_signals.py tests/ratings/test_ranked_signal_capture.py tests/api/test_lobbies_ranked_strangers_only.py::test_ranked_launch_persists_request_ip_hash_not_raw_ip -q`
+  failed first on the missing `RankedGameSignal` model; focused GREEN same
+  command -> 7 passed. Related GREEN
+  `uv run pytest tests/ratings/test_ranked_signal_capture.py tests/ratings/test_human_ranked_elo.py tests/ratings/test_ranked_write_audit.py tests/api/test_lobbies_ranked_strangers_only.py tests/api/test_lobby_launch.py tests/api/test_human_match.py -q`
+  -> 33 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2886 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T13:11 PDT - US-314
+- Added the pure `DecayedRatingDisplay` projection and
+  `project_decayed_display` helper for read-side human rating decay, with
+  injected `now`, threshold-only stale-day inflation, and a human-specific
+  `HUMAN_RATING_DECAY_IDLE_DAYS` constant distinct from the existing model
+  ladder default.
+- Locked the projection contract in `tests/ratings/test_provisional_and_decay.py`
+  for exact below-threshold scores, threshold subtraction, `last_game_at=None`,
+  naive/aware datetime compatibility, never-improving conservative scores, and
+  provisional-player neutrality.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/provisional_and_decay.py`,
+  `tests/ratings/test_provisional_and_decay.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_provisional_and_decay.py -q` failed first
+  on missing `HUMAN_RATING_DECAY_IDLE_DAYS`; focused GREEN same command -> 35
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2893 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T13:26 PDT - US-306
+- Added pure GDPR human export shaping in `core/gdpr_export.py`, returning a
+  deterministic `padrino.gdpr_human_export.v1` bundle with principal profile,
+  session metadata, consent history, authored chat sidecars, current
+  `HumanRating` rows, and `HumanRatingEvent` history.
+- Added authenticated `GET /human/me/export`, with read helpers for principal
+  sessions, consent rows, principal-owned chat through the required
+  `game_seats` join, and human rating history.
+- Redacted chat rows now export as `redacted=true` with no raw/cleaned text,
+  while `session_hash` and `source_ip_hash` are stripped from the response.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/human.py`,
+  `src/padrino/core/gdpr_export.py`,
+  `src/padrino/db/repositories/human_chat.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/db/repositories/human_principals.py`,
+  `src/padrino/db/repositories/human_ratings.py`,
+  `tests/api/test_human_export_route.py`,
+  `tests/core/test_gdpr_export_bundle.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/test_gdpr_export_bundle.py tests/api/test_human_export_route.py -q`
+  failed first on missing `padrino.core.gdpr_export`; focused GREEN same
+  command -> 5 passed. Related GREEN
+  `uv run pytest tests/core/test_gdpr_export_bundle.py tests/api/test_human_export_route.py tests/core/test_purity.py -q`
+  -> 70 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2902 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T13:48 PDT - US-307
+- Added `POST /human/me/delete` to anonymize the current human principal:
+  `Principal.deleted_at` is set, display/ranked handles are scrubbed, authored
+  sidecar chat is redacted, and consent `source_ip_hash` values are nulled.
+- Added deterministic UUID-shaped GDPR tombstone tokens and repository helpers
+  that replace `HumanRating.human_player_id`,
+  `HumanRatingEvent.human_player_id`, and
+  `HumanRatingEvent.public_player_id` without deleting rating history. Current
+  rating rows are quarantined so the public ladder excludes them explicitly.
+- Kept replay and benchmark firewalls locked: delete leaves `game_events` and
+  `games.event_hash_head` byte-identical, does not mutate scientific
+  `Rating`/`RatingEvent`, refuses deleted-cookie match replacement, filters
+  deleted/tombstoned humans from leaderboard entity resolution, and skips
+  soft-deleted principals in terminal ranked human writes.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_auth.py`,
+  `src/padrino/api/routes/human.py`, `src/padrino/core/gdpr_delete.py`,
+  `src/padrino/db/repositories/human_chat.py`,
+  `src/padrino/db/repositories/human_consents.py`,
+  `src/padrino/db/repositories/human_principals.py`,
+  `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/ratings/public_leaderboard.py`,
+  `tests/api/test_human_delete_route.py`,
+  `tests/ratings/test_human_ranked_elo.py`,
+  `tests/ratings/test_public_leaderboard_human_handle.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_delete_route.py -q` failed first on
+  missing `padrino.core.gdpr_delete`; focused RED
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py -q`
+  failed first on deleted humans still appearing in `human_cards`; focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py::test_deleted_principal_is_skipped_by_terminal_ranked_write -q`
+  failed first on the terminal writer recreating a deleted principal row.
+  Focused GREEN
+  `uv run pytest tests/api/test_human_delete_route.py tests/ratings/test_public_leaderboard_human_handle.py tests/ratings/test_human_ranked_elo.py -q`
+  -> 14 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2909 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T14:04 PDT - US-308
+- Extended `db/retention.py` with `HumanPiiRetentionPolicy`,
+  lightweight human chat/consent/guest projections, and
+  `plan_human_pii_retention`, using an injected `now` and strict older-than TTL
+  comparisons so boundary rows stay within retention.
+- Extended `run_retention_executor` to load human-PII projections and, only
+  when `padrino_enable_retention=True` and
+  `padrino_retention_dry_run=False`, redact old `human_chat_messages`, null old
+  `human_consents.source_ip_hash`, and soft-delete/scrub abandoned guest
+  principals. Dry-run still returns zero applied mutations.
+- Added Settings TTLs for human chat retention, consent IP hash retention, and
+  abandoned guest retention. The default chat retention TTL is shared with the
+  ranked legal document text through
+  `DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS`.
+- Added planner and executor tests pinning strict cutoff behavior, dry-run
+  defaults, no rating delete list, rating-row preservation, Settings overrides,
+  and the no `datetime.utcnow` / random planner guard.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/retention.py`,
+  `src/padrino/db/retention_executor.py`, `src/padrino/legal/documents.py`,
+  `src/padrino/settings.py`,
+  `tests/db/test_human_pii_retention_policy.py`,
+  `tests/db/test_human_pii_retention_executor.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_human_pii_retention_policy.py` failed first on
+  missing human-PII planner imports; focused RED
+  `uv run pytest tests/db/test_human_pii_retention_executor.py` failed first on
+  missing executor result fields. Focused GREEN
+  `uv run pytest tests/db/test_human_pii_retention_policy.py tests/db/test_human_pii_retention_executor.py`
+  -> 8 passed. Related GREEN
+  `uv run pytest tests/db/test_human_pii_retention_policy.py tests/db/test_human_pii_retention_executor.py tests/db/test_retention_policy.py tests/db/test_retention_executor.py tests/api/test_legal_documents_route.py tests/api/test_consent_content_hash.py tests/test_settings.py`
+  -> 65 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2919 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T15:03 PDT - US-309
+- Added public `/terms` and `/privacy` Svelte routes that render the
+  server-served legal document body and `version_label`.
+- Added `/play/ranked-consent` with four independent ranked-purpose checkboxes;
+  submit stays disabled until every purpose is checked and posts the served
+  ranked document hash for each purpose.
+- Updated the home base-consent flow to fetch TOS/PRIVACY/AGE_GATE documents,
+  link to the real legal routes, echo served `content_hashes` on POST, and
+  re-prompt with current versions after a 412 match handoff.
+- Wired `/profile` data controls to self-export, ranked-consent withdrawal, and
+  delete/anonymize endpoints; the client mutation helper now handles 204 empty
+  responses.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/lib/api/client.ts`,
+  `web/dashboard/src/lib/api/types.ts`, `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/play/match/+page.svelte`,
+  `web/dashboard/src/routes/play/ranked-consent/+page.svelte`,
+  `web/dashboard/src/routes/privacy/+page.svelte`,
+  `web/dashboard/src/routes/profile/+page.svelte`,
+  `web/dashboard/src/routes/terms/+page.svelte`,
+  `web/dashboard/tests/e2e/legal-consent.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `pnpm -C web/dashboard test:e2e -- legal-consent.spec.ts` failed first on
+  missing `/terms`, missing home legal links/hash echo, missing 412 re-prompt,
+  missing ranked consent route, and missing profile self-serve controls.
+  Focused GREEN `pnpm -C web/dashboard test:e2e -- legal-consent.spec.ts`
+  -> 5 passed. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e`
+  -> 59 passed / 3 skipped. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2919 passed / 41 skipped /
+  10 deselected.
+
+## 2026-06-27T14:30 PDT - US-299
+- Added `tests/api/test_reveal_identity_firewall.py` with route-level
+  regression guards over live seat observation, pre-terminal public/private
+  reveal errors, and terminal public/private reveal payloads.
+- The fixtures seed two human participants with sentinel `display_name`,
+  `ranked_handle`, OAuth verified email, email hash, and active `RankedBan`
+  metadata, plus an AI build with sentinel model identity. Assertions check the
+  full SSE/JSON bodies: pre-terminal surfaces expose only public player ids and
+  no model/human identity markers; terminal reveal still exposes AI model
+  identity but no human PII, principal ids, ranked-ban, or eligibility fields.
+- No production code changes were needed; existing anonymous observation guards
+  and canonical reveal projection already satisfied the regression contract.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/api/test_reveal_identity_firewall.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_reveal_identity_firewall.py -q` failed first
+  on duplicate ranked-handle test fixture setup; focused GREEN
+  `uv run pytest tests/api/test_reveal_identity_firewall.py -q` -> 3 passed.
+  Related GREEN
+  `uv run pytest tests/api/test_endgame_reveal.py tests/api/test_human_reveal.py tests/api/test_seat_observation_stream.py -q`
+  -> 16 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2923 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch
+  `web/dashboard`.
+
+## 2026-06-27T14:44 PDT - US-312
+- Added pure ranked telemetry scoring in `core/anticheat/signals.py` for
+  same-IP clusters, cross-game co-occurrence, abnormal win/loss streaks, and
+  precomputed bot-cadence latency features, with deterministic evidence
+  payloads and no clock/RNG imports.
+- Added migration `0064_ranked_flags`, ORM model, and `ranked_flags`
+  repository. Existing head assertions now point at `0064`; no migration
+  `<=0063` was edited.
+- Added the batch/admin-triggered `ratings/anticheat_scoring_service.py` wrapper
+  that reads `ranked_game_signals`, builds thresholds from `Settings`, and
+  inserts advisory flags without mutating `HumanRating` or `HumanRatingEvent`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/anticheat/__init__.py`,
+  `src/padrino/core/anticheat/signals.py`, `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0064_ranked_flags.py`,
+  `src/padrino/db/repositories/ranked_flags.py`,
+  `src/padrino/ratings/anticheat_scoring_service.py`,
+  `src/padrino/settings.py`, `tests/core/anticheat/test_signals.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_migration_0060_ranked_ban.py`,
+  `tests/db/test_migration_0062_human_consent_content_hash.py`,
+  `tests/db/test_migration_0063_ranked_game_signals.py`,
+  `tests/db/test_migration_0064_ranked_flags.py`,
+  `tests/db/test_migrations.py`,
+  `tests/ratings/test_anticheat_scoring_service.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/anticheat/test_signals.py tests/db/test_migration_0064_ranked_flags.py tests/ratings/test_anticheat_scoring_service.py -q`
+  failed first on missing `padrino.core.anticheat`, missing `RankedFlag`, and
+  missing scorer service. Focused GREEN same command -> 11 passed. Related GREEN
+  `uv run pytest tests/db/test_migration_0055_llm_call_pricing_basis.py tests/db/test_migration_0056_ranked_write_audit.py tests/db/test_migration_0057_human_rating_quarantine.py tests/db/test_migration_0058_oauth_identity_email_verified.py tests/db/test_migration_0059_principal_ranked_handle.py tests/db/test_migration_0060_ranked_ban.py tests/db/test_migration_0062_human_consent_content_hash.py tests/db/test_migration_0063_ranked_game_signals.py tests/db/test_migration_0064_ranked_flags.py tests/db/test_migrations.py -q`
+  -> 30 passed. Core firewall GREEN
+  `uv run pytest tests/core/test_purity.py tests/core/test_no_wallclock.py tests/core/anticheat/test_signals.py -q`
+  -> 138 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2941 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T14:56 PDT - US-313
+- Added admin-only ranked anti-cheat review routes:
+  `GET /admin/anticheat/flags`,
+  `GET /admin/anticheat/principals/{principal_id}`, and
+  `GET /admin/anticheat/games/{game_id}/signals`.
+- The flag list supports `kind`, `severity`, `principal_id`, and keyset
+  pagination; principal rollups return ranked game count, flags, distinct
+  `source_ip_hash` count, and win rate; game inspection returns the stored
+  ranked telemetry signals.
+- Responses project pseudonymous ranked handles only, never raw
+  `Principal.display_name`; recursive evidence sanitization redacts raw IP
+  values while preserving hashes for review.
+- Mounted the router only with the private admin surface so
+  `public_surface_only` still omits it.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/app.py`,
+  `src/padrino/api/routes/__init__.py`,
+  `src/padrino/api/routes/admin_anticheat.py`,
+  `tests/api/test_admin_anticheat_review.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_admin_anticheat_review.py -q` failed first on
+  missing `/admin/anticheat/*` routes; focused GREEN same command -> 4 passed.
+  Related GREEN
+  `uv run pytest tests/api/test_ranked_ban_admin.py tests/ratings/test_anticheat_scoring_service.py -q`
+  -> 6 passed; `uv run pytest tests/api/test_public_surface_only.py -q` -> 20
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2946 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T15:12 PDT - US-301
+- Added the manual ranked human-rating rollback primitive: pure recompute over
+  ordered game projections, `0061_ranked_game_exclusions`, ORM/repository
+  support for exclusions + rollback audit rows, and
+  `POST /admin/anticheat/principals/{id}/rollback` on the existing admin
+  router.
+- Rollback recomputes only the current `HumanRating` aggregate and inserts
+  idempotent exclusion/audit rows; historical `HumanRatingEvent` rows and
+  `game_events` remain unchanged, so replay/hash-chain evidence stays
+  byte-identical.
+- Inserted `0061` into the existing gap between `0060` and `0062`, updating
+  only `0062+` migration lineage tests.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/anticheat/rating_rollback.py`,
+  `src/padrino/ratings/human_rating_rollback.py`,
+  `src/padrino/db/repositories/ranked_game_exclusions.py`,
+  `src/padrino/db/migrations/versions/0061_ranked_game_exclusions.py`,
+  `src/padrino/db/migrations/versions/0062_human_consent_content_hash.py`,
+  `src/padrino/db/models.py`, `src/padrino/api/routes/admin.py`,
+  `tests/core/anticheat/test_rating_rollback.py`,
+  `tests/api/test_admin_ranked_rollback.py`,
+  `tests/db/test_migration_0061_ranked_game_exclusions.py`,
+  `tests/db/test_migrations.py`, migration lineage tests for `0055`-`0063`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/anticheat/test_rating_rollback.py tests/db/test_migration_0061_ranked_game_exclusions.py tests/api/test_admin_ranked_rollback.py -q`
+  failed first on missing rollback module/models; focused GREEN same command ->
+  9 passed. Nearby migration/rating tests -> 42 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2960
+  passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
+  touch `web/dashboard`.
+
+## 2026-06-27T15:22 PDT - US-315
+- Wired read-side human rating decay into public leaderboard cards by passing an
+  injected `now` through `compute_public_leaderboard`, normalizing it to UTC,
+  and projecting `HumanRating.last_game_at` with
+  `project_decayed_display`.
+- Added the decay as-of day bucket to `_human_rating_cache_part` while
+  preserving the existing updated/count, quarantine, ranked-handle, and ranked
+  consent tokens.
+- Extended human leaderboard tests for idle sigma inflation, fresh-row exact
+  display, persisted-row immutability, decayed sorting/ranking, cache day-boundary
+  invalidation, and true persisted `games` / `sample_count`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/public_leaderboard.py`,
+  `tests/ratings/test_public_leaderboard_human_handle.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py -q`
+  failed first on missing `compute_public_leaderboard(..., now=...)`; focused
+  GREEN same command -> 6 passed. Related GREEN
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py tests/ratings/test_human_rating_quarantine.py tests/ratings/test_ranked_consent_withdrawal.py tests/ratings/test_provisional_and_decay.py tests/api/test_public_routes.py -q`
+  -> 63 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2963 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T15:33 PDT - US-316
+- Added ranked human ELO regression coverage for AI-takeover forfeits:
+  takeover winners are persisted as human losses, takeover losers get a single
+  deterministic loss, draw freezes are overridden by the forfeit, genuine
+  `HUMAN` winners still gain, non-forfeiting humans match an equivalent
+  transient-AI baseline, and all-taken-over human seats still write loss
+  `HumanRatingEvent` rows.
+- Updated `human_openskill_service` so `_team_entries` threads `seat_kind`,
+  keeps `AI_TAKEOVER` seats as transient initial ratings in their actual
+  faction team, and persists the abandoned principal through a separate
+  deterministic Plackett-Luce loss update. Existing per-seat idempotency still
+  skips duplicate `HumanRatingEvent` rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/human_openskill_service.py`,
+  `tests/ratings/test_human_ranked_elo.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py -q` failed first on a
+  takeover winner receiving `mu > INITIAL_MU`; focused GREEN same command -> 15
+  passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2969 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-06-27T15:42 PDT - US-317
+- Locked the ranked human leaderboard's provisional rank treatment with
+  regression tests: provisional humans stay visible with `rank=None`, a
+  high-scoring provisional card does not consume a published rank slot, and the
+  exact `DEFAULT_PROVISIONAL_GAMES` boundary graduates into numeric ranks.
+- Added read-path coverage showing provisional labels and rank quarantine still
+  compose with idle sigma decay, and writer-side coverage showing an
+  AI-takeover forfeit loss increments `HumanRating.games` through the shared
+  provisional threshold.
+- No production implementation changes were needed; existing `_rank_cards`
+  already ranks only non-provisional cards and the human ELO writer already
+  increments `HumanRating.games` for forfeit-loss events.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/ratings/test_public_leaderboard_human_handle.py`,
+  `tests/ratings/test_human_ranked_elo.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused check
+  `uv run pytest tests/ratings/test_public_leaderboard_human_handle.py tests/ratings/test_human_ranked_elo.py -q`
+  first failed on a missing test import, then passed -> 24 passed. Backend
+  gates: `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 2972
+  passed / 41 skipped / 10 deselected. Frontend gates not run; story did not
+  touch `web/dashboard`.
+
+## 2026-06-27T15:53 PDT - US-318
+- Locked the v1 no-AI-strength-of-schedule invariant for ranked human ELO:
+  human updates now have regression coverage that seeds real AI `agent_build_id`
+  seats plus strong/weak scientific `Rating` / `RatingEvent` rows, wraps
+  `update_human_ratings_for_game` with a SQL listener, and asserts the
+  scientific tables are neither read nor written.
+- Added the invariant proof that identical human outcomes produce identical
+  human `HumanRatingEvent` deltas and final `HumanRating` rows even when the
+  persisted scientific AI ladder rows have very different `mu` / `sigma`.
+- Added a clearly marked service docstring recording the v1
+  no-strength-of-schedule decision, the CANONICAL_TEAM firewall rationale, and
+  a future-work marker.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/human_openskill_service.py`,
+  `tests/ratings/test_human_ranked_elo.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED/GREEN
+  `uv run pytest tests/ratings/test_human_ranked_elo.py -k "scientific_ai_strength or docstring"`
+  failed first on the missing docstring marker, then passed -> 2 passed.
+  Full module GREEN `uv run pytest tests/ratings/test_human_ranked_elo.py` ->
+  18 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2974 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T05:41 PDT - US-319
+- Savepoint-isolated ranked telemetry capture so a telemetry DB fault cannot
+  roll back the already-persisted ranked human rating event rows. The
+  `ranked_signals_repo.record_ranked_game_signal` call now runs under
+  `session.begin_nested()` inside the existing broad best-effort logger.
+- Added a regression that monkeypatches `AsyncSession.execute` to run the
+  `ranked_game_signals` insert statement and then raise `OperationalError`;
+  the savepoint rolls the signal back while the outer `HumanRatingEvent`
+  commits. Existing pre-statement failure isolation and happy-path one-signal
+  capture remain covered in the same module.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/ratings/human_openskill_service.py`,
+  `tests/ratings/test_ranked_signal_capture.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_ranked_signal_capture.py::test_signal_capture_db_fault_after_insert_rolls_back_signal_only -q`
+  failed first because the signal row committed (`signal_count == 1`);
+  focused GREEN `uv run pytest tests/ratings/test_ranked_signal_capture.py -q`
+  -> 4 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2975 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T05:51 PDT - US-320
+- Made manual ranked human-rating rollback byte-match the ranked write path for
+  AI takeover histories: `RatingRollbackPlayer` now carries `seat_kind`, any
+  `AI_TAKEOVER` seat is a transient initial team placeholder, and a target
+  takeover is rated as a deterministic forfeit loss that bypasses the normal
+  team/DRAW freeze.
+- Aligned `HumanRatingEvent.created_at` with the injected write-path `now`, so
+  rollback recomputes `last_game_at` from persisted included event rows rather
+  than a database default wall-clock timestamp.
+- Added regression coverage that compares rollback recompute to a fresh
+  write-path replay for takeover as the target's teammate, target's opponent,
+  and the target itself, plus a DRAW target-forfeit override and an
+  INITIAL-constant drift guard.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/anticheat/rating_rollback.py`,
+  `src/padrino/db/repositories/human_ratings.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/ratings/human_rating_rollback.py`,
+  `tests/ratings/test_human_rating_rollback.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_rating_rollback.py -q` first failed
+  on takeover-role rating drift, target takeover forfeit drift, and
+  `last_game_at` timestamp drift; focused GREEN same command -> 5 passed.
+  Related GREEN
+  `uv run pytest tests/core/anticheat/test_rating_rollback.py -q` -> 3 passed;
+  `uv run pytest tests/api/test_admin_ranked_rollback.py -q` -> 3 passed /
+  1 warning; `uv run pytest tests/ratings/test_human_ranked_elo.py -q` ->
+  18 passed; `uv run pytest tests/ratings/test_ranked_signal_capture.py -q` ->
+  4 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2981 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T05:59 PDT - US-321
+- Accepted string-form OAuth `email_verified` claims without broadening to
+  generic truthiness: `_parse_email_verified_claim` now treats bool `True` and
+  stripped case-insensitive strings `true` / `1` as verified, while `false`,
+  missing, `None`, integer `1`, and `yes` stay unverified.
+- Expanded the OAuth payload extraction regression table to cover bool,
+  string-true, string-false, missing, and review-pinned fail-closed variants.
+  Existing ranked lobby denial coverage confirms unverified emails remain
+  ineligible.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/oauth.py`, `tests/api/test_oauth_signin.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_oauth_signin.py::test_user_info_from_payload_parses_email_verified_claim_fail_closed -q`
+  first failed for string `true`, `True`, and `1`; focused GREEN same command
+  -> 10 passed / 1 warning. Related GREEN
+  `uv run pytest tests/api/test_lobbies_ranked_gate.py::test_ranked_lobby_denials_return_predicate_reason_tokens -q`
+  -> 4 passed / 5 warnings. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2986 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T06:07 PDT - US-322
+- Surfaced human-rating firewall finalize skips as a Prometheus counter:
+  `padrino_human_rating_firewall_violations_total{league_kind}` increments in
+  `game_runner._persist_terminated_event` beside the existing structured error
+  log while preserving the swallow-and-continue behavior.
+- Added metric helper/reset/export coverage and extended the existing runner
+  firewall regression to assert the counter increments for a mocked
+  `FirewallViolation` while the terminal game still completes with zero
+  rating rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/observability/metrics.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/observability/test_metrics_endpoint.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/runner/test_rating_integration.py::test_human_rating_firewall_violation_completes_terminal_game_without_ratings -q`
+  failed first on missing metric (`0.0 == 1.0`); focused GREEN
+  `uv run pytest tests/runner/test_rating_integration.py::test_human_rating_firewall_violation_completes_terminal_game_without_ratings tests/observability/test_metrics_endpoint.py -q`
+  -> 20 passed / 1 warning. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2987 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T06:15 PDT - US-323
+- Extended abandoned-guest retention anonymization to redact the guest's
+  authored human-chat sidecar rows via the shared
+  `human_chat.redact_for_principal` ownership join before scrubbing the
+  `Principal` row.
+- Made `redact_for_principal` count and mutate only unredacted sidecar rows, so
+  retention's `human_chat_messages_redacted` total remains idempotent and does
+  not double-count rows already handled by the age-based chat TTL pass.
+- Added a regression with an abandoned guest and an account in the same game:
+  fresh guest chat is redacted, account chat is untouched, and the paired
+  `game_events` hashes still verify byte-identically.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/human_chat.py`,
+  `src/padrino/db/retention_executor.py`,
+  `tests/db/test_human_pii_retention_executor.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_human_pii_retention_executor.py::test_abandoned_guest_retention_redacts_owned_fresh_chat_without_touching_events -q`
+  failed first with `human_chat_messages_redacted == 0`; focused GREEN same
+  command -> 1 passed. Related GREEN
+  `uv run pytest tests/db/test_human_pii_retention_executor.py -q` -> 3 passed;
+  `uv run pytest tests/api/test_human_delete_route.py tests/db/test_human_chat_sidecar.py tests/db/test_human_pii_retention_policy.py -q`
+  -> 13 passed / 5 warnings. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2988 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T06:27 PDT - US-324
+- Added every missing concrete ORM `Base` subclass to
+  `src/padrino/db/models.py` `__all__`: `BudgetReservationSlot`, `Campaign`,
+  `CampaignPairing`, `HumanInferenceReservation`, `HumanPlayerStats`,
+  `HumanTuringGuess`, `RankedGameExclusion`, and
+  `RankedRatingRollbackAudit`.
+- Added a regression in `tests/db/test_models.py` that introspects
+  `padrino.db.models` and asserts every locally defined `Base` subclass is
+  exported through `__all__`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`, `tests/db/test_models.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_models.py::test_models_all_exports_every_base_subclass`
+  failed first on the missing export set; focused GREEN same command ->
+  1 passed. Related GREEN `uv run pytest tests/db/test_models.py` ->
+  21 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2989 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-02T06:44 PDT - US-325
+- Added write-time ranked-ban defense-in-depth for ranked human ELO: the runner
+  resolves active banned principals from persisted game seats after the game is
+  created and injects that set into `update_human_ratings_for_game`.
+- The human rating writer now records a per-principal `REFUSED` provenance row
+  with reason `ranked_banned`, skips HumanRating/HumanRatingEvent writes for
+  those banned seats, and still applies eligible principals in the same call.
+- Preserved the runner no-wall-clock guard by using the terminal game row's
+  persisted `completed_at` as the ban-check/rating-write instant instead of
+  importing `datetime` into `runner/game_runner.py`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/repositories/ranked_bans.py`,
+  `src/padrino/ratings/human_openskill_service.py`,
+  `src/padrino/runner/game_runner.py`,
+  `tests/ratings/test_human_ranked_elo.py`,
+  `tests/runner/test_rating_integration.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/ratings/test_human_ranked_elo.py::test_ranked_banned_principal_is_skipped_by_terminal_ranked_write -q`
+  first failed on the missing `active_ranked_banned_principal_ids` resolver;
+  focused GREEN
+  `uv run pytest tests/ratings/test_human_ranked_elo.py::test_ranked_banned_principal_is_skipped_by_terminal_ranked_write tests/runner/test_rating_integration.py::test_terminal_human_rating_finalize_resolves_ranked_ban_after_game_creation -q`
+  -> 2 passed. Related GREEN
+  `uv run pytest tests/ratings/test_human_ranked_elo.py tests/ratings/test_ranked_write_audit.py tests/runner/test_rating_integration.py -q`
+  -> 32 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 2991 passed / 41 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

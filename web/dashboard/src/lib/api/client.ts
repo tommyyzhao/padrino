@@ -3,6 +3,7 @@ import type {
   ActionResult,
   ChatChannel,
   ChatResult,
+  ConsentAcceptancePayload,
   ConsentStatus,
   CursorPage,
   EndgameReveal,
@@ -15,6 +16,8 @@ import type {
   HumanMatchResponse,
   HumanPlayerStats,
   LaunchResponse,
+  LegalDocumentResponse,
+  LegalDocumentsResponse,
   LobbyRoster,
   LobbySummary,
   PublicCompositionResponse,
@@ -137,7 +140,14 @@ export class PadrinoClient {
     if (!response.ok) {
       await this.parseError(response);
     }
-    return (await response.json()) as T;
+    if (response.status === 204) {
+      return undefined as T;
+    }
+    const text = await response.text();
+    if (text === '') {
+      return undefined as T;
+    }
+    return JSON.parse(text) as T;
   }
 
   /**
@@ -166,7 +176,14 @@ export class PadrinoClient {
     if (!response.ok) {
       await this.parseError(response);
     }
-    return (await response.json()) as T;
+    if (response.status === 204) {
+      return undefined as T;
+    }
+    const text = await response.text();
+    if (text === '') {
+      return undefined as T;
+    }
+    return JSON.parse(text) as T;
   }
 
   // ---- public (unauthenticated when padrino_public_leaderboard_anonymous=True)
@@ -218,6 +235,14 @@ export class PadrinoClient {
 
   publicRulesets(): Promise<PublicRulesetsResponse> {
     return this.request('/public/rulesets');
+  }
+
+  legalDocuments(): Promise<LegalDocumentsResponse> {
+    return this.request('/legal/documents');
+  }
+
+  legalDocument(kind: string): Promise<LegalDocumentResponse> {
+    return this.request(`/legal/documents/${encodeURIComponent(kind)}`);
   }
 
   publicGameAnalytics(gameId: string): Promise<PublicGameAnalyticsResponse> {
@@ -284,8 +309,33 @@ export class PadrinoClient {
   }
 
   /** Record the one-tap combined consent (TOS + Privacy + 16+) (US-130). */
-  postConsent(): Promise<ConsentStatus> {
-    return this.mutate('POST', '/human/consent');
+  postConsent(body?: ConsentAcceptancePayload): Promise<ConsentStatus> {
+    return this.mutate('POST', '/human/consent', body);
+  }
+
+  /** Whether the principal holds current base and purpose-segmented ranked consent. */
+  getRankedConsentStatus(): Promise<ConsentStatus> {
+    return this.request('/human/ranked-consent');
+  }
+
+  /** Record purpose-segmented ranked consent rows. */
+  postRankedConsent(body?: ConsentAcceptancePayload): Promise<ConsentStatus> {
+    return this.mutate('POST', '/human/ranked-consent', body);
+  }
+
+  /** Withdraw ranked consent, freezing future ranked rating writes. */
+  withdrawRankedConsent(): Promise<ConsentStatus> {
+    return this.mutate('POST', '/human/consent/ranked/withdraw');
+  }
+
+  /** Return the current human's deterministic self-export bundle. */
+  exportHumanData(): Promise<Record<string, unknown>> {
+    return this.request('/human/me/export');
+  }
+
+  /** Request GDPR erasure/anonymization for the current human principal. */
+  deleteHumanData(): Promise<void> {
+    return this.mutate('POST', '/human/me/delete');
   }
 
   /**

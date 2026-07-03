@@ -102,7 +102,7 @@ def test_0054_adds_budget_reservation_slots_table(sqlite_db: Path) -> None:
     before_tables = _table_names(sqlite_db)
     assert TABLE_NAME not in before_tables
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0054")
 
     assert _table_names(sqlite_db) - before_tables == {TABLE_NAME}
     assert _column_names(sqlite_db, TABLE_NAME) == EXPECTED_COLUMNS

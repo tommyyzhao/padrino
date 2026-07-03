@@ -146,7 +146,7 @@ def test_0052_adds_nullable_game_lease_columns_and_index(sqlite_db: Path) -> Non
 
     game_id = _insert_existing_game(sqlite_db)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0052")
 
     after_columns = _game_column_names(sqlite_db)
     after_indexes = _index_names(sqlite_db)

@@ -18,6 +18,8 @@ Metric inventory:
   increment at ``GameTerminated``).
 * ``padrino_invalid_action_total{reason}`` — every coerced safe action the
   runner falls back to (timeout, schema violation, llm_exhausted).
+* ``padrino_human_rating_firewall_violations_total{league_kind}`` — every
+  human-rating finalize attempt blocked by the HUMANS_INCLUDED firewall.
 * ``padrino_scheduler_inflight_gauntlets`` — current count of gauntlets
   being driven by ``padrino.runner.scheduler``.
 * ``padrino_api_requests_total{route,method,status}`` — every HTTP request
@@ -130,6 +132,13 @@ invalid_action_total = Counter(
     registry=REGISTRY,
 )
 
+human_rating_firewall_violations_total = Counter(
+    "padrino_human_rating_firewall_violations_total",
+    "Count of human-rating finalize attempts blocked by the HUMANS_INCLUDED firewall.",
+    labelnames=("league_kind",),
+    registry=REGISTRY,
+)
+
 scheduler_inflight_gauntlets = Gauge(
     "padrino_scheduler_inflight_gauntlets",
     "Number of gauntlets currently being driven by the scheduler loop.",
@@ -231,6 +240,11 @@ def record_invalid_action(*, reason: str) -> None:
     invalid_action_total.labels(reason=reason).inc()
 
 
+def record_human_rating_firewall_violation(*, league_kind: str | None) -> None:
+    """Increment the human-rating firewall violation counter."""
+    human_rating_firewall_violations_total.labels(league_kind=league_kind or UNKNOWN_LABEL).inc()
+
+
 def record_broadcast_frame() -> None:
     """Increment the broadcast frame counter by one."""
     broadcast_frames_total.inc()
@@ -303,6 +317,7 @@ def reset_metrics() -> None:
         phase_duration_seconds,
         games_total,
         invalid_action_total,
+        human_rating_firewall_violations_total,
         api_requests_total,
         budget_campaign_spend_usd,
         budget_fraction_of_cap,
@@ -328,6 +343,7 @@ __all__ = [
     "cost_drift_fraction",
     "cost_drift_ratio",
     "games_total",
+    "human_rating_firewall_violations_total",
     "invalid_action_total",
     "llm_calls_total",
     "llm_latency_seconds",
@@ -336,6 +352,7 @@ __all__ = [
     "record_budget_burn",
     "record_cost_drift",
     "record_game_completed",
+    "record_human_rating_firewall_violation",
     "record_invalid_action",
     "record_llm_call",
     "record_phase_duration",

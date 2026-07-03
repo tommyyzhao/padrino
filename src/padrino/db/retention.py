@@ -40,6 +40,15 @@ class RetentionPolicy:
 
 
 @dataclass(frozen=True)
+class HumanPiiRetentionPolicy:
+    """Config-driven human PII retention parameters."""
+
+    chat_retention_ttl_days: int
+    consent_ip_hash_ttl_days: int
+    abandoned_guest_ttl_days: int
+
+
+@dataclass(frozen=True)
 class GameRetentionInfo:
     """Lightweight projection of a Game row needed by the planner.
 
@@ -52,6 +61,34 @@ class GameRetentionInfo:
     completed_at: datetime | None
 
 
+@dataclass(frozen=True)
+class HumanChatRetentionInfo:
+    """Lightweight projection of one human chat sidecar row."""
+
+    id: uuid.UUID
+    created_at: datetime
+    redacted: bool
+
+
+@dataclass(frozen=True)
+class HumanConsentRetentionInfo:
+    """Lightweight projection of one human consent row."""
+
+    id: uuid.UUID
+    accepted_at: datetime
+    source_ip_hash: str | None
+
+
+@dataclass(frozen=True)
+class GuestPrincipalRetentionInfo:
+    """Lightweight projection of a principal's guest-retention state."""
+
+    id: uuid.UUID
+    kind: str
+    deleted_at: datetime | None
+    idle_since: datetime | None
+
+
 @dataclass
 class RetentionPlan:
     """Output of ``plan_retention``: the set of changes a guarded job should apply.
@@ -62,6 +99,16 @@ class RetentionPlan:
 
     games_to_delete: list[uuid.UUID] = field(default_factory=list)
     llm_calls_to_scrub: list[uuid.UUID] = field(default_factory=list)
+    dry_run: bool = True
+
+
+@dataclass
+class HumanPiiRetentionPlan:
+    """Human PII rows that a guarded retention job should redact/anonymize."""
+
+    chat_messages_to_redact: list[uuid.UUID] = field(default_factory=list)
+    consent_ip_hashes_to_null: list[uuid.UUID] = field(default_factory=list)
+    guest_principals_to_anonymize: list[uuid.UUID] = field(default_factory=list)
     dry_run: bool = True
 
 
@@ -123,5 +170,50 @@ def plan_retention(
     return RetentionPlan(
         games_to_delete=games_to_delete,
         llm_calls_to_scrub=llm_calls_to_scrub,
+        dry_run=dry_run,
+    )
+
+
+def plan_human_pii_retention(
+    *,
+    chat_messages: Sequence[HumanChatRetentionInfo],
+    consents: Sequence[HumanConsentRetentionInfo],
+    guest_principals: Sequence[GuestPrincipalRetentionInfo],
+    policy: HumanPiiRetentionPolicy,
+    now: datetime,
+    dry_run: bool = True,
+) -> HumanPiiRetentionPlan:
+    """Pure planner for human PII retention.
+
+    Human PII uses a stricter boundary than the original game-bank planner:
+    rows are selected only when their timestamp is strictly older than the
+    configured cutoff. Rows exactly at the cutoff remain within TTL.
+    """
+    now = _aware(now)
+    chat_cutoff = now - timedelta(days=policy.chat_retention_ttl_days)
+    consent_cutoff = now - timedelta(days=policy.consent_ip_hash_ttl_days)
+    guest_cutoff = now - timedelta(days=policy.abandoned_guest_ttl_days)
+
+    chat_messages_to_redact = [
+        row.id for row in chat_messages if not row.redacted and _aware(row.created_at) < chat_cutoff
+    ]
+    consent_ip_hashes_to_null = [
+        row.id
+        for row in consents
+        if row.source_ip_hash is not None and _aware(row.accepted_at) < consent_cutoff
+    ]
+    guest_principals_to_anonymize = [
+        row.id
+        for row in guest_principals
+        if row.kind == "guest"
+        and row.deleted_at is None
+        and row.idle_since is not None
+        and _aware(row.idle_since) < guest_cutoff
+    ]
+
+    return HumanPiiRetentionPlan(
+        chat_messages_to_redact=chat_messages_to_redact,
+        consent_ip_hashes_to_null=consent_ip_hashes_to_null,
+        guest_principals_to_anonymize=guest_principals_to_anonymize,
         dry_run=dry_run,
     )

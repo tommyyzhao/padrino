@@ -24,8 +24,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.api.auth import _get_auth_settings
 from padrino.api.deps import get_session, get_session_factory
 from padrino.api.human_auth import HumanPrincipalContext, require_human
+from padrino.api.human_consent import client_ip_hash
 from padrino.api.lobby_launch import (
     AutoFillPoolError,
     LobbyNotLaunchableError,
@@ -38,8 +40,10 @@ from padrino.api.lobby_presence import (
     stale_member_ids,
 )
 from padrino.api.lobby_state import stream_lobby_state
+from padrino.api.ranked_eligibility import resolve_ranked_eligibility
 from padrino.core.composition import CompositionSummary, composition_summary
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStakes, LobbyStatus
+from padrino.core.ranked_eligibility import evaluate_ranked_eligibility
 from padrino.core.rulesets import Ruleset, get_ruleset
 from padrino.db.models import Lobby
 from padrino.db.repositories import agent_builds as agent_builds_repo
@@ -71,6 +75,14 @@ def _idle_seconds() -> float:
     from padrino.settings import get_settings
 
     return get_settings().padrino_lobby_idle_cancel_seconds
+
+
+def ranked_human_rating_enabled_from_request(request: Request) -> bool:
+    """Read the ranked human-rating kill-switch from request-scoped settings."""
+    from padrino.settings import get_settings
+
+    settings = getattr(request.app.state, "auth_settings", None) or get_settings()
+    return getattr(settings, "padrino_ranked_human_rating_enabled", False) is True
 
 
 # Map an admission-denial reason to its HTTP status. A breaker-open or per-user
@@ -177,10 +189,28 @@ async def create_lobby(
             detail="integrity_acknowledgement_required",
         )
 
+    now = datetime.now(UTC)
+    ruleset: Ruleset | None = None
+    if body.ranked:
+        ruleset = _ruleset_or_422(body.ruleset_id)
+        facts = await resolve_ranked_eligibility(
+            session,
+            principal_id=ctx.principal_id,
+            settings=_get_auth_settings(request),
+            now=now,
+        )
+        decision = evaluate_ranked_eligibility(facts)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=decision.reason.value,
+            )
+
     admission = await _enforce_admission(
         request, session, principal_id=ctx.principal_id, action=ACTION_CREATE
     )
-    ruleset = _ruleset_or_422(body.ruleset_id)
+    if ruleset is None:
+        ruleset = _ruleset_or_422(body.ruleset_id)
     player_count: int = ruleset.PLAYER_COUNT
     ai_seat_count = player_count - 1
 
@@ -198,7 +228,6 @@ async def create_lobby(
                 detail="unknown_prepick_model",
             )
 
-    now = datetime.now(UTC)
     league = await leagues_repo.get_or_create_humans_included(
         session, ruleset_id=body.ruleset_id, ranked=body.ranked
     )
@@ -489,7 +518,13 @@ async def launch(
         request, session, principal_id=ctx.principal_id, action=ACTION_LAUNCH
     )
     try:
-        result = await launch_lobby(session, lobby_id=lobby_id)
+        league = await leagues_repo.get(session, lobby.league_id)
+        source_ip_hash = client_ip_hash(request) if league is not None and league.ranked else None
+        result = await launch_lobby(
+            session,
+            lobby_id=lobby_id,
+            source_ip_hash=source_ip_hash,
+        )
     except (LobbyNotLaunchableError, AutoFillPoolError) as exc:
         # Roll the freshly claimed (unbound) slots back so a failed launch leaks
         # neither a count slot nor a held inference reservation.

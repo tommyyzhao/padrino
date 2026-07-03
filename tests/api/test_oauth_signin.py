@@ -10,6 +10,7 @@ when no provider is configured, and provider secrets/tokens are never persisted.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
@@ -24,6 +25,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.api import oauth as oauth_module
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.api.oauth import (
@@ -100,11 +102,22 @@ def _cookie(resp_headers: object, name: str) -> str | None:
     return jar[name].value
 
 
-def _stub_subject(subject: str, *, name: str | None = "Alice") -> None:
+def _stub_subject(
+    subject: str,
+    *,
+    name: str | None = "Alice",
+    email: str | None = None,
+    email_verified: bool = False,
+) -> None:
     async def _resolve(
         config: object, *, code: str, code_verifier: str, nonce: str
     ) -> OAuthUserInfo:
-        return OAuthUserInfo(subject=subject, display_name=name)
+        return OAuthUserInfo(
+            subject=subject,
+            display_name=name,
+            email=email,
+            email_verified=email_verified,
+        )
 
     set_resolve_user_info(_resolve)
 
@@ -129,6 +142,8 @@ def _signed_id_token(
     include_exp: bool = True,
     azp: str | None = None,
     iat: int | None = None,
+    email: str | None = None,
+    email_verified: object | None = None,
 ) -> str:
     claims: dict[str, Any] = {
         "iss": iss,
@@ -140,6 +155,10 @@ def _signed_id_token(
     }
     if azp is not None:
         claims["azp"] = azp
+    if email is not None:
+        claims["email"] = email
+    if email_verified is not None:
+        claims["email_verified"] = email_verified
     if include_exp:
         claims["exp"] = exp if exp is not None else int(time()) + 3600
     token = jwt.encode({"alg": "RS256", "kid": "test-key"}, claims, _OIDC_KEY)
@@ -189,6 +208,55 @@ def _oauth_settings_with_max_token_age(max_token_age_seconds: int | None) -> Set
     )
 
 
+def test_user_info_from_payload_extracts_email_claims() -> None:
+    info = oauth_module._user_info_from_payload(
+        {
+            "sub": "subject-email-claims",
+            "name": "Alice",
+            "email": " MixedCase@Example.COM ",
+            "email_verified": True,
+        }
+    )
+
+    assert info.subject == "subject-email-claims"
+    assert info.display_name == "Alice"
+    assert info.email == " MixedCase@Example.COM "
+    assert info.email_verified is True
+
+
+@pytest.mark.parametrize(
+    ("claim_present", "value", "expected"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (True, "true", True),
+        (True, "True", True),
+        (True, "1", True),
+        (True, None, False),
+        (False, None, False),
+        (True, "false", False),
+        (True, 1, False),
+        (True, "yes", False),
+    ],
+)
+def test_user_info_from_payload_parses_email_verified_claim_fail_closed(
+    claim_present: bool,
+    value: object,
+    expected: bool,
+) -> None:
+    payload: dict[str, object] = {
+        "sub": "subject-email-verified-parse",
+        "email": "alice@example.test",
+    }
+    if claim_present:
+        payload["email_verified"] = value
+
+    info = oauth_module._user_info_from_payload(payload)
+
+    assert info.email == "alice@example.test"
+    assert info.email_verified is expected
+
+
 @pytest.mark.asyncio
 async def test_start_redirects_with_state_and_pkce(client: AsyncClient) -> None:
     resp = await client.get("/human/oauth/google/start")
@@ -235,6 +303,61 @@ async def test_callback_creates_account_keyed_by_subject(
 
 
 @pytest.mark.asyncio
+async def test_callback_persists_normalized_verified_email_on_create(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    start = await client.get("/human/oauth/google/start")
+    state = _cookie(start.headers, OAUTH_STATE_COOKIE)
+    verifier = _cookie(start.headers, OAUTH_VERIFIER_COOKIE)
+    assert state is not None and verifier is not None
+
+    _stub_subject(
+        "subject-email-create",
+        email="  Alice@Example.COM  ",
+        email_verified=True,
+    )
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+    async with session_factory() as session:
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
+    assert len(identities) == 1
+    assert identities[0].email == "alice@example.com"
+    assert identities[0].email_verified is True
+
+
+@pytest.mark.asyncio
+async def test_callback_unverified_email_claim_persists_false(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    start = await client.get("/human/oauth/google/start")
+    state = _cookie(start.headers, OAUTH_STATE_COOKIE)
+    verifier = _cookie(start.headers, OAUTH_VERIFIER_COOKIE)
+    assert state is not None and verifier is not None
+
+    _stub_subject(
+        "subject-email-unverified",
+        email="bob@example.com",
+        email_verified=False,
+    )
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+    async with session_factory() as session:
+        identity = (await session.execute(select(OAuthIdentity))).scalar_one()
+    assert identity.email == "bob@example.com"
+    assert identity.email_verified is False
+
+
+@pytest.mark.asyncio
 async def test_repeat_signin_resolves_same_account(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -261,6 +384,39 @@ async def test_repeat_signin_resolves_same_account(
         identities = (await session.execute(select(OAuthIdentity))).scalars().all()
     assert len(principals) == 1
     assert len(identities) == 1
+
+
+@pytest.mark.asyncio
+async def test_repeat_signin_refreshes_email_and_verified_flag(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async def _login(*, email: str, email_verified: bool) -> str:
+        start = await client.get("/human/oauth/google/start")
+        state = _cookie(start.headers, OAUTH_STATE_COOKIE)
+        verifier = _cookie(start.headers, OAUTH_VERIFIER_COOKIE)
+        assert state is not None and verifier is not None
+        _stub_subject(
+            "subject-email-refresh",
+            email=email,
+            email_verified=email_verified,
+        )
+        resp = await client.get(
+            "/human/oauth/google/callback",
+            params={"code": "auth-code", "state": state},
+            cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+        )
+        assert resp.status_code == 200
+        return str(resp.json()["principal_id"])
+
+    first = await _login(email="old@example.test", email_verified=False)
+    second = await _login(email="  New@Example.TEST  ", email_verified=True)
+
+    assert first == second
+    async with session_factory() as session:
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
+    assert len(identities) == 1
+    assert identities[0].email == "new@example.test"
+    assert identities[0].email_verified is True
 
 
 @pytest.mark.asyncio
@@ -294,13 +450,47 @@ async def test_signed_in_guest_upgraded_in_place(
 
     async with session_factory() as session:
         principals = (await session.execute(select(Principal))).scalars().all()
+        identities = (await session.execute(select(OAuthIdentity))).scalars().all()
     assert len(principals) == 1
     assert principals[0].kind == "account"
+    assert len(identities) == 1
 
     # The original guest cookie still resolves (its session re-points in place).
     me = await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: guest_token})
     assert me.status_code == 200
     assert me.json()["kind"] == "account"
+
+
+@pytest.mark.asyncio
+async def test_signed_in_guest_upgrade_persists_normalized_email(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    guest = await client.post("/human/guest")
+    guest_token = _cookie(guest.headers, HUMAN_SESSION_COOKIE)
+    assert guest_token is not None
+
+    state, verifier, _nonce = await _callback_cookies(client)
+    _stub_subject(
+        "subject-email-upgrade",
+        email="  UpGrade@Example.COM ",
+        email_verified=True,
+    )
+
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={
+            OAUTH_STATE_COOKIE: state,
+            OAUTH_VERIFIER_COOKIE: verifier,
+            HUMAN_SESSION_COOKIE: guest_token,
+        },
+    )
+
+    assert resp.status_code == 200
+    async with session_factory() as session:
+        identity = (await session.execute(select(OAuthIdentity))).scalar_one()
+    assert identity.email == "upgrade@example.com"
+    assert identity.email_verified is True
 
 
 @pytest.mark.asyncio
@@ -968,6 +1158,41 @@ async def test_callback_accepts_id_token_within_default_max_age(
     )
 
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_callback_does_not_log_provider_email_claim(
+    client: AsyncClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The provider id_token email claim is stored but never emitted to logs."""
+    state, verifier, nonce = await _callback_cookies(client)
+    sensitive_email = "sensitive-oauth-email@example.test"
+
+    async def _exchange(config: object, *, code: str, code_verifier: str) -> dict[str, str]:
+        return {
+            "id_token": _signed_id_token(
+                nonce=nonce,
+                email=sensitive_email,
+                email_verified=True,
+            )
+        }
+
+    async def _fetch(config: object) -> dict[str, object]:
+        return _jwks()
+
+    set_exchange_token(_exchange)
+    set_fetch_jwks(_fetch)
+
+    caplog.set_level(logging.DEBUG, logger="padrino")
+    resp = await client.get(
+        "/human/oauth/google/callback",
+        params={"code": "auth-code", "state": state},
+        cookies={OAUTH_STATE_COOKIE: state, OAUTH_VERIFIER_COOKIE: verifier},
+    )
+
+    assert resp.status_code == 200
+    assert sensitive_email not in caplog.text
 
 
 @pytest.mark.asyncio

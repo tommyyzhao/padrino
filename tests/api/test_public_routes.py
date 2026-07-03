@@ -12,6 +12,7 @@ import hashlib
 import secrets
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -420,15 +421,39 @@ async def _seed_human_leaderboard_rows(
             kind=human_principals.PRINCIPAL_KIND_ACCOUNT,
             display_name="Human Ace",
         )
+        await human_principals.claim_ranked_handle(
+            session,
+            ace.id,
+            candidate="HumanAce",
+            blocklist=(),
+            reserved=(),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
         seedling = await human_principals.create_principal(
             session,
             kind=human_principals.PRINCIPAL_KIND_ACCOUNT,
             display_name="Human Seedling",
         )
+        await human_principals.claim_ranked_handle(
+            session,
+            seedling.id,
+            candidate="HumanSeedling",
+            blocklist=(),
+            reserved=(),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
+        )
         casual = await human_principals.create_principal(
             session,
             kind=human_principals.PRINCIPAL_KIND_ACCOUNT,
             display_name="Casual Human",
+        )
+        await human_principals.claim_ranked_handle(
+            session,
+            casual.id,
+            candidate="CasualHuman",
+            blocklist=(),
+            reserved=(),
+            now=datetime(2026, 6, 27, tzinfo=UTC),
         )
         session.add_all(
             [
@@ -603,17 +628,17 @@ async def test_leaderboard_returns_ranked_humans_included_cards_from_human_ratin
     assert {card["ruleset_id"] for card in human_cards} == {"mini7_v1"}
 
     by_name = {card["display_name"]: card for card in human_cards}
-    assert set(by_name) == {"Human Ace", "Human Seedling"}
-    assert "Casual Human" not in by_name
+    assert set(by_name) == {"HumanAce", "HumanSeedling"}
+    assert "CasualHuman" not in by_name
     assert all(card["display_name"] != "Atlas ranked" for card in human_cards)
-    assert by_name["Human Ace"]["rank"] == 1
-    assert by_name["Human Ace"]["provisional"] is False
-    assert by_name["Human Seedling"]["rank"] is None
-    assert by_name["Human Seedling"]["provisional"] is True
+    assert by_name["HumanAce"]["rank"] == 1
+    assert by_name["HumanAce"]["provisional"] is False
+    assert by_name["HumanSeedling"]["rank"] is None
+    assert by_name["HumanSeedling"]["provisional"] is True
     assert (
-        by_name["Human Seedling"]["conservative_score"] > by_name["Human Ace"]["conservative_score"]
+        by_name["HumanSeedling"]["conservative_score"] > by_name["HumanAce"]["conservative_score"]
     )
-    assert "10 games" in by_name["Human Seedling"]["provisional_reason"]
+    assert "10 games" in by_name["HumanSeedling"]["provisional_reason"]
     assert all("human_player_id" not in card for card in human_cards)
 
 

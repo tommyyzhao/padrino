@@ -58,6 +58,7 @@ from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
+from padrino.db.repositories import ranked_bans as ranked_bans_repo
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
 from padrino.economics.human_cost_governance import (
     PRICE_BASIS_FALLBACK_TABLE,
@@ -75,11 +76,16 @@ from padrino.observability.events import (
     EVENT_PRIVACY_AUDIT_LEAK_DETECTED,
     EVENT_RATING_UPDATED,
 )
-from padrino.observability.metrics import record_game_completed
+from padrino.observability.metrics import (
+    record_game_completed,
+    record_human_rating_firewall_violation,
+)
 from padrino.observability.privacy_audit import audit_ranked_observations
 from padrino.observability.timing import time_phase
 from padrino.ratings.human_openskill_service import (
+    FirewallViolation,
     HumanGameResult,
+    ranked_human_rating_enabled,
     update_human_ratings_for_game,
 )
 from padrino.ratings.openskill_service import (
@@ -418,6 +424,23 @@ async def _should_apply_human_ratings(
     return league.kind == LeagueKind.HUMANS_INCLUDED.value and league.ranked is True
 
 
+async def _ranked_banned_principal_ids_for_game(
+    session: AsyncSession,
+    *,
+    game_id: uuid.UUID,
+    now: Any,
+) -> set[uuid.UUID]:
+    seats = await games_repo.list_seats(session, game_id)
+    principal_ids = {
+        seat.occupant_principal_id for seat in seats if seat.occupant_principal_id is not None
+    }
+    return await ranked_bans_repo.active_ranked_banned_principal_ids(
+        session,
+        principal_ids=principal_ids,
+        now=now,
+    )
+
+
 def _should_apply_placement(
     persistence: GamePersistence,
     ranked: bool,
@@ -640,16 +663,41 @@ async def _persist_terminated_event(
                 )
         if apply_human_ratings:
             assert persistence.league_id is not None
+            settings = persistence.settings or get_settings()
             human_winner = cast(Literal["TOWN", "MAFIA", "DRAW"], state.terminal_result)
-            human_events = await update_human_ratings_for_game(
+            if completed_at is None:
+                msg = "completed game missing completed_at after terminal update"
+                raise RuntimeError(msg)
+            rating_now = completed_at
+            ranked_banned_principal_ids = await _ranked_banned_principal_ids_for_game(
                 session,
-                league_id=persistence.league_id,
-                ranked=ranked,
-                game_result=HumanGameResult(
-                    game_id=persistence.game_id,
-                    winner=human_winner,
-                ),
+                game_id=persistence.game_id,
+                now=rating_now,
             )
+            try:
+                human_events = await update_human_ratings_for_game(
+                    session,
+                    league_id=persistence.league_id,
+                    ranked=ranked,
+                    game_result=HumanGameResult(
+                        game_id=persistence.game_id,
+                        winner=human_winner,
+                    ),
+                    rating_enabled=ranked_human_rating_enabled(settings),
+                    ranked_banned_principal_ids=ranked_banned_principal_ids,
+                    now=rating_now,
+                )
+            except FirewallViolation as exc:
+                record_human_rating_firewall_violation(league_kind=exc.league_kind)
+                _logger.error(
+                    "human.rating.finalize_skipped_firewall_violation",
+                    game_id=str(persistence.game_id),
+                    league_id=str(exc.league_id),
+                    kind=exc.league_kind,
+                    winner=human_winner,
+                    error=str(exc),
+                )
+                human_events = []
             if human_events:
                 _logger.info(
                     "human.rating.updated",

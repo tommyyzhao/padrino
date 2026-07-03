@@ -8,7 +8,8 @@ Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 siblings ``human_rating`` / ``human_rating_event``, the
 non-canonical context sibling rating tables, generic budget reservation slots,
 and the browser-human identity layer ``principals`` / ``human_sessions`` (Wave
-9, US-127), plus human-lane cost admission slots.
+9, US-127), human-lane cost admission slots, and ranked anti-cheat telemetry /
+advisory flags.
 """
 
 from __future__ import annotations
@@ -272,6 +273,7 @@ class Game(Base):
     attempt_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    ranked_source_ip_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class GameSeat(Base):
@@ -828,6 +830,7 @@ class HumanRating(Base):
     conservative_score: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     games: Mapped[int] = mapped_column(Integer, nullable=False)
     last_game_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -865,6 +868,181 @@ class HumanRatingEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+
+
+class RankedWriteAudit(Base):
+    """Append-only provenance for ranked human-rating write decisions."""
+
+    __tablename__ = "ranked_write_audit"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('APPLIED', 'REFUSED')",
+            name="ck_ranked_write_audit_decision",
+        ),
+        Index(
+            "uq_ranked_write_audit_applied_game_human",
+            "game_id",
+            "human_player_id",
+            unique=True,
+            sqlite_where=text("decision = 'APPLIED' AND human_player_id IS NOT NULL"),
+            postgresql_where=text("decision = 'APPLIED' AND human_player_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_ranked_write_audit_refused_game_reason",
+            "game_id",
+            "reason",
+            unique=True,
+            sqlite_where=text("decision = 'REFUSED' AND human_player_id IS NULL"),
+            postgresql_where=text("decision = 'REFUSED' AND human_player_id IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    human_player_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    league_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("leagues.id"), nullable=False)
+    decision: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    flag_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class RankedGameExclusion(Base):
+    """Manual exclusion of one ranked game from one human rating history."""
+
+    __tablename__ = "ranked_game_exclusions"
+    __table_args__ = (
+        Index(
+            "uq_ranked_game_exclusions_principal_game",
+            "principal_id",
+            "game_id",
+            unique=True,
+        ),
+        Index("ix_ranked_game_exclusions_game_id", "game_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id"), nullable=False
+    )
+    human_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class RankedRatingRollbackAudit(Base):
+    """Idempotent append-only audit row for a manual ranked-rating rollback."""
+
+    __tablename__ = "ranked_rating_rollback_audit"
+    __table_args__ = (
+        Index(
+            "uq_ranked_rating_rollback_audit_principal_hash",
+            "principal_id",
+            "exclusion_hash",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id"), nullable=False
+    )
+    human_player_id: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    excluded_game_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    exclusion_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class RankedGameSignal(Base):
+    """Append-only per-game ranked human telemetry for manual anti-cheat review."""
+
+    __tablename__ = "ranked_game_signals"
+    __table_args__ = (
+        Index("uq_ranked_game_signals_game_id", "game_id", unique=True),
+        Index("ix_ranked_game_signals_source_ip_hash", "source_ip_hash"),
+        Index("ix_ranked_game_signals_human_principal_id", "human_principal_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("games.id"), nullable=False)
+    human_principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id"), nullable=False
+    )
+    source_ip_hash: Mapped[str] = mapped_column(String, nullable=False)
+    session_fingerprint_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    winner: Mapped[str] = mapped_column(String, nullable=False)
+    faction: Mapped[str] = mapped_column(String, nullable=False)
+    signals: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class RankedFlag(Base):
+    """Read-side advisory ranked anti-cheat flag for manual review."""
+
+    __tablename__ = "ranked_flags"
+    __table_args__ = (
+        CheckConstraint(
+            "severity IN ('low', 'medium', 'high')",
+            name="ck_ranked_flags_severity",
+        ),
+        Index(
+            "uq_ranked_flags_kind_principal_evidence_hash",
+            "kind",
+            "principal_id",
+            "evidence_hash",
+            unique=True,
+        ),
+        Index("ix_ranked_flags_kind", "kind"),
+        Index("ix_ranked_flags_severity", "severity"),
+        Index("ix_ranked_flags_principal_id", "principal_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str] = mapped_column(String, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class RankedBan(Base):
+    """Manual ranked ban/suspension anchored to an account and optional email hash."""
+
+    __tablename__ = "ranked_ban"
+    __table_args__ = (
+        CheckConstraint("kind IN ('ban', 'suspension')", name="ck_ranked_ban_kind"),
+        Index("ix_ranked_ban_principal_id", "principal_id"),
+        Index("ix_ranked_ban_email_hash", "email_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id"), nullable=False
+    )
+    email_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lifted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ScheduledGauntlet(Base):
@@ -1070,10 +1248,19 @@ class Principal(Base):
     """
 
     __tablename__ = "principals"
+    __table_args__ = (
+        Index(
+            "uq_principals_ranked_handle_normalized",
+            "ranked_handle_normalized",
+            unique=True,
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     kind: Mapped[str] = mapped_column(String, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    ranked_handle: Mapped[str | None] = mapped_column(String, nullable=True)
+    ranked_handle_normalized: Mapped[str | None] = mapped_column(String, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
@@ -1113,9 +1300,10 @@ class OAuthIdentity(Base):
 
     Keyed by (``provider``, ``subject``) so an OAuth sign-in is find-or-create:
     a repeat sign-in resolves the same account principal across sessions and
-    devices. Only the stable provider ``subject`` is persisted — provider access
-    tokens are NEVER stored beyond completing the exchange. There is no friends
-    graph and no multi-account merge in v1.
+    devices. Only the stable provider ``subject`` plus provider-asserted email
+    verification facts are persisted — provider access tokens are NEVER stored
+    beyond completing the exchange. There is no friends graph and no multi-account
+    merge in v1.
     """
 
     __tablename__ = "oauth_identities"
@@ -1126,6 +1314,10 @@ class OAuthIdentity(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     provider: Mapped[str] = mapped_column(String, nullable=False)
     subject: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     principal_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
     )
@@ -1185,6 +1377,7 @@ class HumanConsent(Base):
     )
     document_kind: Mapped[str] = mapped_column(String, nullable=False)
     document_version: Mapped[str] = mapped_column(String, nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     accepted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -1536,6 +1729,9 @@ __all__ = [
     "AnalyticsAggregate",
     "ApiKey",
     "BehavioralEvaluation",
+    "BudgetReservationSlot",
+    "Campaign",
+    "CampaignPairing",
     "Game",
     "GameEvent",
     "GameSeat",
@@ -1548,10 +1744,13 @@ __all__ = [
     "HumanConsent",
     "HumanCostAdmission",
     "HumanGameRuntime",
+    "HumanInferenceReservation",
+    "HumanPlayerStats",
     "HumanRating",
     "HumanRatingEvent",
     "HumanSeatPresence",
     "HumanSession",
+    "HumanTuringGuess",
     "IngestedGame",
     "JudgeEnrichmentCard",
     "League",
@@ -1568,6 +1767,12 @@ __all__ = [
     "PlacementRatingEvent",
     "Principal",
     "PromptVersion",
+    "RankedBan",
+    "RankedFlag",
+    "RankedGameExclusion",
+    "RankedGameSignal",
+    "RankedRatingRollbackAudit",
+    "RankedWriteAudit",
     "RateLimitBucket",
     "Rating",
     "RatingContext",

@@ -3,28 +3,54 @@
 This service is intentionally separate from the scientific rating writer. It
 resolves only ``League.kind == HUMANS_INCLUDED`` rows that are also ranked, and
 persists only the sibling ``human_rating`` / ``human_rating_event`` tables.
+
+V1 no-strength-of-schedule decision: AI seats in ranked human games are
+transient ``INITIAL_MU`` / ``INITIAL_SIGMA`` placeholders. This module must not
+read or write scientific ``Rating`` / ``RatingEvent`` rows to inject model
+strength, because coupling the Humans-Included lane to the CANONICAL_TEAM
+scientific ladder would weaken the rating firewall. Future work may revisit AI
+strength-of-schedule only through an explicit, separately tested firewall
+design.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
+import structlog
 from openskill.models import PlackettLuce
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.core.enums import Faction, LeagueKind
+from padrino.core.enums import Faction, LeagueKind, SeatKind
+from padrino.core.ranked_eligibility import RankedEligibilityReason
 from padrino.core.rulesets.canonicality import canonical_team_ranks_for_outcome
-from padrino.db.models import Game, GameSeat, HumanRating, HumanRatingEvent, League
+from padrino.db.models import Game, GameSeat, HumanRating, HumanRatingEvent, League, Principal
+from padrino.db.repositories import human_consents as human_consents_repo
 from padrino.db.repositories import human_ratings as human_ratings_repo
+from padrino.db.repositories import ranked_signals as ranked_signals_repo
+from padrino.legal.documents import DOCUMENT_KIND_RANKED, get_legal_document
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA, SCOPE_GLOBAL
 from padrino.ratings.openskill_service import SCOPE_VALUE_GLOBAL as _SCOPE_VALUE_GLOBAL
 
 SCOPE_VALUE_GLOBAL: Final[str] = _SCOPE_VALUE_GLOBAL
+_logger = structlog.get_logger("padrino.ratings.human_openskill_service")
+
+
+class FirewallViolation(RuntimeError):
+    """Raised when ranked human ELO is asked to write outside HUMANS_INCLUDED."""
+
+    def __init__(self, *, league_id: uuid.UUID, league_kind: str | None) -> None:
+        self.league_id = league_id
+        self.league_kind = league_kind
+        super().__init__(
+            "human rating firewall violation: "
+            f"league_id={league_id} kind={league_kind!r} is not HUMANS_INCLUDED"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,12 +64,45 @@ class HumanGameResult:
 @dataclass(frozen=True, slots=True)
 class _TeamEntry:
     public_player_id: str
+    seat_kind: str
     row: HumanRating | None
+    existing_event: HumanRatingEvent | None
+    before_mu: float
+    before_sigma: float
     rating: Any
 
 
 def _conservative(mu: float, sigma: float) -> float:
     return mu - 3.0 * sigma
+
+
+def _is_sha256_hex(value: str | None) -> bool:
+    return value is not None and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _principal_uuid_set(values: Iterable[uuid.UUID | str] | None) -> set[uuid.UUID]:
+    if values is None:
+        return set()
+    return {value if isinstance(value, uuid.UUID) else uuid.UUID(str(value)) for value in values}
+
+
+def ranked_human_rating_enabled(settings: Any | None = None) -> bool:
+    """Read the ranked human-rating kill-switch, failing closed if absent."""
+    if settings is None:
+        from padrino.settings import get_settings
+
+        settings = get_settings()
+    return getattr(settings, "padrino_ranked_human_rating_enabled", False) is True
+
+
+def _ranked_required_content_hashes() -> dict[str, str]:
+    document = get_legal_document(DOCUMENT_KIND_RANKED)
+    if document is None:
+        return {}
+    return dict.fromkeys(
+        human_consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS,
+        document.content_hash,
+    )
 
 
 async def _resolve_ranked_humans_included_metadata(
@@ -56,11 +115,16 @@ async def _resolve_ranked_humans_included_metadata(
     if not ranked:
         return None
     league = await session.get(League, league_id)
-    if (
-        league is None
-        or league.kind != LeagueKind.HUMANS_INCLUDED.value
-        or league.ranked is not True
-    ):
+    if league is None:
+        return None
+    if league.kind != LeagueKind.HUMANS_INCLUDED.value:
+        _logger.error(
+            "human.rating.firewall_violation",
+            league_id=str(league_id),
+            kind=league.kind,
+        )
+        raise FirewallViolation(league_id=league_id, league_kind=league.kind)
+    if league.ranked is not True:
         return None
     game = await session.get(Game, game_id)
     if game is None or game.ruleset_id != league.ruleset_id:
@@ -73,6 +137,19 @@ async def _seat_rows(session: AsyncSession, game_id: uuid.UUID) -> list[GameSeat
     return list((await session.execute(stmt)).scalars())
 
 
+async def _deleted_principal_ids(
+    session: AsyncSession,
+    principal_ids: set[uuid.UUID],
+) -> set[uuid.UUID]:
+    if not principal_ids:
+        return set()
+    stmt = select(Principal.id).where(
+        Principal.id.in_(principal_ids),
+        Principal.deleted_at.is_not(None),
+    )
+    return set((await session.execute(stmt)).scalars())
+
+
 async def _team_entries(
     session: AsyncSession,
     *,
@@ -80,9 +157,11 @@ async def _team_entries(
     game_id: uuid.UUID,
     seats: Sequence[GameSeat],
     model: PlackettLuce,
-) -> tuple[list[_TeamEntry], list[_TeamEntry]] | None:
+    excluded_principal_ids: set[uuid.UUID],
+) -> tuple[list[_TeamEntry], list[_TeamEntry], list[_TeamEntry]] | None:
     town: list[_TeamEntry] = []
     mafia: list[_TeamEntry] = []
+    forfeits: list[_TeamEntry] = []
     human_count = 0
     for seat in seats:
         try:
@@ -93,7 +172,14 @@ async def _team_entries(
             return None
 
         row: HumanRating | None = None
-        if seat.occupant_principal_id is not None:
+        existing_event: HumanRatingEvent | None = None
+        before_mu = INITIAL_MU
+        before_sigma = INITIAL_SIGMA
+        is_takeover = seat.seat_kind == SeatKind.AI_TAKEOVER.value
+        if (
+            seat.occupant_principal_id is not None
+            and seat.occupant_principal_id not in excluded_principal_ids
+        ):
             human_count += 1
             row = await human_ratings_repo.get_or_create_human_rating(
                 session,
@@ -105,11 +191,46 @@ async def _team_entries(
                 initial_sigma=INITIAL_SIGMA,
                 initial_conservative_score=_conservative(INITIAL_MU, INITIAL_SIGMA),
             )
-            rating = model.create_rating([row.mu, row.sigma], name=str(row.id))
-        else:
-            rating = model.create_rating([INITIAL_MU, INITIAL_SIGMA])
+            existing_event = await human_ratings_repo.get_human_rating_event(
+                session,
+                game_id=game_id,
+                human_player_id=row.human_player_id,
+                scope_type=SCOPE_GLOBAL,
+                scope_value=SCOPE_VALUE_GLOBAL,
+            )
+            if existing_event is None:
+                before_mu = float(row.mu)
+                before_sigma = float(row.sigma)
+            else:
+                before_mu = float(existing_event.before_mu)
+                before_sigma = float(existing_event.before_sigma)
+            human_entry = _TeamEntry(
+                public_player_id=seat.public_player_id,
+                seat_kind=seat.seat_kind,
+                row=row,
+                existing_event=existing_event,
+                before_mu=before_mu,
+                before_sigma=before_sigma,
+                rating=model.create_rating([before_mu, before_sigma], name=str(row.id)),
+            )
+            if is_takeover:
+                forfeits.append(human_entry)
+                row = None
+                existing_event = None
+                before_mu = INITIAL_MU
+                before_sigma = INITIAL_SIGMA
 
-        entry = _TeamEntry(public_player_id=seat.public_player_id, row=row, rating=rating)
+        entry = _TeamEntry(
+            public_player_id=seat.public_player_id,
+            seat_kind=seat.seat_kind,
+            row=row,
+            existing_event=existing_event,
+            before_mu=before_mu,
+            before_sigma=before_sigma,
+            rating=model.create_rating([before_mu, before_sigma], name=str(row.id))
+            if row is not None
+            else model.create_rating([INITIAL_MU, INITIAL_SIGMA]),
+        )
         if faction is Faction.TOWN:
             town.append(entry)
         else:
@@ -117,7 +238,16 @@ async def _team_entries(
 
     if human_count == 0 or not town or not mafia:
         return None
-    return town, mafia
+    return town, mafia, forfeits
+
+
+def _rate_forfeit_loss(model: PlackettLuce, entry: _TeamEntry) -> Any:
+    """Return the forfeiting human's rating after one deterministic loss."""
+    _winner, forfeiter = model.rate(
+        [[model.create_rating([INITIAL_MU, INITIAL_SIGMA])], [entry.rating]],
+        ranks=[0, 1],
+    )
+    return forfeiter[0]
 
 
 async def _persist_human_entry(
@@ -133,8 +263,34 @@ async def _persist_human_entry(
     row = entry.row
     if row is None:
         return None
-    before_mu = float(row.mu)
-    before_sigma = float(row.sigma)
+    if entry.existing_event is not None:
+        return None
+    event = await human_ratings_repo.record_human_rating_event(
+        session,
+        league_id=league_id,
+        game_id=game_id,
+        human_player_id=row.human_player_id,
+        public_player_id=entry.public_player_id,
+        scope_type=SCOPE_GLOBAL,
+        scope_value=SCOPE_VALUE_GLOBAL,
+        before_mu=entry.before_mu,
+        before_sigma=entry.before_sigma,
+        after_mu=new_mu,
+        after_sigma=new_sigma,
+        created_at=now,
+    )
+    if event is None:
+        return None
+    await human_ratings_repo.record_ranked_write_audit(
+        session,
+        league_id=league_id,
+        game_id=game_id,
+        human_player_id=row.human_player_id,
+        decision="APPLIED",
+        reason=RankedEligibilityReason.ELIGIBLE.value,
+        flag_enabled=True,
+        created_at=now,
+    )
     updated = await human_ratings_repo.update_human_rating(
         session,
         row.id,
@@ -147,19 +303,129 @@ async def _persist_human_entry(
     if updated is None:  # pragma: no cover - row was just inserted in this txn.
         msg = f"Human rating row {row.id} disappeared between insert and update"
         raise RuntimeError(msg)
-    return await human_ratings_repo.record_human_rating_event(
+    return event
+
+
+async def _record_ranked_disabled_refusal(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    ranked: bool,
+    game_id: uuid.UUID,
+    now: datetime,
+) -> None:
+    if not ranked:
+        return
+    league = await session.get(League, league_id)
+    if (
+        league is None
+        or league.kind != LeagueKind.HUMANS_INCLUDED.value
+        or league.ranked is not True
+    ):
+        return
+    game = await session.get(Game, game_id)
+    if game is None or game.ruleset_id != league.ruleset_id:
+        return
+    await human_ratings_repo.record_ranked_write_audit(
         session,
         league_id=league_id,
         game_id=game_id,
-        human_player_id=updated.human_player_id,
-        public_player_id=entry.public_player_id,
-        scope_type=SCOPE_GLOBAL,
-        scope_value=SCOPE_VALUE_GLOBAL,
-        before_mu=before_mu,
-        before_sigma=before_sigma,
-        after_mu=new_mu,
-        after_sigma=new_sigma,
+        human_player_id=None,
+        decision="REFUSED",
+        reason=RankedEligibilityReason.RANKED_DISABLED.value,
+        flag_enabled=False,
+        created_at=now,
     )
+
+
+async def _record_ranked_banned_refusals(
+    session: AsyncSession,
+    *,
+    league_id: uuid.UUID,
+    game_id: uuid.UUID,
+    seats: Sequence[GameSeat],
+    ranked_banned_principal_ids: set[uuid.UUID],
+    now: datetime,
+) -> None:
+    banned_seat_principal_ids = sorted(
+        {
+            seat.occupant_principal_id
+            for seat in seats
+            if seat.occupant_principal_id is not None
+            and seat.occupant_principal_id in ranked_banned_principal_ids
+        },
+        key=str,
+    )
+    for principal_id in banned_seat_principal_ids:
+        await human_ratings_repo.record_ranked_write_audit(
+            session,
+            league_id=league_id,
+            game_id=game_id,
+            human_player_id=str(principal_id),
+            decision="REFUSED",
+            reason=RankedEligibilityReason.RANKED_BANNED.value,
+            flag_enabled=True,
+            created_at=now,
+        )
+
+
+async def _record_ranked_game_signal_best_effort(
+    session: AsyncSession,
+    *,
+    game: Game,
+    game_result: HumanGameResult,
+    seats: Sequence[GameSeat],
+    events: Sequence[HumanRatingEvent],
+    now: datetime,
+) -> None:
+    if not events:
+        return
+    source_ip_hash = game.ranked_source_ip_hash
+    if not _is_sha256_hex(source_ip_hash):
+        _logger.warning(
+            "ranked.signals.capture_skipped",
+            game_id=str(game_result.game_id),
+            reason="missing_hashed_source_ip",
+        )
+        return
+    assert source_ip_hash is not None
+
+    seats_by_public_id = {seat.public_player_id: seat for seat in seats}
+    event = sorted(
+        events,
+        key=lambda row: (row.public_player_id or "", row.human_player_id),
+    )[0]
+    if event.public_player_id is None:
+        return
+    seat = seats_by_public_id.get(event.public_player_id)
+    if seat is None:
+        return
+    human_principal_id = seat.occupant_principal_id
+    if human_principal_id is None:
+        try:
+            human_principal_id = uuid.UUID(event.human_player_id)
+        except ValueError:
+            return
+
+    try:
+        async with session.begin_nested():
+            await ranked_signals_repo.record_ranked_game_signal(
+                session,
+                game_id=game_result.game_id,
+                human_principal_id=human_principal_id,
+                source_ip_hash=source_ip_hash,
+                winner=game_result.winner,
+                faction=seat.faction,
+                signals={},
+                created_at=now,
+            )
+    except Exception as exc:
+        _logger.warning(
+            "ranked.signals.capture_failed",
+            game_id=str(game_result.game_id),
+            human_principal_id=str(human_principal_id),
+            error=str(exc),
+        )
 
 
 async def update_human_ratings_for_game(
@@ -168,6 +434,8 @@ async def update_human_ratings_for_game(
     league_id: uuid.UUID,
     ranked: bool,
     game_result: HumanGameResult,
+    rating_enabled: bool | None = None,
+    ranked_banned_principal_ids: Iterable[uuid.UUID | str] | None = None,
     now: datetime | None = None,
 ) -> list[HumanRatingEvent]:
     """Apply the GLOBAL ranked-human update for one Humans-Included game.
@@ -175,6 +443,20 @@ async def update_human_ratings_for_game(
     AI seats participate as transient initial ratings so the team update reflects
     the full mixed game, but only human principal rows are persisted.
     """
+    flag_enabled = (
+        ranked_human_rating_enabled() if rating_enabled is None else rating_enabled
+    ) is True
+    _now = now if now is not None else datetime.now(UTC)
+    if not flag_enabled:
+        await _record_ranked_disabled_refusal(
+            session,
+            league_id=league_id,
+            ranked=ranked,
+            game_id=game_result.game_id,
+            now=_now,
+        )
+        return []
+
     metadata = await _resolve_ranked_humans_included_metadata(
         session,
         league_id=league_id,
@@ -183,8 +465,28 @@ async def update_human_ratings_for_game(
     )
     if metadata is None:
         return []
+    _league, game = metadata
 
     seats = await _seat_rows(session, game_result.game_id)
+    human_principal_ids = {
+        seat.occupant_principal_id for seat in seats if seat.occupant_principal_id is not None
+    }
+    banned_principal_ids = _principal_uuid_set(ranked_banned_principal_ids) & human_principal_ids
+    await _record_ranked_banned_refusals(
+        session,
+        league_id=league_id,
+        game_id=game_result.game_id,
+        seats=seats,
+        ranked_banned_principal_ids=banned_principal_ids,
+        now=_now,
+    )
+    withdrawn_principal_ids = await human_consents_repo.active_ranked_withdrawn_principal_ids(
+        session,
+        subject_principal_ids=human_principal_ids,
+        required_kinds=human_consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS,
+        required_content_hashes=_ranked_required_content_hashes(),
+    )
+    deleted_principal_ids = await _deleted_principal_ids(session, human_principal_ids)
     model = PlackettLuce(mu=INITIAL_MU, sigma=INITIAL_SIGMA)
     teams = await _team_entries(
         session,
@@ -192,10 +494,13 @@ async def update_human_ratings_for_game(
         game_id=game_result.game_id,
         seats=seats,
         model=model,
+        excluded_principal_ids=withdrawn_principal_ids
+        | deleted_principal_ids
+        | banned_principal_ids,
     )
     if teams is None:
         return []
-    town_entries, mafia_entries = teams
+    town_entries, mafia_entries, forfeit_entries = teams
 
     ranks = canonical_team_ranks_for_outcome(game_result.winner)
     new_town, new_mafia = model.rate(
@@ -203,7 +508,6 @@ async def update_human_ratings_for_game(
         ranks=[ranks[Faction.TOWN.value], ranks[Faction.MAFIA.value]],
     )
 
-    _now = now if now is not None else datetime.now(UTC)
     events: list[HumanRatingEvent] = []
     for entry, new in zip(town_entries, new_town, strict=True):
         event = await _persist_human_entry(
@@ -233,11 +537,34 @@ async def update_human_ratings_for_game(
         )
         if event is not None:
             events.append(event)
+    for entry in forfeit_entries:
+        new = _rate_forfeit_loss(model, entry)
+        event = await _persist_human_entry(
+            session,
+            league_id=league_id,
+            game_id=game_result.game_id,
+            entry=entry,
+            new_mu=new.mu,
+            new_sigma=new.sigma,
+            now=_now,
+        )
+        if event is not None:
+            events.append(event)
+    await _record_ranked_game_signal_best_effort(
+        session,
+        game=game,
+        game_result=game_result,
+        seats=seats,
+        events=events,
+        now=_now,
+    )
     return events
 
 
 __all__ = [
     "SCOPE_VALUE_GLOBAL",
+    "FirewallViolation",
     "HumanGameResult",
+    "ranked_human_rating_enabled",
     "update_human_ratings_for_game",
 ]

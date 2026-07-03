@@ -130,6 +130,25 @@ async def get_human_context(
     )
 
 
+async def deleted_human_session_present(
+    request: Request,
+    session: AsyncSession,
+) -> bool:
+    """Return True when the request cookie belongs to a soft-deleted principal."""
+    raw_token = _session_token(request)
+    if raw_token is None:
+        return False
+
+    record = await principals_repo.get_session_by_token(session, raw_token)
+    if record is None or record.revoked_at is not None:
+        return False
+    if _as_aware(record.expires_at) <= datetime.now(UTC):
+        return False
+
+    principal = await principals_repo.get_principal(session, record.principal_id)
+    return principal is not None and principal.deleted_at is not None
+
+
 def _as_aware(value: datetime) -> datetime:
     """Coerce a possibly-naive DB timestamp (SQLite drops tz) to UTC-aware."""
     if value.tzinfo is None:
@@ -185,6 +204,7 @@ __all__ = [
     "PRINCIPAL_ACCOUNT",
     "PRINCIPAL_GUEST",
     "HumanPrincipalContext",
+    "deleted_human_session_present",
     "generate_session_token",
     "get_human_context",
     "require_account",

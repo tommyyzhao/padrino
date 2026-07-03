@@ -41,9 +41,14 @@ from padrino.core.lobby.autofill import (
     NotEnoughCuratedModelsError,
     autofill_empty_seats,
 )
+from padrino.core.lobby.strangers_only import (
+    RankedSeatingViolation,
+    assert_strangers_only_ranked,
+)
 from padrino.core.rulesets import get_ruleset
 from padrino.db.models import GameSeat, LobbyMember
 from padrino.db.repositories import games as games_repo
+from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 
 
@@ -87,7 +92,12 @@ async def _curated_roster(session: AsyncSession, ruleset_id: str) -> list[str]:
     return await human_eligible_pool(session, ruleset_id)
 
 
-async def launch_lobby(session: AsyncSession, *, lobby_id: uuid.UUID) -> LaunchResult:
+async def launch_lobby(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    source_ip_hash: str | None = None,
+) -> LaunchResult:
     """Materialize a human-lane game from a LOCKED lobby (idempotent).
 
     Raises:
@@ -109,6 +119,16 @@ async def launch_lobby(session: AsyncSession, *, lobby_id: uuid.UUID) -> LaunchR
     seats = await lobbies_repo.list_seats(session, lobby_id)
     if len(seats) != ruleset.PLAYER_COUNT:
         raise LobbyNotLaunchableError("seat_count_mismatch")
+
+    league = await leagues_repo.get(session, lobby.league_id)
+    human_seat_count = sum(1 for seat in seats if seat.seat_kind == LobbySeatKind.HUMAN.value)
+    try:
+        assert_strangers_only_ranked(
+            lobby_is_ranked=league.ranked if league is not None else False,
+            human_seat_count=human_seat_count,
+        )
+    except RankedSeatingViolation as exc:
+        raise LobbyNotLaunchableError(exc.reason) from exc
 
     # Resolve reserved AI builds (host pre-picks) and the empty AI seats.
     reserved: dict[int, str] = {}
@@ -143,6 +163,7 @@ async def launch_lobby(session: AsyncSession, *, lobby_id: uuid.UUID) -> LaunchR
         status="CREATED",
     )
     game.identity_mode = lobby.identity_mode
+    game.ranked_source_ip_hash = source_ip_hash
 
     member_principal = await _member_principals(session, lobby_id)
 

@@ -23,7 +23,7 @@ import hashlib
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
 from openskill.models import PlackettLuce
@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.core.enums import LeagueKind, RatingContextKind
 from padrino.db.models import (
     AgentBuild,
+    HumanConsent,
     HumanRating,
     IngestedGame,
     League,
@@ -45,6 +46,9 @@ from padrino.db.models import (
     RatingContext,
     SoloRateRating,
 )
+from padrino.db.repositories import human_consents as human_consents_repo
+from padrino.db.repositories.human_principals import derive_default_ranked_handle
+from padrino.legal.documents import DOCUMENT_KIND_RANKED, get_legal_document
 from padrino.ratings.openskill_service import (
     INITIAL_MU,
     INITIAL_SIGMA,
@@ -52,7 +56,10 @@ from padrino.ratings.openskill_service import (
     SCOPE_GLOBAL,
     SCOPE_VALUE_GLOBAL,
 )
-from padrino.ratings.provisional_and_decay import DEFAULT_PROVISIONAL_GAMES
+from padrino.ratings.provisional_and_decay import (
+    DEFAULT_PROVISIONAL_GAMES,
+    project_decayed_display,
+)
 from padrino.ratings.solo_rate_service import (
     DEFAULT_SOLO_RATE_MIN_ATTEMPTS,
     beta_binomial_credible_interval,
@@ -151,6 +158,16 @@ def _conservative(mu: float, sigma: float) -> float:
     return mu - 3.0 * sigma
 
 
+def _ranked_required_content_hashes() -> dict[str, str]:
+    document = get_legal_document(DOCUMENT_KIND_RANKED)
+    if document is None:
+        return {}
+    return dict.fromkeys(
+        human_consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS,
+        document.content_hash,
+    )
+
+
 def _entity_id(
     *,
     display_name: str,
@@ -232,6 +249,7 @@ async def compute_public_leaderboard(
     gauntlet_id: str | None = None,
     provisional_games_threshold: int = DEFAULT_PROVISIONAL_GAMES,
     solo_rate_min_attempts: int = DEFAULT_SOLO_RATE_MIN_ATTEMPTS,
+    now: datetime | None = None,
 ) -> PublicLeaderboard:
     """Return the cached or freshly-computed public leaderboard.
 
@@ -240,6 +258,7 @@ async def compute_public_leaderboard(
     the previous ``cache_tag`` simply miss the cache once and get the fresh
     aggregate.
     """
+    as_of = _leaderboard_as_of(now)
     ingested_tag = await _ingested_cache_part(
         session,
         ruleset_id=ruleset_id,
@@ -248,7 +267,7 @@ async def compute_public_leaderboard(
     canonical_tag = await _rating_cache_part(session, Rating, ruleset_id=ruleset_id)
     placement_tag = await _rating_cache_part(session, PlacementRating, ruleset_id=ruleset_id)
     solo_tag = await _rating_cache_part(session, SoloRateRating, ruleset_id=ruleset_id)
-    human_tag = await _human_rating_cache_part(session, ruleset_id=ruleset_id)
+    human_tag = await _human_rating_cache_part(session, ruleset_id=ruleset_id, now=as_of)
     cache_tag = (
         f"ingested:{ingested_tag};canonical:{canonical_tag};"
         f"placement:{placement_tag};solo:{solo_tag};human:{human_tag}"
@@ -294,6 +313,7 @@ async def compute_public_leaderboard(
         session,
         ruleset_id=ruleset_id,
         min_games=provisional_games_threshold,
+        now=as_of,
     )
 
     leaderboard = PublicLeaderboard(
@@ -349,9 +369,14 @@ async def _human_rating_cache_part(
     session: AsyncSession,
     *,
     ruleset_id: str | None,
+    now: datetime,
 ) -> str:
     stmt = (
-        select(func.max(HumanRating.updated_at), func.count(HumanRating.id))
+        select(
+            HumanRating.human_player_id,
+            HumanRating.updated_at,
+            HumanRating.quarantined_at,
+        )
         .select_from(HumanRating)
         .join(League, League.id == HumanRating.league_id)
         .where(
@@ -361,13 +386,137 @@ async def _human_rating_cache_part(
     )
     if ruleset_id is not None:
         stmt = stmt.where(League.ruleset_id == ruleset_id)
-    max_dt, count = (await session.execute(stmt)).one()
-    return _cache_part(max_dt, int(count))
+    rows = list((await session.execute(stmt)).all())
+    human_player_ids = [row.human_player_id for row in rows]
+    max_updated_at = _max_datetime(row.updated_at for row in rows)
+    max_quarantined_at = _max_datetime(row.quarantined_at for row in rows)
+    handle_token = await _human_handle_cache_token(
+        session,
+        human_player_ids,
+    )
+    consent_token = await _human_ranked_consent_cache_token(
+        session,
+        human_player_ids,
+    )
+    decay_day = now.date().isoformat() if rows else "empty"
+    return (
+        f"{_cache_part(max_updated_at, len(rows))}:"
+        f"q:{_dt_cache_token(max_quarantined_at)}:"
+        f"h:{handle_token}:c:{consent_token}:d:{decay_day}"
+    )
+
+
+def _leaderboard_as_of(now: datetime | None) -> datetime:
+    resolved = datetime.now(UTC) if now is None else now
+    if resolved.tzinfo is None:
+        return resolved.replace(tzinfo=UTC)
+    return resolved.astimezone(UTC)
 
 
 def _cache_part(max_dt: datetime | None, count: int) -> str:
     tag = max_dt.isoformat() if max_dt is not None else "empty"
     return f"{tag}:{count}"
+
+
+def _dt_cache_token(max_dt: datetime | None) -> str:
+    return max_dt.isoformat() if max_dt is not None else "empty"
+
+
+def _max_datetime(values: Iterable[datetime | None]) -> datetime | None:
+    return max((value for value in values if value is not None), default=None)
+
+
+async def _human_handle_cache_token(
+    session: AsyncSession,
+    human_player_ids: Iterable[str],
+) -> str:
+    ids = list(dict.fromkeys(human_player_ids))
+    if not ids:
+        return "empty"
+
+    uuid_to_raw: dict[uuid.UUID, str] = {}
+    for raw in ids:
+        try:
+            uuid_to_raw[uuid.UUID(raw)] = raw
+        except ValueError:
+            continue
+
+    principal_tokens: dict[str, str] = {}
+    if uuid_to_raw:
+        stmt = select(
+            Principal.id,
+            Principal.ranked_handle,
+            Principal.deleted_at,
+            Principal.updated_at,
+        ).where(Principal.id.in_(list(uuid_to_raw)))
+        for principal_id, ranked_handle, deleted_at, updated_at in (
+            await session.execute(stmt)
+        ).all():
+            principal_tokens[uuid_to_raw[principal_id]] = "|".join(
+                [
+                    ranked_handle or "",
+                    _dt_cache_token(deleted_at),
+                    _dt_cache_token(updated_at),
+                ]
+            )
+
+    raw = "\n".join(
+        principal_tokens.get(human_player_id, "missing") for human_player_id in sorted(ids)
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+async def _human_ranked_consent_cache_token(
+    session: AsyncSession,
+    human_player_ids: Iterable[str],
+) -> str:
+    ids = list(dict.fromkeys(human_player_ids))
+    if not ids:
+        return "empty"
+
+    uuid_to_raw: dict[uuid.UUID, str] = {}
+    for raw in ids:
+        try:
+            uuid_to_raw[uuid.UUID(raw)] = raw
+        except ValueError:
+            continue
+    if not uuid_to_raw:
+        return "empty"
+
+    relevant_kinds = human_consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS | {
+        human_consents_repo.DOCUMENT_KIND_RANKED_WITHDRAWN
+    }
+    stmt = (
+        select(
+            HumanConsent.subject_principal_id,
+            HumanConsent.document_kind,
+            HumanConsent.content_hash,
+            HumanConsent.accepted_at,
+        )
+        .where(
+            HumanConsent.subject_principal_id.in_(list(uuid_to_raw)),
+            HumanConsent.document_kind.in_(relevant_kinds),
+        )
+        .order_by(
+            HumanConsent.subject_principal_id,
+            HumanConsent.document_kind,
+            HumanConsent.accepted_at,
+        )
+    )
+    tokens = [
+        "|".join(
+            [
+                uuid_to_raw[principal_id],
+                kind,
+                content_hash or "",
+                accepted_at.isoformat(),
+            ]
+        )
+        for principal_id, kind, content_hash, accepted_at in (await session.execute(stmt)).all()
+    ]
+    if not tokens:
+        return "empty"
+    return hashlib.sha256("\n".join(tokens).encode("utf-8")).hexdigest()[:32]
 
 
 def _aggregate_entries(
@@ -470,10 +619,16 @@ async def _agent_entities(
     return entities
 
 
-def _human_entity(human_player_id: str, display_name: str | None) -> PublicEntity:
+def _human_entity(human_player_id: str, ranked_handle: str | None) -> PublicEntity:
     digest = hashlib.sha256(f"human|{human_player_id}".encode()).hexdigest()
-    stripped = display_name.strip() if display_name is not None else ""
-    safe_display_name = stripped or f"Human {digest[:8]}"
+    stripped = ranked_handle.strip() if ranked_handle is not None else ""
+    if stripped:
+        safe_display_name = stripped
+    else:
+        try:
+            safe_display_name = derive_default_ranked_handle(uuid.UUID(human_player_id))
+        except ValueError:
+            safe_display_name = f"Player-{digest[:10]}"
     return PublicEntity(
         entity_id=digest[:32],
         display_name=safe_display_name,
@@ -499,15 +654,17 @@ async def _human_entities(
         except ValueError:
             continue
 
-    display_names: dict[str, str | None] = {}
+    ranked_handles: dict[str, str | None] = {}
     if uuid_to_raw:
-        stmt = select(Principal.id, Principal.display_name).where(
+        stmt = select(Principal.id, Principal.ranked_handle, Principal.deleted_at).where(
             Principal.id.in_(list(uuid_to_raw))
         )
-        for principal_id, display_name in (await session.execute(stmt)).all():
-            display_names[uuid_to_raw[principal_id]] = display_name
+        for principal_id, ranked_handle, deleted_at in (await session.execute(stmt)).all():
+            if deleted_at is not None:
+                continue
+            ranked_handles[uuid_to_raw[principal_id]] = ranked_handle
 
-    return {raw: _human_entity(raw, display_names.get(raw)) for raw in ids}
+    return {raw: _human_entity(raw, ranked_handles[raw]) for raw in ids if raw in ranked_handles}
 
 
 def _card_id(
@@ -832,6 +989,7 @@ async def _human_cards(
     *,
     ruleset_id: str | None,
     min_games: int,
+    now: datetime,
 ) -> tuple[PublicRatingCard, ...]:
     stmt = (
         select(HumanRating, League)
@@ -841,26 +999,51 @@ async def _human_cards(
             League.ranked.is_(True),
             HumanRating.scope_type == SCOPE_GLOBAL,
             HumanRating.scope_value == SCOPE_VALUE_GLOBAL,
+            HumanRating.quarantined_at.is_(None),
         )
     )
     if ruleset_id is not None:
         stmt = stmt.where(League.ruleset_id == ruleset_id)
     rows = list((await session.execute(stmt)).all())
-    entities = await _human_entities(session, (row.human_player_id for row, _league in rows))
+    uuid_to_raw: dict[uuid.UUID, str] = {}
+    for row, _league in rows:
+        try:
+            uuid_to_raw[uuid.UUID(row.human_player_id)] = row.human_player_id
+        except ValueError:
+            continue
+    withdrawn_ids = await human_consents_repo.active_ranked_withdrawn_principal_ids(
+        session,
+        subject_principal_ids=uuid_to_raw,
+        required_kinds=human_consents_repo.REQUIRED_RANKED_DOCUMENT_KINDS,
+        required_content_hashes=_ranked_required_content_hashes(),
+    )
+    withdrawn_raw_ids = {uuid_to_raw[principal_id] for principal_id in withdrawn_ids}
+    visible_rows: list[tuple[HumanRating, League]] = [
+        (row, league) for row, league in rows if row.human_player_id not in withdrawn_raw_ids
+    ]
+    entities = await _human_entities(
+        session, (row.human_player_id for row, _league in visible_rows)
+    )
     cards: list[PublicRatingCard] = []
-    for row, league in rows:
+    for row, league in visible_rows:
         entity = entities.get(row.human_player_id)
         if entity is None:
             continue
+        display = project_decayed_display(
+            row.mu,
+            row.sigma,
+            row.last_game_at,
+            now=now,
+        )
         cards.append(
             _human_openskill_card(
                 ruleset_id=league.ruleset_id,
                 entity=entity,
                 scope_type=row.scope_type,
                 scope_value=row.scope_value,
-                mu=row.mu,
-                sigma=row.sigma,
-                conservative_score=row.conservative_score,
+                mu=display.mu,
+                sigma=display.sigma,
+                conservative_score=display.conservative_score,
                 games=row.games,
                 min_games=min_games,
             )

@@ -26,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.api import human_consent
 from padrino.api.app import create_app
 from padrino.api.auth import _get_auth_settings
 from padrino.api.deps import get_session
@@ -37,6 +38,7 @@ from padrino.api.human_auth import (
 from padrino.api.human_consent import enforce_consent, hash_source_ip
 from padrino.db.models import HumanConsent
 from padrino.db.repositories import human_consents as consents_repo
+from padrino.legal.documents import LegalDocument, list_legal_documents
 
 _gate_router = APIRouter()
 
@@ -115,14 +117,11 @@ async def test_consent_status_endpoint(client: AsyncClient, guest_token: str) ->
 
 
 @pytest.mark.asyncio
-async def test_version_bump_reprompts(
+async def test_document_hash_change_reprompts(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CEREBRAS_API_KEY", "test-cerebras-key")
-    monkeypatch.setenv("PADRINO_CONSENT_TOS_VERSION", "v1")
-    monkeypatch.setenv("PADRINO_CONSENT_PRIVACY_VERSION", "v1")
-    monkeypatch.setenv("PADRINO_CONSENT_AGE_GATE_VERSION", "v1")
     from padrino.settings import get_settings
 
     get_settings.cache_clear()
@@ -136,8 +135,21 @@ async def test_version_bump_reprompts(
             ok = await ac.post("/_test/human/act", cookies={HUMAN_SESSION_COOKIE: token})
             assert ok.status_code == 200
 
-            # Bump the TOS document version: the stale consent no longer counts.
-            monkeypatch.setenv("PADRINO_CONSENT_TOS_VERSION", "v2")
+            changed_documents = tuple(
+                LegalDocument(
+                    kind=document.kind,
+                    version_label=document.version_label,
+                    body=f"{document.body}\nMaterial terms changed.\n",
+                )
+                if document.kind == consents_repo.DOCUMENT_KIND_TOS
+                else document
+                for document in list_legal_documents()
+            )
+            monkeypatch.setattr(
+                human_consent,
+                "list_legal_documents",
+                lambda: changed_documents,
+            )
             get_settings.cache_clear()
             app2 = create_app(session_factory=session_factory, auth_required=True)
             app2.include_router(_gate_router)

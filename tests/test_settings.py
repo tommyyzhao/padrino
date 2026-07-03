@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+from starlette.requests import Request
+
+from padrino.api.routes.lobbies import ranked_human_rating_enabled_from_request
+from padrino.ratings.human_openskill_service import ranked_human_rating_enabled
 from padrino.settings import Settings, get_settings
 
 
@@ -53,6 +59,53 @@ def test_default_fallback_model(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_default_human_lane_mock_ai_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PADRINO_HUMAN_LANE_MOCK_AI", raising=False)
     assert _fresh().padrino_human_lane_mock_ai is False
+
+
+def test_default_ranked_human_rating_kill_switch_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PADRINO_RANKED_HUMAN_RATING_ENABLED", raising=False)
+    assert _fresh().padrino_ranked_human_rating_enabled is False
+
+
+def test_ranked_human_rating_kill_switch_visible_to_api_and_ratings_layers() -> None:
+    settings = Settings(_env_file=None, padrino_ranked_human_rating_enabled=True)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/lobbies",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(auth_settings=settings)),
+        }
+    )
+
+    assert ranked_human_rating_enabled_from_request(request) is True
+    assert ranked_human_rating_enabled(settings) is True
+
+
+def test_ranked_human_rating_kill_switch_fails_closed_for_missing_settings() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/lobbies",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(auth_settings=object())),
+        }
+    )
+
+    assert ranked_human_rating_enabled_from_request(request) is False
+    assert ranked_human_rating_enabled(object()) is False
+
+
+def test_core_does_not_import_settings() -> None:
+    offenders = [
+        path
+        for path in Path("src/padrino/core").rglob("*.py")
+        if "padrino.settings" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
 
 
 def test_env_override_human_lane_mock_ai(monkeypatch: pytest.MonkeyPatch) -> None:

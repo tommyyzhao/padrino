@@ -34,6 +34,7 @@ from padrino.api.human_actions import submit_action
 from padrino.api.human_auth import (
     HUMAN_SESSION_COOKIE,
     HumanPrincipalContext,
+    deleted_human_session_present,
     generate_session_token,
     get_human_context,
     require_human,
@@ -48,8 +49,12 @@ from padrino.api.human_consent import (
     client_ip_hash,
     enforce_consent,
     has_current_consent,
+    has_current_ranked_consent,
     record_consent,
+    record_ranked_consent,
+    record_ranked_withdrawal,
     required_consent_versions,
+    required_ranked_consent_versions,
 )
 from padrino.api.human_observation import build_seat_observation_snapshot, stream_snapshot
 from padrino.api.human_seat_auth import HUMAN_LANE_SEAT_KINDS
@@ -77,11 +82,35 @@ from padrino.api.pagination import (
 from padrino.api.reveal import build_participant_reveal, winner_from_terminal_result
 from padrino.core.engine.actions import Action
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStatus
+from padrino.core.gdpr_export import (
+    ChatExportInput,
+    ConsentExportInput,
+    HumanDataExportBundle,
+    HumanRatingEventExportInput,
+    HumanRatingExportInput,
+    PrincipalExportInput,
+    SessionExportInput,
+    assemble_human_data_export,
+)
 from padrino.core.reveal import EndgameReveal
 from padrino.core.rulesets import get_ruleset
 from padrino.db.game_status import GAME_STATUS_COMPLETED
-from padrino.db.models import Game, GameSeat, HumanPlayerStats, HumanTuringGuess, Principal
+from padrino.db.models import (
+    Game,
+    GameSeat,
+    HumanChatMessage,
+    HumanConsent,
+    HumanPlayerStats,
+    HumanRating,
+    HumanRatingEvent,
+    HumanSession,
+    HumanTuringGuess,
+    Principal,
+)
+from padrino.db.repositories import human_chat as human_chat_repo
+from padrino.db.repositories import human_consents as human_consents_repo
 from padrino.db.repositories import human_principals as principals_repo
+from padrino.db.repositories import human_ratings as human_ratings_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
@@ -405,6 +434,73 @@ async def post_consent(
     return ConsentStatus(consented=True, required_versions=versions)
 
 
+@router.get("/human/ranked-consent", response_model=ConsentStatus)
+async def get_ranked_consent_status(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatus:
+    """Report whether the principal holds current base and ranked consent."""
+    settings = _get_auth_settings(request)
+    consented = await has_current_ranked_consent(
+        session, subject_principal_id=ctx.principal_id, settings=settings
+    )
+    return ConsentStatus(
+        consented=consented,
+        required_versions=required_ranked_consent_versions(settings),
+    )
+
+
+@router.post(
+    "/human/ranked-consent",
+    response_model=ConsentStatus,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_ranked_consent(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatus:
+    """Record purpose-segmented ranked consent rows for the current human."""
+    settings = _get_auth_settings(request)
+    versions = await record_ranked_consent(
+        session,
+        subject_principal_id=ctx.principal_id,
+        settings=settings,
+        accepted_at=datetime.now(UTC),
+        source_ip_hash=client_ip_hash(request),
+    )
+    consented = await has_current_ranked_consent(
+        session, subject_principal_id=ctx.principal_id, settings=settings
+    )
+    return ConsentStatus(consented=consented, required_versions=versions)
+
+
+@router.post(
+    "/human/consent/ranked/withdraw",
+    response_model=ConsentStatus,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_ranked_consent_withdrawal(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> ConsentStatus:
+    """Append a ranked consent withdrawal marker for the current human."""
+    settings = _get_auth_settings(request)
+    await record_ranked_withdrawal(
+        session,
+        subject_principal_id=ctx.principal_id,
+        settings=settings,
+        withdrawn_at=datetime.now(UTC),
+        source_ip_hash=client_ip_hash(request),
+    )
+    return ConsentStatus(
+        consented=False,
+        required_versions=required_ranked_consent_versions(settings),
+    )
+
+
 @router.post(
     "/human/match",
     response_model=MatchResponse,
@@ -424,6 +520,11 @@ async def post_match(
     """
     settings = _get_auth_settings(request)
     if ctx is None:
+        if await deleted_human_session_present(request, session):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="principal_deleted",
+            )
         _principal, raw_token = await _create_guest_session(
             session,
             settings=settings,
@@ -919,6 +1020,93 @@ async def get_me(
     )
 
 
+@router.get("/human/me/export", response_model=HumanDataExportBundle)
+async def get_me_export(
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> HumanDataExportBundle:
+    """Return the authenticated principal's deterministic self-export bundle."""
+    principal = await principals_repo.get_principal(session, ctx.principal_id)
+    if principal is None:  # pragma: no cover - require_human already checked it.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="principal_not_found",
+        )
+    return assemble_human_data_export(
+        principal=_principal_export_input(principal),
+        sessions=[
+            _session_export_input(row)
+            for row in await principals_repo.list_sessions_for_principal(
+                session,
+                principal_id=ctx.principal_id,
+            )
+        ],
+        consents=[
+            _consent_export_input(row)
+            for row in await human_consents_repo.list_for_principal(
+                session,
+                subject_principal_id=ctx.principal_id,
+            )
+        ],
+        chat_messages=[
+            _chat_export_input(row)
+            for row in await human_chat_repo.list_for_principal(
+                session,
+                principal_id=ctx.principal_id,
+            )
+        ],
+        human_ratings=[
+            _human_rating_export_input(row)
+            for row in await human_ratings_repo.list_human_ratings_for_principal(
+                session,
+                principal_id=ctx.principal_id,
+            )
+        ],
+        human_rating_events=[
+            _human_rating_event_export_input(row)
+            for row in await human_ratings_repo.list_human_rating_events_for_principal(
+                session,
+                principal_id=ctx.principal_id,
+            )
+        ],
+    )
+
+
+@router.post("/human/me/delete", status_code=status.HTTP_204_NO_CONTENT)
+async def post_me_delete(
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Anonymize the current human principal while preserving replay/rating rows."""
+    now = datetime.now(UTC)
+    anonymized_token = await principals_repo.allocate_anonymized_principal_token(
+        session,
+        ctx.principal_id,
+    )
+    await human_chat_repo.redact_for_principal(session, principal_id=ctx.principal_id)
+    await human_consents_repo.null_source_ip_hashes_for_principal(
+        session,
+        subject_principal_id=ctx.principal_id,
+    )
+    await human_ratings_repo.tombstone_human_rating_identity(
+        session,
+        principal_id=ctx.principal_id,
+        anonymized_token=anonymized_token,
+        tombstoned_at=now,
+    )
+    deleted = await principals_repo.anonymize_principal_for_delete(
+        session,
+        ctx.principal_id,
+        now=now,
+    )
+    if deleted is None:  # pragma: no cover - require_human already checked it.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="principal_not_found",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.patch("/human/me", response_model=GuestSummary)
 async def patch_me(
     body: DisplayNameUpdate,
@@ -937,6 +1125,91 @@ async def patch_me(
         principal_id=updated.id,
         kind=updated.kind,
         display_name=updated.display_name,
+    )
+
+
+def _principal_export_input(row: Principal) -> PrincipalExportInput:
+    return PrincipalExportInput(
+        id=row.id,
+        kind=row.kind,
+        display_name=row.display_name,
+        ranked_handle=row.ranked_handle,
+        ranked_handle_normalized=row.ranked_handle_normalized,
+        deleted_at=row.deleted_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _session_export_input(row: HumanSession) -> SessionExportInput:
+    return SessionExportInput(
+        id=row.id,
+        principal_id=row.principal_id,
+        session_hash=row.session_hash,
+        kind=row.kind,
+        issued_at=row.issued_at,
+        expires_at=row.expires_at,
+        revoked_at=row.revoked_at,
+        last_seen_at=row.last_seen_at,
+    )
+
+
+def _consent_export_input(row: HumanConsent) -> ConsentExportInput:
+    return ConsentExportInput(
+        id=row.id,
+        subject_principal_id=row.subject_principal_id,
+        document_kind=row.document_kind,
+        document_version=row.document_version,
+        content_hash=row.content_hash,
+        accepted_at=row.accepted_at,
+        source_ip_hash=row.source_ip_hash,
+    )
+
+
+def _chat_export_input(row: HumanChatMessage) -> ChatExportInput:
+    return ChatExportInput(
+        id=row.id,
+        game_id=row.game_id,
+        sequence=row.sequence,
+        public_player_id=row.public_player_id,
+        raw_text=row.raw_text,
+        cleaned_text=row.cleaned_text,
+        redacted=row.redacted,
+        created_at=row.created_at,
+    )
+
+
+def _human_rating_export_input(row: HumanRating) -> HumanRatingExportInput:
+    return HumanRatingExportInput(
+        id=row.id,
+        league_id=row.league_id,
+        human_player_id=row.human_player_id,
+        scope_type=row.scope_type,
+        scope_value=row.scope_value,
+        mu=row.mu,
+        sigma=row.sigma,
+        conservative_score=row.conservative_score,
+        games=row.games,
+        last_game_at=row.last_game_at,
+        quarantined_at=row.quarantined_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _human_rating_event_export_input(row: HumanRatingEvent) -> HumanRatingEventExportInput:
+    return HumanRatingEventExportInput(
+        id=row.id,
+        league_id=row.league_id,
+        game_id=row.game_id,
+        human_player_id=row.human_player_id,
+        public_player_id=row.public_player_id,
+        scope_type=row.scope_type,
+        scope_value=row.scope_value,
+        before_mu=row.before_mu,
+        before_sigma=row.before_sigma,
+        after_mu=row.after_mu,
+        after_sigma=row.after_sigma,
+        created_at=row.created_at,
     )
 
 
@@ -1054,6 +1327,8 @@ async def oauth_callback(
         provider=config.provider,
         subject=user_info.subject,
         display_name=user_info.display_name,
+        email=user_info.email,
+        email_verified=user_info.email_verified,
         now=now,
         upgrade_guest_id=guest_id,
     )

@@ -13,7 +13,7 @@ import uuid
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.db.models import HumanChatMessage
+from padrino.db.models import GameSeat, HumanChatMessage
 
 
 async def append_human_chat(
@@ -59,6 +59,25 @@ async def list_for_game(session: AsyncSession, game_id: uuid.UUID) -> list[Human
     return list((await session.execute(stmt)).scalars())
 
 
+async def list_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> list[HumanChatMessage]:
+    """Return chat authored by a principal via the game-seat ownership join."""
+    stmt = (
+        select(HumanChatMessage)
+        .join(
+            GameSeat,
+            (GameSeat.game_id == HumanChatMessage.game_id)
+            & (GameSeat.public_player_id == HumanChatMessage.public_player_id),
+        )
+        .where(GameSeat.occupant_principal_id == principal_id)
+        .order_by(HumanChatMessage.game_id, HumanChatMessage.sequence, HumanChatMessage.id)
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
 async def redact(session: AsyncSession, *, game_id: uuid.UUID, sequence: int) -> int:
     """Null the raw/cleaned text and set ``redacted=True`` for one message.
 
@@ -81,3 +100,32 @@ async def redact(session: AsyncSession, *, game_id: uuid.UUID, sequence: int) ->
     )
     await session.flush()
     return affected
+
+
+async def redact_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> int:
+    """Redact every sidecar chat row authored by ``principal_id``."""
+    stmt = (
+        select(HumanChatMessage)
+        .join(
+            GameSeat,
+            (GameSeat.game_id == HumanChatMessage.game_id)
+            & (GameSeat.public_player_id == HumanChatMessage.public_player_id),
+        )
+        .where(
+            GameSeat.occupant_principal_id == principal_id,
+            HumanChatMessage.redacted.is_(False),
+        )
+        .order_by(HumanChatMessage.game_id, HumanChatMessage.sequence, HumanChatMessage.id)
+    )
+    rows = list((await session.execute(stmt)).scalars())
+    for row in rows:
+        row.raw_text = None
+        row.cleaned_text = None
+        row.redacted = True
+    if rows:
+        await session.flush()
+    return len(rows)

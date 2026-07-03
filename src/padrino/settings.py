@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from padrino.legal.documents import DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS
+
 if TYPE_CHECKING:
     from padrino.llm.adapter import RoutingPolicy
 
@@ -127,6 +129,23 @@ class Settings(BaseSettings):
     # the deterministic mock adapter for AI seats so human-lane smoke/e2e runs
     # never require real provider credentials or network calls.
     padrino_human_lane_mock_ai: bool = False
+
+    # Ranked human ELO kill-switch (US-289). Defaults OFF and is read only from
+    # impure API/ratings shells; pure core receives resolved facts only.
+    padrino_ranked_human_rating_enabled: bool = False
+
+    # Ranked anti-cheat advisory scorer (US-312). These thresholds drive the
+    # batch/admin read-side scorer over ``ranked_game_signals``. The scorer only
+    # writes ``ranked_flags`` for manual review; it never gates or mutates human
+    # ratings.
+    padrino_ranked_flags_window_days: int = 30
+    padrino_ranked_flags_source_ip_min_principals: int = 3
+    padrino_ranked_flags_cooccurrence_min_games: int = 10
+    padrino_ranked_flags_streak_min_games: int = 8
+    padrino_ranked_flags_streak_max_tail_probability: float = 0.01
+    padrino_ranked_flags_bot_cadence_min_games: int = 5
+    padrino_ranked_flags_bot_cadence_max_average_latency_ms: int = 750
+    padrino_ranked_flags_bot_cadence_max_latency_spread_ms: int = 25
 
     # Human-aware tick (US-138). A human-friendly per-phase deadline the tick
     # barrier waits on (slow humans and slow LLMs alike are coerced to a safe
@@ -342,6 +361,12 @@ class Settings(BaseSettings):
     # kept indefinitely.
     padrino_raw_payload_ttl_days: int = 30
     padrino_non_broadcastable_game_ttl_days: int = 7
+    # Human PII retention (US-308). Chat sidecar redaction defaults to the
+    # RANKED:CHAT_RETENTION consent text's stated window; consent IP hashes and
+    # abandoned guest principals have their own operator-configurable TTLs.
+    padrino_human_chat_retention_ttl_days: int = DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS
+    padrino_human_consent_ip_hash_ttl_days: int = 90
+    padrino_abandoned_guest_ttl_days: int = 30
 
     # Retention executor (US-116). The executor is wired into the scheduler tick
     # but stays inert unless ``padrino_enable_retention`` is True AND

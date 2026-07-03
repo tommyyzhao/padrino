@@ -1,0 +1,109 @@
+{
+  "project": "Padrino",
+  "branchName": "ralph/padrino-v14",
+  "description": "Wave 14 FIXES (post-implementation adversarial code-review of ralph/padrino-v14). The 30-story wave passed its gates (2974 tests) with NO blockers; these 7 stories close the verified findings from the code-review (12 raised, 10 survived; 2 high + 5 accepted low). Stacks on the SAME branch ralph/padrino-v14 (one merge). Excluded by product decision: the pre-existing unsalted source_ip_hash -> HMAC hardening (pre-existing scope, advisory-only use; tracked separately). Deferred (unreachable in v1): multi-email ranked-ban evasion.\n\nHARD RULES unchanged: no random/datetime.utcnow under core/ (inject now/clock); NEVER edit shipped migrations (add new if needed); canonical firewall (HUMANS_INCLUDED writes only human_rating, never CANONICAL_TEAM); rule 7 (pseudonymous handle, no raw display_name/UUID); byte-identical deterministic replay; dashboard stories pass pnpm lint+check. Ranked stays flag-OFF (padrino_ranked_human_rating_enabled default False) throughout. Test-first: failing test -> implement -> green -> refactor -> commit.\n\nFIXES: US-319 (HIGH fail-open) savepoint-isolate ranked telemetry capture so a real DB fault cannot roll back the rating write; US-320 (HIGH determinism) make the manual rating-rollback recompute model AI_TAKEOVER forfeit-loss so it is byte-identical to the write path; US-321..325 (LOW) string email_verified claim, firewall-violation metric/audit, abandoned-guest chat redaction, ORM __all__ omissions, and ranked-ban re-check at rating-write time (defense-in-depth).\n\nFIX-PRD ADVERSARIAL REVIEW APPLIED (pre-run): 13 findings, all spec-tightening (0 'fix is wrong'; US-319/US-320 approach confirmed GO). Key: US-320 must model AI_TAKEOVER teammates/opponents (not just the target) as INITIAL placeholders, forfeit-loss overrides DRAW, core must not import ratings/, pin INITIAL constants + last_game_at for byte-identity, and test all 3 seat roles; US-325 reframed to per-principal exclusion; US-324 adds all missing Base subclasses to __all__ + completeness test; line refs corrected (US-322/324); US-319 keeps the broad except + savepoint inside; US-321 exact parse; US-323 reuses the tested redaction primitive.",
+  "userStories": [
+    {
+      "id": "US-319",
+      "priority": 319,
+      "dependencies": [],
+      "title": "Savepoint-isolate ranked telemetry capture so a DB fault cannot roll back the rating write",
+      "description": "HIGH (fail-open). The wave guarantee is 'telemetry capture NEVER blocks/alters a rating write'. The best-effort wrapper _record_ranked_game_signal_best_effort (src/padrino/ratings/human_openskill_service.py ~372-389, called ~:502) catches the Python exception but does NOT isolate the SQLAlchemy transaction: ranked_signals_repo.record_ranked_game_signal runs session.execute()+flush() on the SAME AsyncSession that persisted the HumanRatingEvent rows, inside the single _persistence_transaction opened at game_runner.py:581. A REAL DB error not swallowed by on_conflict_do_nothing (OperationalError/connection drop, serialization failure, an unexpected constraint/NOT NULL violation) leaves the session in pending-rollback; the outer commit then raises PendingRollbackError OUTSIDE the wrapper and rolls back the already-persisted rating events. FIX: wrap the telemetry insert in a SAVEPOINT (async with session.begin_nested(): await ranked_signals_repo.record_ranked_game_signal(...)) keeping the outer except for logging, matching the existing in-repo idiom (leagues.py:73-75, human_principals.py:165). begin_nested() rolls back to the savepoint on any DB error, leaving the flushed HumanRatingEvent rows committable.\n\nREVIEW REVISIONS (fix-PRD hardening): Keep the pre-existing broad `except Exception` wrapper (human_openskill_service.py ~:383) as the OUTER catch (the point is to survive ARBITRARY DB faults, not only IntegrityError), and put `async with session.begin_nested():` INSIDE it around the ranked_signals_repo.record_ranked_game_signal call. begin_nested() rolls the savepoint back on ANY DB error; the outer except then just logs. The in-repo begin_nested idioms (leagues.py, human_principals.py) catch only IntegrityError \u2014 do NOT narrow the catch to IntegrityError here.",
+      "acceptanceCriteria": [
+        "The ranked telemetry insert is wrapped in session.begin_nested() so a DB error unwinds only the savepoint, not the outer transaction.",
+        "A NEW regression test injects a REAL DB error AFTER a statement runs in record_ranked_game_signal (e.g. monkeypatch the repo's session.execute to raise sqlalchemy.exc.OperationalError, or seed a non-game_id constraint violation) and asserts the HumanRatingEvent rows STILL commit while the ranked_game_signals row is absent.",
+        "The existing failure-isolation test (raise BEFORE any DB statement) still passes.",
+        "No change to the happy path: a normal ranked finalize writes exactly one signals row and the rating events."
+      ],
+      "notes": "Fix from code-review HIGH #1. Files: src/padrino/ratings/human_openskill_service.py, tests/ratings/test_ranked_signal_capture.py. Flag-off-gated + needs a DB fault, but it violates a stated wave guarantee.",
+      "passes": false
+    },
+    {
+      "id": "US-320",
+      "priority": 320,
+      "dependencies": [],
+      "title": "Make manual rating-rollback recompute model AI_TAKEOVER forfeit-loss (byte-identical to the write path)",
+      "description": "HIGH (determinism). The ranked WRITE path (human_openskill_service.update_human_ratings_for_game) scores an AI_TAKEOVER seat specially: is_takeover = seat.seat_kind == SeatKind.AI_TAKEOVER.value (~:172); the human is pulled from the team and replaced by a transient INITIAL_MU/INITIAL_SIGMA AI placeholder (~:210-215), then rated a FORFEIT LOSS via _rate_forfeit_loss (ranks=[0,1], always loser, NO draw exception; ~:489-501). The MANUAL rollback recompute does NOT model this: human_rating_rollback._player_for_seat (~:238-266) keys only on seat.public_player_id/occupant_principal_id and never reads seat.seat_kind, and core/anticheat/rating_rollback (~:97-141) places the seat into the team as a full-strength human receiving the team win/loss/DRAW outcome. So any history containing an AI_TAKEOVER game recomputes DIFFERENTLY from a byte-identical replay, violating 'rollback recompute leaves the hash chain byte-identical' and the locked forfeit-loss decision. FIX: thread seat_kind (and takeover provenance) through _player_for_seat + _rate_one_game and apply the SAME forfeit-loss logic as the write path (takeover seat -> transient INITIAL placeholder in the team + forfeit LOSS, overriding the DRAW branch). Prefer reusing the write-path's rating primitive over reimplementing it, to prevent future drift. Also fold finding #8: set last_game_at with the same time-source semantics as the write path (do not use datetime.utcnow in core; inject/thread the time).\n\nREVIEW REVISIONS (fix-PRD hardening): TIGHTENED SPEC (byte-identity is achievable but has 3 seat-role sub-cases the loop MUST cover):\n(1) Thread seat.seat_kind onto the core RatingRollbackPlayer dataclass (src/padrino/core/anticheat/rating_rollback.py) via _player_for_seat (human_rating_rollback.py) \u2014 do NOT infer takeover from occupant_principal_id.\n(2) In _rate_one_game, ANY seat with seat_kind == SeatKind.AI_TAKEOVER.value must be modeled as a transient INITIAL placeholder in the team (model.create_rating([initial_mu, initial_sigma])) EVEN IF it has a non-None occupant/human_player_id. This is the write-path behavior (human_openskill_service.py ~:172,210-215,224-226) and is REQUIRED for a takeover seat that is the target's TEAMMATE or OPPONENT \u2014 otherwise the target's team update diverges (empirically: target mu 25.861 correct vs 25.589 buggy).\n(3) TARGET-as-takeover: score the target as a forfeit LOSS exactly like the write path's _rate_forfeit_loss (1v1 vs a single transient INITIAL rating, ranks=[0,1]), and this forfeit-loss OVERRIDES the DRAW freeze (the write-path forfeit loop ~:489-501 never consults winner; there is NO draw exception). Do NOT route a target-takeover through the normal team/DRAW branch (core/anticheat/rating_rollback.py DRAW freeze must be skipped for that seat). Oracle: tests/ratings/test_human_ranked_elo.py::test_ai_takeover_forfeit_overrides_draw_freeze.\n(4) CORE PURITY (hard rule): core/anticheat/rating_rollback.py must NOT import padrino.ratings (human_openskill_service lives in the impure ratings/ shell). Replicate the forfeit primitive as a PURE helper in core (or extract a shared pure helper both call) \u2014 do not add a ratings import to core.\n(5) INITIAL constant pinning: core/anticheat/rating_rollback.py defines its own INITIAL_MU/INITIAL_SIGMA; ratings/openskill_service.py defines INITIAL_MU=25.0/INITIAL_SIGMA=25/3 too. The rollback placeholder MUST use values equal to the write path's; add a drift-guard test asserting the two constants are equal.\n(6) last_game_at byte-identity: the write path sets HumanRating.last_game_at from the injected `now`; the rollback must produce the SAME last_game_at for a byte-identical result (thread the injected time / align record_human_rating_event). No datetime.utcnow/random in core.\n(7) ACCEPTANCE TESTS MUST include ALL THREE seat roles, not just target-takeover: (a) takeover seat is the target's TEAMMATE, (b) takeover seat is the target's OPPONENT, (c) target itself is the takeover \u2014 each asserting rollback recompute == a fresh write-path replay of the non-excluded game sequence (mu/sigma byte-identical); PLUS a DRAW-winner variant locking forfeit-overrides-draw. Without (a) and (b) the new takeover branch stays uncovered.",
+      "acceptanceCriteria": [
+        "seat_kind is threaded onto the core RatingRollbackPlayer and read in _rate_one_game (not inferred from occupant_principal_id).",
+        "ANY AI_TAKEOVER seat (target, teammate, OR opponent) is modeled as a transient INITIAL placeholder in the team recompute, matching the write path.",
+        "A TARGET-as-takeover seat is scored as a forfeit LOSS (1v1 vs a single INITIAL rating, ranks=[0,1]) that OVERRIDES the DRAW freeze (no draw exception), matching human_openskill_service.",
+        "core/anticheat/rating_rollback.py does NOT import padrino.ratings; the forfeit/INITIAL logic is a pure core helper; INITIAL_MU/INITIAL_SIGMA equal the write path's (drift-guard test asserts equality).",
+        "last_game_at (and games/sigma) recompute byte-identically to a fresh write-path replay; no datetime.utcnow/random in core.",
+        "Tests cover THREE seat roles \u2014 takeover as (a) target's teammate, (b) target's opponent, (c) the target itself \u2014 each asserting rollback recompute == fresh write-path replay of the non-excluded sequence; plus a DRAW-winner forfeit-overrides-draw variant."
+      ],
+      "notes": "Fix from code-review HIGH #2 (+ folds LOW #8). Files: src/padrino/ratings/human_rating_rollback.py, src/padrino/core/anticheat/rating_rollback.py, tests. Manual/flag-gated primitive but must be trustworthy.",
+      "passes": false
+    },
+    {
+      "id": "US-321",
+      "priority": 321,
+      "dependencies": [],
+      "title": "Accept string-form OAuth email_verified claims (\"true\"/\"false\"), not only bool",
+      "description": "LOW (correctness; over-restriction, not a hole). src/padrino/api/oauth.py ~:420 coerces a non-bool email_verified claim to False, but some OIDC providers send email_verified as the STRING \"true\"/\"false\". A legitimately verified user with a string claim is thus treated as unverified and BLOCKED from ranked (friction). FIX: parse the claim robustly - treat bool True or the case-insensitive strings \"true\"/\"1\" as verified; everything else (incl. missing/None/\"false\") as unverified (still fail-closed for genuinely-unverified).\n\nREVIEW REVISIONS (fix-PRD hardening): Pin the parse EXACTLY: email_verified is True only when the claim is bool True, OR a str whose stripped lowercase is 'true' or '1'. Integer 1, 'yes', other truthy values -> False (fail-closed). Do NOT use naive bool(claim) truthiness. Add the integer-1-stays-False and 'yes'-stays-False cases to the parametrized test.",
+      "acceptanceCriteria": [
+        "email_verified is True for bool True and for the strings 'true'/'True'/'1'; False for None, missing, 'false', and other values.",
+        "A test covers bool, string-true, string-false, and missing claim variants.",
+        "Genuinely-unverified emails remain fail-closed (ineligible)."
+      ],
+      "notes": "Fix from code-review LOW #4. Files: src/padrino/api/oauth.py, tests/api/*.",
+      "passes": false
+    },
+    {
+      "id": "US-322",
+      "priority": 322,
+      "dependencies": [],
+      "title": "Surface human-rating firewall violations via a metric/audit, not just a swallowed log",
+      "description": "LOW (observability of a security invariant). game_runner.py ~:655 catches FirewallViolation during human-rating finalize and logs it, but emits no metric/audit signal - a firewall breach (HUMANS_INCLUDED trying to write CANONICAL_TEAM) would be invisible to monitoring. FIX: on FirewallViolation, emit a counter metric (and/or a structured audit row) in addition to the log, so the security invariant is observable/alertable. Keep the existing swallow-and-continue behavior (do not crash the finalize).\n\nREVIEW REVISIONS (fix-PRD hardening): Line ref retarget: at HEAD the FirewallViolation is raised inside update_human_ratings_for_game and CAUGHT in the except block around game_runner.py:648-657 (~:655). Add a dedicated firewall-violation COUNTER in the metrics module and increment it in that except block beside the existing logger; keep the swallow-and-continue behavior; add a test asserting the counter increments on a firewall violation at finalize.",
+      "acceptanceCriteria": [
+        "A FirewallViolation during finalize increments a dedicated metric (and/or writes an audit row) in addition to the log line.",
+        "A test asserts the metric/audit is emitted when a firewall violation is raised on the finalize path.",
+        "The finalize still does not crash on a firewall violation (behavior preserved)."
+      ],
+      "notes": "Fix from code-review LOW #6. Files: src/padrino/runner/game_runner.py, observability/metrics, tests.",
+      "passes": false
+    },
+    {
+      "id": "US-323",
+      "priority": 323,
+      "dependencies": [],
+      "title": "Redact abandoned-guest free-text chat during retention anonymization (GDPR completeness)",
+      "description": "LOW (GDPR completeness). src/padrino/db/retention_executor.py ~:278-306 anonymizes abandoned guests but leaves their free-text human_chat_messages PII un-redacted. FIX: extend the abandoned-guest anonymization to also redact/scrub the guest's authored chat rows (via the human_chat_messages -> game_seats join on (game_id, public_player_id) where occupant_principal_id = the guest), consistent with the GDPR-delete redaction (US-307) and the human-chat sidecar redactability requirement.\n\nREVIEW REVISIONS (fix-PRD hardening): Reuse the EXISTING tested chat-redaction primitive: in _anonymize_guest_principals (src/padrino/db/retention_executor.py ~:278-306), for each soft-deleted abandoned guest principal, resolve their authored human_chat_messages via the game_seats join (game_id, public_player_id where occupant_principal_id = the guest) and apply the same redaction used by the GDPR-delete path (US-307) rather than a new ad-hoc scrub. Chat is an out-of-band sidecar; redaction must NOT alter the hash-chained event log (replay stays byte-identical).",
+      "acceptanceCriteria": [
+        "Abandoned-guest retention anonymization redacts/scrubs the guest's authored human_chat_messages free-text (using the game_seats join to resolve the principal's chat rows).",
+        "A test seeds an abandoned guest with chat, runs retention, and asserts the chat text is redacted while non-guest chat is untouched.",
+        "Deterministic replay is preserved (chat is an out-of-band sidecar; redaction does not alter the hash-chained event log)."
+      ],
+      "notes": "Fix from code-review LOW #7. Files: src/padrino/db/retention_executor.py, tests. Consistent with US-307/US-308.",
+      "passes": false
+    },
+    {
+      "id": "US-324",
+      "priority": 324,
+      "dependencies": [],
+      "title": "Add RankedGameExclusion and RankedRatingRollbackAudit ORM models to db.models __all__",
+      "description": "LOW (correctness/hygiene). src/padrino/db/models.py ~:1761-1768 defines RankedGameExclusion and RankedRatingRollbackAudit but omits them from the module __all__, so `from padrino.db.models import *` does not export them and the public model surface is inconsistent. FIX: add both names to __all__ (and any other Wave-14 ORM models missing from it).\n\nREVIEW REVISIONS (fix-PRD hardening): Line-ref correction: the CLASS definitions are at src/padrino/db/models.py ~:912 (RankedGameExclusion) and ~:939 (RankedRatingRollbackAudit); lines 1761-1768 are inside the __all__ list. There are EIGHT Base subclasses currently missing from __all__, not just the two Wave-14 models. To make the completeness test (AC2) pass test-first, add ALL currently-missing Base subclasses to __all__ (including the two named), and add a test asserting every Base subclass defined in models.py appears in __all__.",
+      "acceptanceCriteria": [
+        "RankedGameExclusion and RankedRatingRollbackAudit (and every other currently-missing Base subclass) appear in src/padrino/db/models.py __all__.",
+        "A test asserts every Base subclass defined in models.py is present in __all__ (and passes)."
+      ],
+      "notes": "Fix from code-review LOW #9. Files: src/padrino/db/models.py, tests/db/*.",
+      "passes": false
+    },
+    {
+      "id": "US-325",
+      "priority": 325,
+      "dependencies": [],
+      "title": "Re-check ranked-ban at rating-write time (defense-in-depth)",
+      "description": "LOW (defense-in-depth). The ranked-ban is enforced at lobby-create (US-291) but NOT re-checked at the rating-write gate (human_openskill_service ~:430-449), so a principal banned AFTER their ranked lobby was created (game in flight) could still get a rating written at finalize. FIX: re-check the ban (is_ranked_banned) at rating-write time as part of the write-time predicate re-evaluation, mirroring the existing write-time kill-switch re-check - if banned, write nothing (return []) and record a refused provenance row. Resolve the ban fact in the impure shell and pass it in (do not add a DB import to core).\n\nREVIEW REVISIONS (fix-PRD hardening): Specify a PER-PRINCIPAL exclusion, NOT a whole-game 'return []'. Resolve a banned set (is_principal_ranked_banned) in the impure shell and pass it in; at rating-write time SKIP writing the rating for any seat whose occupant principal is ranked-banned (record a refused-provenance row per US-294 for the skipped principal), while still writing eligible principals. For human-vs-AI strangers-only ranked there is exactly one human seat, so a banned human yields zero writes for that game \u2014 but frame it as per-principal for correctness/future-proofing. Mirror the write-time kill-switch re-check (US-292). Resolve the ban fact in the shell; add NO db import to core.",
+      "acceptanceCriteria": [
+        "At rating-write time, a ranked-banned principal's seat is SKIPPED (zero HumanRating writes for that principal) even if a ranked league/lobby already exists; eligible principals in the same call are unaffected.",
+        "A refused-provenance audit row (per US-294) is recorded for the skipped banned principal.",
+        "A test bans a principal AFTER a ranked game is created, finalizes it, and asserts no HumanRating rows are written for that principal.",
+        "The ban fact is resolved in the impure shell and injected; no db import added to core."
+      ],
+      "notes": "Fix from code-review LOW #10. Files: src/padrino/ratings/human_openskill_service.py, src/padrino/runner/game_runner.py, db/repositories/ranked_bans.py, tests. Mirrors the write-time kill-switch re-check (US-292).",
+      "passes": false
+    }
+  ]
+}

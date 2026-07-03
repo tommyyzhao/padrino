@@ -9,10 +9,13 @@
   import { dismissHowToPlay, hasDismissedHowToPlay } from '$lib/howToPlay';
   import { canonicalTeamRulesets } from '$lib/rulesets';
   import type {
+    LegalDocumentResponse,
     PublicLadderEntry,
     PublicLiveGameEntry,
     PublicRecentGameEntry
   } from '$lib/api/types';
+
+  type BaseConsentKind = 'TOS' | 'PRIVACY' | 'AGE_GATE';
 
   // KPIs are sourced exclusively from the public spectator surface so the home
   // page works against a public-surface-only API (no private /games, /gauntlets).
@@ -26,6 +29,7 @@
   let matchError = $state<string | null>(null);
   let consenting = $state(false);
   let showHowToPlay = $state(false);
+  let consentDocuments = $state<Partial<Record<BaseConsentKind, LegalDocumentResponse>>>({});
 
   let matchBusy = $derived(
     matchState === 'checking' || matchState === 'starting' || consenting
@@ -38,6 +42,20 @@
         : consenting
           ? 'Accepting...'
           : null
+  );
+  let baseConsentHashes = $derived(
+    consentDocuments.TOS && consentDocuments.PRIVACY && consentDocuments.AGE_GATE
+      ? {
+          TOS: consentDocuments.TOS.content_hash,
+          PRIVACY: consentDocuments.PRIVACY.content_hash,
+          AGE_GATE: consentDocuments.AGE_GATE.content_hash
+        }
+      : null
+  );
+  let baseConsentVersionLabel = $derived(
+    consentDocuments.TOS && consentDocuments.PRIVACY
+      ? `Terms ${consentDocuments.TOS.version_label} / Privacy ${consentDocuments.PRIVACY.version_label}`
+      : null
   );
 
   function isUnauthorized(error: unknown): boolean {
@@ -97,6 +115,24 @@
     await goto('/play/match');
   }
 
+  async function loadBaseConsentDocuments(): Promise<void> {
+    const [tos, privacy, age] = await Promise.all([
+      padrino.client.legalDocument('TOS'),
+      padrino.client.legalDocument('PRIVACY'),
+      padrino.client.legalDocument('AGE_GATE')
+    ]);
+    consentDocuments = { TOS: tos, PRIVACY: privacy, AGE_GATE: age };
+  }
+
+  async function promptForBaseConsent(): Promise<void> {
+    matchState = 'needs_consent';
+    try {
+      await loadBaseConsentDocuments();
+    } catch (error) {
+      matchError = (error as Error).message;
+    }
+  }
+
   async function startSoloMatch(options: { skipHowToPlay?: boolean } = {}): Promise<void> {
     matchError = null;
     if (!options.skipHowToPlay && !hasDismissedHowToPlay()) {
@@ -108,7 +144,7 @@
       await ensureHumanSession();
       const consent = await padrino.client.getConsentStatus();
       if (!consent.consented) {
-        matchState = 'needs_consent';
+        await promptForBaseConsent();
         return;
       }
       await openMatchQueue();
@@ -122,9 +158,16 @@
     consenting = true;
     matchError = null;
     try {
-      const consent = await padrino.client.postConsent();
+      if (baseConsentHashes === null) {
+        await loadBaseConsentDocuments();
+      }
+      if (baseConsentHashes === null) {
+        matchError = 'Consent documents are still loading.';
+        return;
+      }
+      const consent = await padrino.client.postConsent({ content_hashes: baseConsentHashes });
       if (!consent.consented) {
-        matchState = 'needs_consent';
+        await promptForBaseConsent();
         matchError = 'Consent is required before play.';
         return;
       }
@@ -147,7 +190,13 @@
     showHowToPlay = false;
   }
 
-  onMount(load);
+  onMount(() => {
+    void load();
+    if (new URLSearchParams(window.location.search).get('consent') === 'required') {
+      padrino.setHumanSession(true);
+      void promptForBaseConsent();
+    }
+  });
 </script>
 
 <section
@@ -199,14 +248,34 @@
       <Card class="mt-4 max-w-xl border-amber-400" data-testid="home-consent-card">
         <p class="mb-3 flex items-start gap-2 text-xs" data-testid="home-consent-row">
           <span>
-            I accept the <strong>Terms</strong> and <strong>Privacy Policy</strong> and confirm I am
-            <strong>16 or older</strong>.
+            I accept the
+            <a
+              class="font-semibold underline"
+              href="/terms"
+              data-testid="home-consent-terms-link"
+            >
+              Terms
+            </a>
+            and
+            <a
+              class="font-semibold underline"
+              href="/privacy"
+              data-testid="home-consent-privacy-link"
+            >
+              Privacy Policy
+            </a>
+            and confirm I am <strong>16 or older</strong>.
           </span>
         </p>
+        {#if baseConsentVersionLabel}
+          <p class="mb-3 text-xs text-muted-foreground" data-testid="home-consent-version">
+            {baseConsentVersionLabel}
+          </p>
+        {/if}
         <Button
           testid="home-consent-accept"
           onclick={() => void acceptConsentAndMatch()}
-          disabled={consenting}
+          disabled={consenting || baseConsentHashes === null}
         >
           {consenting ? 'Accepting...' : 'Accept & play'}
         </Button>
