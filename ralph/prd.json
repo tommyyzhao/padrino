@@ -38,7 +38,7 @@
         "Existing counts-only composition reports the new human count but discloses no in-game public seat mapping."
       ],
       "notes": "BLOCKER. Likely files: api/routes/lobbies.py, db/repositories/lobbies.py, tests/api/test_lobby_invite_presence.py, postgres concurrency test.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-328",

@@ -10,6 +10,7 @@ human/AI map) in anonymous mode.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -19,12 +20,20 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
-from padrino.core.enums import LobbyStatus
-from padrino.db.models import Lobby, LobbyMember
+from padrino.core.enums import LobbySeatKind, LobbyStatus
+from padrino.db.models import (
+    HumanCostAdmission,
+    HumanInferenceReservation,
+    Lobby,
+    LobbyMember,
+    LobbySeat,
+)
+from padrino.db.repositories import human_principals as principals_repo
 
 
 @pytest.fixture(autouse=True)
@@ -79,8 +88,93 @@ async def _invite_token(client: AsyncClient, lobby_id: str, host_token: str) -> 
     return token
 
 
+async def _principal_id_for_token(
+    session_factory: async_sessionmaker[AsyncSession], token: str
+) -> uuid.UUID:
+    async with session_factory() as session:
+        record = await principals_repo.get_session_by_token(session, token)
+        assert record is not None
+        return record.principal_id
+
+
+async def _lobby_seats(
+    session_factory: async_sessionmaker[AsyncSession], lobby_id: str
+) -> list[LobbySeat]:
+    async with session_factory() as session:
+        return list(
+            (
+                await session.execute(
+                    select(LobbySeat)
+                    .where(LobbySeat.lobby_id == uuid.UUID(lobby_id))
+                    .order_by(LobbySeat.seat_index)
+                )
+            ).scalars()
+        )
+
+
+async def _member_count_for_principal(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    lobby_id: str,
+    principal_id: uuid.UUID,
+) -> int:
+    async with session_factory() as session:
+        return int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(LobbyMember)
+                    .where(
+                        LobbyMember.lobby_id == uuid.UUID(lobby_id),
+                        LobbyMember.principal_id == principal_id,
+                    )
+                )
+            ).scalar_one()
+        )
+
+
+async def _live_join_slot_count(
+    session_factory: async_sessionmaker[AsyncSession], principal_id: uuid.UUID
+) -> int:
+    async with session_factory() as session:
+        return int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(HumanCostAdmission)
+                    .where(
+                        HumanCostAdmission.principal_id == principal_id,
+                        HumanCostAdmission.action == "join",
+                        HumanCostAdmission.released_at.is_(None),
+                    )
+                )
+            ).scalar_one()
+        )
+
+
+async def _live_inference_reservation_count(
+    session_factory: async_sessionmaker[AsyncSession], principal_id: uuid.UUID
+) -> int:
+    async with session_factory() as session:
+        scope_key = principal_id.hex
+        return int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(HumanInferenceReservation)
+                    .where(
+                        HumanInferenceReservation.scope_key == scope_key,
+                        HumanInferenceReservation.released_at.is_(None),
+                    )
+                )
+            ).scalar_one()
+        )
+
+
 @pytest.mark.asyncio
-async def test_guest_joins_via_invite_link(client: AsyncClient) -> None:
+async def test_guest_joins_via_invite_link(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
     host = await _guest_token(client)
     lobby = await _create_lobby(client, host)
     invite = await _invite_token(client, lobby["id"], host)
@@ -92,6 +186,14 @@ async def test_guest_joins_via_invite_link(client: AsyncClient) -> None:
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["member_count"] == 2
+    assert resp.json()["composition"] == {"human_count": 2, "ai_count": 5, "total": 7}
+
+    seats = await _lobby_seats(session_factory, lobby["id"])
+    human_seats = [seat for seat in seats if seat.seat_kind == LobbySeatKind.HUMAN.value]
+    assert len(human_seats) == 2
+    friend_member = next(seat for seat in human_seats if seat.seat_index != 0)
+    assert friend_member.member_id is not None
+    assert friend_member.agent_build_id is None
 
 
 @pytest.mark.asyncio
@@ -105,18 +207,41 @@ async def test_join_unknown_invite_token_404(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_join_is_single_use_per_person(client: AsyncClient) -> None:
+async def test_join_is_single_use_per_person(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
     host = await _guest_token(client)
     lobby = await _create_lobby(client, host)
     invite = await _invite_token(client, lobby["id"], host)
 
     friend = await _guest_token(client)
+    friend_principal_id = await _principal_id_for_token(session_factory, friend)
     first = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: friend})
     assert first.status_code == 200
+    seats_after_first = await _lobby_seats(session_factory, lobby["id"])
+    friend_seats_after_first = [
+        seat
+        for seat in seats_after_first
+        if seat.seat_kind == LobbySeatKind.HUMAN.value and seat.seat_index != 0
+    ]
+    assert len(friend_seats_after_first) == 1
+    first_member_id = friend_seats_after_first[0].member_id
+    assert first_member_id is not None
+    assert await _live_join_slot_count(session_factory, friend_principal_id) == 1
+
     # Re-joining is idempotent: the same membership, not a second row.
     second = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: friend})
     assert second.status_code == 200
     assert second.json()["member_count"] == 2
+    assert second.json()["composition"] == {"human_count": 2, "ai_count": 5, "total": 7}
+
+    seats_after_second = await _lobby_seats(session_factory, lobby["id"])
+    assert [
+        seat.member_id
+        for seat in seats_after_second
+        if seat.seat_kind == LobbySeatKind.HUMAN.value and seat.seat_index != 0
+    ] == [first_member_id]
+    assert await _live_join_slot_count(session_factory, friend_principal_id) == 1
 
 
 @pytest.mark.asyncio
@@ -143,7 +268,7 @@ async def test_roster_read_member_scoped(client: AsyncClient) -> None:
     body = roster.json()
     assert len(body["members"]) == 2
     # Identity-blind: composition is counts only, never a per-seat human/AI map.
-    assert body["composition"] == {"human_count": 1, "ai_count": 6, "total": 7}
+    assert body["composition"] == {"human_count": 2, "ai_count": 5, "total": 7}
     for member in body["members"]:
         assert set(member) == {"member_id", "is_host", "ready", "present"}
 
@@ -345,3 +470,67 @@ async def test_lobby_state_stream_requires_member(client: AsyncClient) -> None:
         f"/lobbies/{lobby['id']}/stream", cookies={HUMAN_SESSION_COOKIE: outsider}
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_full_lobby_join_fails_without_unseated_member_or_admission(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    host = await _guest_token(client)
+    lobby = await _create_lobby(client, host)
+    invite = await _invite_token(client, lobby["id"], host)
+
+    for _ in range(6):
+        token = await _guest_token(client)
+        joined = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: token})
+        assert joined.status_code == 200, joined.text
+
+    denied_token = await _guest_token(client)
+    denied_principal_id = await _principal_id_for_token(session_factory, denied_token)
+    denied = await client.post(
+        f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: denied_token}
+    )
+    assert denied.status_code == 409, denied.text
+    assert denied.json()["detail"] == "lobby_full"
+
+    seats = await _lobby_seats(session_factory, lobby["id"])
+    assert len([seat for seat in seats if seat.seat_kind == LobbySeatKind.HUMAN.value]) == 7
+    assert all(seat.member_id is not None for seat in seats)
+    assert (
+        await _member_count_for_principal(
+            session_factory, lobby_id=lobby["id"], principal_id=denied_principal_id
+        )
+        == 0
+    )
+    assert await _live_join_slot_count(session_factory, denied_principal_id) == 0
+    assert await _live_inference_reservation_count(session_factory, denied_principal_id) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_concurrent_last_slot_joins_one_success_one_lobby_full_on_postgres(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    host = await _guest_token(client)
+    lobby = await _create_lobby(client, host)
+    invite = await _invite_token(client, lobby["id"], host)
+
+    for _ in range(5):
+        token = await _guest_token(client)
+        joined = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: token})
+        assert joined.status_code == 200, joined.text
+
+    contenders = [await _guest_token(client), await _guest_token(client)]
+    responses = await asyncio.gather(
+        *[
+            client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: token})
+            for token in contenders
+        ]
+    )
+
+    assert sorted(resp.status_code for resp in responses) == [200, 409]
+    denied = next(resp for resp in responses if resp.status_code == 409)
+    assert denied.json()["detail"] == "lobby_full"
+    seats = await _lobby_seats(session_factory, lobby["id"])
+    assert len([seat for seat in seats if seat.seat_kind == LobbySeatKind.HUMAN.value]) == 7
+    assert len([seat for seat in seats if seat.seat_kind == LobbySeatKind.AI.value]) == 0

@@ -43,6 +43,7 @@ from padrino.api.lobby_state import stream_lobby_state
 from padrino.api.ranked_eligibility import resolve_ranked_eligibility
 from padrino.core.composition import CompositionSummary, composition_summary
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStakes, LobbyStatus
+from padrino.core.lobby import LobbySeatPlanError
 from padrino.core.ranked_eligibility import evaluate_ranked_eligibility
 from padrino.core.rulesets import Ruleset, get_ruleset
 from padrino.db.models import Lobby
@@ -357,20 +358,29 @@ async def join_lobby(
         session, lobby_id=lobby.id, principal_id=ctx.principal_id
     )
     if existing is None:
+        if lobby.status != LobbyStatus.OPEN.value:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="lobby_not_open")
         admission = await _enforce_admission(
             request, session, principal_id=ctx.principal_id, action=ACTION_JOIN
         )
-        if lobby.status != LobbyStatus.OPEN.value:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="lobby_not_open")
-        member = await lobbies_repo.add_member(
-            session,
-            lobby_id=lobby.id,
-            principal_id=ctx.principal_id,
-            is_host=False,
-            now=now,
-        )
-        await bind_admission_slots(session, admission, lobby_id=lobby.id, lobby_member_id=member.id)
-        await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
+        try:
+            member = await lobbies_repo.add_member(
+                session,
+                lobby_id=lobby.id,
+                principal_id=ctx.principal_id,
+                is_host=False,
+                now=now,
+            )
+            await lobbies_repo.claim_member_seat(session, lobby_id=lobby.id, member_id=member.id)
+            await bind_admission_slots(
+                session, admission, lobby_id=lobby.id, lobby_member_id=member.id
+            )
+            await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
+        except LobbySeatPlanError as exc:
+            await session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=exc.reason.value
+            ) from exc
     else:
         await lobbies_repo.touch_member_presence(session, member_id=existing.id, now=now)
     await lobbies_repo.touch_lobby(session, lobby_id=lobby.id, now=now)

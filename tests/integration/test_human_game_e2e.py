@@ -80,10 +80,13 @@ from tests.conftest import make_town_win_script
 
 _RULESET = "mini7_v1"
 _PLAYER_COUNT = 7
-_AI_SEAT_COUNT = _PLAYER_COUNT - 1
+_INITIAL_AI_SEAT_COUNT = _PLAYER_COUNT - 1
+_LAUNCHED_HUMAN_SEAT_COUNT = 2
+_LAUNCHED_AI_SEAT_COUNT = _PLAYER_COUNT - _LAUNCHED_HUMAN_SEAT_COUNT
 # The host occupies lobby seat 0 -> public_player_id P01 (assign_roles maps
 # seat_index i -> P0{i+1}). The host is the human player in this game.
 _HOST_SEAT = "P01"
+_FRIEND_SEAT = "P02"
 
 
 # --------------------------------------------------------------------------- #
@@ -381,9 +384,9 @@ async def test_human_game_full_spine_smoke(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # ---- Curated pool so launch auto-fill can fill the 6 AI seats. ----------
+    # ---- Curated pool so launch auto-fill can fill the initial AI seats. ----
     async with session_factory() as session:
-        await _seed_curated_pool(session, count=_AI_SEAT_COUNT)
+        await _seed_curated_pool(session, count=_INITIAL_AI_SEAT_COUNT)
 
     # ---- create lobby (host) ------------------------------------------------
     host = await _new_guest(client)
@@ -433,13 +436,13 @@ async def test_human_game_full_spine_smoke(
     game_id = uuid.UUID(launched.json()["game_id"])
 
     # The materialized game is gauntlet-less (benchmark scheduler never claims it)
-    # and carries exactly one HUMAN seat (the host) + six curated AI seats.
+    # and carries both joined humans + the remaining curated AI seats.
     seats = await _seat_rows(session_factory, game_id)
     assert len(seats) == _PLAYER_COUNT
     human_seats = [s for s in seats if s.seat_kind == SeatKind.HUMAN.value]
-    assert len(human_seats) == 1
-    assert human_seats[0].public_player_id == _HOST_SEAT
-    assert human_seats[0].occupant_principal_id is not None
+    assert len(human_seats) == _LAUNCHED_HUMAN_SEAT_COUNT
+    assert {s.public_player_id for s in human_seats} == {_HOST_SEAT, _FRIEND_SEAT}
+    assert all(s.occupant_principal_id is not None for s in human_seats)
 
     # ---- play a full game through the human lane ----------------------------
     # Mark the game LIVE so the live-tail / reveal gating is exercised against
@@ -616,17 +619,23 @@ async def test_human_game_full_spine_smoke(
     assert reveal_seats[_HOST_SEAT]["is_human"] is True
     assert reveal_seats[_HOST_SEAT]["takeover_provenance"] == "HUMAN"
     assert reveal_seats[_HOST_SEAT]["model"] is None
+    # The invited friend also owns a real anonymous HUMAN seat.
+    assert reveal_seats[_FRIEND_SEAT]["is_human"] is True
+    assert reveal_seats[_FRIEND_SEAT]["takeover_provenance"] == "HUMAN"
+    assert reveal_seats[_FRIEND_SEAT]["model"] is None
     # Every AI seat reveals its exact model identity.
-    ai_reveals = [s for sid, s in reveal_seats.items() if sid != _HOST_SEAT]
-    assert len(ai_reveals) == _AI_SEAT_COUNT
+    ai_reveals = [s for sid, s in reveal_seats.items() if sid not in {_HOST_SEAT, _FRIEND_SEAT}]
+    assert len(ai_reveals) == _LAUNCHED_AI_SEAT_COUNT
     assert all(s["is_human"] is False for s in ai_reveals)
     assert all(s["model"] is not None for s in ai_reveals)
     assert all(s["model"]["model_name"] == "zai-glm-4.7" for s in ai_reveals)
 
     # ---- spot-the-AI guess scores ------------------------------------------
-    # The host guesses every OTHER seat is AI (the truth, since the host is the
-    # only human), so the guess scores a perfect detection accuracy.
-    guess = {sid: "AI" for sid in reveal_seats if sid != _HOST_SEAT}
+    # The host identifies the invited friend as HUMAN and every remaining seat
+    # as AI, so the guess scores a perfect detection accuracy.
+    guess = {
+        sid: ("HUMAN" if sid == _FRIEND_SEAT else "AI") for sid in reveal_seats if sid != _HOST_SEAT
+    }
     guess_resp = await client.post(
         f"/human/games/{game_id}/turing-guess",
         json={"guess": guess},
@@ -635,8 +644,8 @@ async def test_human_game_full_spine_smoke(
     assert guess_resp.status_code == 200, guess_resp.text
     score = guess_resp.json()
     assert score["guesser_public_id"] == _HOST_SEAT
-    assert score["total"] == _AI_SEAT_COUNT
-    assert score["correct"] == _AI_SEAT_COUNT
+    assert score["total"] == _PLAYER_COUNT - 1
+    assert score["correct"] == _PLAYER_COUNT - 1
     assert score["idempotent_replay"] is False
 
     # The personal accuracy is disclosed only after the guess was submitted.
@@ -644,4 +653,4 @@ async def test_human_game_full_spine_smoke(
         f"/human/games/{game_id}/turing-guess", cookies={HUMAN_SESSION_COOKIE: host}
     )
     assert own.status_code == 200
-    assert own.json()["correct"] == _AI_SEAT_COUNT
+    assert own.json()["correct"] == _PLAYER_COUNT - 1

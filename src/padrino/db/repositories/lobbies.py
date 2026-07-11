@@ -19,6 +19,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import LobbySeatKind
+from padrino.core.lobby.seating import (
+    LobbySeatPlan,
+    LobbySeatPlanEntry,
+    claim_lowest_available_ai_seat,
+)
 from padrino.db.models import Lobby, LobbyMember, LobbySeat
 
 
@@ -192,6 +197,25 @@ async def add_seat(
     return obj
 
 
+async def claim_member_seat(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    member_id: uuid.UUID,
+) -> LobbySeat:
+    """Atomically claim the lowest available AI lobby seat for ``member_id``.
+
+    The caller owns the transaction. Seat rows are selected ``FOR UPDATE`` where
+    supported so concurrent last-seat joins serialize on Postgres; SQLite ignores
+    the clause and still runs the same pure planner under the transaction.
+    """
+    seats = await _locked_seats(session, lobby_id)
+    plan = claim_lowest_available_ai_seat(
+        _seat_plan_entries(seats), joining_member_id=str(member_id)
+    )
+    return await _apply_seat_plan(session, seats=seats, plan=plan, member_id=member_id)
+
+
 async def list_seats(session: AsyncSession, lobby_id: uuid.UUID) -> list[LobbySeat]:
     result = await session.execute(
         select(LobbySeat).where(LobbySeat.lobby_id == lobby_id).order_by(LobbySeat.seat_index)
@@ -199,9 +223,56 @@ async def list_seats(session: AsyncSession, lobby_id: uuid.UUID) -> list[LobbySe
     return list(result.scalars())
 
 
+async def _locked_seats(session: AsyncSession, lobby_id: uuid.UUID) -> list[LobbySeat]:
+    result = await session.execute(
+        select(LobbySeat)
+        .where(LobbySeat.lobby_id == lobby_id)
+        .order_by(LobbySeat.seat_index)
+        .with_for_update()
+    )
+    return list(result.scalars())
+
+
+def _seat_plan_entries(seats: list[LobbySeat]) -> LobbySeatPlan:
+    return tuple(
+        LobbySeatPlanEntry(
+            seat_index=seat.seat_index,
+            seat_kind=seat.seat_kind,
+            member_id=str(seat.member_id) if seat.member_id is not None else None,
+            agent_build_id=str(seat.agent_build_id) if seat.agent_build_id is not None else None,
+        )
+        for seat in seats
+    )
+
+
+async def _apply_seat_plan(
+    session: AsyncSession,
+    *,
+    seats: list[LobbySeat],
+    plan: LobbySeatPlan,
+    member_id: uuid.UUID,
+) -> LobbySeat:
+    rows_by_index = {seat.seat_index: seat for seat in seats}
+    claimed: LobbySeat | None = None
+    for entry in plan:
+        row = rows_by_index[entry.seat_index]
+        row.seat_kind = LobbySeatKind(entry.seat_kind).value
+        row.member_id = uuid.UUID(entry.member_id) if entry.member_id is not None else None
+        row.agent_build_id = (
+            uuid.UUID(entry.agent_build_id) if entry.agent_build_id is not None else None
+        )
+        if row.member_id == member_id:
+            claimed = row
+
+    await session.flush()
+    assert claimed is not None
+    return claimed
+
+
 __all__ = [
     "add_member",
     "add_seat",
+    "claim_member_seat",
     "create_lobby",
     "get_lobby",
     "get_lobby_by_invite_token",

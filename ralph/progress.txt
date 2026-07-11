@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Atomic lobby join seating (US-327): for first-time invite joins, insert the
+  `LobbyMember`, select the lobby's `LobbySeat` rows `FOR UPDATE`, adapt them
+  to `LobbySeatPlanEntry`, apply `claim_lowest_available_ai_seat`, then bind
+  admission slots only after the seat plan flushes. Route-level
+  `LobbySeatPlanError` handling should rollback the whole transaction so a full
+  lobby leaves no unseated member or leaked admission/reservation rows. SQLite
+  ignores `FOR UPDATE`, but the same repository helper gives serialized
+  correctness in default tests while a `postgres`-marked test covers concurrent
+  last-slot joins.
 - Pure lobby seat-claim planning (US-326): keep member-to-seat transitions in
   `core/lobby/seating.py` as immutable, canonical `seat_index`-sorted tuples.
   The join planner claims only the lowest eligible AI seat, keeps latent
@@ -5983,3 +5992,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
   3001 passed / 50 skipped / 10 deselected. Frontend gates not run; story did
   not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-327
+- Applied the pure lobby seat planner inside the invite-join transaction:
+  first-time joins now create the `LobbyMember`, lock and rewrite the
+  `LobbySeat` plan, bind admission slots, and commit only after the joined
+  member owns a real HUMAN seat.
+- Kept idempotent rejoins admission-free and seat-free, and mapped full-lobby
+  planner failures to stable `409 lobby_full` responses with a transaction
+  rollback so no unseated member or admission/reservation rows survive.
+- Updated the human-game E2E smoke expectation so an invited friend materializes
+  as a second anonymous HUMAN game seat, with reveal and spot-the-AI scoring
+  reflecting host + friend + remaining AI seats.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/lobbies.py`,
+  `src/padrino/db/repositories/lobbies.py`,
+  `tests/api/test_lobby_invite_presence.py`,
+  `tests/integration/test_human_game_e2e.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_lobby_invite_presence.py -m "not integration"`
+  first failed on stale `1 human / 6 AI` composition and accepted over-cap
+  joins; focused GREEN same command -> 14 passed / 1 skipped. Related GREEN
+  `uv run pytest tests/api/test_lobby_launch.py -m "not integration"` ->
+  8 passed; `uv run pytest tests/api/test_human_match.py
+  tests/api/test_lobby_launch_slot_lifecycle.py -m "not integration"` ->
+  11 passed; `uv run pytest
+  tests/integration/test_human_game_e2e.py::test_human_game_full_spine_smoke
+  -m "not integration"` -> 1 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3002 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
