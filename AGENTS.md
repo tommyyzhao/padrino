@@ -10,7 +10,7 @@ A **deterministic, event-sourced league engine** for benchmarking LLM agents in 
 
 Padrino now also has a **human-multiplayer layer** (`prd-v3.md`): humans play with/against models in **private friend lobbies**, default **anonymous**, always **casual**, and **strictly segregated** from the scientific benchmark.
 
-Vision docs: `prd.md` (v1 backend), `prd-v2.md` (v2 spectator site), `prd-v3.md` (v3 human multiplayer). The executable plan lives in `ralph/prd.json`.
+Vision docs: `prd.md` (v1 backend), `prd-v2.md` (v2 spectator site), `prd-v3.md` (v3 human multiplayer), and `prd-v4.md` (Waves 15–16 playable OpenRouter game + ranked platform). The executable plan lives in `ralph/prd.json`.
 
 ---
 
@@ -52,12 +52,22 @@ Canonical JSON: UTF-8, sorted keys, no insignificant whitespace, no floats in co
 
 ### 5. Rulesets are resolved dynamically by `ruleset_id`
 
-Two rulesets ship today, resolved via `padrino.core.rulesets.get_ruleset(ruleset_id)`:
+Eight rulesets ship today, resolved via `padrino.core.rulesets.get_ruleset(ruleset_id)`:
 
 - `mini7_v1` — 7 players: 2 Mafia, 1 Detective, 1 Doctor, 3 Villagers.
 - `bench10_v1` — 10 players: 3 Mafia, 1 Detective, 1 Doctor, 5 Villagers.
+- `roleblock10_v1`, `visit12_v1`, `ninja13_v1`, `deception13_v1` — canonical
+  team variants with advanced roles.
+- `sk12_v1` — placement-scored Serial Killer variant.
+- `jester8_v1` — solo-rate-scored Jester variant.
 
-Both use `MAX_DAYS = 5`. Add a new ruleset as a module under `core/rulesets/` satisfying the `Ruleset` Protocol, then register it in `get_ruleset`; never hardcode a ruleset in routes, scheduler, tournaments, evaluations, or leaderboards. Every rating is stamped with `ruleset_id` so each variant gets its own leaderboard.
+All use `MAX_DAYS = 5`. Add a new registered ruleset as a module under
+`core/rulesets/` satisfying the `Ruleset` Protocol, then register it in
+`get_ruleset`; never hardcode a ruleset in routes, scheduler, tournaments,
+evaluations, or leaderboards. Wave 15 adds persisted hash-addressed custom
+`GameRulesSnapshot` values for casual games only; replay resolves those from
+the archived snapshot, never from a DB/network lookup in core. Every rating is
+stamped with `ruleset_id` so each registered variant gets its own leaderboard.
 
 The human-multiplayer lane reuses `mini7_v1` / `bench10_v1` (decision 15); a buffered-cadence variant (`hcad7_v1` / `hcad10_v1`) is **deferred** past v1.
 
@@ -71,7 +81,10 @@ On any live / observation / spectator surface, never reveal which seats are huma
 
 ### 8. Human games are segregated from the benchmark (Wave 9)
 
-A human-lane game writes **ZERO** rows to the scientific `Rating` / `RatingEvent` tables. Human ELO lives in a **dormant** sibling table under the "Humans-Included League" and is not written in v1 (casual).
+A human-lane game writes **ZERO** rows to the scientific `Rating` /
+`RatingEvent` tables. Human ELO lives in sibling tables under the
+"Humans-Included League" and remains default-OFF behind server kill switches;
+custom/invite games are always casual and never write human ratings.
 
 ### 9. Human chat is stored out-of-band of the hash chain (Wave 9)
 
@@ -80,6 +93,32 @@ Human free-text chat lives in a **sidecar** table; the paired core event carries
 ### 10. Human games run on a separate worker lane (Wave 9)
 
 Minutes-to-hours human games run on a dedicated runner lane with **durable, rehydratable Postgres-snapshot** state, isolated from the benchmark scheduler's concurrency cap. **No Redis** (stack rule).
+
+### 11. Custom games are casual; ranked configuration is server-owned (Waves 15–16)
+
+Custom/invite games write no human or scientific ratings. Ranked model pools,
+role decks, cadence, routing, and seating are frozen by a server-owned season
+snapshot; players never select ranked opponents or roles.
+
+### 12. Provider credentials never enter game data (Wave 15)
+
+Player/provider credentials are encrypted at rest and resolved only in the
+impure provider shell. Raw keys must never enter logs, errors, API readbacks,
+frontend storage, events, replays, exports, analytics, or `src/padrino/core/**`.
+
+### 13. Money is an append-only integer ledger (Wave 15)
+
+Store grants, reservations, charges, releases, and completion-reserve spend as
+integer USD micros with idempotency keys. Never use binary floats for balances,
+never allow a player balance below zero, and never switch selected models after
+a funded game is admitted.
+
+### 14. Human ratings consume frozen AI anchors, not scientific rows (Wave 16)
+
+Season-scoped solo/mixed human rating code may consume immutable AI anchor
+snapshots, but a human-game hot path still reads/writes **ZERO** scientific
+`Rating` / `RatingEvent` rows. Mixed-game rollback recomputes the affected
+season/ruleset stream in canonical order.
 
 ---
 

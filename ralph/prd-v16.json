@@ -1,0 +1,741 @@
+{
+  "project": "Padrino",
+  "branchName": "ralph/padrino-v15-v16",
+  "description": "Wave 16 source snapshot — Ranked Seasons, Solo, Mixed Human+AI, Integrity and Canary (US-374..407). This source plan follows the Wave 15 US-373 gate in combined ralph/prd.json. Its root US-374 depends on US-373, intentionally external to this source snapshot.",
+  "userStories": [
+    {
+      "id": "US-374",
+      "wave": 16,
+      "epic": "A-MODES",
+      "priority": 1,
+      "dependencies": [
+        "US-373"
+      ],
+      "title": "Enforce the final game-mode taxonomy",
+      "description": "Make Casual Quick Play, Casual Custom, Ranked Solo, Ranked Mixed, and Scientific AI explicit server-owned modes rather than overloading Lobby.ranked/stakes booleans. Remove the ranked checkbox and ranked launch path from custom lobbies.",
+      "acceptanceCriteria": [
+        "A pure GameMode policy defines allowed league kind, rating scope, invite/party behavior, player configuration, identity mode, and funding authority for every mode.",
+        "Custom/quickplay routes always create casual non-rating games and reject ranked fields/legacy attempts; no hidden request can mint ranked custom games.",
+        "Existing ranked human rows remain readable/migratable, but all new ranked games must enter dedicated Wave 16 endpoints.",
+        "Scientific AI mode remains gauntlet/campaign-only and cannot contain human seats.",
+        "API/frontend tests show distinct mode labels and prove custom opponent/role selection cannot reach any ranked writer."
+      ],
+      "notes": "Wave 16 root story; closes the old custom ranked exploit.",
+      "passes": false
+    },
+    {
+      "id": "US-375",
+      "wave": 16,
+      "epic": "A-SEASONS",
+      "priority": 2,
+      "dependencies": [
+        "US-374"
+      ],
+      "title": "Pure ranked season, pool, and scope contracts",
+      "description": "Define immutable pure contracts for ranked season identity, SOLO_HUMAN_VS_AI and MIXED_HUMAN_AI scopes, server rules/cadence snapshot, frozen model pool, AI anchors, role/faction calibration, eligibility, and lifecycle.",
+      "acceptanceCriteria": [
+        "Season config is frozen/hash-addressed and includes mode, ruleset/rules hash, cadence hash, pool hash, calibration hash, starts/ends, placement threshold, and policy version.",
+        "Season states DRAFT, SHADOW, ACTIVE, FROZEN, CLOSED have deterministic allowed transitions with injected time/facts.",
+        "Solo and mixed scopes are distinct keys; ratings/events from one cannot satisfy or affect another.",
+        "Season pool entries include immutable AgentRuntimeSnapshot identity, fixed AI anchor mu/sigma, weight/schedule quota, provider policy, and qualification evidence hash.",
+        "Pure validation rejects custom rules, player-selected routing, missing anchors/calibration, overlapping active scope, and non-ranked-qualified pool entries."
+      ],
+      "notes": "Core only; persistence next.",
+      "passes": false
+    },
+    {
+      "id": "US-376",
+      "wave": 16,
+      "epic": "A-SEASONS",
+      "priority": 3,
+      "dependencies": [
+        "US-375"
+      ],
+      "title": "Ranked season and pool persistence (migration 0071)",
+      "description": "Migration 0071 adds ranked seasons, immutable pool entries, role/faction calibration, and lifecycle audit rows. It establishes one active season per mode/ruleset without altering scientific ratings.",
+      "acceptanceCriteria": [
+        "0071 follows 0070 linearly with SQLite/Postgres upgrade/downgrade and migration-head tests.",
+        "Tables persist every season snapshot/hash field and append-only transition audit; pool/calibration rows are immutable after SHADOW.",
+        "Partial unique constraints prevent overlapping ACTIVE seasons for the same mode/ruleset while allowing drafts/history.",
+        "No raw provider credential, player identity, or scientific Rating foreign key is stored; AI anchors are copied values with provenance snapshot ids.",
+        "Repository create/transition/read paths are transactional, idempotent, and fail closed on hash disagreement."
+      ],
+      "notes": "Ranked season is impure configuration; core consumes frozen facts.",
+      "passes": false
+    },
+    {
+      "id": "US-377",
+      "wave": 16,
+      "epic": "A-SEASONS",
+      "priority": 4,
+      "dependencies": [
+        "US-345",
+        "US-346",
+        "US-376"
+      ],
+      "title": "Ranked model qualification from evidence and drift",
+      "description": "Turn the Wave 15 preview tier into an enforceable, versioned ranked qualification process bound to catalog, probe, prompt/schema, provider endpoint, price, latency, privacy, and drift evidence.",
+      "acceptanceCriteria": [
+        "Admin qualification evaluates the pure tier policy and writes append-only qualified/refused evidence with operator/policy version and reason tokens.",
+        "Qualification pins an exact canonical slug and provider endpoint/routing policy with allow_fallbacks=false, require_parameters=true, ZDR/data policy, max price, and inference params.",
+        "Catalog/provider/prompt/schema/price/latency drift marks future season eligibility stale without mutating an existing frozen season.",
+        "At least N successful contract probes across required role/action families is enforced from settings/policy.",
+        "Human and scientific ranked launch both refuse an unqualified or stale model unless already frozen into an active season under its grandfather policy."
+      ],
+      "notes": "Automated decisions are qualification only, not anti-cheat penalties.",
+      "passes": false
+    },
+    {
+      "id": "US-378",
+      "wave": 16,
+      "epic": "A-SCIENCE",
+      "priority": 5,
+      "dependencies": [
+        "US-349",
+        "US-351",
+        "US-377"
+      ],
+      "title": "Exact-route OpenRouter scientific agent builds and campaigns",
+      "description": "Enable AI-only scientific gauntlets/campaigns to recruit ranked-qualified OpenRouter models while preserving exact attribution and the existing canonical rating firewall.",
+      "acceptanceCriteria": [
+        "Scientific materialization freezes catalog/qualification/prompt/schema/provider endpoint/inference/routing hashes into AgentBuild/campaign cells.",
+        "Requests disable router/provider/model fallback unless an explicit experiment config defines a labeled fallback arm; require_parameters and router metadata are on.",
+        "Actual provider/model/attempt metadata and cost persist per call; an unexpected actual model/provider makes the game non-publishable rather than crediting the requested build.",
+        "Existing paired/mirrored scheduling and model/ruleset-specific Rating writes remain unchanged and human tables are untouched.",
+        "Deterministic stubbed heterogeneous campaign plus opt-in live mini-gauntlet cover the new path."
+      ],
+      "notes": "AI-only ranked already exists; this story opens the OpenRouter field safely.",
+      "passes": false
+    },
+    {
+      "id": "US-379",
+      "wave": 16,
+      "epic": "A-SEASONS",
+      "priority": 6,
+      "dependencies": [
+        "US-376",
+        "US-377",
+        "US-378"
+      ],
+      "title": "Freeze calibrated ranked AI pools from scientific evidence",
+      "description": "Build an admin service that selects qualified models and copies scientific evidence into an immutable season pool/AI-anchor snapshot without creating a runtime dependency from human games to scientific tables.",
+      "acceptanceCriteria": [
+        "Pool builder runs outside human game hot paths, reads publishable scientific ratings/evidence, and copies anchor mu/sigma/provenance into season pool rows.",
+        "Selection enforces provider/model diversity, role/faction coverage, qualification freshness, cost/latency/privacy ceilings, and configurable schedule weights.",
+        "Same inputs/policy produce identical pool ordering/hash; manual inclusions/exclusions are explicit audit facts.",
+        "After freeze, changing scientific Rating rows cannot change an existing season pool or any human rating delta.",
+        "Tests install SQL listeners around human runtime/writer paths proving they never query Rating/RatingEvent."
+      ],
+      "notes": "Bridge by snapshot copy only; hard rule 14.",
+      "passes": false
+    },
+    {
+      "id": "US-380",
+      "wave": 16,
+      "epic": "A-SEASONS",
+      "priority": 7,
+      "dependencies": [
+        "US-376",
+        "US-379"
+      ],
+      "title": "Admin season lifecycle, shadow activation, and kill switches",
+      "description": "Provide admin-only create/inspect/validate/transition endpoints and independent default-off kill switches for ranked solo and ranked mixed.",
+      "acceptanceCriteria": [
+        "Settings have separate solo/mixed enabled flags default False plus global human-rating kill switch; all must permit admission/write.",
+        "Admin can create DRAFT, validate hashes/pool/calibration, enter SHADOW, activate, freeze, and close with transition audit; invalid transitions fail.",
+        "Only one ACTIVE season per mode/ruleset is returned to matchmaking; SHADOW produces no public rating writes.",
+        "Turning any relevant flag off blocks new admission and rechecks at rating write for in-flight games without deploy.",
+        "Responses use model/season facts but no secret refs/raw credentials; auth/pagination/audit tests pass."
+      ],
+      "notes": "Production remains OFF after Wave 16 implementation.",
+      "passes": false
+    },
+    {
+      "id": "US-381",
+      "wave": 16,
+      "epic": "B-SOLO",
+      "priority": 8,
+      "dependencies": [
+        "US-380"
+      ],
+      "title": "Ranked solo admission and match endpoint",
+      "description": "Add a dedicated verified-account ranked solo endpoint that composes existing fail-closed identity/consent/ban checks with active season, queue/admission, and server-owned config.",
+      "acceptanceCriteria": [
+        "POST /human/ranked/solo/match requires account, verified email, current base+ranked consent, no active ban, flags enabled, and active SOLO season; denial reason ordering is pinned.",
+        "Guests are directed to sign-in/consent without minting ranked state; request accepts no model, role, rules, routing, identity, cadence, or funding override.",
+        "The game is anonymous, strangers-only one-human plus AI, season/rules/pool scoped, and funded by server-ranked budget—not promo/BYOK.",
+        "Admission and materialization are idempotent; concurrent requests cannot create multiple active ranked matches for one principal.",
+        "Custom/private lobby tables and invite tokens are not used as ranked authority."
+      ],
+      "notes": "Can internally reuse launch primitives with a dedicated ranked match owner/config.",
+      "passes": false
+    },
+    {
+      "id": "US-382",
+      "wave": 16,
+      "epic": "B-SOLO",
+      "priority": 9,
+      "dependencies": [
+        "US-379",
+        "US-381"
+      ],
+      "title": "Deterministic balanced solo schedule and role assignment",
+      "description": "Assign each ranked solo entrant a role/faction and AI roster through a deterministic, auditable schedule that balances exposure across placement/ranked games without letting the client reroll.",
+      "acceptanceCriteria": [
+        "Pure scheduler derives role/faction quota cell and AI pool draw from season id, principal pseudonymous schedule key, completed-count ledger, and server seed; same inputs match.",
+        "Repeated cancellations/no-shows do not freely reroll favorable roles/models; consumed/reserved schedule cells have explicit lifecycle.",
+        "Over a configured cycle, exposure matches season role/faction and model-weight quotas within pinned tolerance.",
+        "AI seat duplicates follow pool policy; public pre-reveal surfaces expose neither selected models nor schedule cell.",
+        "A schedule ledger/audit persists enough facts for replay/rating recompute without raw email/device identity."
+      ],
+      "notes": "Fairness and anti-cherry-pick blocker.",
+      "passes": false
+    },
+    {
+      "id": "US-383",
+      "wave": 16,
+      "epic": "B-SOLO",
+      "priority": 10,
+      "dependencies": [
+        "US-375",
+        "US-382"
+      ],
+      "title": "Pure season-scoped solo rating with role/faction calibration",
+      "description": "Define the ranked solo update using human prior, frozen AI anchors, actual faction result, scheduled role/faction baseline, placement/forfeit facts, and policy version. It must be deterministic and independent of live scientific rows.",
+      "acceptanceCriteria": [
+        "Pure function consumes only frozen season facts plus prior and outcome, returning new rating/event inputs; no DB/settings/clock/random.",
+        "Expected result is adjusted by pinned role/faction calibration and AI table anchors so harder assignments yield fairer updates; math/ranges are documented in code and golden-tested.",
+        "Win/loss/draw, day-cap, no-contest, disconnect takeover forfeit, and invalid/insufficient participation have explicit outcomes; forfeit overrides faction win/draw.",
+        "Calibration cannot produce non-finite/negative sigma or unbounded delta; property tests cover symmetry/monotonicity/bounds.",
+        "Identical event stream recomputes byte-identically and different live scientific ratings have no effect."
+      ],
+      "notes": "Use OpenSkill primitives where appropriate, but freeze policy/constants.",
+      "passes": false
+    },
+    {
+      "id": "US-384",
+      "wave": 16,
+      "epic": "B-SOLO",
+      "priority": 11,
+      "dependencies": [
+        "US-383"
+      ],
+      "title": "Season/mode-scoped human rating storage (migration 0072)",
+      "description": "Migration 0072 scopes HumanRating/HumanRatingEvent by season, mode, and ruleset and archives complete rating inputs needed for solo/mixed recomputation while preserving legacy Wave 14 rows.",
+      "acceptanceCriteria": [
+        "0072 follows 0071 linearly, upgrades/downgrades SQLite/Postgres, and assigns legacy rows to an explicit LEGACY_SOLO scope without fabricating an active season.",
+        "Uniqueness includes principal/human player, season, mode, ruleset; events include prior/posterior, outcome, role/faction, AI anchor/pool/calibration/policy hashes, participation/forfeit/no-contest, and idempotency.",
+        "Existing public ladder can still read legacy rows but new ranked routes always filter explicit scope.",
+        "No FK/read dependency to scientific Rating/RatingEvent is introduced.",
+        "ORM/repository/migration tests cover isolation across two seasons and two modes."
+      ],
+      "notes": "May rename sibling tables only through additive migration/backfill, never edit old migrations.",
+      "passes": false
+    },
+    {
+      "id": "US-385",
+      "wave": 16,
+      "epic": "B-SOLO",
+      "priority": 12,
+      "dependencies": [
+        "US-380",
+        "US-383",
+        "US-384"
+      ],
+      "title": "Idempotent ranked solo finalize and provenance",
+      "description": "Wire terminal solo games to the new writer with write-time season/flag/consent/ban/config rechecks, schedule settlement, rating event, and applied/refused provenance.",
+      "acceptanceCriteria": [
+        "Exactly one rating event per game/principal/scope commits with terminal game persistence or converges through idempotent reconciliation.",
+        "Writer rechecks global+solo flags, active/grandfather season, consent withdrawal, ban, game config hashes, schedule cell, and replay-valid terminal outcome; refusal writes provenance and no rating.",
+        "AI takeover writes a forfeit loss; technical/provider-budget no-contest writes no rating and returns schedule cell according to policy.",
+        "Eligible write touches only season-scoped human tables/audits and performs zero scientific table reads/writes under SQL listener test.",
+        "Rollback/retry/crash tests prove no duplicate delta or lost terminal game."
+      ],
+      "notes": "Extends Wave14 defenses rather than bypassing them.",
+      "passes": false
+    },
+    {
+      "id": "US-386",
+      "wave": 16,
+      "epic": "B-SOLO",
+      "priority": 13,
+      "dependencies": [
+        "US-365",
+        "US-380",
+        "US-381",
+        "US-385"
+      ],
+      "title": "Ranked solo queue and post-match UI",
+      "description": "Enable the Ranked mode card for eligible users and build a focused solo flow: eligibility, season/pool disclosure, consent, search/preparation, live game, and rating result.",
+      "acceptanceCriteria": [
+        "UI explains standardized server-selected opponents/roles, active season/ruleset, anonymity, provisional threshold, disconnect forfeit, and no player funding.",
+        "Eligibility failures route to sign-in, verified email, ranked consent, ban/support, disabled/season-unavailable states with human copy.",
+        "No model/role/routing controls appear; network retry is idempotent and cancel cannot reroll consumed schedule unfairly.",
+        "Post-match shows prior/delta/new score, provisional progress, role/faction baseline context, season rank, and no-contest/refusal reason when applicable.",
+        "Mobile/desktop/reduced-motion Playwright covers placement win/loss, forfeit, flag-off, consent withdrawal, and reconnect."
+      ],
+      "notes": "Frontend gates mandatory.",
+      "passes": false
+    },
+    {
+      "id": "US-387",
+      "wave": 16,
+      "epic": "B-SOLO",
+      "priority": 14,
+      "dependencies": [
+        "US-382",
+        "US-385",
+        "US-386"
+      ],
+      "title": "Ranked solo deterministic end-to-end and shadow proof",
+      "description": "Prove the entire ranked solo product in default tests and shadow mode before mixed queue work.",
+      "acceptanceCriteria": [
+        "Cold verified account completes ranked consent, enters an active synthetic season, receives balanced server config, plays to terminal, and gets exactly one scoped rating.",
+        "Second game exercises another role/faction schedule cell; schedule/rating/replay remain stable across rehydration.",
+        "Player cannot alter model/role/rules/cadence/funding via request tampering and pre-reveal identity stays blind.",
+        "Flag-off/ban/withdrawal after game creation blocks write with provenance; AI takeover becomes forfeit; provider failure becomes no-contest.",
+        "SHADOW season runs identical decision math/audit but writes no public HumanRating and does not appear on leaderboard."
+      ],
+      "notes": "Solo release candidate gate.",
+      "passes": false
+    },
+    {
+      "id": "US-388",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 15,
+      "dependencies": [
+        "US-387"
+      ],
+      "title": "Pure mixed-ranked queue and table policy",
+      "description": "Define the strangers-only mixed human/AI queue policy: solo entrants, minimum/target humans, wait/backfill thresholds, ruleset/region/language compatibility, blocks, rematch avoidance, and server ownership.",
+      "acceptanceCriteria": [
+        "Policy accepts only eligible solo principals with matching active MIXED season/config and returns deterministic compatible grouping decisions from injected tickets/time.",
+        "No invite, party, friend, host, model, role, team, provider, cadence, funding, or seat preference is accepted.",
+        "Initial policy defaults are 4 humans / target 7 / 90-second AI-backfill threshold for mini7 and 6 humans / target 10 / 120 seconds for bench10; values are season-configured and shadow-calibrated, and a match never starts below minimum.",
+        "Recent co-player avoidance and mutual blocks are hard constraints; soft latency/language/skill bands widen deterministically with wait.",
+        "Policy returns stable reason/explanation tokens and imports no DB/clock/random."
+      ],
+      "notes": "Initial parties explicitly out of scope.",
+      "passes": false
+    },
+    {
+      "id": "US-389",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 16,
+      "dependencies": [
+        "US-388"
+      ],
+      "title": "Persistent ranked queue tickets and claims (migration 0073)",
+      "description": "Migration 0073 adds durable mixed-ranked tickets, leases/claims, readiness checks, and match membership so API/worker restarts cannot duplicate or strand entrants.",
+      "acceptanceCriteria": [
+        "0073 follows 0072 linearly with SQLite/Postgres round-trip and indexes for active season/status/created/lease.",
+        "One active ticket per principal/mode/season is enforced; ticket stores non-PII matching facts, policy hash, state timestamps, lease owner/expiry, and cancellation/no-show provenance.",
+        "Match membership transactionally consumes tickets once and links the eventual game; stale leases are reaped without losing queue age.",
+        "No raw IP/email/device/display name or provider credential is stored; anti-cheat references use existing hashed/sidecar facts.",
+        "Repository concurrency tests prove disjoint workers cannot claim the same ticket/table."
+      ],
+      "notes": "DB-as-queue, no Redis.",
+      "passes": false
+    },
+    {
+      "id": "US-390",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 17,
+      "dependencies": [
+        "US-380",
+        "US-388",
+        "US-389"
+      ],
+      "title": "Mixed queue API, presence, ready check, and cancellation",
+      "description": "Expose enter/status/stream/leave/ready endpoints with fail-closed eligibility and durable reconnect behavior suitable for multi-minute waits.",
+      "acceptanceCriteria": [
+        "Enter reuses ranked identity/consent/ban/flag checks and is idempotent; status/SSE is principal-scoped and reveals only safe aggregate wait/table facts.",
+        "Presence heartbeat and disconnect grace prevent ghost matches; ready check has bounded timeout and explicit accept/decline/no-show states.",
+        "Cancellation before claim is immediate; after match reservation follows dodge policy and cannot be used to inspect/reroll roles/models.",
+        "A principal cannot queue in solo and mixed or multiple rulesets simultaneously under configured policy.",
+        "Rate limits and concurrency tests cover spam, duplicate tabs, restart, stale tickets, and cancel/claim races."
+      ],
+      "notes": "No lobby host exists in mixed ranked.",
+      "passes": false
+    },
+    {
+      "id": "US-391",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 18,
+      "dependencies": [
+        "US-379",
+        "US-389",
+        "US-390"
+      ],
+      "title": "Concurrent mixed table assembler and AI backfill",
+      "description": "Implement the dedicated matchmaker worker step that claims compatible tickets, performs ready check, fills remaining seats from frozen pool after policy threshold, and atomically materializes one ranked human-lane game.",
+      "acceptanceCriteria": [
+        "Assembler uses DB row claims/leases to build each table once across workers; failed readiness returns eligible tickets without resetting fair queue age and penalizes decliners per policy.",
+        "Human membership count meets policy; remaining AI selections follow season weights/quotas and frozen exact routing; no player can influence them.",
+        "Materialized Game/GameSeats carry season/mode/rules/pool/calibration/schedule/match hashes and no invite/lobby host authority.",
+        "Role/public-seat assignment is seeded after final membership and remains identity-blind; queue ordering cannot reveal faction/role.",
+        "Partial failure before game commit releases claims; after commit reconciliation links all memberships/tickets idempotently."
+      ],
+      "notes": "Separate worker hook may share human lane process but not benchmark capacity.",
+      "passes": false
+    },
+    {
+      "id": "US-392",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 19,
+      "dependencies": [
+        "US-391"
+      ],
+      "title": "Deterministic mixed seating with faction-exposure balancing",
+      "description": "Balance human role/faction exposure over a season without assigning roles by rating, identity, model knowledge, or client choice. The final assignment remains seeded and auditable.",
+      "acceptanceCriteria": [
+        "Pure assignment selects among valid seeded permutations using only season schedule deficits and a deterministic tie-break; it never reads ratings/display identity/chat.",
+        "Over quota cycles each human's role/faction exposure remains within configured tolerance without guaranteeing a requested role.",
+        "Assignment does not condition on intended winner, model strength, party, or live provider state and preserves the role deck exactly.",
+        "Schedule reservation prevents disconnect/cancel rerolls; no-show settlement is explicit.",
+        "Property/golden tests cover varying human counts, solo factions, impossible-balance fallback, and replay stability."
+      ],
+      "notes": "Fairness scheduling is distinct from matchmaking skill bands.",
+      "passes": false
+    },
+    {
+      "id": "US-393",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 20,
+      "dependencies": [
+        "US-383",
+        "US-392"
+      ],
+      "title": "Pure mixed human/AI team rating with frozen anchors",
+      "description": "Implement season-scoped mixed rating over actual faction teams: human priors update, AI seats contribute frozen read-only anchor ratings, role/faction calibration adjusts expectations, and only humans persist.",
+      "acceptanceCriteria": [
+        "Pure function accepts ordered teams with humans/AI anchors, ranks/outcome, roles, participation/forfeit, calibration and policy hashes; no DB/settings/clock/random.",
+        "OpenSkill team math handles multiple humans per faction and frozen AI anchors; AI posterior values are discarded and never written to scientific or human model rows.",
+        "Human deltas respond monotonically to result and expected team strength, remain bounded, and do not depend on live scientific ratings.",
+        "Draw, multi-faction/solo roles supported by season policy, all-human-one-faction tables, no-contest, multiple forfeits, and AI takeover are explicitly golden-tested.",
+        "Event output contains every prior/anchor/calibration input needed for byte-identical ordered recomputation."
+      ],
+      "notes": "Use JOSS/OpenSkill multi-team principles but calibrate empirically in shadow.",
+      "passes": false
+    },
+    {
+      "id": "US-394",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 21,
+      "dependencies": [
+        "US-393"
+      ],
+      "title": "Rating calibration simulator and golden corpus",
+      "description": "Before persistence, build an offline deterministic simulator that stress-tests solo/mixed rating policy for bias, inflation, convergence, role imbalance, human-count mix, AI anchors, collusion patterns, and disconnects.",
+      "acceptanceCriteria": [
+        "Seeded simulator generates controlled seasons from explicit synthetic skill/outcome models and returns calibration metrics without network/DB/real user data.",
+        "Tests assert no systematic rating gain for equal-skill population, bounded inflation/deflation, convergence ordering, role/faction residual within thresholds, and stable behavior across human counts.",
+        "Golden corpus covers current built-in ranked rulesets, solo and mixed, rare roles, draws/day caps, forfeits/no-contests, and season reset.",
+        "Policy/calibration changes intentionally update versioned goldens and cannot reinterpret old events.",
+        "A machine-readable report is available to shadow go/no-go and CI threshold checks."
+      ],
+      "notes": "Scientific validity blocker, not a claim of perfect real-world calibration.",
+      "passes": false
+    },
+    {
+      "id": "US-395",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 22,
+      "dependencies": [
+        "US-384",
+        "US-385",
+        "US-393",
+        "US-394"
+      ],
+      "title": "Idempotent multi-principal mixed rating finalize",
+      "description": "Persist mixed updates for every eligible human in one terminal workflow with per-principal write-time rechecks and all-or-explicit-partial provenance, while retaining enough facts for global recompute.",
+      "acceptanceCriteria": [
+        "One game produces at most one event per principal/scope and one immutable ordered game-rating input record; retry is idempotent.",
+        "Flags/season/config/replay are game-wide gates; consent/ban/withdrawal/forfeit eligibility is rechecked per principal and refusal does not silently erase other eligible audit facts.",
+        "Rating inputs use pregame priors frozen at match start/terminal policy as specified so concurrent games for one principal serialize deterministically.",
+        "No scientific tables are read/written; AI anchors come only from season snapshot.",
+        "Crash/concurrent finalize tests prove deterministic ordering, no duplicate deltas, and explicit reconciliation state."
+      ],
+      "notes": "May serialize active ranked games per principal to avoid ambiguous concurrent priors.",
+      "passes": false
+    },
+    {
+      "id": "US-396",
+      "wave": 16,
+      "epic": "C-MIXED",
+      "priority": 23,
+      "dependencies": [
+        "US-390",
+        "US-392",
+        "US-395"
+      ],
+      "title": "No-show, dodge, disconnect, and multi-forfeit policy",
+      "description": "Define and enforce player-facing consequences for ready-check decline/no-show, pregame dodge, midgame disconnect/takeover, reconnect, and infrastructure failure without confusing misconduct with provider faults.",
+      "acceptanceCriteria": [
+        "Pure policy maps stage, presence, grace, prior strikes, and infrastructure facts to ticket cooldown, schedule settlement, rating forfeit/no-contest, and audit reasons.",
+        "A human taken over after grace receives forfeit loss even if faction wins/draws; connected teammates/opponents rate against the frozen replacement anchor as specified.",
+        "Provider/platform/worker failure affecting table fairness produces no-contest, no player strike, no rating, and restores appropriate schedule/queue facts.",
+        "Short reconnect within grace preserves control and cannot duplicate actions; repeated dodges escalate bounded cooldown but never auto-ban without review.",
+        "UI/API expose clear reason/duration/appeal path without revealing other players' identity or anti-cheat facts."
+      ],
+      "notes": "Compose with existing takeover event/provenance.",
+      "passes": false
+    },
+    {
+      "id": "US-397",
+      "wave": 16,
+      "epic": "D-SAFETY",
+      "priority": 24,
+      "dependencies": [
+        "US-390"
+      ],
+      "title": "Player reports, blocks, and mutes schema (migration 0074)",
+      "description": "Add the minimum strangers-ranked safety substrate: post-game reports, principal blocks, and game-local mutes, segregated from hash-chained mechanics and public identity.",
+      "acceptanceCriteria": [
+        "0074 follows 0073 linearly and supports append-only reports with category/evidence refs/status, unique directional blocks, and game/principal mute sidecar state; upgrade/downgrade/index tests pass.",
+        "Reports reference pseudonymous principal/game/sidecar sequence without copying raw chat into hash-chain/audit payloads.",
+        "Block API cannot reveal whether another principal blocked the caller; matching uses mutual exclusion privately.",
+        "GDPR/retention distinguishes reporter safety evidence from ordinary chat and preserves deterministic event replay.",
+        "No report/block/mute action automatically changes ratings or imposes a ranked ban."
+      ],
+      "notes": "Friends graph remains out of scope; blocking is safety-critical.",
+      "passes": false
+    },
+    {
+      "id": "US-398",
+      "wave": 16,
+      "epic": "D-SAFETY",
+      "priority": 25,
+      "dependencies": [
+        "US-388",
+        "US-397"
+      ],
+      "title": "Report/block services and matchmaker enforcement",
+      "description": "Expose authenticated report/block/unblock/mute flows, retain evidence safely, and enforce blocks in mixed matching without turning reports into automatic penalties.",
+      "acceptanceCriteria": [
+        "Only game participants can report another participant for that completed/recent game; categories and bounded note/evidence references are validated/rate limited.",
+        "Block/unblock is idempotent; current/future matching never groups either direction while existing games remain replayable.",
+        "Mute hides sidecar chat locally and never suppresses structured actions/game events or leak mute state to target.",
+        "Admin review can inspect pseudonymous evidence under existing auth/audit; no public/raw display-name leak.",
+        "Abuse tests cover fabricated game/seat, report spam, block probing, deleted users, and retention."
+      ],
+      "notes": "Manual moderation only.",
+      "passes": false
+    },
+    {
+      "id": "US-399",
+      "wave": 16,
+      "epic": "D-SAFETY",
+      "priority": 26,
+      "dependencies": [
+        "US-369",
+        "US-397",
+        "US-398"
+      ],
+      "title": "Ranked chat safety and player controls UI",
+      "description": "Add in-game mute and post-game report/block UX appropriate for anonymous ranked play, plus clear moderation/appeal expectations.",
+      "acceptanceCriteria": [
+        "Mute is accessible from chat/seat context without revealing human/AI identity and has visible local state/undo.",
+        "Report becomes available only when target provenance is server-authorized; pre-reveal UI uses public seat id and server resolves principal privately.",
+        "Post-reveal block/report confirmations avoid raw UUID/email/display name and explain that reports do not automatically alter ratings.",
+        "Keyboard/mobile/screen-reader flows work and malicious text is escaped; sidecar moderation status remains private.",
+        "Playwright covers report, block preventing a future synthetic match, mute, rate-limit/error, and deleted-account cases."
+      ],
+      "notes": "Frontend gates mandatory.",
+      "passes": false
+    },
+    {
+      "id": "US-400",
+      "wave": 16,
+      "epic": "D-INTEGRITY",
+      "priority": 27,
+      "dependencies": [
+        "US-395",
+        "US-398"
+      ],
+      "title": "Mixed-ranked telemetry and advisory integrity signals",
+      "description": "Extend advisory telemetry for a true multi-human environment: repeated co-play, coordinated voting/action timing, account/device/IP clusters, queue dodges, abnormal role-conditioned outcomes, and bot cadence—without automatic penalties.",
+      "acceptanceCriteria": [
+        "Pure scorer uses injected window/thresholds and pseudonymous rows to emit deterministic flags/evidence; no rating/game mutation.",
+        "Signals distinguish teammates/opponents, expected queue rematches, NAT/shared-IP uncertainty, role/faction baselines, and infrastructure no-contests to reduce false positives.",
+        "Raw IP/chat/provider credentials never enter evidence; hashes and bounded aggregates only.",
+        "Batch/admin capture is savepoint-isolated and cannot block game/rating writes; failure emits metric/audit.",
+        "Threshold/below-threshold/property tests and multi-human synthetic collusion fixtures pass; flags remain manual-review only."
+      ],
+      "notes": "Wave14 scorer evolves from one-human assumptions.",
+      "passes": false
+    },
+    {
+      "id": "US-401",
+      "wave": 16,
+      "epic": "D-INTEGRITY",
+      "priority": 28,
+      "dependencies": [
+        "US-395",
+        "US-400"
+      ],
+      "title": "Season-stream rating exclusion and deterministic recompute (migration 0075)",
+      "description": "Replace per-principal local rollback as the authority for mixed ranked with canonical season/ruleset stream recomputation, because one exclusion changes later opponents' priors.",
+      "acceptanceCriteria": [
+        "0075 follows 0074 linearly and adds season game exclusions/recompute runs/checkpoints/audit; existing per-principal exclusions remain legacy-compatible.",
+        "Pure recompute orders included game input records by terminal timestamp plus game id, replays every human prior/event from season initial state, and returns byte-identical ratings/events/checkpoints.",
+        "Excluding one game recomputes every transitively affected human in the season/ruleset/mode; game events/hash chains and AI anchor snapshots remain untouched.",
+        "Admin operation is idempotent, resumable, dry-run diffable, actor/reason audited, and atomically publishes a completed version so readers never see partial ladder.",
+        "Golden test compares recompute after exclusion to a fresh season that never contained the game, including forfeits/withdrawn/deleted principals."
+      ],
+      "notes": "Critical correctness for multiplayer ratings.",
+      "passes": false
+    },
+    {
+      "id": "US-402",
+      "wave": 16,
+      "epic": "D-INTEGRITY",
+      "priority": 29,
+      "dependencies": [
+        "US-385",
+        "US-395",
+        "US-401"
+      ],
+      "title": "Season-scoped solo and mixed leaderboards",
+      "description": "Expose separate season/ruleset/mode human leaderboards with pseudonymous handles, provisional/decay state, role/faction diagnostics, recompute version, and privacy-safe pagination.",
+      "acceptanceCriteria": [
+        "API requires explicit mode/season/ruleset or selects current active deterministically; solo and mixed rows never intermix.",
+        "Headline rank uses the scoped rating with provisional exclusion/read-side decay; diagnostics show sample counts/outcomes by role/faction but no role-specific rank below privacy/sample threshold.",
+        "Withdrawn/banned/quarantined/deleted handling follows existing consent/GDPR policy and recompute publication atomically invalidates cache.",
+        "Responses expose no display_name/email/raw UUID/IP/device/report/ban evidence; handle policy remains authoritative.",
+        "Frontend presents season switcher, solo/mixed tabs, methodology, provisional progress, and empty/frozen/closed states."
+      ],
+      "notes": "Scientific model leaderboards remain separate navigation/product.",
+      "passes": false
+    },
+    {
+      "id": "US-403",
+      "wave": 16,
+      "epic": "E-RANKED-UI",
+      "priority": 30,
+      "dependencies": [
+        "US-386",
+        "US-390",
+        "US-396",
+        "US-399",
+        "US-402"
+      ],
+      "title": "Mixed ranked queue, ready check, and post-match UI",
+      "description": "Complete the player journey for Ranked Mixed: eligibility, season disclosure, queue, wait/cancel, ready check, anonymous game, safety controls, and scoped rating result.",
+      "acceptanceCriteria": [
+        "Ranked mode screen distinguishes Solo vs Mixed, expected wait/human minimum/AI backfill, season/rules, no parties/model choice, forfeit/safety policy, and rating scope.",
+        "Queue survives refresh/reconnect via SSE, widens bands transparently without exposing hidden candidates, and supports fair cancel/ready transitions.",
+        "Ready check is accessible and time-bounded; decline/no-show/cooldown/no-contest explanations match server reason tokens.",
+        "Live table remains identity-blind and uses existing atmospheric UI; report/block/mute controls follow US-399.",
+        "Post-match shows mixed delta/team expectation/role context/provisional rank and links season methodology without exposing others' ratings pregame."
+      ],
+      "notes": "Frontend gates mandatory.",
+      "passes": false
+    },
+    {
+      "id": "US-404",
+      "wave": 16,
+      "epic": "E-RANKED-UI",
+      "priority": 31,
+      "dependencies": [
+        "US-391",
+        "US-392",
+        "US-395",
+        "US-396",
+        "US-398",
+        "US-403"
+      ],
+      "title": "Ranked mixed deterministic end-to-end games",
+      "description": "Add multi-browser default-suite tests for ranked mixed tables with real queue/ticket/readiness APIs, AI backfill, human actions/chat, terminal rating, safety, and replay.",
+      "acceptanceCriteria": [
+        "At least four verified humans enter separately, ready, are assigned across a mini7 table with AI backfill, play to terminal, and each receives exactly one MIXED scoped event.",
+        "A second scenario covers block incompatibility, one no-show replacement/return, one midgame takeover forfeit, report/mute, and eligible players' coherent ratings.",
+        "Requests cannot set model/role/team/routing/funding/invite; pre-reveal responses remain identity-blind and scientific tables stay untouched.",
+        "Worker/API restart during queue and game converges without duplicate ticket/game/rating/charge; replay and season recompute match live result.",
+        "Desktop and mobile Playwright drive representative humans while deterministic mocks drive others; no real provider call."
+      ],
+      "notes": "Mixed ranked release candidate gate.",
+      "passes": false
+    },
+    {
+      "id": "US-405",
+      "wave": 16,
+      "epic": "F-OPS",
+      "priority": 32,
+      "dependencies": [
+        "US-387",
+        "US-394",
+        "US-400",
+        "US-401",
+        "US-404"
+      ],
+      "title": "Shadow calibration and go/no-go report",
+      "description": "Run both ranked modes in SHADOW over deterministic simulations and operator-approved test games, producing a machine-readable go/no-go report instead of enabling flags on code completion.",
+      "acceptanceCriteria": [
+        "Report covers eligibility/refusal rates, queue waits/backfill/human mix, role/faction exposure, prediction calibration, rating inflation/convergence, provider reliability/cost, forfeits/no-contests, moderation/flag rates, and privacy/firewall audits.",
+        "Thresholds are versioned settings/policy; below-threshold results name blocking metrics and cannot transition season to ACTIVE.",
+        "Shadow games write audit/simulated candidate outputs but no public ratings/leaderboard ranks; scientific and casual stats remain distinguishable.",
+        "Report is deterministic for same dataset/config and includes catalog/pool/calibration/code version hashes.",
+        "Tests construct pass/fail fixtures for every hard threshold and prove flags remain default off."
+      ],
+      "notes": "Human operator reviews report before activation.",
+      "passes": false
+    },
+    {
+      "id": "US-406",
+      "wave": 16,
+      "epic": "F-OPS",
+      "priority": 33,
+      "dependencies": [
+        "US-390",
+        "US-391",
+        "US-395",
+        "US-405"
+      ],
+      "title": "Ranked capacity, concurrency, and abuse load gate",
+      "description": "Prove the separate human lane and DB-as-queue survive realistic ranked concurrency, SSE reconnects, rating serialization, OpenRouter failures, and adversarial admission without starving scientific work.",
+      "acceptanceCriteria": [
+        "Load harness covers configured concurrent solo/mixed queues/games, multiple API/worker processes, Postgres claims, SSE reconnect storms, chat/action rate limits, and terminal rating settlement.",
+        "No duplicate/overbooked ticket, game, seat, schedule cell, rating event, ledger charge, or recompute publication occurs under races.",
+        "Human ranked load does not consume benchmark scheduler semaphore/capacity; scientific heartbeat/game progress remains within threshold.",
+        "Provider latency/429/5xx, catalog stale, credential unavailable, flag flip, and DB worker restart degrade to bounded queue/no-contest behavior.",
+        "Metrics/alerts expose queue age, ready failures, no-contests, rating lag, recompute lag, provider/cost drift, safety backlog, and firewall violations with low-cardinality labels."
+      ],
+      "notes": "Postgres test can remain marked postgres but default pure/concurrency model must run.",
+      "passes": false
+    },
+    {
+      "id": "US-407",
+      "wave": 16,
+      "epic": "F-OPS",
+      "priority": 34,
+      "dependencies": [
+        "US-378",
+        "US-380",
+        "US-402",
+        "US-404",
+        "US-405",
+        "US-406"
+      ],
+      "title": "Wave 16 canary flags, runbooks, and final release gate",
+      "description": "Finalize one operator-controlled activation sequence for scientific OpenRouter, ranked solo, then ranked mixed. Implementation completion leaves all production switches off.",
+      "acceptanceCriteria": [
+        "Settings and deployment examples keep global, solo, and mixed human rating/match flags False by default; scientific OpenRouter recruitment is independently gated.",
+        "Runbook/checklist covers catalog/probe/pool freeze, key/credential encryption readiness, budgets/completion reserve, legal/consent, shadow report, migrations/backups, rollback/recompute, moderation staffing, canary cohort, metrics/alerts, and emergency kill.",
+        "Automated audit proves custom games cannot rate; solo/mixed cannot accept player config; human hot paths touch zero scientific ratings; credentials never leak; season/rating/recompute hashes verify.",
+        "End-to-end release suite includes AI-only scientific OpenRouter, ranked solo, ranked mixed, flag-off in-flight refusal/no-contest, and rollback/recompute without event-chain mutation.",
+        "Only an explicit operator action may transition a validated SHADOW season ACTIVE and enable its flag; code/tests never flip production configuration."
+      ],
+      "notes": "Final story in the combined Ralph queue.",
+      "passes": false
+    }
+  ]
+}

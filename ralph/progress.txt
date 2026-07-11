@@ -5924,3 +5924,27 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 2991 passed / 41 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - Activate combined Waves 15–16 plan
+- Archived the completed Ralph Git branches separately, then activated one
+  82-story executable queue on `ralph/padrino-v15-v16`: Wave 15 US-326..373
+  builds the truthful multi-human casual OpenRouter product; Wave 16
+  US-374..407 builds frozen ranked seasons, standardized solo, mixed human/AI
+  matchmaking, calibrated ratings, integrity, shadow, and canary gates.
+- Locked human decisions in `prd-v4.md`: 20–30 minute standard cadence;
+  neo-noir occult laboratory plus sleek technical visual identity; connected
+  OpenRouter or one-time $5 verified-account promo; conservative reservation
+  plus bounded operator completion reserve; host-funded custom AI seats;
+  custom role deck with seeded hidden assignment; arbitrary casual text models
+  tiered by compatibility; server-owned ranked configuration; no ranked parties.
+- The combined graph keeps all production ranked flags default OFF. US-374
+  depends on the Wave 15 full-product gate US-373, so a single Ralph loop cannot
+  enter Wave 16 early. Separate `prd-v15.json` / `prd-v16.json` files are source
+  snapshots; `prd.json` is the only active queue.
+- Increased the default Ralph iteration budget from 40 to 100 so all 82 stories
+  fit one invocation. No implementation/runtime behavior changed in this
+  planning activation.
+- Thread URL: n/a (local Codex planning session).
+- Files changed: `prd-v4.md`, `AGENTS.md`, `ralph/prd.json`,
+  `ralph/prd-v15.json`, `ralph/prd-v16.json`, `ralph/ralph-codex.sh`,
+  `ralph/progress.txt`.

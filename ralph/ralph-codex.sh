@@ -24,7 +24,7 @@ LAST_BRANCH_FILE="$SCRIPT_DIR/.last-branch"
 V9_DOCS_BRANCH="docs/padrino-v9-human-multiplayer-plan"
 V9_BRANCH="ralph/padrino-v9"
 
-MAX_ITERATIONS=40
+MAX_ITERATIONS=100
 V9_ITERATIONS=60
 RUN_ALL=0
 SYNC_TOOLING=1
@@ -33,7 +33,8 @@ usage() {
   cat <<'EOF'
 Usage:
   ./ralph/ralph-codex.sh [max_iterations]
-      Run the active ralph/prd.json plan until complete.
+      Run the active ralph/prd.json plan until complete. The default budget is
+      100 iterations so the combined 82-story Waves 15–16 queue fits one run.
 
   ./ralph/ralph-codex.sh --all-remaining [--max-iterations N] [--v9-iterations N]
       Finish the active Wave 8 plan, merge it to main, swap in Wave 9, and
