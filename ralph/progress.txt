@@ -6214,3 +6214,17 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3042 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - Ralph completion detection repair
+- Fixed `ralph/ralph-codex.sh` after a Codex usage-limit exit falsely matched
+  the completion sentinel echoed inside the generated prompt and stopped with
+  75 unfinished stories.
+- The loop now treats `ralph/prd.json`'s remaining-story count as the sole
+  completion authority, preserves the Codex pipeline exit status, and fails
+  clearly on usage limits or any other nonzero iteration exit so an operator
+  can restart without mistaking partial work for completion.
+- Files changed: `ralph/ralph-codex.sh`, `ralph/progress.txt`.
+- Gates (all GREEN): `bash -n ralph/ralph-codex.sh`; `git diff --check`;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
+  3042 passed / 51 skipped / 10 deselected.

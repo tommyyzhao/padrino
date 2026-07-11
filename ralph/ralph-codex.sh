@@ -313,7 +313,7 @@ EOF
 
 run_active_plan_loop() {
   local max_iterations="$1"
-  local branch count output remaining
+  local branch codex_status count output remaining
 
   initialize_progress_file
   neutralize_auto_archive_for_active_plan
@@ -337,19 +337,23 @@ run_active_plan_loop() {
     echo "  Ralph Codex Iteration $i of $max_iterations"
     echo "==============================================================="
 
-    output="$(emit_iteration_prompt | codex "${CODEX_ARGS[@]}" 2>&1 | tee /dev/stderr)" || true
-
-    if echo "$output" | grep -qE '^[[:space:]]*<promise>COMPLETE</promise>[[:space:]]*$'; then
-      echo ""
-      echo "Ralph completed all tasks by sentinel."
-      return 0
-    fi
+    set +e
+    output="$(emit_iteration_prompt | codex "${CODEX_ARGS[@]}" 2>&1 | tee /dev/stderr)"
+    codex_status=$?
+    set -e
 
     remaining="$(remaining_count)"
     if [ "$remaining" = "0" ]; then
       echo ""
       echo "Ralph completed all tasks (prd.json shows 0 unfinished stories)."
       return 0
+    fi
+
+    if [ "$codex_status" -ne 0 ]; then
+      if echo "$output" | grep -qi "hit your usage limit"; then
+        die "Codex usage limit reached with $remaining unfinished stories; restart after the reported reset time"
+      fi
+      die "Codex iteration $i exited with status $codex_status and $remaining unfinished stories"
     fi
 
     echo "Iteration $i complete. Remaining stories: $remaining. Continuing..."
