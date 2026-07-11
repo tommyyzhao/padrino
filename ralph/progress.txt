@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Player-facing lobby identity (US-330): keep roster projection in
+  `api/lobby_presence.py` over already-loaded member rows plus a
+  `{lobby_member_id: display_name}` map; return only `member_id`,
+  `display_label`, `is_self`, `host`, `ready`, and `present`. Do not expose
+  `Principal.id` or `GameSeat.public_player_id` to pregame roster surfaces.
+  For anonymous launch, keep `GameSeat.seat_index` equal to the public
+  `RolesAssigned` seat index, but choose the source `LobbySeat` with
+  `seat_permutation("anonymous-launch:<lobby_seed>", player_count)` so lobby
+  join order cannot identify human public seats.
 - Launch-readiness invariant (US-329): keep lobby launch gates in
   `core/lobby/readiness.py` as a pure data-in/data-out evaluator over member
   readiness/presence, seat ownership, contiguous capacity, and injected AI
@@ -6096,3 +6105,38 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3031 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-330
+- Replaced pregame roster UUID display with deterministic lobby-local labels
+  derived from human display names, including duplicate suffixes and blank-name
+  `Player N` labels, without mutating `Principal.display_name`.
+- Made roster and lobby-state stream entries caller-relative (`is_self`,
+  `host`) while removing principal ids from `LobbySummary`; the dashboard now
+  derives host controls from the safe roster row and renders `display_label`.
+- Decoupled anonymous launch from lobby order by permuting source `LobbySeat`
+  slots onto public `GameSeat` roles with `seat_permutation`, preserving replay
+  seat indices while hiding which public seats are human.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/lobby_presence.py`,
+  `src/padrino/api/lobby_state.py`, `src/padrino/api/lobby_launch.py`,
+  `src/padrino/api/routes/lobbies.py`,
+  `src/padrino/db/repositories/lobbies.py`,
+  `tests/api/test_lobby_invite_presence.py`,
+  `tests/api/test_lobby_launch.py`, `tests/api/test_human_match.py`,
+  `tests/integration/test_human_game_e2e.py`,
+  `web/dashboard/src/lib/api/types.ts`,
+  `web/dashboard/src/routes/lobby/[id]/+page.svelte`,
+  `web/dashboard/tests/e2e/helpers/identityBlind.ts`,
+  `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first
+  `uv run pytest tests/api/test_lobby_invite_presence.py::test_roster_display_labels_are_lobby_local_and_do_not_leak_identity tests/api/test_lobby_launch.py::test_anonymous_launch_maps_lobby_order_to_public_seats_by_seeded_permutation -q`
+  failed on the missing roster fields and direct lobby-order seat mapping;
+  focused GREEN same plus stream coverage -> 3 passed. Related GREEN
+  `uv run pytest tests/api/test_lobby_create.py tests/api/test_lobby_invite_presence.py tests/api/test_lobby_launch.py tests/api/test_human_match.py tests/integration/test_human_game_e2e.py -q`
+  -> 57 passed / 1 skipped. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3033 passed / 51 skipped /
+  10 deselected. Frontend gates: `pnpm -C web/dashboard lint`;
+  `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` ->
+  59 passed / 3 skipped.

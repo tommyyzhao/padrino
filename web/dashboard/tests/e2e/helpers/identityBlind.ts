@@ -7,11 +7,15 @@ export const IDENTITY_MARKER_TOKENS = [
   'agent_build_id',
   'controller_type',
   'takeover',
+  'principal_id',
   'occupant_principal_id',
   'human_player_id',
+  'public_player_id',
+  'seat_index',
   'model_provider',
   'model_name',
-  'provider_name'
+  'provider_name',
+  'provider'
 ] as const;
 
 export const ROLE_AND_FACTION_TOKENS = [

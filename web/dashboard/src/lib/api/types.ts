@@ -464,7 +464,6 @@ export interface LobbySummary {
   integrity_acknowledged: boolean;
   status: string;
   invite_token: string;
-  host_principal_id: string;
   league_id: string;
   game_id: string | null;
   member_count: number;
@@ -474,7 +473,9 @@ export interface LobbySummary {
 /** Identity-blind roster entry: no principal id, seat_kind, or human/AI map. */
 export interface RosterMember {
   member_id: string;
-  is_host: boolean;
+  display_label: string;
+  is_self: boolean;
+  host: boolean;
   ready: boolean;
   present: boolean;
 }

@@ -26,14 +26,9 @@
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-  // The host can launch; non-hosts only ready up. We cannot reveal which member
-  // is which seat, but the lobby summary names the host principal and the guest
-  // summary names our own principal — comparing them is identity-mode-neutral
-  // (it discloses NOTHING about human/AI seat assignment).
-  let myPrincipalId = $state<string | null>(null);
-  let isHost = $derived(
-    summary !== null && myPrincipalId !== null && summary.host_principal_id === myPrincipalId
-  );
+  // The host can launch; non-hosts only ready up. The roster tells each caller
+  // which row is their own without exposing principal ids or game seats.
+  let isHost = $derived(roster?.members.some((m) => m.is_self && m.host) ?? false);
 
   const inviteUrl = $derived(
     summary === null
@@ -61,7 +56,6 @@
       summary = s;
       roster = r;
       consented = c.consented;
-      myPrincipalId = me.principal_id;
       if (me.display_name) displayName = me.display_name;
       error = null;
     } catch (e) {
@@ -300,8 +294,9 @@
             >
               <span class="flex items-center gap-2">
                 <span class={m.present ? 'text-emerald-500' : 'text-muted-foreground'}>●</span>
-                <span class="font-mono">{m.member_id.slice(0, 8)}</span>
-                {#if m.is_host}<span class="text-muted-foreground">(host)</span>{/if}
+                <span>{m.display_label}</span>
+                {#if m.is_self}<span class="text-muted-foreground">(you)</span>{/if}
+                {#if m.host}<span class="text-muted-foreground">(host)</span>{/if}
               </span>
               <span class={m.ready ? 'text-emerald-600' : 'text-muted-foreground'}>
                 {m.ready ? 'ready' : 'waiting'}

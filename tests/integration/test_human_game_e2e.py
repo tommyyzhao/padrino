@@ -83,10 +83,7 @@ _PLAYER_COUNT = 7
 _INITIAL_AI_SEAT_COUNT = _PLAYER_COUNT - 1
 _LAUNCHED_HUMAN_SEAT_COUNT = 2
 _LAUNCHED_AI_SEAT_COUNT = _PLAYER_COUNT - _LAUNCHED_HUMAN_SEAT_COUNT
-# The host occupies lobby seat 0 -> public_player_id P01 (assign_roles maps
-# seat_index i -> P0{i+1}). The host is the human player in this game.
-_HOST_SEAT = "P01"
-_FRIEND_SEAT = "P02"
+_ROSTER_MEMBER_KEYS = {"member_id", "display_label", "is_self", "host", "ready", "present"}
 
 
 # --------------------------------------------------------------------------- #
@@ -264,6 +261,7 @@ def _db_backed_human_pull(
     token: str,
     game_id: uuid.UUID,
     script: Mapping[tuple[str, str], AgentResponse],
+    human_seat_id: str,
     *,
     chat_sent: list[bool],
 ) -> PullAction:
@@ -282,7 +280,7 @@ def _db_backed_human_pull(
 
     async def pull(observation: Observation) -> Action | None:
         phase = observation.phase
-        scripted = script.get((phase, _HOST_SEAT))
+        scripted = script.get((phase, human_seat_id))
         if scripted is None or scripted.action is None:
             return None
 
@@ -324,12 +322,13 @@ def _mixed_adapter(
     seats: list[GameSeat],
     script: Mapping[tuple[str, str], AgentResponse],
     human_pull: PullAction,
+    human_seat_id: str,
     clock: _FakeClock,
 ) -> SeatMultiplexAdapter:
     adapters: dict[str, LlmAdapter] = {}
     for seat in seats:
         sid = seat.public_player_id
-        if sid == _HOST_SEAT:
+        if sid == human_seat_id:
             adapters[sid] = HumanAdapter(
                 pull_action=human_pull,
                 deadline_seconds=30.0,
@@ -390,6 +389,9 @@ async def test_human_game_full_spine_smoke(
 
     # ---- create lobby (host) ------------------------------------------------
     host = await _new_guest(client)
+    host_principal_id = uuid.UUID(
+        (await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: host})).json()["principal_id"]
+    )
     await _consent(client, host)
     created = await client.post(
         "/lobbies",
@@ -406,6 +408,11 @@ async def test_human_game_full_spine_smoke(
 
     # ---- guest join (a friend joins the private lobby) ----------------------
     guest = await _new_guest(client)
+    guest_principal_id = uuid.UUID(
+        (await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: guest})).json()[
+            "principal_id"
+        ]
+    )
     await _consent(client, guest)
     joined = await client.post(
         f"/lobbies/join/{invite_token}",
@@ -416,7 +423,7 @@ async def test_human_game_full_spine_smoke(
     assert roster.status_code == 200
     # The roster is identity-blind: members carry no seat_kind / principal / map.
     for member in roster.json()["members"]:
-        assert set(member) == {"member_id", "is_host", "ready", "present"}
+        assert set(member) == _ROSTER_MEMBER_KEYS
     assert roster.json()["member_count"] == 2
 
     # ---- ready -> lock -> launch (curated auto-fill + handoff) --------------
@@ -447,8 +454,11 @@ async def test_human_game_full_spine_smoke(
     assert len(seats) == _PLAYER_COUNT
     human_seats = [s for s in seats if s.seat_kind == SeatKind.HUMAN.value]
     assert len(human_seats) == _LAUNCHED_HUMAN_SEAT_COUNT
-    assert {s.public_player_id for s in human_seats} == {_HOST_SEAT, _FRIEND_SEAT}
     assert all(s.occupant_principal_id is not None for s in human_seats)
+    host_seat = next(s for s in human_seats if s.occupant_principal_id == host_principal_id)
+    friend_seat = next(s for s in human_seats if s.occupant_principal_id == guest_principal_id)
+    host_public_id = host_seat.public_player_id
+    friend_public_id = friend_seat.public_player_id
 
     # ---- play a full game through the human lane ----------------------------
     # Mark the game LIVE so the live-tail / reveal gating is exercised against
@@ -461,8 +471,10 @@ async def test_human_game_full_spine_smoke(
 
     script = _town_win_script_from_seats(seats)
     clock = _FakeClock()
-    human_pull = _db_backed_human_pull(client, host, game_id, script, chat_sent=[False])
-    mux = _mixed_adapter(seats, script, human_pull, clock)
+    human_pull = _db_backed_human_pull(
+        client, host, game_id, script, host_public_id, chat_sent=[False]
+    )
+    mux = _mixed_adapter(seats, script, human_pull, host_public_id, clock)
 
     async with session_factory() as session, session.begin():
         game = await session.get(Game, game_id)
@@ -552,7 +564,7 @@ async def test_human_game_full_spine_smoke(
             .all()
         )
     assert len(sidecar) == 1
-    assert sidecar[0].public_player_id == _HOST_SEAT
+    assert sidecar[0].public_player_id == host_public_id
     assert sidecar[0].raw_text == "I think we should vote carefully today."
     async with session_factory() as session:
         chained = (
@@ -567,7 +579,7 @@ async def test_human_game_full_spine_smoke(
             .one()
         )
     assert chained.event_type == "PublicMessageSubmitted"
-    assert chained.actor_player_id == _HOST_SEAT
+    assert chained.actor_player_id == host_public_id
     assert chained.payload == {
         "text": "",
         "round_index": 1,
@@ -583,7 +595,7 @@ async def test_human_game_full_spine_smoke(
                 await session.execute(
                     select(HumanActionSubmission).where(
                         HumanActionSubmission.game_id == game_id,
-                        HumanActionSubmission.public_player_id == _HOST_SEAT,
+                        HumanActionSubmission.public_player_id == host_public_id,
                     )
                 )
             )
@@ -622,15 +634,17 @@ async def test_human_game_full_spine_smoke(
     reveal_seats = {s["public_player_id"]: s for s in body["seats"]}
 
     # The host's HUMAN seat reveals as human (no model).
-    assert reveal_seats[_HOST_SEAT]["is_human"] is True
-    assert reveal_seats[_HOST_SEAT]["takeover_provenance"] == "HUMAN"
-    assert reveal_seats[_HOST_SEAT]["model"] is None
+    assert reveal_seats[host_public_id]["is_human"] is True
+    assert reveal_seats[host_public_id]["takeover_provenance"] == "HUMAN"
+    assert reveal_seats[host_public_id]["model"] is None
     # The invited friend also owns a real anonymous HUMAN seat.
-    assert reveal_seats[_FRIEND_SEAT]["is_human"] is True
-    assert reveal_seats[_FRIEND_SEAT]["takeover_provenance"] == "HUMAN"
-    assert reveal_seats[_FRIEND_SEAT]["model"] is None
+    assert reveal_seats[friend_public_id]["is_human"] is True
+    assert reveal_seats[friend_public_id]["takeover_provenance"] == "HUMAN"
+    assert reveal_seats[friend_public_id]["model"] is None
     # Every AI seat reveals its exact model identity.
-    ai_reveals = [s for sid, s in reveal_seats.items() if sid not in {_HOST_SEAT, _FRIEND_SEAT}]
+    ai_reveals = [
+        s for sid, s in reveal_seats.items() if sid not in {host_public_id, friend_public_id}
+    ]
     assert len(ai_reveals) == _LAUNCHED_AI_SEAT_COUNT
     assert all(s["is_human"] is False for s in ai_reveals)
     assert all(s["model"] is not None for s in ai_reveals)
@@ -640,7 +654,9 @@ async def test_human_game_full_spine_smoke(
     # The host identifies the invited friend as HUMAN and every remaining seat
     # as AI, so the guess scores a perfect detection accuracy.
     guess = {
-        sid: ("HUMAN" if sid == _FRIEND_SEAT else "AI") for sid in reveal_seats if sid != _HOST_SEAT
+        sid: ("HUMAN" if sid == friend_public_id else "AI")
+        for sid in reveal_seats
+        if sid != host_public_id
     }
     guess_resp = await client.post(
         f"/human/games/{game_id}/turing-guess",
@@ -649,7 +665,7 @@ async def test_human_game_full_spine_smoke(
     )
     assert guess_resp.status_code == 200, guess_resp.text
     score = guess_resp.json()
-    assert score["guesser_public_id"] == _HOST_SEAT
+    assert score["guesser_public_id"] == host_public_id
     assert score["total"] == _PLAYER_COUNT - 1
     assert score["correct"] == _PLAYER_COUNT - 1
     assert score["idempotent_replay"] is False

@@ -141,7 +141,6 @@ function lobbySummary(status = 'OPEN') {
     integrity_acknowledged: false,
     status,
     invite_token: INVITE_TOKEN,
-    host_principal_id: HOST_PRINCIPAL,
     league_id: 'llll0000-0000-0000-0000-llllllllllll',
     game_id: null,
     member_count: 2,
@@ -156,8 +155,22 @@ function lobbyRoster(guestReady: boolean) {
     member_count: 2,
     composition: { human_count: 2, ai_count: 5, total: 7 },
     members: [
-      { member_id: HOST_PRINCIPAL, is_host: true, ready: true, present: true },
-      { member_id: GUEST_PRINCIPAL, is_host: false, ready: guestReady, present: true }
+      {
+        member_id: 'member-host-safe',
+        display_label: 'Host Friend',
+        is_self: false,
+        host: true,
+        ready: true,
+        present: true
+      },
+      {
+        member_id: 'member-guest-safe',
+        display_label: 'Friend',
+        is_self: true,
+        host: false,
+        ready: guestReady,
+        present: true
+      }
     ]
   };
 }
@@ -292,6 +305,7 @@ test.describe('lobby UI (US-154)', () => {
     await expect(page.getByTestId('lobby-ready-state')).toHaveText('Ready');
 
     // Anonymity: the rendered roster exposes no human/AI seat markers.
+    await expect(page.getByTestId('lobby-roster')).toContainText('Friend');
     await expectIdentityBlind(page.getByTestId('lobby-roster'));
   });
 

@@ -8,8 +8,8 @@ no change.
 
 Each frame is counts-only and carries NO per-seat human/AI map, NO principal id,
 NO seat_kind — only the canonical :func:`composition_summary` counts and the
-identity-blind roster from :mod:`padrino.api.lobby_presence`. Timing is injected
-via :class:`LobbyStreamConfig` so tests close the stream near-instantly.
+caller-safe roster from :mod:`padrino.api.lobby_presence`. Timing is injected via
+:class:`LobbyStreamConfig` so tests close the stream near-instantly.
 """
 
 from __future__ import annotations
@@ -59,15 +59,27 @@ def default_lobby_stream_config() -> LobbyStreamConfig:
 
 
 async def _build_state_frame(
-    session: AsyncSession, *, lobby_id: uuid.UUID, now: datetime, stale_seconds: float
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    caller_principal_id: uuid.UUID,
+    now: datetime,
+    stale_seconds: float,
 ) -> dict[str, object] | None:
     lobby = await lobbies_repo.get_lobby(session, lobby_id)
     if lobby is None:
         return None
     members = await lobbies_repo.list_members(session, lobby_id)
+    display_names = await lobbies_repo.list_member_display_names(session, lobby_id)
     seats = await lobbies_repo.list_seats(session, lobby_id)
     composition = composition_summary({"seat_kind": seat.seat_kind} for seat in seats)
-    roster = roster_view(members, now=now, stale_seconds=stale_seconds)
+    roster = roster_view(
+        members,
+        display_names_by_member_id=display_names,
+        caller_principal_id=caller_principal_id,
+        now=now,
+        stale_seconds=stale_seconds,
+    )
     return {
         "type": LOBBY_STATE_FRAME,
         "lobby_id": str(lobby.id),
@@ -81,6 +93,7 @@ async def stream_lobby_state(
     session_factory: async_sessionmaker[AsyncSession],
     lobby_id: uuid.UUID,
     *,
+    caller_principal_id: uuid.UUID,
     config: LobbyStreamConfig | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> AsyncIterator[str]:
@@ -102,7 +115,11 @@ async def stream_lobby_state(
         now = datetime.now(UTC)
         async with session_factory() as session:
             frame = await _build_state_frame(
-                session, lobby_id=lobby_id, now=now, stale_seconds=cfg.stale_seconds
+                session,
+                lobby_id=lobby_id,
+                caller_principal_id=caller_principal_id,
+                now=now,
+                stale_seconds=cfg.stale_seconds,
             )
 
         if frame is None:

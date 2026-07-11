@@ -150,7 +150,6 @@ class LobbySummary(BaseModel):
     integrity_acknowledged: bool
     status: str
     invite_token: str
-    host_principal_id: uuid.UUID
     league_id: uuid.UUID
     game_id: uuid.UUID | None
     member_count: int
@@ -307,10 +306,12 @@ async def get_lobby(
 
 
 class RosterMember(BaseModel):
-    """Identity-blind roster entry: no principal id, seat_kind, or human/AI map."""
+    """Caller-safe roster entry: no principal id, seat_kind, or human/AI map."""
 
     member_id: uuid.UUID
-    is_host: bool
+    display_label: str
+    is_self: bool
+    host: bool
     ready: bool
     present: bool
 
@@ -399,7 +400,7 @@ async def get_roster(
     """Return the member-scoped, identity-blind roster after reconciling presence."""
     lobby = await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
     await _reconcile_lifecycle(session, lobby)
-    roster = await _roster(session, lobby_id=lobby_id)
+    roster = await _roster(session, lobby_id=lobby_id, caller_principal_id=ctx.principal_id)
     await session.commit()
     return roster
 
@@ -421,7 +422,7 @@ async def set_ready(
     await lobbies_repo.set_member_ready(session, member_id=member.id, ready=body.ready)
     await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
     await lobbies_repo.touch_lobby(session, lobby_id=lobby.id, now=now)
-    roster = await _roster(session, lobby_id=lobby_id)
+    roster = await _roster(session, lobby_id=lobby_id, caller_principal_id=ctx.principal_id)
     await session.commit()
     return roster
 
@@ -441,7 +442,7 @@ async def heartbeat(
     now = datetime.now(UTC)
     await lobbies_repo.touch_member_presence(session, member_id=member.id, now=now)
     await lobbies_repo.touch_lobby(session, lobby_id=lobby.id, now=now)
-    roster = await _roster(session, lobby_id=lobby_id)
+    roster = await _roster(session, lobby_id=lobby_id, caller_principal_id=ctx.principal_id)
     await session.commit()
     return roster
 
@@ -666,7 +667,7 @@ async def transfer_host(
         new_host_principal_id=target.principal_id,
         now=now,
     )
-    roster = await _roster(session, lobby_id=lobby_id)
+    roster = await _roster(session, lobby_id=lobby_id, caller_principal_id=ctx.principal_id)
     await session.commit()
     return roster
 
@@ -686,7 +687,7 @@ async def stream_lobby(
     """
     await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
     return StreamingResponse(
-        stream_lobby_state(session_factory, lobby_id),
+        stream_lobby_state(session_factory, lobby_id, caller_principal_id=ctx.principal_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -809,7 +810,6 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
         integrity_acknowledged=lobby.integrity_acknowledged,
         status=lobby.status,
         invite_token=lobby.invite_token,
-        host_principal_id=lobby.host_principal_id,
         league_id=lobby.league_id,
         game_id=lobby.game_id,
         member_count=len(members),
@@ -817,14 +817,23 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
     )
 
 
-async def _roster(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbyRoster:
+async def _roster(
+    session: AsyncSession, *, lobby_id: uuid.UUID, caller_principal_id: uuid.UUID
+) -> LobbyRoster:
     lobby = await lobbies_repo.get_lobby(session, lobby_id)
     assert lobby is not None
     members = await lobbies_repo.list_members(session, lobby_id)
+    display_names = await lobbies_repo.list_member_display_names(session, lobby_id)
     seats = await lobbies_repo.list_seats(session, lobby_id)
     composition = composition_summary({"seat_kind": seat.seat_kind} for seat in seats)
     now = datetime.now(UTC)
-    views: list[MemberView] = roster_view(members, now=now, stale_seconds=_stale_seconds())
+    views: list[MemberView] = roster_view(
+        members,
+        display_names_by_member_id=display_names,
+        caller_principal_id=caller_principal_id,
+        now=now,
+        stale_seconds=_stale_seconds(),
+    )
     return LobbyRoster(
         id=lobby.id,
         status=lobby.status,
@@ -833,7 +842,9 @@ async def _roster(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbyRoster:
         members=[
             RosterMember(
                 member_id=v.member_id,
-                is_host=v.is_host,
+                display_label=v.display_label,
+                is_self=v.is_self,
+                host=v.host,
                 ready=v.ready,
                 present=v.present,
             )

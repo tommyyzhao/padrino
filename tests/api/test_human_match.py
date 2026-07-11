@@ -241,7 +241,6 @@ async def test_match_composes_single_human_lobby_and_launches_game(
     human_seats = [seat for seat in game_seats if seat.seat_kind == SeatKind.HUMAN.value]
     ai_seats = [seat for seat in game_seats if seat.seat_kind == SeatKind.AI.value]
     assert len(human_seats) == 1
-    assert human_seats[0].seat_index == 0
     assert human_seats[0].occupant_principal_id == principal_id
     assert len(ai_seats) == 6
     assert all(seat.agent_build_id is not None for seat in ai_seats)

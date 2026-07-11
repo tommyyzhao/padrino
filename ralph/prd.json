@@ -99,7 +99,7 @@
         "API and frontend tests assert full-JSON absence of forbidden identity columns."
       ],
       "notes": "Member list may identify invited humans before play; rule 7 still forbids binding them to game seats.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-331",

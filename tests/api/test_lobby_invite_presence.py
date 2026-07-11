@@ -39,6 +39,8 @@ from padrino.db.models import (
 )
 from padrino.db.repositories import human_principals as principals_repo
 
+_ROSTER_MEMBER_KEYS = {"member_id", "display_label", "is_self", "host", "ready", "present"}
+
 
 @pytest.fixture(autouse=True)
 def _stub_provider_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,7 +120,7 @@ async def _friend_member_id(client: AsyncClient, lobby_id: str, host_token: str)
         f"/lobbies/{lobby_id}/roster", cookies={HUMAN_SESSION_COOKIE: host_token}
     )
     assert roster.status_code == 200, roster.text
-    member_id: str = next(m["member_id"] for m in roster.json()["members"] if not m["is_host"])
+    member_id: str = next(m["member_id"] for m in roster.json()["members"] if not m["host"])
     return member_id
 
 
@@ -341,7 +343,7 @@ async def test_roster_read_member_scoped(client: AsyncClient) -> None:
     # Identity-blind: composition is counts only, never a per-seat human/AI map.
     assert body["composition"] == {"human_count": 2, "ai_count": 5, "total": 7}
     for member in body["members"]:
-        assert set(member) == {"member_id", "is_host", "ready", "present"}
+        assert set(member) == _ROSTER_MEMBER_KEYS
 
     # A non-member cannot read the roster.
     outsider = await _guest_token(client)
@@ -349,6 +351,84 @@ async def test_roster_read_member_scoped(client: AsyncClient) -> None:
         f"/lobbies/{lobby['id']}/roster", cookies={HUMAN_SESSION_COOKIE: outsider}
     )
     assert denied.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_roster_display_labels_are_lobby_local_and_do_not_leak_identity(
+    client: AsyncClient,
+) -> None:
+    host = await _guest_token(client)
+    renamed = await client.patch(
+        "/human/me",
+        json={"display_name": "Alex"},
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert renamed.status_code == 200, renamed.text
+    host_principal_id = renamed.json()["principal_id"]
+    lobby = await _create_lobby(client, host)
+    invite = await _invite_token(client, lobby["id"], host)
+
+    friend = await _guest_token(client)
+    renamed_friend = await client.patch(
+        "/human/me",
+        json={"display_name": "Alex"},
+        cookies={HUMAN_SESSION_COOKIE: friend},
+    )
+    assert renamed_friend.status_code == 200, renamed_friend.text
+    friend_principal_id = renamed_friend.json()["principal_id"]
+    joined = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: friend})
+    assert joined.status_code == 200, joined.text
+
+    unnamed = await _guest_token(client)
+    unnamed_me = await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: unnamed})
+    assert unnamed_me.status_code == 200, unnamed_me.text
+    unnamed_principal_id = unnamed_me.json()["principal_id"]
+    joined_unnamed = await client.post(
+        f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: unnamed}
+    )
+    assert joined_unnamed.status_code == 200, joined_unnamed.text
+
+    roster = await client.get(
+        f"/lobbies/{lobby['id']}/roster",
+        cookies={HUMAN_SESSION_COOKIE: friend},
+    )
+
+    assert roster.status_code == 200, roster.text
+    body = roster.json()
+    assert body["composition"] == {"human_count": 3, "ai_count": 4, "total": 7}
+    assert [set(member) for member in body["members"]] == [_ROSTER_MEMBER_KEYS] * 3
+    assert [member["display_label"] for member in body["members"]] == [
+        "Alex #1",
+        "Alex #2",
+        "Player 3",
+    ]
+    assert [member["host"] for member in body["members"]] == [True, False, False]
+    assert [member["is_self"] for member in body["members"]] == [False, True, False]
+
+    member_ids = {member["member_id"] for member in body["members"]}
+    assert member_ids.isdisjoint({host_principal_id, friend_principal_id, unnamed_principal_id})
+
+    encoded = json.dumps(body, sort_keys=True)
+    forbidden_tokens = {
+        "principal_id",
+        "email",
+        "public_player_id",
+        "seat_index",
+        "seat_kind",
+        "agent_build_id",
+        "provider",
+        "model_name",
+        "model_config_id",
+    }
+    for token in forbidden_tokens:
+        assert f'"{token}"' not in encoded
+    assert host_principal_id not in encoded
+    assert friend_principal_id not in encoded
+    assert unnamed_principal_id not in encoded
+
+    host_after = await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: host})
+    assert host_after.status_code == 200, host_after.text
+    assert host_after.json()["display_name"] == "Alex"
 
 
 @pytest.mark.asyncio
@@ -361,7 +441,7 @@ async def test_ready_up(client: AsyncClient) -> None:
         cookies={HUMAN_SESSION_COOKIE: host},
     )
     assert resp.status_code == 200
-    me = next(m for m in resp.json()["members"] if m["is_host"])
+    me = next(m for m in resp.json()["members"] if m["host"])
     assert me["ready"] is True
 
     unready = await client.post(
@@ -369,7 +449,7 @@ async def test_ready_up(client: AsyncClient) -> None:
         json={"ready": False},
         cookies={HUMAN_SESSION_COOKIE: host},
     )
-    me = next(m for m in unready.json()["members"] if m["is_host"])
+    me = next(m for m in unready.json()["members"] if m["host"])
     assert me["ready"] is False
 
 
@@ -528,7 +608,7 @@ async def test_host_transfer(client: AsyncClient) -> None:
         cookies={HUMAN_SESSION_COOKIE: host},
     )
     assert transferred.status_code == 200
-    new_host = next(m for m in transferred.json()["members"] if m["is_host"])
+    new_host = next(m for m in transferred.json()["members"] if m["host"])
     assert new_host["member_id"] == friend_member_id
 
     # The old host is now a non-host and may no longer transfer.
@@ -700,7 +780,7 @@ async def test_lobby_state_stream_identity_blind(
     for key in forbidden:
         assert f'"{key}"' not in blob, key
     for member in snapshot["members"]:
-        assert set(member) == {"member_id", "is_host", "ready", "present"}
+        assert set(member) == _ROSTER_MEMBER_KEYS
 
 
 @pytest.mark.asyncio

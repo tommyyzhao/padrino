@@ -10,9 +10,10 @@ roster / ready / state-channel surfaces all share:
 * :func:`should_auto_cancel` — whether an idle / host-abandoned lobby must
   transition to ``CLOSED`` (idle = no activity within the idle window; abandoned
   = the host is no longer present and nobody is).
-* :func:`project_member` / :func:`roster_view` — the counts-only, identity-blind
-  roster shape. The roster carries NO principal id, NO seat_kind, NO per-seat
-  human/AI map — only ``member_id``, ``is_host``, ``ready`` and ``present``.
+* :func:`project_member` / :func:`roster_view` — the caller-safe roster shape.
+  The roster carries NO principal id, NO seat_kind, NO per-seat human/AI map —
+  only ``member_id``, ``display_label``, ``is_self``, ``host``, ``ready`` and
+  ``present``.
 
 All functions are data-in / data-out with an injected ``now``: no clock reads, no
 DB, no IO. The impure api shell (``routes/lobbies.py``) loads the rows, calls
@@ -22,7 +23,7 @@ these with ``datetime.now(UTC)``, and applies the resulting eviction / cancel.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -38,8 +39,8 @@ def _as_aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-class _MemberRow(Protocol):
-    """The subset of :class:`padrino.db.models.LobbyMember` these helpers read."""
+class _PresenceMemberRow(Protocol):
+    """The subset of a lobby member row needed for presence decisions."""
 
     id: uuid.UUID
     is_host: bool
@@ -48,38 +49,48 @@ class _MemberRow(Protocol):
     last_seen_at: datetime | None
 
 
+class _RosterMemberRow(_PresenceMemberRow, Protocol):
+    """The subset of a lobby member row needed for roster projection."""
+
+    principal_id: uuid.UUID
+
+
 @dataclass(frozen=True)
 class MemberView:
-    """The identity-blind, counts-only view of one lobby member (US-148)."""
+    """The safe player-facing view of one lobby member (US-330)."""
 
     member_id: uuid.UUID
-    is_host: bool
+    display_label: str
+    is_self: bool
+    host: bool
     ready: bool
     present: bool
 
     def as_dict(self) -> dict[str, object]:
         return {
             "member_id": str(self.member_id),
-            "is_host": self.is_host,
+            "display_label": self.display_label,
+            "is_self": self.is_self,
+            "host": self.host,
             "ready": self.ready,
             "present": self.present,
         }
 
 
-def _last_active(member: _MemberRow) -> datetime:
+def _last_active(member: _PresenceMemberRow) -> datetime:
     """The member's most recent liveness signal (heartbeat, else join time)."""
     raw = member.last_seen_at if member.last_seen_at is not None else member.joined_at
     return _as_aware(raw)
 
 
-def is_present(member: _MemberRow, *, now: datetime, stale_seconds: float) -> bool:
+def is_present(member: _PresenceMemberRow, *, now: datetime, stale_seconds: float) -> bool:
     """True iff the member's last liveness signal is within the stale window."""
     cutoff = now - timedelta(seconds=stale_seconds)
     return _last_active(member) >= cutoff
 
 
 def stale_member_ids(
-    members: Iterable[_MemberRow], *, now: datetime, stale_seconds: float
+    members: Iterable[_PresenceMemberRow], *, now: datetime, stale_seconds: float
 ) -> list[uuid.UUID]:
     """Members to evict: any non-present member is stale and dropped on read."""
     return [m.id for m in members if not is_present(m, now=now, stale_seconds=stale_seconds)]
@@ -88,7 +99,7 @@ def stale_member_ids(
 def should_auto_cancel(
     *,
     lobby_updated_at: datetime,
-    members: Iterable[_MemberRow],
+    members: Iterable[_PresenceMemberRow],
     now: datetime,
     idle_seconds: float,
     stale_seconds: float,
@@ -108,20 +119,74 @@ def should_auto_cancel(
     return not any_present
 
 
-def project_member(member: _MemberRow, *, now: datetime, stale_seconds: float) -> MemberView:
+def project_member(
+    member: _RosterMemberRow,
+    *,
+    display_label: str,
+    caller_principal_id: uuid.UUID,
+    now: datetime,
+    stale_seconds: float,
+) -> MemberView:
     return MemberView(
         member_id=member.id,
-        is_host=member.is_host,
+        display_label=display_label,
+        is_self=member.principal_id == caller_principal_id,
+        host=member.is_host,
         ready=member.ready,
         present=is_present(member, now=now, stale_seconds=stale_seconds),
     )
 
 
 def roster_view(
-    members: Iterable[_MemberRow], *, now: datetime, stale_seconds: float
+    members: Iterable[_RosterMemberRow],
+    *,
+    display_names_by_member_id: Mapping[uuid.UUID, str | None],
+    caller_principal_id: uuid.UUID,
+    now: datetime,
+    stale_seconds: float,
 ) -> list[MemberView]:
-    """The identity-blind roster: one :class:`MemberView` per member."""
-    return [project_member(m, now=now, stale_seconds=stale_seconds) for m in members]
+    """Return the caller-safe roster: one :class:`MemberView` per member."""
+    member_list = list(members)
+    labels = _display_labels(member_list, display_names_by_member_id)
+    return [
+        project_member(
+            m,
+            display_label=labels[m.id],
+            caller_principal_id=caller_principal_id,
+            now=now,
+            stale_seconds=stale_seconds,
+        )
+        for m in member_list
+    ]
+
+
+def _display_labels(
+    members: list[_RosterMemberRow],
+    display_names_by_member_id: Mapping[uuid.UUID, str | None],
+) -> dict[uuid.UUID, str]:
+    raw_labels: list[tuple[uuid.UUID, str, str | None, int]] = []
+    duplicate_counts: dict[str, int] = {}
+    for position, member in enumerate(members, start=1):
+        raw = display_names_by_member_id.get(member.id)
+        stripped = raw.strip() if raw is not None else ""
+        normalized = stripped.casefold() if stripped else ""
+        if normalized:
+            duplicate_counts[normalized] = duplicate_counts.get(normalized, 0) + 1
+        raw_labels.append((member.id, stripped, normalized or None, position))
+
+    seen: dict[str, int] = {}
+    labels: dict[uuid.UUID, str] = {}
+    for member_id, stripped, label_key, position in raw_labels:
+        if label_key is None:
+            labels[member_id] = f"Player {position}"
+            continue
+        if duplicate_counts[label_key] == 1:
+            labels[member_id] = stripped
+            continue
+        ordinal = seen.get(label_key, 0) + 1
+        seen[label_key] = ordinal
+        labels[member_id] = f"{stripped} #{ordinal}"
+    return labels
 
 
 __all__ = [

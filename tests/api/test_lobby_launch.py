@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.enums import LobbySeatKind, LobbyStatus, SeatKind
+from padrino.core.seating import seat_permutation
 from padrino.db.models import (
     AgentBuild,
     Game,
@@ -129,6 +130,16 @@ async def _create_and_lock(client: AsyncClient, token: str) -> uuid.UUID:
     return lobby_id
 
 
+async def _invite_token(client: AsyncClient, lobby_id: uuid.UUID, host_token: str) -> str:
+    resp = await client.get(
+        f"/lobbies/{lobby_id}",
+        cookies={HUMAN_SESSION_COOKIE: host_token},
+    )
+    assert resp.status_code == 200, resp.text
+    token: str = resp.json()["invite_token"]
+    return token
+
+
 @pytest.mark.asyncio
 async def test_launch_materializes_game_and_seats(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
@@ -180,6 +191,89 @@ async def test_launch_materializes_game_and_seats(
     assert len(set(ai_build_ids)) == len(ai_build_ids)
     # Roles cover the full mini7 roster (deterministic from the game seed).
     assert {s.public_player_id for s in seats} == {f"P{i:02d}" for i in range(1, 8)}
+
+
+@pytest.mark.asyncio
+async def test_anonymous_launch_maps_lobby_order_to_public_seats_by_seeded_permutation(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("padrino.api.routes.lobbies.secrets.token_hex", lambda _n: "us330")
+    async with session_factory() as session:
+        await _seed_curated_builds(session, count=5)
+    host_token = await _guest_token(client)
+    host_principal_id = await _principal_id_for_token(session_factory, host_token)
+    created = await client.post(
+        "/lobbies",
+        json={"ruleset_id": "mini7_v1"},
+        cookies={HUMAN_SESSION_COOKIE: host_token},
+    )
+    assert created.status_code == 201, created.text
+    lobby_id = uuid.UUID(created.json()["id"])
+    invite = await _invite_token(client, lobby_id, host_token)
+
+    friend_token = await _guest_token(client)
+    friend_principal_id = await _principal_id_for_token(session_factory, friend_token)
+    joined = await client.post(
+        f"/lobbies/join/{invite}",
+        cookies={HUMAN_SESSION_COOKIE: friend_token},
+    )
+    assert joined.status_code == 200, joined.text
+    for token in (host_token, friend_token):
+        ready = await client.post(
+            f"/lobbies/{lobby_id}/ready",
+            json={"ready": True},
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert ready.status_code == 200, ready.text
+
+    locked = await client.post(
+        f"/lobbies/{lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: host_token}
+    )
+    assert locked.status_code == 200, locked.text
+    launched = await client.post(
+        f"/lobbies/{lobby_id}/launch",
+        cookies={HUMAN_SESSION_COOKIE: host_token},
+    )
+    assert launched.status_code == 200, launched.text
+    game_id = uuid.UUID(launched.json()["game_id"])
+
+    async with session_factory() as session:
+        lobby_seats = list(
+            (
+                await session.execute(
+                    select(LobbySeat)
+                    .where(LobbySeat.lobby_id == lobby_id)
+                    .order_by(LobbySeat.seat_index)
+                )
+            ).scalars()
+        )
+        game_seats = list(
+            (
+                await session.execute(
+                    select(GameSeat)
+                    .where(GameSeat.game_id == game_id)
+                    .order_by(GameSeat.seat_index)
+                )
+            ).scalars()
+        )
+
+    assert [
+        seat.seat_index for seat in lobby_seats if seat.seat_kind == LobbySeatKind.HUMAN.value
+    ] == [0, 1]
+    human_by_principal = {
+        seat.occupant_principal_id: seat
+        for seat in game_seats
+        if seat.seat_kind == SeatKind.HUMAN.value
+    }
+    permutation = seat_permutation("anonymous-launch:us330", 7)
+    assert human_by_principal[host_principal_id].seat_index == permutation.index(0)
+    assert human_by_principal[friend_principal_id].seat_index == permutation.index(1)
+    assert {
+        human_by_principal[host_principal_id].seat_index,
+        human_by_principal[friend_principal_id].seat_index,
+    } != {0, 1}
 
 
 @pytest.mark.asyncio

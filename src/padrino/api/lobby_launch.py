@@ -50,7 +50,9 @@ from padrino.core.lobby.strangers_only import (
     RankedSeatingViolation,
     assert_strangers_only_ranked,
 )
+from padrino.core.observation_privacy import is_anonymous
 from padrino.core.rulesets import get_ruleset
+from padrino.core.seating import seat_permutation
 from padrino.db.models import GameSeat, LobbyMember
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
@@ -183,6 +185,16 @@ async def launch_lobby(
     game_seed = _derive_game_seed(lobby.lobby_seed)
     assigned = assign_roles(game_seed, ruleset)
     roles_by_index = {seat.seat_index: seat for seat in assigned}
+    seats_by_index = {seat.seat_index: seat for seat in seats}
+    if is_anonymous(lobby.identity_mode):
+        # ``seat_permutation`` maps public game seat index -> source lobby slot.
+        # The game seat index remains the public/replay index from RolesAssigned;
+        # only the lobby slot supplying that public seat is shuffled.
+        source_lobby_slot_by_public_index = seat_permutation(
+            f"anonymous-launch:{lobby.lobby_seed}", ruleset.PLAYER_COUNT
+        )
+    else:
+        source_lobby_slot_by_public_index = tuple(range(ruleset.PLAYER_COUNT))
 
     game = await games_repo.create(
         session,
@@ -195,15 +207,16 @@ async def launch_lobby(
 
     member_principal = await _member_principals(session, lobby_id)
 
-    for seat in sorted(seats, key=lambda s: s.seat_index):
-        role_seat = roles_by_index[seat.seat_index]
+    for public_seat_index, source_lobby_slot in enumerate(source_lobby_slot_by_public_index):
+        seat = seats_by_index[source_lobby_slot]
+        role_seat = roles_by_index[public_seat_index]
         if seat.seat_kind == LobbySeatKind.HUMAN.value:
             occupant = member_principal.get(seat.member_id) if seat.member_id else None
             session.add(
                 GameSeat(
                     game_id=game.id,
                     public_player_id=role_seat.public_player_id,
-                    seat_index=seat.seat_index,
+                    seat_index=role_seat.seat_index,
                     agent_build_id=None,
                     seat_kind=SeatKind.HUMAN.value,
                     occupant_principal_id=occupant,
@@ -222,7 +235,7 @@ async def launch_lobby(
                 GameSeat(
                     game_id=game.id,
                     public_player_id=role_seat.public_player_id,
-                    seat_index=seat.seat_index,
+                    seat_index=role_seat.seat_index,
                     agent_build_id=uuid.UUID(build_id),
                     seat_kind=SeatKind.AI.value,
                     role=role_seat.role.value,

@@ -27,7 +27,7 @@ from padrino.core.lobby.seating import (
 from padrino.core.lobby.seating import (
     release_member_seat as plan_release_member_seat,
 )
-from padrino.db.models import Lobby, LobbyMember, LobbySeat
+from padrino.db.models import Lobby, LobbyMember, LobbySeat, Principal
 
 
 async def create_lobby(
@@ -120,6 +120,18 @@ async def list_members(session: AsyncSession, lobby_id: uuid.UUID) -> list[Lobby
         .order_by(LobbyMember.joined_at, LobbyMember.id)
     )
     return list(result.scalars())
+
+
+async def list_member_display_names(
+    session: AsyncSession, lobby_id: uuid.UUID
+) -> dict[uuid.UUID, str | None]:
+    """Return ``{lobby_member_id: display_name}`` for player-facing roster labels."""
+    result = await session.execute(
+        select(LobbyMember.id, Principal.display_name)
+        .join(Principal, Principal.id == LobbyMember.principal_id)
+        .where(LobbyMember.lobby_id == lobby_id)
+    )
+    return {row[0]: row[1] for row in result.all()}
 
 
 async def get_member(
@@ -289,6 +301,7 @@ __all__ = [
     "get_lobby_by_invite_token",
     "get_member",
     "get_member_by_id",
+    "list_member_display_names",
     "list_members",
     "list_seats",
     "release_member_seat",
