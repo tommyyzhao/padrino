@@ -18,7 +18,7 @@
         "Property tests cover one-member-one-seat, unique seat indices, human count equals seated member count, and join/release round trips; no DB/network/clock/random imports enter core."
       ],
       "notes": "Test-first. Likely files: core/lobby/seating.py, tests/core/lobby/test_seating.py.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-327",

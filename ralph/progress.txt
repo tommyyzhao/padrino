@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Pure lobby seat-claim planning (US-326): keep member-to-seat transitions in
+  `core/lobby/seating.py` as immutable, canonical `seat_index`-sorted tuples.
+  The join planner claims only the lowest eligible AI seat, keeps latent
+  `agent_build_id` on a HUMAN seat only as the input-defined AI reservation to
+  restore on release, and exposes stable lower-snake-case reason tokens for DB/API
+  shells to translate. Repository stories should adapt persisted rows to
+  `LobbySeatPlanEntry`, apply the returned full plan inside one transaction,
+  and avoid duplicating planner invariants in SQL-only logic.
 - Write-time ranked-ban defense (US-325): resolve active ranked-banned
   principal ids in the impure runner shell from persisted `game_seats`, inject
   that set into `update_human_ratings_for_game`, and let the writer record a
@@ -5948,3 +5956,30 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Files changed: `prd-v4.md`, `AGENTS.md`, `ralph/prd.json`,
   `ralph/prd-v15.json`, `ralph/prd-v16.json`, `ralph/ralph-codex.sh`,
   `ralph/progress.txt`.
+
+## 2026-07-11 PDT - US-326
+- Added a pure immutable lobby seating planner:
+  `claim_lowest_available_ai_seat` claims the lowest-index eligible AI slot for
+  a joining member, and `release_member_seat` releases exactly that member back
+  to an AI slot.
+- The planner canonicalizes raw persisted seat-kind strings, rejects malformed
+  layouts/duplicates/full lobbies/vacant reserved human seats with stable reason
+  tokens, and preserves or clears latent AI model reservations according to the
+  input `AiReservationPolicy`.
+- Added focused unit and Hypothesis property coverage for determinism,
+  immutability, one-member-one-seat, unique seat indices, human-count parity,
+  and join/release round trips.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/lobby/seating.py`,
+  `src/padrino/core/lobby/__init__.py`, `tests/core/lobby/test_seating.py`,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/lobby/test_seating.py` first failed on missing
+  `padrino.core.lobby.seating`; focused GREEN
+  `uv run pytest tests/core/lobby/test_seating.py tests/core/test_purity.py`
+  -> 86 passed. Targeted `uv run mypy src/padrino/core/lobby/seating.py
+  tests/core/lobby/test_seating.py` -> no issues. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
+  3001 passed / 50 skipped / 10 deselected. Frontend gates not run; story did
+  not touch `web/dashboard`.
