@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Real multi-human E2E production path (US-332): launch lobbies through the real
+  HTTP invite/ready/lock/launch routes, then run `_run_one_human_game` with the
+  default human-lane executor and an injected scripted AI adapter factory.
+  Scripted human clients should run as separate tasks that POST to
+  `/human/games/{id}/actions` and `/human/games/{id}/chat` after the
+  `human_game_runtime` phase snapshot appears; do not replace the production
+  `HumanAdapter` pull source when the story needs DB-backed adapter proof.
+  Assert per-principal observation streams before reveal, public live frames via
+  `assert_anonymous_safe`, sidecar-only chat, zero scientific/human rating rows,
+  public reveal gating, and replay from persisted `game_events`.
 - Multi-human lane seat isolation (US-331): keep source-seat authority in
   `api/human_seat_auth.resolve_human_game_seat`, derived only from
   `(game_id, occupant_principal_id)` and requiring exactly one matching row
@@ -6179,4 +6189,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 36 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3041 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-332
+- Reworked the human-game E2E smoke into two default-suite production-path
+  scenarios: a deterministic two-human mini7 game and a three-human mini7 game
+  where one joined human disconnects before the worker lane takes that seat over
+  while the other humans continue submitting.
+- The tests now launch through real guest cookies, invite join, ready, lock, and
+  launch routes; run the default human-lane executor with production
+  DB-backed `HumanAdapter` instances; feed connected humans through independent
+  HTTP action/chat submitter tasks; and drive AI seats with deterministic mock
+  adapters only.
+- Added end-to-end assertions for exactly one `GameSeat.occupant_principal_id`
+  per joined human, per-principal observation access, identity-blind pre-reveal
+  live frames, reveal-time human/model/takeover provenance, sidecar-only human
+  chat, zero `Rating` / `RatingEvent` / `HumanRating` / `HumanRatingEvent`
+  rows for casual games, and byte-identical replay from persisted events/API.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/integration/test_human_game_e2e.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused `uv run pytest tests/integration/test_human_game_e2e.py -q`
+  -> 2 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3042 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

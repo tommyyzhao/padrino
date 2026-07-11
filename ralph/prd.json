@@ -141,7 +141,7 @@
         "Both games write zero Rating/RatingEvent and zero HumanRating/HumanRatingEvent rows because custom games are casual; replay verifies byte-identically."
       ],
       "notes": "Wave 15 multiplayer truth gate; tests use mock AI and injected clocks, never real providers.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-333",

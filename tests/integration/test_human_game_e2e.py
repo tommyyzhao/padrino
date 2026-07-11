@@ -1,25 +1,20 @@
-"""End-to-end human-game smoke test (Wave 9, US-157).
+"""End-to-end human-game coverage for real multi-human lobbies.
 
-The single default-suite guard that exercises the ENTIRE human spine through the
-REAL HTTP channels, so a cross-boundary contract break can never pass a green
-suite (the Wave-7 lesson). One test walks:
+These default-suite guards exercise the human spine through REAL HTTP channels,
+so a cross-boundary contract break can never pass a green suite (the Wave-7
+lesson). The scenarios walk:
 
-    create lobby -> guest join -> consent -> ready -> lock -> launch (curated
-    auto-fill materializes a real human-lane Game + GameSeat rows) -> the human
-    worker lane drives the game while a scripted human client POSTs the host's
-    structured actions (votes + night actions) and one moderated public chat
-    message over the authenticated channels -> the game reaches a terminal
-    result -> the broadcast completes -> the endgame reveal exposes models +
-    human seats -> a spot-the-AI guess scores.
+    create lobby -> guests join -> consent -> ready -> lock -> launch (curated
+    auto-fill materializes real human-lane Game + GameSeat rows) -> the
+    production human worker lane drives the game while scripted human clients
+    POST independent structured actions and buffered chat over authenticated
+    channels -> the game reaches terminal -> reveal opens identity -> replay
+    verifies the persisted hash chain.
 
-The human seat is NOT shortcut: its turn is resolved by polling the buffered
-POST action channel (US-134) exactly like production. A scripted human client
-coroutine POSTs the host's action for the observed phase through the real
-``/human/games/{id}/actions`` endpoint; the runner's :class:`HumanAdapter` then
-pulls that buffered submission back from the DB. AI seats are driven by a
-deterministic mock script. Everything runs under an injected fake clock with
-zero/short delays, so the whole spine is deterministic and never touches a real
-LLM or the wall clock for game timing.
+Human seats are NOT shortcut: production :class:`HumanAdapter` instances poll
+the DB-backed POST action store exactly like production. AI seats are driven by
+a deterministic mock script. Tests use short injected settings and never touch
+a real LLM.
 
 Two invariants are asserted across the whole spine (the Wave-9 non-negotiables):
 
@@ -31,11 +26,14 @@ Two invariants are asserted across the whole spine (the Wave-9 non-negotiables):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -46,14 +44,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.api.app import create_app
 from padrino.api.auth import SCOPE_SPECTATOR, RateLimiter, generate_raw_key
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
+from padrino.api.human_observation import DEADLINE_FRAME, OBSERVATION_FRAME
 from padrino.core.agents.contract import AgentResponse
-from padrino.core.engine.actions import Action
-from padrino.core.engine.event_log import EventLog, StoredEvent
-from padrino.core.engine.state import GameState, Seat
+from padrino.core.engine.legal_actions import legal_actions_for
 from padrino.core.enums import ActionType, Faction, Role, SeatKind
 from padrino.core.human_chat import human_chat_content_ref
 from padrino.core.observation_privacy import assert_anonymous_safe
-from padrino.core.observations import Observation, Ruleset
+from padrino.core.observations import Observation, format_phase_id
 from padrino.db.models import (
     Game,
     GameEvent,
@@ -66,40 +63,22 @@ from padrino.db.models import (
     RatingEvent,
 )
 from padrino.db.repositories import api_keys as api_keys_repo
+from padrino.db.repositories import human_game_runtime as runtime_repo
+from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.llm.adapter import AdapterResult, LlmAdapter
-from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.llm.multiplex import SeatMultiplexAdapter
 from padrino.public.broadcast_index import BroadcastState
 from padrino.public.live_tail import LiveTailConfig, stream_live_tail
-from padrino.runner.game_runner import GameConfig, GamePersistence, drive_game_loop
-from padrino.runner.human_chat_release import release_held_chat_for_phase
-from padrino.runner.human_lane import _run_human_tick_responses
-from padrino.runner.human_tick import HumanTickConfig
+from padrino.runner.human_durability import replay_state_from_rows
+from padrino.runner.human_lane import _default_human_game_executor, _run_one_human_game
+from padrino.runner.human_state_cache import resolve_current_human_state
+from padrino.settings import Settings
 from tests.conftest import make_town_win_script
 
 _RULESET = "mini7_v1"
 _PLAYER_COUNT = 7
-_INITIAL_AI_SEAT_COUNT = _PLAYER_COUNT - 1
-_LAUNCHED_HUMAN_SEAT_COUNT = 2
-_LAUNCHED_AI_SEAT_COUNT = _PLAYER_COUNT - _LAUNCHED_HUMAN_SEAT_COUNT
 _ROSTER_MEMBER_KEYS = {"member_id", "display_label", "is_self", "host", "ready", "present"}
-
-
-# --------------------------------------------------------------------------- #
-# Deterministic clock (advances only when the injected sleep is awaited)
-# --------------------------------------------------------------------------- #
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self._now = 0.0
-
-    def now(self) -> float:
-        return self._now
-
-    async def sleep(self, seconds: float) -> None:
-        self._now += seconds
 
 
 class _ScriptedSeatAdapter:
@@ -142,7 +121,10 @@ async def _seed_curated_pool(session: AsyncSession, *, count: int) -> None:
     """Seed ``count`` active curated builds targeting mini7_v1 (the auto-fill pool)."""
     from padrino.db.models import AgentBuild, ModelConfig, ModelProvider, PromptVersion
 
-    provider = ModelProvider(name="cerebras", base_url=None, auth_secret_ref="CEREBRAS_API_KEY")
+    suffix = uuid.uuid4().hex
+    provider = ModelProvider(
+        name=f"cerebras-{suffix}", base_url=None, auth_secret_ref="CEREBRAS_API_KEY"
+    )
     session.add(provider)
     await session.flush()
     mc = ModelConfig(
@@ -161,7 +143,7 @@ async def _seed_curated_pool(session: AsyncSession, *, count: int) -> None:
         system_prompt="play",
         developer_prompt="json",
         response_schema={"type": "object"},
-        prompt_hash="hash-us157",
+        prompt_hash=f"hash-us332-{suffix}",
     )
     session.add(pv)
     await session.flush()
@@ -177,6 +159,13 @@ async def _seed_curated_pool(session: AsyncSession, *, count: int) -> None:
             )
         )
     await session.commit()
+
+
+@dataclass(frozen=True, slots=True)
+class _JoinedHuman:
+    token: str
+    principal_id: uuid.UUID
+    public_player_id: str
 
 
 # --------------------------------------------------------------------------- #
@@ -220,7 +209,7 @@ async def client(
 
 
 # --------------------------------------------------------------------------- #
-# Game-driving glue: build the script + the DB-backed human pull_action
+# Game-driving glue: launch real lobbies + drive production HumanAdapters
 # --------------------------------------------------------------------------- #
 
 
@@ -256,93 +245,314 @@ def _town_win_script_from_seats(seats: list[GameSeat]) -> dict[tuple[str, str], 
     )
 
 
-def _db_backed_human_pull(
-    client: AsyncClient,
-    token: str,
-    game_id: uuid.UUID,
+def _ai_adapter_factory(
     script: Mapping[tuple[str, str], AgentResponse],
-    human_seat_id: str,
+) -> LlmAdapter:
+    return SeatMultiplexAdapter(
+        {seat_id: _ScriptedSeatAdapter(seat_id, script) for _phase, seat_id in script}
+    )
+
+
+def _human_lane_settings() -> Settings:
+    return Settings(
+        padrino_human_phase_deadline_seconds=5.0,
+        padrino_human_release_delay_seconds=0.0,
+        padrino_human_reconnect_grace_seconds=300.0,
+        padrino_human_global_lobby_cost_breaker_usd=10_000.0,
+    )
+
+
+async def _new_consented_guest(client: AsyncClient) -> tuple[str, uuid.UUID]:
+    token = await _new_guest(client)
+    principal_id = uuid.UUID(
+        (await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: token})).json()[
+            "principal_id"
+        ]
+    )
+    await _consent(client, token)
+    return token, principal_id
+
+
+async def _launch_lobby(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
     *,
-    chat_sent: list[bool],
-) -> PullAction:
-    """Return a ``pull_action`` that drives the host seat over the REAL POST channels.
+    human_count: int,
+) -> tuple[uuid.UUID, list[_JoinedHuman], list[GameSeat]]:
+    async with session_factory() as session:
+        await _seed_curated_pool(session, count=_PLAYER_COUNT)
 
-    For the observed phase it POSTs the host's scripted action through
-    ``/human/games/{id}/actions`` (the authenticated US-134 channel), and on the
-    FIRST discussion phase the host is alive for, it also POSTs exactly ONE
-    moderated public chat message through ``/human/games/{id}/chat`` (US-135).
-    The buffered action is then returned to the runner's :class:`HumanAdapter`,
-    exactly mirroring how the production human-aware tick resolves a human seat
-    from buffered input. ``chat_sent`` is a single-element mutable flag so the
-    one-message guard is independent of how many discussion phases the
-    (random-seed) game runs — a strictly-once post regardless of game length.
-    """
+    host_token, host_principal_id = await _new_consented_guest(client)
+    created = await client.post(
+        "/lobbies",
+        json={"ruleset_id": _RULESET},
+        cookies={HUMAN_SESSION_COOKIE: host_token},
+    )
+    assert created.status_code == 201, created.text
+    lobby = created.json()
+    lobby_id = uuid.UUID(lobby["id"])
+    invite_token = lobby["invite_token"]
+    assert "seats" not in lobby
+    assert lobby["composition"]["total"] == _PLAYER_COUNT
 
-    async def pull(observation: Observation) -> Action | None:
-        phase = observation.phase
-        scripted = script.get((phase, human_seat_id))
-        if scripted is None or scripted.action is None:
-            return None
+    sessions: list[tuple[str, uuid.UUID]] = [(host_token, host_principal_id)]
+    for _ in range(human_count - 1):
+        token, principal_id = await _new_consented_guest(client)
+        joined = await client.post(
+            f"/lobbies/join/{invite_token}",
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert joined.status_code == 200, joined.text
+        sessions.append((token, principal_id))
 
-        # Moderated public chat: exactly ONE human-authored message, sent the
-        # first time the host is asked to act in a discussion phase.
-        if "_DISCUSSION_" in phase and not chat_sent[0]:
-            chat_sent[0] = True
+    roster = await client.get(
+        f"/lobbies/{lobby_id}/roster", cookies={HUMAN_SESSION_COOKIE: host_token}
+    )
+    assert roster.status_code == 200, roster.text
+    assert roster.json()["member_count"] == human_count
+    for member in roster.json()["members"]:
+        assert set(member) == _ROSTER_MEMBER_KEYS
+
+    for token, _principal_id in sessions:
+        ready = await client.post(
+            f"/lobbies/{lobby_id}/ready",
+            json={"ready": True},
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert ready.status_code == 200, ready.text
+
+    locked = await client.post(
+        f"/lobbies/{lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: host_token}
+    )
+    assert locked.status_code == 200, locked.text
+    launched = await client.post(
+        f"/lobbies/{lobby_id}/launch", cookies={HUMAN_SESSION_COOKIE: host_token}
+    )
+    assert launched.status_code == 200, launched.text
+    assert launched.json()["created"] is True
+    game_id = uuid.UUID(launched.json()["game_id"])
+
+    seats = await _seat_rows(session_factory, game_id)
+    human_seats = [s for s in seats if s.seat_kind == SeatKind.HUMAN.value]
+    assert len(human_seats) == human_count
+    by_principal = {s.occupant_principal_id: s for s in human_seats}
+    assert set(by_principal) == {principal_id for _token, principal_id in sessions}
+    humans = [
+        _JoinedHuman(
+            token=token,
+            principal_id=principal_id,
+            public_player_id=by_principal[principal_id].public_player_id,
+        )
+        for token, principal_id in sessions
+    ]
+    return game_id, humans, seats
+
+
+def _parse_sse_frames(text: str) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    for block in text.split("\n\n"):
+        for line in block.splitlines():
+            if line.startswith("data:"):
+                payload = line[len("data:") :].strip()
+                frames.append(json.loads(payload))
+    return frames
+
+
+async def _assert_human_observation_access(
+    client: AsyncClient,
+    game_id: uuid.UUID,
+    humans: Sequence[_JoinedHuman],
+) -> None:
+    for human in humans:
+        resp = await client.get(
+            f"/human/games/{game_id}/observation/stream",
+            cookies={HUMAN_SESSION_COOKIE: human.token},
+        )
+        assert resp.status_code == 200, resp.text
+        frames = _parse_sse_frames(resp.text)
+        obs = next(frame for frame in frames if frame["type"] == OBSERVATION_FRAME)
+        deadline = next(frame for frame in frames if frame["type"] == DEADLINE_FRAME)
+        assert obs["you"]["player_id"] == human.public_player_id
+        assert deadline["phase"] == obs["phase"]
+        rendered = json.dumps(frames)
+        assert "is_human" not in rendered
+        assert "model_name" not in rendered
+        assert "agent_build_id" not in rendered
+
+    stranger = await _new_guest(client)
+    denied = await client.get(
+        f"/human/games/{game_id}/observation/stream",
+        cookies={HUMAN_SESSION_COOKIE: stranger},
+    )
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "wrong_seat"
+
+
+async def _wait_for_runtime(
+    session_factory: async_sessionmaker[AsyncSession],
+    game_id: uuid.UUID,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while loop.time() < deadline:
+        async with session_factory() as session:
+            runtime = await runtime_repo.get(session, game_id)
+            if runtime is not None:
+                return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"human runtime row was not created for {game_id}")
+
+
+async def _scripted_human_submitter(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    human: _JoinedHuman,
+    script: Mapping[tuple[str, str], AgentResponse],
+    stop: asyncio.Event,
+    chat_text: str,
+) -> None:
+    attempted_actions: set[str] = set()
+    chat_sent = False
+    while not stop.is_set():
+        async with session_factory() as session:
+            game = await session.get(Game, game_id)
+            if game is not None and game.status == "COMPLETED":
+                return
+            resolved = await resolve_current_human_state(session, game_id)
+            if resolved is None:
+                phase = None
+                action_allowed = False
+                public_chat_allowed = False
+            else:
+                state = resolved.state
+                phase = format_phase_id(state.current_phase)
+                seat = state.seat_by_public_id(human.public_player_id)
+                if seat is None or not seat.alive:
+                    action_allowed = False
+                    public_chat_allowed = False
+                else:
+                    legal = legal_actions_for(state, seat)
+                    scripted = script.get((phase, human.public_player_id))
+                    action_allowed = (
+                        scripted is not None
+                        and scripted.action.type in legal.allowed_action_types
+                        and (
+                            scripted.action.target is None
+                            or scripted.action.target in legal.legal_targets
+                        )
+                    )
+                    public_chat_allowed = "_DISCUSSION_" in phase
+
+        if phase is not None and action_allowed and phase not in attempted_actions:
+            scripted = script[(phase, human.public_player_id)]
+            body: dict[str, object] = {"type": scripted.action.type.value}
+            if scripted.action.target is not None:
+                body["target"] = scripted.action.target
+            resp = await client.post(
+                f"/human/games/{game_id}/actions",
+                json={
+                    "action": body,
+                    "idempotency_key": f"act-{human.public_player_id}-{phase}",
+                },
+                cookies={HUMAN_SESSION_COOKIE: human.token},
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["public_player_id"] == human.public_player_id
+            attempted_actions.add(phase)
+
+        if phase is not None and public_chat_allowed and not chat_sent:
             chat = await client.post(
                 f"/human/games/{game_id}/chat",
                 json={
                     "channel": "PUBLIC",
-                    "text": "I think we should vote carefully today.",
-                    "idempotency_key": "chat-once",
+                    "text": chat_text,
+                    "idempotency_key": f"chat-{human.public_player_id}",
                 },
-                cookies={HUMAN_SESSION_COOKIE: token},
+                cookies={HUMAN_SESSION_COOKIE: human.token},
             )
             assert chat.status_code == 200, chat.text
+            assert chat.json()["public_player_id"] == human.public_player_id
             assert chat.json()["status"] == "HELD"
+            chat_sent = True
 
-        action = scripted.action
-        body: dict[str, object] = {"type": action.type.value}
-        if action.target is not None:
-            body["target"] = action.target
-        resp = await client.post(
-            f"/human/games/{game_id}/actions",
-            json={"action": body, "idempotency_key": f"act-{phase}"},
-            cookies={HUMAN_SESSION_COOKIE: token},
-        )
-        # A discussion phase has no votable/structured action for the seat; the
-        # POST channel rejects it (409) and the human simply talks, not acts.
-        if resp.status_code != 200:
-            return None
-        return action
-
-    return pull
+        await asyncio.sleep(0.01)
 
 
-def _mixed_adapter(
-    seats: list[GameSeat],
+async def _run_human_lane_game(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    humans: Sequence[_JoinedHuman],
     script: Mapping[tuple[str, str], AgentResponse],
-    human_pull: PullAction,
-    human_seat_id: str,
-    clock: _FakeClock,
-) -> SeatMultiplexAdapter:
-    adapters: dict[str, LlmAdapter] = {}
-    for seat in seats:
-        sid = seat.public_player_id
-        if sid == human_seat_id:
-            adapters[sid] = HumanAdapter(
-                pull_action=human_pull,
-                deadline_seconds=30.0,
-                poll_interval_seconds=0.5,
-                clock=clock.now,
-                sleep=clock.sleep,
+    disconnected: set[str] | None = None,
+) -> None:
+    settings = _human_lane_settings()
+    disconnected_ids = disconnected or set()
+    if disconnected_ids:
+        async with session_factory() as session, session.begin():
+            for public_player_id in disconnected_ids:
+                await presence_repo.mark_disconnected(
+                    session,
+                    game_id=game_id,
+                    public_player_id=public_player_id,
+                    disconnected_at=datetime.now(UTC) - timedelta(seconds=600),
+                )
+
+    def ai_factory(assignments: Mapping[str, object]) -> LlmAdapter:
+        return SeatMultiplexAdapter(
+            {seat_id: _ScriptedSeatAdapter(seat_id, script) for seat_id in assignments}
+        )
+
+    executor = _default_human_game_executor(settings, ai_adapter_factory=ai_factory)
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        _run_one_human_game(
+            session_factory,
+            game_id=game_id,
+            semaphore=asyncio.Semaphore(1),
+            adapter_factory=None,
+            ai_adapter_factory=ai_factory,
+            game_executor=executor,
+            settings=settings,
+            build_production_adapter=True,
+            resume=None,
+        )
+    )
+    await _wait_for_runtime(session_factory, game_id)
+    await _assert_human_observation_access(
+        client,
+        game_id,
+        [human for human in humans if human.public_player_id not in disconnected_ids],
+    )
+
+    submitters = [
+        asyncio.create_task(
+            _scripted_human_submitter(
+                client,
+                session_factory,
+                game_id=game_id,
+                human=human,
+                script=script,
+                stop=stop,
+                chat_text=f"{human.public_player_id} is checking the table.",
             )
-        else:
-            adapters[sid] = _ScriptedSeatAdapter(sid, script)
-    return SeatMultiplexAdapter(adapters)
+        )
+        for human in humans
+        if human.public_player_id not in disconnected_ids
+    ]
+    try:
+        await asyncio.wait_for(runner, timeout=30.0)
+    finally:
+        stop.set()
+        if submitters:
+            await asyncio.gather(*submitters, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------- #
-# The end-to-end smoke test
+# Shared assertions
 # --------------------------------------------------------------------------- #
 
 
@@ -378,301 +588,305 @@ async def _assert_live_frames_anonymous(
     assert frame_count  # the live tail actually emitted frames to audit
 
 
-@pytest.mark.asyncio
-async def test_human_game_full_spine_smoke(
-    client: AsyncClient,
+async def _mark_live(
     session_factory: async_sessionmaker[AsyncSession],
+    game_id: uuid.UUID,
 ) -> None:
-    # ---- Curated pool so launch auto-fill can fill the initial AI seats. ----
-    async with session_factory() as session:
-        await _seed_curated_pool(session, count=_INITIAL_AI_SEAT_COUNT)
-
-    # ---- create lobby (host) ------------------------------------------------
-    host = await _new_guest(client)
-    host_principal_id = uuid.UUID(
-        (await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: host})).json()["principal_id"]
-    )
-    await _consent(client, host)
-    created = await client.post(
-        "/lobbies",
-        json={"ruleset_id": _RULESET},
-        cookies={HUMAN_SESSION_COOKIE: host},
-    )
-    assert created.status_code == 201, created.text
-    lobby = created.json()
-    lobby_id = uuid.UUID(lobby["id"])
-    invite_token = lobby["invite_token"]
-    # Composition is disclosed counts-only, never a per-seat human/AI map.
-    assert "seats" not in lobby
-    assert lobby["composition"]["total"] == _PLAYER_COUNT
-
-    # ---- guest join (a friend joins the private lobby) ----------------------
-    guest = await _new_guest(client)
-    guest_principal_id = uuid.UUID(
-        (await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: guest})).json()[
-            "principal_id"
-        ]
-    )
-    await _consent(client, guest)
-    joined = await client.post(
-        f"/lobbies/join/{invite_token}",
-        cookies={HUMAN_SESSION_COOKIE: guest},
-    )
-    assert joined.status_code == 200, joined.text
-    roster = await client.get(f"/lobbies/{lobby_id}/roster", cookies={HUMAN_SESSION_COOKIE: host})
-    assert roster.status_code == 200
-    # The roster is identity-blind: members carry no seat_kind / principal / map.
-    for member in roster.json()["members"]:
-        assert set(member) == _ROSTER_MEMBER_KEYS
-    assert roster.json()["member_count"] == 2
-
-    # ---- ready -> lock -> launch (curated auto-fill + handoff) --------------
-    guest_ready = await client.post(
-        f"/lobbies/{lobby_id}/ready",
-        json={"ready": True},
-        cookies={HUMAN_SESSION_COOKIE: guest},
-    )
-    assert guest_ready.status_code == 200, guest_ready.text
-    ready = await client.post(
-        f"/lobbies/{lobby_id}/ready",
-        json={"ready": True},
-        cookies={HUMAN_SESSION_COOKIE: host},
-    )
-    assert ready.status_code == 200, ready.text
-    locked = await client.post(f"/lobbies/{lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: host})
-    assert locked.status_code == 200, locked.text
-    launched = await client.post(
-        f"/lobbies/{lobby_id}/launch", cookies={HUMAN_SESSION_COOKIE: host}
-    )
-    assert launched.status_code == 200, launched.text
-    assert launched.json()["created"] is True
-    game_id = uuid.UUID(launched.json()["game_id"])
-
-    # The materialized game is gauntlet-less (benchmark scheduler never claims it)
-    # and carries both joined humans + the remaining curated AI seats.
-    seats = await _seat_rows(session_factory, game_id)
-    assert len(seats) == _PLAYER_COUNT
-    human_seats = [s for s in seats if s.seat_kind == SeatKind.HUMAN.value]
-    assert len(human_seats) == _LAUNCHED_HUMAN_SEAT_COUNT
-    assert all(s.occupant_principal_id is not None for s in human_seats)
-    host_seat = next(s for s in human_seats if s.occupant_principal_id == host_principal_id)
-    friend_seat = next(s for s in human_seats if s.occupant_principal_id == guest_principal_id)
-    host_public_id = host_seat.public_player_id
-    friend_public_id = friend_seat.public_player_id
-
-    # ---- play a full game through the human lane ----------------------------
-    # Mark the game LIVE so the live-tail / reveal gating is exercised against
-    # the real columns (the broadcast lifecycle is separate from the engine).
     async with session_factory() as session, session.begin():
         game = await session.get(Game, game_id)
         assert game is not None
         game.broadcast_state = BroadcastState.LIVE.value
         game.is_broadcastable = True
 
-    script = _town_win_script_from_seats(seats)
-    clock = _FakeClock()
-    human_pull = _db_backed_human_pull(
-        client, host, game_id, script, host_public_id, chat_sent=[False]
-    )
-    mux = _mixed_adapter(seats, script, human_pull, host_public_id, clock)
 
-    async with session_factory() as session, session.begin():
-        game = await session.get(Game, game_id)
-        assert game is not None
-        game_seed = game.game_seed
-
-    persistence = GamePersistence(
-        session_factory=session_factory,
-        game_id=game_id,
-        agent_builds={},  # human-lane: empty -> rating write path fails closed
-        league_id=None,
-    )
-    release_base = datetime(2026, 6, 20, tzinfo=UTC)
-
-    async def release_chat(
-        phase: str,
-        settled_at: float,
-        release_log: EventLog,
-        pending_lower_events: Sequence[StoredEvent],
-    ) -> None:
-        async with session_factory() as session, session.begin():
-            await release_held_chat_for_phase(
-                session,
-                game_id=game_id,
-                phase=phase,
-                released_at=release_base + timedelta(seconds=settled_at),
-                event_log=release_log,
-                pending_lower_events=pending_lower_events,
-            )
-
-    async def tick_runner(
-        state: GameState,
-        event_log: EventLog,
-        eligible_seats: Sequence[Seat],
-        tick_adapter: LlmAdapter,
-        ruleset: Ruleset,
-        ranked: bool,
-        timeout_s: float,
-    ) -> dict[str, AgentResponse]:
-        return await _run_human_tick_responses(
-            state,
-            event_log,
-            eligible_seats,
-            tick_adapter,
-            ruleset,
-            ranked,
-            timeout_s,
-            # phase_deadline_seconds is the REAL wall-clock asyncio.wait_for ceiling
-            # run_tick puts around adapter.complete(); a tight 1.0s ceiling is
-            # spuriously exceeded under `pytest --cov` (coverage tracing slows the
-            # human adapter's DB-backed pull), coercing the human and breaking the
-            # TOWN-win assertion. A generous ceiling is a backstop (the pre-staged
-            # human action returns instantly) with no happy-path cost.
-            config=HumanTickConfig(phase_deadline_seconds=30.0, release_delay_seconds=0.0),
-            clock=clock.now,
-            sleep=clock.sleep,
-            release_chat=release_chat,
+async def _read_events(
+    session_factory: async_sessionmaker[AsyncSession],
+    game_id: uuid.UUID,
+) -> list[GameEvent]:
+    async with session_factory() as session:
+        return list(
+            (
+                await session.execute(
+                    select(GameEvent)
+                    .where(GameEvent.game_id == game_id)
+                    .order_by(GameEvent.sequence)
+                )
+            ).scalars()
         )
 
-    outcome = await drive_game_loop(
-        GameConfig(game_id=str(game_id), game_seed=game_seed, ruleset_id=_RULESET, timeout_s=30.0),
-        mux,
-        ranked=False,
-        persistence=persistence,
-        tick_runner=tick_runner,
-    )
 
-    # ---- terminal -----------------------------------------------------------
-    assert outcome.final_state.terminal_result == "TOWN"
+async def _assert_terminal_and_replay(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    auth: Mapping[str, str],
+) -> None:
     async with session_factory() as session:
         game = await session.get(Game, game_id)
         assert game is not None
         assert game.status == "COMPLETED"
         assert isinstance(game.terminal_result, dict)
         assert game.terminal_result["winner"] == "TOWN"
+        event_hash_head = game.event_hash_head
 
-    # The human's moderated chat message was held, released, and routed to the
-    # out-of-band sidecar (US-123) - never inline in the hash-chained log.
+    rows = await _read_events(session_factory, game_id)
+    replayed_state, replayed_log = replay_state_from_rows(rows)
+    assert replayed_state.terminal_result == "TOWN"
+    assert replayed_log.head_hash == event_hash_head
+    assert [event.event_hash for event in replayed_log.events] == [row.event_hash for row in rows]
+    assert [event.body["sequence"] for event in replayed_log.events] == [
+        row.sequence for row in rows
+    ]
+
+    response = await client.post(f"/games/{game_id}/replay", headers=dict(auth))
+    assert response.status_code == 200, response.text
+    assert response.json()["replay_status"] == "PASS"
+    assert response.json()["final_event_hash"] == event_hash_head
+
+
+async def _assert_sidecar_chat_only(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    expected_texts_by_seat: Mapping[str, str],
+) -> None:
     async with session_factory() as session:
-        sidecar = (
+        sidecar = list(
             (
                 await session.execute(
-                    select(HumanChatMessage).where(HumanChatMessage.game_id == game_id)
+                    select(HumanChatMessage)
+                    .where(HumanChatMessage.game_id == game_id)
+                    .order_by(HumanChatMessage.public_player_id)
                 )
-            )
-            .scalars()
-            .all()
+            ).scalars()
         )
-    assert len(sidecar) == 1
-    assert sidecar[0].public_player_id == host_public_id
-    assert sidecar[0].raw_text == "I think we should vote carefully today."
-    async with session_factory() as session:
-        chained = (
-            (
+    assert {row.public_player_id: row.raw_text for row in sidecar} == dict(expected_texts_by_seat)
+
+    for row in sidecar:
+        assert row.raw_text is not None
+        async with session_factory() as session:
+            chained = (
                 await session.execute(
                     select(GameEvent)
                     .where(GameEvent.game_id == game_id)
-                    .where(GameEvent.sequence == sidecar[0].sequence)
+                    .where(GameEvent.sequence == row.sequence)
                 )
-            )
-            .scalars()
-            .one()
-        )
-    assert chained.event_type == "PublicMessageSubmitted"
-    assert chained.actor_player_id == host_public_id
-    assert chained.payload == {
-        "text": "",
-        "round_index": 1,
-        "content_ref": human_chat_content_ref("I think we should vote carefully today."),
-    }
-    assert "I think we should vote carefully today." not in str(chained.payload)
+            ).scalar_one()
+        assert chained.event_type == "PublicMessageSubmitted"
+        assert chained.actor_player_id == row.public_player_id
+        assert chained.payload["text"] == ""
+        assert chained.payload["content_ref"] == human_chat_content_ref(row.raw_text)
+        assert row.raw_text not in json.dumps(chained.payload)
 
-    # The host's structured actions genuinely flowed through the authenticated
-    # POST action channel (US-134) - the human seat was driven, not shortcut.
+
+async def _assert_action_submissions(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    expected_human_seats: Sequence[str],
+    absent_human_seats: Sequence[str] = (),
+) -> None:
     async with session_factory() as session:
-        host_actions = (
+        rows = list(
             (
                 await session.execute(
-                    select(HumanActionSubmission).where(
-                        HumanActionSubmission.game_id == game_id,
-                        HumanActionSubmission.public_player_id == host_public_id,
-                    )
+                    select(HumanActionSubmission).where(HumanActionSubmission.game_id == game_id)
                 )
-            )
-            .scalars()
-            .all()
+            ).scalars()
         )
-    assert host_actions  # at least one vote / night action was buffered via POST
-    assert all(a.action_type in {t.value for t in ActionType} for a in host_actions)
+    by_seat: dict[str, list[HumanActionSubmission]] = {}
+    for row in rows:
+        by_seat.setdefault(row.public_player_id, []).append(row)
+    for public_player_id in expected_human_seats:
+        assert by_seat[public_player_id]
+        assert all(
+            row.action_type in {t.value for t in ActionType} for row in by_seat[public_player_id]
+        )
+    for public_player_id in absent_human_seats:
+        assert public_player_id not in by_seat
 
-    # ---- anonymity held on every live frame --------------------------------
-    await _assert_live_frames_anonymous(session_factory, game_id)
 
-    # ---- SEGREGATION: zero scientific rating rows --------------------------
-    assert await _count_rating_rows(session_factory) == (0, 0, 0, 0)
-
-    # ---- reveal is hidden while LIVE, opens once the broadcast completes -----
+async def _spectator_auth(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    label: str,
+) -> dict[str, str]:
     raw_key = generate_raw_key()
     async with session_factory() as session, session.begin():
-        await api_keys_repo.create(
-            session, raw_key=raw_key, scopes=[SCOPE_SPECTATOR], label="e2e-viewer"
-        )
-    auth = {"Authorization": f"Bearer {raw_key}"}
+        await api_keys_repo.create(session, raw_key=raw_key, scopes=[SCOPE_SPECTATOR], label=label)
+    return {"Authorization": f"Bearer {raw_key}"}
 
-    pre = await client.get(f"/public/games/{game_id}/reveal", headers=auth)
-    assert pre.status_code == 404  # still LIVE -> the truth is not disclosed early
+
+async def _assert_reveal(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    auth: Mapping[str, str],
+    human_seats: Sequence[str],
+    takeover_seats: Sequence[str] = (),
+) -> dict[str, dict[str, object]]:
+    pre = await client.get(f"/public/games/{game_id}/reveal", headers=dict(auth))
+    assert pre.status_code == 404
 
     async with session_factory() as session, session.begin():
         game = await session.get(Game, game_id)
         assert game is not None
         game.broadcast_state = BroadcastState.RECENT.value
 
-    revealed = await client.get(f"/public/games/{game_id}/reveal", headers=auth)
+    revealed = await client.get(f"/public/games/{game_id}/reveal", headers=dict(auth))
     assert revealed.status_code == 200, revealed.text
     body = revealed.json()
     assert body["winner"] == "TOWN"
     reveal_seats = {s["public_player_id"]: s for s in body["seats"]}
 
-    # The host's HUMAN seat reveals as human (no model).
-    assert reveal_seats[host_public_id]["is_human"] is True
-    assert reveal_seats[host_public_id]["takeover_provenance"] == "HUMAN"
-    assert reveal_seats[host_public_id]["model"] is None
-    # The invited friend also owns a real anonymous HUMAN seat.
-    assert reveal_seats[friend_public_id]["is_human"] is True
-    assert reveal_seats[friend_public_id]["takeover_provenance"] == "HUMAN"
-    assert reveal_seats[friend_public_id]["model"] is None
-    # Every AI seat reveals its exact model identity.
-    ai_reveals = [
-        s for sid, s in reveal_seats.items() if sid not in {host_public_id, friend_public_id}
-    ]
-    assert len(ai_reveals) == _LAUNCHED_AI_SEAT_COUNT
-    assert all(s["is_human"] is False for s in ai_reveals)
-    assert all(s["model"] is not None for s in ai_reveals)
-    assert all(s["model"]["model_name"] == "zai-glm-4.7" for s in ai_reveals)
+    for public_player_id in human_seats:
+        seat = reveal_seats[public_player_id]
+        assert seat["is_human"] is True
+        assert seat["takeover_provenance"] == "HUMAN"
+        assert seat["model"] is None
 
-    # ---- spot-the-AI guess scores ------------------------------------------
-    # The host identifies the invited friend as HUMAN and every remaining seat
-    # as AI, so the guess scores a perfect detection accuracy.
+    for public_player_id in takeover_seats:
+        seat = reveal_seats[public_player_id]
+        assert seat["is_human"] is False
+        assert seat["takeover_provenance"] == "HUMAN_THEN_AI"
+        assert seat["taken_over_at_phase"] is not None
+        assert seat["model"] is not None
+
+    ai_reveals = [
+        seat
+        for public_player_id, seat in reveal_seats.items()
+        if public_player_id not in set(human_seats).union(takeover_seats)
+    ]
+    assert len(ai_reveals) == _PLAYER_COUNT - len(human_seats) - len(takeover_seats)
+    assert all(seat["is_human"] is False for seat in ai_reveals)
+    assert all(seat["model"] is not None for seat in ai_reveals)
+    assert all(seat["model"]["model_name"] == "zai-glm-4.7" for seat in ai_reveals)
+    return reveal_seats
+
+
+@pytest.mark.asyncio
+async def test_two_human_mini7_game_completes_through_real_http_and_replay(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id, humans, seats = await _launch_lobby(client, session_factory, human_count=2)
+    assert all(human.public_player_id for human in humans)
+    await _mark_live(session_factory, game_id)
+    script = _town_win_script_from_seats(seats)
+    await _run_human_lane_game(
+        client, session_factory, game_id=game_id, humans=humans, script=script
+    )
+
+    auth = await _spectator_auth(session_factory, label="us332-two-human")
+    await _assert_terminal_and_replay(client, session_factory, game_id=game_id, auth=auth)
+    await _assert_sidecar_chat_only(
+        session_factory,
+        game_id=game_id,
+        expected_texts_by_seat={
+            human.public_player_id: f"{human.public_player_id} is checking the table."
+            for human in humans
+        },
+    )
+    await _assert_action_submissions(
+        session_factory,
+        game_id=game_id,
+        expected_human_seats=[human.public_player_id for human in humans],
+    )
+    await _assert_live_frames_anonymous(session_factory, game_id)
+    assert await _count_rating_rows(session_factory) == (0, 0, 0, 0)
+    reveal_seats = await _assert_reveal(
+        client,
+        session_factory,
+        game_id=game_id,
+        auth=auth,
+        human_seats=[human.public_player_id for human in humans],
+    )
+
+    host = humans[0]
     guess = {
-        sid: ("HUMAN" if sid == friend_public_id else "AI")
+        sid: ("HUMAN" if sid in {human.public_player_id for human in humans[1:]} else "AI")
         for sid in reveal_seats
-        if sid != host_public_id
+        if sid != host.public_player_id
     }
     guess_resp = await client.post(
         f"/human/games/{game_id}/turing-guess",
         json={"guess": guess},
-        cookies={HUMAN_SESSION_COOKIE: host},
+        cookies={HUMAN_SESSION_COOKIE: host.token},
     )
     assert guess_resp.status_code == 200, guess_resp.text
     score = guess_resp.json()
-    assert score["guesser_public_id"] == host_public_id
+    assert score["guesser_public_id"] == host.public_player_id
     assert score["total"] == _PLAYER_COUNT - 1
     assert score["correct"] == _PLAYER_COUNT - 1
     assert score["idempotent_replay"] is False
 
-    # The personal accuracy is disclosed only after the guess was submitted.
     own = await client.get(
-        f"/human/games/{game_id}/turing-guess", cookies={HUMAN_SESSION_COOKIE: host}
+        f"/human/games/{game_id}/turing-guess", cookies={HUMAN_SESSION_COOKIE: host.token}
     )
     assert own.status_code == 200
     assert own.json()["correct"] == _PLAYER_COUNT - 1
+
+
+@pytest.mark.asyncio
+async def test_three_human_game_finishes_after_one_disconnect_takeover(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id, humans, seats = await _launch_lobby(client, session_factory, human_count=3)
+    disconnected = humans[-1]
+    connected = humans[:-1]
+    await _mark_live(session_factory, game_id)
+    script = _town_win_script_from_seats(seats)
+
+    await _run_human_lane_game(
+        client,
+        session_factory,
+        game_id=game_id,
+        humans=humans,
+        script=script,
+        disconnected={disconnected.public_player_id},
+    )
+
+    auth = await _spectator_auth(session_factory, label="us332-three-human")
+    await _assert_terminal_and_replay(client, session_factory, game_id=game_id, auth=auth)
+    await _assert_sidecar_chat_only(
+        session_factory,
+        game_id=game_id,
+        expected_texts_by_seat={
+            human.public_player_id: f"{human.public_player_id} is checking the table."
+            for human in connected
+        },
+    )
+    await _assert_action_submissions(
+        session_factory,
+        game_id=game_id,
+        expected_human_seats=[human.public_player_id for human in connected],
+        absent_human_seats=[disconnected.public_player_id],
+    )
+    await _assert_live_frames_anonymous(session_factory, game_id)
+    assert await _count_rating_rows(session_factory) == (0, 0, 0, 0)
+
+    async with session_factory() as session:
+        seat = (
+            await session.execute(
+                select(GameSeat).where(
+                    GameSeat.game_id == game_id,
+                    GameSeat.public_player_id == disconnected.public_player_id,
+                )
+            )
+        ).scalar_one()
+    assert seat.seat_kind == SeatKind.AI_TAKEOVER.value
+    assert seat.occupant_principal_id == disconnected.principal_id
+    assert seat.takeover_agent_build_id is not None
+    assert seat.taken_over_at_phase is not None
+
+    await _assert_reveal(
+        client,
+        session_factory,
+        game_id=game_id,
+        auth=auth,
+        human_seats=[human.public_player_id for human in connected],
+        takeover_seats=[disconnected.public_player_id],
+    )
