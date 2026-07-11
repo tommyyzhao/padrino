@@ -119,7 +119,7 @@
         "Tests exercise simultaneous submissions and one-seat takeover without timing flakiness."
       ],
       "notes": "Likely files: runner/human_lane.py, human_seat_auth.py, presence repositories/tests.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-332",

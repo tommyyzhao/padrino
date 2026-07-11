@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Multi-human lane seat isolation (US-331): keep source-seat authority in
+  `api/human_seat_auth.resolve_human_game_seat`, derived only from
+  `(game_id, occupant_principal_id)` and requiring exactly one matching row
+  (fetch at most two and 403 on zero or ambiguity). Same-lobby humans may reuse
+  idempotency keys because action/chat uniqueness includes `public_player_id`.
+  Worker regressions should seed 2+ `SeatKind.HUMAN` game seats, assert distinct
+  `HumanAdapter` instances, assert the AI assignment map contains every AI
+  public seat, and prove expired presence swaps only the disconnected seat while
+  runtime snapshots preserve all buffered per-seat actions/chat holds plus the
+  persisted deadline/hash head.
 - Player-facing lobby identity (US-330): keep roster projection in
   `api/lobby_presence.py` over already-loaded member rows plus a
   `{lobby_member_id: display_name}` map; return only `member_id`,
@@ -6140,3 +6150,33 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   10 deselected. Frontend gates: `pnpm -C web/dashboard lint`;
   `pnpm -C web/dashboard check`; `pnpm -C web/dashboard test:e2e` ->
   59 passed / 3 skipped.
+
+## 2026-07-11 PDT - US-331
+- Added production multi-human lane coverage for two simultaneous HUMAN seats:
+  `build_human_lane_adapter` now has a regression proving distinct
+  `HumanAdapter` instances per human and one captured AI assignment per AI seat.
+- Added same-lobby concurrent POST regressions for action and chat submissions;
+  both principals can reuse the same idempotency key without crossing source
+  seats because the server resolves source seat from the principal binding.
+- Hardened shared human seat authorization to fail closed with `403 wrong_seat`
+  when a corrupted game binds one principal to multiple seats instead of
+  surfacing SQLAlchemy `MultipleResultsFound`.
+- Added one-seat takeover and restart durability coverage for multi-human games:
+  stale presence takes over only the expired seat, connected seats remain
+  human-controlled, and rehydration preserves multiple buffered actions/chat
+  holds, phase deadline, and event hash head.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_seat_auth.py`,
+  `tests/api/test_human_seat_auth.py`,
+  `tests/api/test_human_multi_seat_authorization.py`,
+  `tests/runner/test_human_lane_multi_human.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/api/test_human_seat_auth.py tests/api/test_human_multi_seat_authorization.py tests/runner/test_human_lane_multi_human.py -q`
+  first failed on `MultipleResultsFound` from ambiguous seat auth; focused GREEN
+  same command -> 7 passed. Related GREEN
+  `uv run pytest tests/api/test_human_action_channel.py tests/api/test_human_chat_channel.py tests/runner/test_human_lane_wiring.py tests/runner/test_human_lane_takeover_wiring.py tests/runner/test_human_game_durability.py -q`
+  -> 36 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3041 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

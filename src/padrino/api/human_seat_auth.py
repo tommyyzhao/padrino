@@ -49,10 +49,10 @@ async def resolve_human_game_seat(
     )
     if restrict_to_human_lane:
         stmt = stmt.where(GameSeat.seat_kind.in_(HUMAN_LANE_SEAT_KINDS))
-    seat = (await session.execute(stmt)).scalar_one_or_none()
-    if seat is None:
+    seats = list((await session.execute(stmt.limit(2))).scalars())
+    if len(seats) != 1:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=wrong_seat_detail)
-    return seat
+    return seats[0]
 
 
 __all__ = ["HUMAN_LANE_SEAT_KINDS", "WRONG_SEAT_DETAIL", "resolve_human_game_seat"]
