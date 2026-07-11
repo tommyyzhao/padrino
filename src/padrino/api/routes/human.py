@@ -567,6 +567,7 @@ async def post_match(
         is_host=True,
         now=now,
     )
+    await lobbies_repo.set_member_ready(session, member_id=host_member.id, ready=True)
     await bind_admission_slots(
         session,
         create_admission,
@@ -602,7 +603,12 @@ async def post_match(
         action=ACTION_LAUNCH,
     )
     try:
-        result = await launch_lobby(session, lobby_id=lobby.id)
+        result = await launch_lobby(
+            session,
+            lobby_id=lobby.id,
+            now=now,
+            stale_seconds=settings.padrino_lobby_presence_stale_seconds,
+        )
     except (LobbyNotLaunchableError, AutoFillPoolError) as exc:
         await rollback_admission_decision(session, launch_admission)
         detail = "autofill_pool_exhausted" if isinstance(exc, AutoFillPoolError) else str(exc)

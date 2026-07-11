@@ -79,7 +79,7 @@
         "Tests cover 1–N humans for every built-in player count and malformed layouts."
       ],
       "notes": "Likely files: core/lobby/readiness.py, api/lobby_launch.py, routes/lobbies.py.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-330",

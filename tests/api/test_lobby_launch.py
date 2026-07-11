@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -19,18 +20,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
-from padrino.core.enums import LobbyStatus, SeatKind
+from padrino.core.enums import LobbySeatKind, LobbyStatus, SeatKind
 from padrino.db.models import (
     AgentBuild,
     Game,
     GameSeat,
     Lobby,
+    LobbyMember,
+    LobbySeat,
     ModelConfig,
     ModelProvider,
     PromptVersion,
     Rating,
     RatingEvent,
 )
+from padrino.db.repositories import human_principals as principals_repo
 from padrino.runner.human_lane import list_human_lane_games
 
 
@@ -53,6 +57,15 @@ async def _guest_token(client: AsyncClient) -> str:
     resp = await client.post("/human/guest")
     assert resp.status_code == 201
     return resp.cookies[HUMAN_SESSION_COOKIE]
+
+
+async def _principal_id_for_token(
+    session_factory: async_sessionmaker[AsyncSession], token: str
+) -> uuid.UUID:
+    async with session_factory() as session:
+        record = await principals_repo.get_session_by_token(session, token)
+        assert record is not None
+        return record.principal_id
 
 
 async def _seed_curated_builds(session: AsyncSession, *, count: int) -> list[uuid.UUID]:
@@ -105,6 +118,12 @@ async def _create_and_lock(client: AsyncClient, token: str) -> uuid.UUID:
     )
     assert created.status_code == 201, created.text
     lobby_id = uuid.UUID(created.json()["id"])
+    ready = await client.post(
+        f"/lobbies/{lobby_id}/ready",
+        json={"ready": True},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert ready.status_code == 200, ready.text
     locked = await client.post(f"/lobbies/{lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: token})
     assert locked.status_code == 200, locked.text
     return lobby_id
@@ -228,6 +247,46 @@ async def test_launch_requires_lock(
 
 
 @pytest.mark.asyncio
+async def test_lock_fails_closed_when_active_member_has_no_seat(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    token = await _guest_token(client)
+    created = await client.post(
+        "/lobbies",
+        json={"ruleset_id": "mini7_v1"},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert created.status_code == 201, created.text
+    lobby_id = uuid.UUID(created.json()["id"])
+    ready = await client.post(
+        f"/lobbies/{lobby_id}/ready",
+        json={"ready": True},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert ready.status_code == 200, ready.text
+
+    unseated_token = await _guest_token(client)
+    unseated_principal_id = await _principal_id_for_token(session_factory, unseated_token)
+    now = datetime.now(UTC)
+    async with session_factory() as session, session.begin():
+        session.add(
+            LobbyMember(
+                lobby_id=lobby_id,
+                principal_id=unseated_principal_id,
+                is_host=False,
+                ready=True,
+                joined_at=now,
+                last_seen_at=now,
+            )
+        )
+
+    locked = await client.post(f"/lobbies/{lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: token})
+
+    assert locked.status_code == 409, locked.text
+    assert locked.json()["detail"] == "missing_seat"
+
+
+@pytest.mark.asyncio
 async def test_launch_requires_host(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -241,6 +300,75 @@ async def test_launch_requires_host(
     )
     # A non-member cannot even probe existence (404).
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_launch_rechecks_locked_lobby_readiness_before_materializing_game(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with session_factory() as session:
+        await _seed_curated_builds(session, count=6)
+    token = await _guest_token(client)
+    lobby_id = await _create_and_lock(client, token)
+
+    unseated_token = await _guest_token(client)
+    unseated_principal_id = await _principal_id_for_token(session_factory, unseated_token)
+    now = datetime.now(UTC)
+    async with session_factory() as session, session.begin():
+        session.add(
+            LobbyMember(
+                lobby_id=lobby_id,
+                principal_id=unseated_principal_id,
+                is_host=False,
+                ready=True,
+                joined_at=now,
+                last_seen_at=now,
+            )
+        )
+    async with session_factory() as session:
+        before_games = (await session.execute(select(func.count()).select_from(Game))).scalar_one()
+        before_seats = (
+            await session.execute(select(func.count()).select_from(GameSeat))
+        ).scalar_one()
+
+    resp = await client.post(f"/lobbies/{lobby_id}/launch", cookies={HUMAN_SESSION_COOKIE: token})
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == "missing_seat"
+    async with session_factory() as session:
+        game_count = (await session.execute(select(func.count()).select_from(Game))).scalar_one()
+        seat_count = (
+            await session.execute(select(func.count()).select_from(GameSeat))
+        ).scalar_one()
+    assert game_count == before_games
+    assert seat_count == before_seats
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_locked_lobby_with_orphan_human_seat(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with session_factory() as session:
+        await _seed_curated_builds(session, count=6)
+    token = await _guest_token(client)
+    lobby_id = await _create_and_lock(client, token)
+
+    async with session_factory() as session, session.begin():
+        seat = (
+            await session.execute(
+                select(LobbySeat).where(
+                    LobbySeat.lobby_id == lobby_id,
+                    LobbySeat.seat_index == 1,
+                )
+            )
+        ).scalar_one()
+        seat.seat_kind = LobbySeatKind.HUMAN.value
+        seat.member_id = None
+
+    resp = await client.post(f"/lobbies/{lobby_id}/launch", cookies={HUMAN_SESSION_COOKIE: token})
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == "orphan_seat"
 
 
 @pytest.mark.asyncio
@@ -259,7 +387,7 @@ async def test_launch_fails_when_pool_too_small(
     lobby_id = await _create_and_lock(client, token)
     resp = await client.post(f"/lobbies/{lobby_id}/launch", cookies={HUMAN_SESSION_COOKIE: token})
     assert resp.status_code == 409
-    assert resp.json()["detail"] == "autofill_pool_exhausted"
+    assert resp.json()["detail"] == "unresolved_ai_seat"
 
 
 @pytest.mark.asyncio

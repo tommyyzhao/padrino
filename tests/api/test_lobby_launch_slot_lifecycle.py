@@ -134,6 +134,12 @@ async def _create_and_lock(client: AsyncClient, token: str) -> uuid.UUID:
     )
     assert created.status_code == 201, created.text
     lobby_id = uuid.UUID(created.json()["id"])
+    ready = await client.post(
+        f"/lobbies/{lobby_id}/ready",
+        json={"ready": True},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert ready.status_code == 200, ready.text
     locked = await client.post(f"/lobbies/{lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: token})
     assert locked.status_code == 200, locked.text
     return lobby_id
@@ -346,6 +352,12 @@ async def test_held_reservations_do_not_double_count_charged_spend(
 
     # Push charged spend to the cap and confirm admission now denies.
     new_lobby_id = uuid.UUID(ok.json()["id"])
+    ready = await client.post(
+        f"/lobbies/{new_lobby_id}/ready",
+        json={"ready": True},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert ready.status_code == 200
     locked = await client.post(
         f"/lobbies/{new_lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: token}
     )

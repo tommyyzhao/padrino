@@ -150,6 +150,15 @@ async def _invite_token(client: AsyncClient, lobby_id: str, host_token: str) -> 
     return token
 
 
+async def _set_ready(client: AsyncClient, lobby_id: str, token: str) -> None:
+    resp = await client.post(
+        f"/lobbies/{lobby_id}/ready",
+        json={"ready": True},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert resp.status_code == 200, resp.text
+
+
 async def _principal_id_for_token(
     session_factory: async_sessionmaker[AsyncSession], token: str
 ) -> uuid.UUID:
@@ -368,6 +377,7 @@ async def test_ready_up(client: AsyncClient) -> None:
 async def test_host_lock(client: AsyncClient) -> None:
     host = await _guest_token(client)
     lobby = await _create_lobby(client, host)
+    await _set_ready(client, lobby["id"], host)
     resp = await client.post(f"/lobbies/{lobby['id']}/lock", cookies={HUMAN_SESSION_COOKIE: host})
     assert resp.status_code == 200
     assert resp.json()["status"] == LobbyStatus.LOCKED.value
@@ -384,6 +394,17 @@ async def test_host_lock(client: AsyncClient) -> None:
     )
     assert denied.status_code == 403
     assert invite  # silence unused
+
+
+@pytest.mark.asyncio
+async def test_host_lock_requires_every_member_ready(client: AsyncClient) -> None:
+    host = await _guest_token(client)
+    lobby = await _create_lobby(client, host)
+
+    denied = await client.post(f"/lobbies/{lobby['id']}/lock", cookies={HUMAN_SESSION_COOKIE: host})
+
+    assert denied.status_code == 409
+    assert denied.json()["detail"] == "not_ready_member"
 
 
 @pytest.mark.asyncio

@@ -31,10 +31,15 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.lobby_readiness import (
+    available_auto_fill_build_count,
+    evaluate_lobby_rows,
+)
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import LobbySeatKind, LobbyStatus, SeatKind
 from padrino.core.lobby.autofill import (
@@ -97,6 +102,8 @@ async def launch_lobby(
     *,
     lobby_id: uuid.UUID,
     source_ip_hash: str | None = None,
+    now: datetime | None = None,
+    stale_seconds: float | None = None,
 ) -> LaunchResult:
     """Materialize a human-lane game from a LOCKED lobby (idempotent).
 
@@ -116,9 +123,18 @@ async def launch_lobby(
         raise LobbyNotLaunchableError("lobby_not_locked")
 
     ruleset = get_ruleset(lobby.ruleset_id)
+    members = await lobbies_repo.list_members(session, lobby_id)
     seats = await lobbies_repo.list_seats(session, lobby_id)
-    if len(seats) != ruleset.PLAYER_COUNT:
-        raise LobbyNotLaunchableError("seat_count_mismatch")
+    structural_readiness = evaluate_lobby_rows(
+        members=members,
+        seats=seats,
+        expected_player_count=ruleset.PLAYER_COUNT,
+        available_ai_build_count=None,
+        now=now,
+        stale_seconds=stale_seconds,
+    )
+    if not structural_readiness.allowed:
+        raise LobbyNotLaunchableError(structural_readiness.reasons[0].value)
 
     league = await leagues_repo.get(session, lobby.league_id)
     human_seat_count = sum(1 for seat in seats if seat.seat_kind == LobbySeatKind.HUMAN.value)
@@ -129,6 +145,19 @@ async def launch_lobby(
         )
     except RankedSeatingViolation as exc:
         raise LobbyNotLaunchableError(exc.reason) from exc
+
+    roster = await _curated_roster(session, lobby.ruleset_id)
+    available_ai_build_count = available_auto_fill_build_count(seats=seats, curated_roster=roster)
+    model_readiness = evaluate_lobby_rows(
+        members=members,
+        seats=seats,
+        expected_player_count=ruleset.PLAYER_COUNT,
+        available_ai_build_count=available_ai_build_count,
+        now=now,
+        stale_seconds=stale_seconds,
+    )
+    if not model_readiness.allowed:
+        raise LobbyNotLaunchableError(model_readiness.reasons[0].value)
 
     # Resolve reserved AI builds (host pre-picks) and the empty AI seats.
     reserved: dict[int, str] = {}
@@ -141,7 +170,6 @@ async def launch_lobby(
         else:
             empty_indices.append(seat.seat_index)
 
-    roster = await _curated_roster(session, lobby.ruleset_id)
     try:
         filled = autofill_empty_seats(
             lobby_seed=lobby.lobby_seed,

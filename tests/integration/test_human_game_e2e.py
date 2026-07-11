@@ -420,6 +420,12 @@ async def test_human_game_full_spine_smoke(
     assert roster.json()["member_count"] == 2
 
     # ---- ready -> lock -> launch (curated auto-fill + handoff) --------------
+    guest_ready = await client.post(
+        f"/lobbies/{lobby_id}/ready",
+        json={"ready": True},
+        cookies={HUMAN_SESSION_COOKIE: guest},
+    )
+    assert guest_ready.status_code == 200, guest_ready.text
     ready = await client.post(
         f"/lobbies/{lobby_id}/ready",
         json={"ready": True},

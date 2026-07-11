@@ -308,6 +308,12 @@ async def test_launch_denied_when_global_breaker_open(
         "/lobbies", json={"ruleset_id": "mini7_v1"}, cookies={HUMAN_SESSION_COOKIE: host_token}
     )
     lobby_id = created.json()["id"]
+    ready = await client.post(
+        f"/lobbies/{lobby_id}/ready",
+        json={"ready": True},
+        cookies={HUMAN_SESSION_COOKIE: host_token},
+    )
+    assert ready.status_code == 200, ready.text
     lock = await client.post(
         f"/lobbies/{lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: host_token}
     )

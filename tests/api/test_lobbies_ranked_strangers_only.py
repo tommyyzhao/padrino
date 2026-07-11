@@ -146,7 +146,18 @@ async def _create_ranked_lobby(client: AsyncClient, token: str) -> uuid.UUID:
         cookies={HUMAN_SESSION_COOKIE: token},
     )
     assert response.status_code == 201, response.text
-    return uuid.UUID(response.json()["id"])
+    lobby_id = uuid.UUID(response.json()["id"])
+    await _set_ready(client, lobby_id=lobby_id, token=token)
+    return lobby_id
+
+
+async def _set_ready(client: AsyncClient, *, lobby_id: uuid.UUID, token: str) -> None:
+    response = await client.post(
+        f"/lobbies/{lobby_id}/ready",
+        json={"ready": True},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert response.status_code == 200, response.text
 
 
 async def _make_second_seat_human(
@@ -223,6 +234,7 @@ async def test_ranked_launch_with_multiple_human_seats_rejected_without_game_row
         cookies={HUMAN_SESSION_COOKIE: friend},
     )
     assert joined.status_code == 200, joined.text
+    await _set_ready(ranked_client, lobby_id=lobby_id, token=friend)
     await _make_second_seat_human(
         session_factory,
         lobby_id=lobby_id,
@@ -338,6 +350,8 @@ async def test_casual_launch_with_multiple_human_seats_is_unaffected(
         cookies={HUMAN_SESSION_COOKIE: friend},
     )
     assert joined.status_code == 200, joined.text
+    await _set_ready(ranked_client, lobby_id=lobby_id, token=host)
+    await _set_ready(ranked_client, lobby_id=lobby_id, token=friend)
     await _make_second_seat_human(
         session_factory,
         lobby_id=lobby_id,

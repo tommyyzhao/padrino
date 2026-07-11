@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Launch-readiness invariant (US-329): keep lobby launch gates in
+  `core/lobby/readiness.py` as a pure data-in/data-out evaluator over member
+  readiness/presence, seat ownership, contiguous capacity, and injected AI
+  model availability facts. Lock should call it with `available_ai_build_count=None`;
+  launch should run a structural pass before mode-specific policy checks, then
+  a model-resolution pass before `Game`/`GameSeat` writes. Route/repository
+  shells should translate only the first stable reason token and never fall back
+  to aggregate ready counts.
 - Lobby lifecycle member removal (US-328): route code should release a member's
   `LobbySeat` through `db.repositories.lobbies.release_member_seat` before
   deleting the `LobbyMember`, then release bound admission/reservation rows in
@@ -6057,4 +6065,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 86 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3007 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-329
+- Added a pure lobby launch-readiness evaluator with stable ordered reason
+  tokens for missing seats, duplicate seats, orphan seats, absent members,
+  not-ready members, unresolved AI seats, and count mismatches.
+- Wired lock and launch through the evaluator. Lock checks structure plus human
+  ready/presence without requiring a live AI pool; launch rechecks structure,
+  preserves ranked seating policy ordering, then proves every unresolved AI
+  seat can be filled before materializing `Game` or `GameSeat` rows.
+- Updated quick play and tests so positive launch paths explicitly ready all
+  seated humans, and added corruption regressions proving unseated members and
+  orphan human seats fail closed with zero malformed game rows.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/lobby/readiness.py`,
+  `src/padrino/api/lobby_readiness.py`, `src/padrino/api/lobby_launch.py`,
+  `src/padrino/api/routes/lobbies.py`, `src/padrino/api/routes/human.py`,
+  `src/padrino/core/lobby/__init__.py`,
+  `tests/core/lobby/test_readiness.py`, `tests/api/test_lobby_launch.py`,
+  `tests/api/test_lobby_invite_presence.py`,
+  `tests/api/test_lobby_admission.py`,
+  `tests/api/test_lobbies_ranked_strangers_only.py`,
+  `tests/api/test_lobby_launch_slot_lifecycle.py`,
+  `tests/integration/test_human_game_e2e.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/core/lobby/test_readiness.py tests/api/test_lobby_launch.py tests/api/test_lobby_invite_presence.py tests/api/test_lobby_admission.py tests/api/test_lobbies_ranked_strangers_only.py tests/api/test_lobby_launch_slot_lifecycle.py -q`
+  -> 64 passed / 1 skipped. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3031 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

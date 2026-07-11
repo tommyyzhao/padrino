@@ -39,6 +39,7 @@ from padrino.api.lobby_presence import (
     should_auto_cancel,
     stale_member_ids,
 )
+from padrino.api.lobby_readiness import evaluate_lobby_rows
 from padrino.api.lobby_state import stream_lobby_state
 from padrino.api.ranked_eligibility import resolve_ranked_eligibility
 from padrino.core.composition import CompositionSummary, composition_summary
@@ -456,6 +457,12 @@ async def lock_lobby(
     if lobby.status != LobbyStatus.OPEN.value:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="lobby_not_open")
     now = datetime.now(UTC)
+    await _assert_lobby_readiness(
+        session,
+        lobby=lobby,
+        now=now,
+        available_ai_build_count=None,
+    )
     await lobbies_repo.set_lobby_status(
         session, lobby_id=lobby_id, status=LobbyStatus.LOCKED.value, now=now
     )
@@ -534,6 +541,8 @@ async def launch(
             session,
             lobby_id=lobby_id,
             source_ip_hash=source_ip_hash,
+            now=now,
+            stale_seconds=_stale_seconds(),
         )
     except (LobbyNotLaunchableError, AutoFillPoolError) as exc:
         # Roll the freshly claimed (unbound) slots back so a failed launch leaks
@@ -745,6 +754,30 @@ async def _release_and_remove_member(
     await lobbies_repo.release_member_seat(session, lobby_id=lobby_id, member_id=member_id)
     await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
     await lobbies_repo.remove_member(session, member_id=member_id)
+
+
+async def _assert_lobby_readiness(
+    session: AsyncSession,
+    *,
+    lobby: Lobby,
+    now: datetime,
+    available_ai_build_count: int | None,
+) -> None:
+    """Fail closed when lobby rows cannot safely advance toward launch."""
+    ruleset = _ruleset_or_422(lobby.ruleset_id)
+    decision = evaluate_lobby_rows(
+        members=await lobbies_repo.list_members(session, lobby.id),
+        seats=await lobbies_repo.list_seats(session, lobby.id),
+        expected_player_count=ruleset.PLAYER_COUNT,
+        available_ai_build_count=available_ai_build_count,
+        now=now,
+        stale_seconds=_stale_seconds(),
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=decision.reasons[0].value,
+        )
 
 
 def _as_aware(value: datetime) -> datetime:
