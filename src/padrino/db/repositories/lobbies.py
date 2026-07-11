@@ -24,6 +24,9 @@ from padrino.core.lobby.seating import (
     LobbySeatPlanEntry,
     claim_lowest_available_ai_seat,
 )
+from padrino.core.lobby.seating import (
+    release_member_seat as plan_release_member_seat,
+)
 from padrino.db.models import Lobby, LobbyMember, LobbySeat
 
 
@@ -213,7 +216,21 @@ async def claim_member_seat(
     plan = claim_lowest_available_ai_seat(
         _seat_plan_entries(seats), joining_member_id=str(member_id)
     )
-    return await _apply_seat_plan(session, seats=seats, plan=plan, member_id=member_id)
+    await _apply_seat_plan(session, seats=seats, plan=plan)
+    claimed = next(seat for seat in seats if seat.member_id == member_id)
+    return claimed
+
+
+async def release_member_seat(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    member_id: uuid.UUID,
+) -> None:
+    """Atomically release ``member_id`` back to its configured AI lobby seat."""
+    seats = await _locked_seats(session, lobby_id)
+    plan = plan_release_member_seat(_seat_plan_entries(seats), departing_member_id=str(member_id))
+    await _apply_seat_plan(session, seats=seats, plan=plan)
 
 
 async def list_seats(session: AsyncSession, lobby_id: uuid.UUID) -> list[LobbySeat]:
@@ -250,10 +267,8 @@ async def _apply_seat_plan(
     *,
     seats: list[LobbySeat],
     plan: LobbySeatPlan,
-    member_id: uuid.UUID,
-) -> LobbySeat:
+) -> None:
     rows_by_index = {seat.seat_index: seat for seat in seats}
-    claimed: LobbySeat | None = None
     for entry in plan:
         row = rows_by_index[entry.seat_index]
         row.seat_kind = LobbySeatKind(entry.seat_kind).value
@@ -261,12 +276,8 @@ async def _apply_seat_plan(
         row.agent_build_id = (
             uuid.UUID(entry.agent_build_id) if entry.agent_build_id is not None else None
         )
-        if row.member_id == member_id:
-            claimed = row
 
     await session.flush()
-    assert claimed is not None
-    return claimed
 
 
 __all__ = [
@@ -280,6 +291,7 @@ __all__ = [
     "get_member_by_id",
     "list_members",
     "list_seats",
+    "release_member_seat",
     "remove_member",
     "set_host",
     "set_lobby_status",

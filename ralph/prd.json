@@ -58,7 +58,7 @@
         "Lifecycle operations are idempotent under retries and concurrent kick/heartbeat/leave races."
       ],
       "notes": "Add a member leave endpoint if absent. Likely files: lobbies routes/repo, lobby_presence, tests.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-329",

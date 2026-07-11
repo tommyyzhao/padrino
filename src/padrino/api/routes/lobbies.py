@@ -587,15 +587,51 @@ async def kick_member(
     """Host-only: remove a member from the lobby."""
     await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
     target = await lobbies_repo.get_member_by_id(session, member_id)
-    if target is None or target.lobby_id != lobby_id:
+    now = datetime.now(UTC)
+    if target is None:
+        summary = await _summary(session, lobby_id=lobby_id)
+        await session.commit()
+        return summary
+    if target.lobby_id != lobby_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="member_not_found")
     if target.is_host:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cannot_kick_host")
-    now = datetime.now(UTC)
-    # Release the kicked member's join slot so it does not count against their cap.
-    await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
-    await lobbies_repo.remove_member(session, member_id=member_id)
+    await _release_and_remove_member(session, lobby_id=lobby_id, member_id=member_id, now=now)
     await lobbies_repo.touch_lobby(session, lobby_id=lobby_id, now=now)
+    summary = await _summary(session, lobby_id=lobby_id)
+    await session.commit()
+    return summary
+
+
+@router.post("/lobbies/{lobby_id}/leave", response_model=LobbySummary)
+async def leave_lobby(
+    lobby_id: uuid.UUID,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbySummary:
+    """Member-only: leave a lobby and release the caller's reserved seat."""
+    await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    member = await lobbies_repo.get_member(
+        session, lobby_id=lobby_id, principal_id=ctx.principal_id
+    )
+    assert member is not None
+    was_host = member.is_host
+    if was_host:
+        members = await lobbies_repo.list_members(session, lobby_id)
+        if any(candidate.id != member.id for candidate in members):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="host_must_transfer_before_leave",
+            )
+
+    now = datetime.now(UTC)
+    await _release_and_remove_member(session, lobby_id=lobby_id, member_id=member.id, now=now)
+    if was_host:
+        await lobbies_repo.set_lobby_status(
+            session, lobby_id=lobby_id, status=LobbyStatus.CLOSED.value, now=now
+        )
+    else:
+        await lobbies_repo.touch_lobby(session, lobby_id=lobby_id, now=now)
     summary = await _summary(session, lobby_id=lobby_id)
     await session.commit()
     return summary
@@ -697,8 +733,18 @@ async def _reconcile_lifecycle(session: AsyncSession, lobby: Lobby) -> None:
         # the auto-cancel path); only non-host stale members are dropped.
         member = await lobbies_repo.get_member_by_id(session, member_id)
         if member is not None and not member.is_host:
-            await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
-            await lobbies_repo.remove_member(session, member_id=member_id)
+            await _release_and_remove_member(
+                session, lobby_id=lobby.id, member_id=member_id, now=now
+            )
+
+
+async def _release_and_remove_member(
+    session: AsyncSession, *, lobby_id: uuid.UUID, member_id: uuid.UUID, now: datetime
+) -> None:
+    """Release one member's lobby seat and admissions before deleting the member."""
+    await lobbies_repo.release_member_seat(session, lobby_id=lobby_id, member_id=member_id)
+    await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
+    await lobbies_repo.remove_member(session, member_id=member_id)
 
 
 def _as_aware(value: datetime) -> datetime:

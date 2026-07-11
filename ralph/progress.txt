@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Lobby lifecycle member removal (US-328): route code should release a member's
+  `LobbySeat` through `db.repositories.lobbies.release_member_seat` before
+  deleting the `LobbyMember`, then release bound admission/reservation rows in
+  the same transaction. The repository locks the lobby's seats and delegates the
+  transition to the pure `core.lobby.seating.release_member_seat` planner so a
+  vacated human slot becomes an AI slot, preserves its latent `agent_build_id`
+  when policy says preserve, and stays claimable by the next invite join.
 - Atomic lobby join seating (US-327): for first-time invite joins, insert the
   `LobbyMember`, select the lobby's `LobbySeat` rows `FOR UPDATE`, adapt them
   to `LobbySeatPlanEntry`, apply `claim_lowest_available_ai_seat`, then bind
@@ -6022,4 +6029,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -m "not integration"` -> 1 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3002 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-328
+- Added transaction-scoped lobby member removal: kick, stale eviction, and the
+  new explicit leave endpoint now release the member's `LobbySeat` through the
+  pure planner before deleting the `LobbyMember`, then release bound cost
+  admissions and inference reservations.
+- Preserved seat integrity across host transfer and retries: transfer changes
+  host authority only, repeated kick of an already-removed member is a no-op for
+  host retries, and concurrent kick/leave races converge on one released AI
+  slot with no dangling `member_id`.
+- Covered deterministic refill after release, including preservation of a
+  pre-picked `agent_build_id` on the vacated AI slot so a later invited member
+  can reclaim it.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/lobbies.py`,
+  `src/padrino/db/repositories/lobbies.py`,
+  `tests/api/test_lobby_invite_presence.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/api/test_lobby_invite_presence.py -m "not integration" -q`
+  -> 19 passed / 1 skipped; related
+  `uv run pytest tests/api/test_lobby_launch.py tests/api/test_human_match.py tests/api/test_lobby_launch_slot_lifecycle.py -m "not integration" -q`
+  -> 19 passed; pure
+  `uv run pytest tests/core/lobby/test_seating.py tests/core/test_purity.py -q`
+  -> 86 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3007 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

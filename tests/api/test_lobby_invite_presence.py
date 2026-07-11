@@ -27,11 +27,15 @@ from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.enums import LobbySeatKind, LobbyStatus
 from padrino.db.models import (
+    AgentBuild,
     HumanCostAdmission,
     HumanInferenceReservation,
     Lobby,
     LobbyMember,
     LobbySeat,
+    ModelConfig,
+    ModelProvider,
+    PromptVersion,
 )
 from padrino.db.repositories import human_principals as principals_repo
 
@@ -68,6 +72,47 @@ async def _create_lobby(client: AsyncClient, token: str) -> dict[str, Any]:
     return body
 
 
+async def _make_agent_build(session: AsyncSession) -> AgentBuild:
+    suffix = uuid.uuid4().hex
+    provider = ModelProvider(
+        name=f"cerebras-{suffix}", base_url=None, auth_secret_ref="CEREBRAS_API_KEY"
+    )
+    session.add(provider)
+    await session.flush()
+    model = ModelConfig(
+        provider_id=provider.id,
+        model_name=f"zai-glm-4.7-{suffix}",
+        model_version=None,
+        default_temperature=0.7,
+        default_top_p=1.0,
+        default_max_output_tokens=4096,
+        supports_structured_outputs=True,
+    )
+    session.add(model)
+    prompt = PromptVersion(
+        ruleset_id="mini7_v1",
+        version=f"v1-{suffix}",
+        system_prompt="play",
+        developer_prompt="json",
+        response_schema={"type": "object"},
+        prompt_hash=f"hash-us328-{suffix}",
+    )
+    session.add(prompt)
+    await session.flush()
+    build = AgentBuild(
+        display_name=f"cerebras/glm-4.7@{suffix}",
+        model_config_id=model.id,
+        prompt_version_id=prompt.id,
+        adapter_version="2026.05",
+        inference_params={"temperature": 0.7},
+        active=True,
+    )
+    session.add(build)
+    await session.flush()
+    await session.commit()
+    return build
+
+
 async def _friend_member_id(client: AsyncClient, lobby_id: str, host_token: str) -> str:
     roster = await client.get(
         f"/lobbies/{lobby_id}/roster", cookies={HUMAN_SESSION_COOKIE: host_token}
@@ -75,6 +120,23 @@ async def _friend_member_id(client: AsyncClient, lobby_id: str, host_token: str)
     assert roster.status_code == 200, roster.text
     member_id: str = next(m["member_id"] for m in roster.json()["members"] if not m["is_host"])
     return member_id
+
+
+async def _create_lobby_with_prepick(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    host_token: str,
+) -> tuple[dict[str, Any], uuid.UUID]:
+    async with session_factory() as session:
+        build = await _make_agent_build(session)
+        build_id = build.id
+    resp = await client.post(
+        "/lobbies",
+        json={"ruleset_id": "mini7_v1", "prepick_agent_build_ids": [str(build_id)]},
+        cookies={HUMAN_SESSION_COOKIE: host_token},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json(), build_id
 
 
 async def _invite_token(client: AsyncClient, lobby_id: str, host_token: str) -> str:
@@ -348,6 +410,90 @@ async def test_host_kick(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_kick_releases_member_seat_admission_and_allows_refill(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    host = await _guest_token(client)
+    lobby, build_id = await _create_lobby_with_prepick(client, session_factory, host)
+    invite = await _invite_token(client, lobby["id"], host)
+    friend = await _guest_token(client)
+    friend_principal_id = await _principal_id_for_token(session_factory, friend)
+    joined = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: friend})
+    assert joined.status_code == 200, joined.text
+    friend_member_id = await _friend_member_id(client, lobby["id"], host)
+
+    kicked = await client.post(
+        f"/lobbies/{lobby['id']}/kick/{friend_member_id}",
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert kicked.status_code == 200, kicked.text
+    assert kicked.json()["member_count"] == 1
+    assert kicked.json()["composition"] == {"human_count": 1, "ai_count": 6, "total": 7}
+
+    seats = await _lobby_seats(session_factory, lobby["id"])
+    released = seats[1]
+    assert released.seat_kind == LobbySeatKind.AI.value
+    assert released.member_id is None
+    assert released.agent_build_id == build_id
+    assert await _live_join_slot_count(session_factory, friend_principal_id) == 0
+    assert await _live_inference_reservation_count(session_factory, friend_principal_id) == 0
+
+    replacement = await _guest_token(client)
+    refill = await client.post(
+        f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: replacement}
+    )
+    assert refill.status_code == 200, refill.text
+    assert refill.json()["composition"] == {"human_count": 2, "ai_count": 5, "total": 7}
+    seats_after_refill = await _lobby_seats(session_factory, lobby["id"])
+    reclaimed = seats_after_refill[1]
+    assert reclaimed.seat_kind == LobbySeatKind.HUMAN.value
+    assert reclaimed.member_id is not None
+    assert reclaimed.agent_build_id == build_id
+
+
+@pytest.mark.asyncio
+async def test_member_leave_releases_seat_and_admissions(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    host = await _guest_token(client)
+    lobby = await _create_lobby(client, host)
+    invite = await _invite_token(client, lobby["id"], host)
+    friend = await _guest_token(client)
+    friend_principal_id = await _principal_id_for_token(session_factory, friend)
+    joined = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: friend})
+    assert joined.status_code == 200, joined.text
+
+    left = await client.post(
+        f"/lobbies/{lobby['id']}/leave", cookies={HUMAN_SESSION_COOKIE: friend}
+    )
+    assert left.status_code == 200, left.text
+    assert left.json()["member_count"] == 1
+    assert left.json()["composition"] == {"human_count": 1, "ai_count": 6, "total": 7}
+
+    seats = await _lobby_seats(session_factory, lobby["id"])
+    assert seats[1].seat_kind == LobbySeatKind.AI.value
+    assert seats[1].member_id is None
+    assert await _live_join_slot_count(session_factory, friend_principal_id) == 0
+    assert await _live_inference_reservation_count(session_factory, friend_principal_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_host_must_transfer_before_leaving_multi_member_lobby(client: AsyncClient) -> None:
+    host = await _guest_token(client)
+    lobby = await _create_lobby(client, host)
+    invite = await _invite_token(client, lobby["id"], host)
+    friend = await _guest_token(client)
+    joined = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: friend})
+    assert joined.status_code == 200, joined.text
+
+    denied = await client.post(
+        f"/lobbies/{lobby['id']}/leave", cookies={HUMAN_SESSION_COOKIE: host}
+    )
+    assert denied.status_code == 409
+    assert denied.json()["detail"] == "host_must_transfer_before_leave"
+
+
+@pytest.mark.asyncio
 async def test_host_transfer(client: AsyncClient) -> None:
     host = await _guest_token(client)
     lobby = await _create_lobby(client, host)
@@ -370,6 +516,38 @@ async def test_host_transfer(client: AsyncClient) -> None:
         cookies={HUMAN_SESSION_COOKIE: host},
     )
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_host_transfer_does_not_move_or_duplicate_seat_ownership(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    host = await _guest_token(client)
+    lobby = await _create_lobby(client, host)
+    invite = await _invite_token(client, lobby["id"], host)
+    friend = await _guest_token(client)
+    await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: friend})
+    friend_member_id = await _friend_member_id(client, lobby["id"], host)
+    before = [
+        (seat.seat_index, seat.seat_kind, seat.member_id, seat.agent_build_id)
+        for seat in await _lobby_seats(session_factory, lobby["id"])
+    ]
+
+    transferred = await client.post(
+        f"/lobbies/{lobby['id']}/transfer/{friend_member_id}",
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert transferred.status_code == 200, transferred.text
+
+    after = [
+        (seat.seat_index, seat.seat_kind, seat.member_id, seat.agent_build_id)
+        for seat in await _lobby_seats(session_factory, lobby["id"])
+    ]
+    assert after == before
+    human_member_ids = [
+        member_id for _, kind, member_id, _ in after if kind == LobbySeatKind.HUMAN.value
+    ]
+    assert len(human_member_ids) == len(set(human_member_ids)) == 2
 
 
 @pytest.mark.asyncio
@@ -399,7 +577,50 @@ async def test_heartbeat_presence_eviction(
     member_ids = {m["member_id"] for m in roster.json()["members"]}
     assert str(friend_member_id) not in member_ids
     assert roster.json()["member_count"] == 1
+    assert roster.json()["composition"] == {"human_count": 1, "ai_count": 6, "total": 7}
+    seats = await _lobby_seats(session_factory, lobby["id"])
+    assert seats[1].seat_kind == LobbySeatKind.AI.value
+    assert seats[1].member_id is None
     assert lobby_id  # silence unused
+
+
+@pytest.mark.asyncio
+async def test_concurrent_kick_and_leave_release_lifecycle_once(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    host = await _guest_token(client)
+    lobby = await _create_lobby(client, host)
+    invite = await _invite_token(client, lobby["id"], host)
+    friend = await _guest_token(client)
+    friend_principal_id = await _principal_id_for_token(session_factory, friend)
+    joined = await client.post(f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: friend})
+    assert joined.status_code == 200, joined.text
+    friend_member_id = await _friend_member_id(client, lobby["id"], host)
+
+    responses = await asyncio.gather(
+        client.post(
+            f"/lobbies/{lobby['id']}/kick/{friend_member_id}",
+            cookies={HUMAN_SESSION_COOKIE: host},
+        ),
+        client.post(f"/lobbies/{lobby['id']}/leave", cookies={HUMAN_SESSION_COOKIE: friend}),
+    )
+
+    assert sorted(resp.status_code for resp in responses) in ([200, 200], [200, 404])
+    seats = await _lobby_seats(session_factory, lobby["id"])
+    assert seats[1].seat_kind == LobbySeatKind.AI.value
+    assert seats[1].member_id is None
+    assert await _live_join_slot_count(session_factory, friend_principal_id) == 0
+    assert await _live_inference_reservation_count(session_factory, friend_principal_id) == 0
+
+    retried = await client.post(
+        f"/lobbies/{lobby['id']}/kick/{friend_member_id}",
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert retried.status_code == 200, retried.text
+    seats_after_retry = await _lobby_seats(session_factory, lobby["id"])
+    assert [(seat.seat_kind, seat.member_id) for seat in seats_after_retry] == [
+        (seat.seat_kind, seat.member_id) for seat in seats
+    ]
 
 
 @pytest.mark.asyncio
