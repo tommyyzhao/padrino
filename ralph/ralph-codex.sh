@@ -28,6 +28,8 @@ MAX_ITERATIONS=100
 V9_ITERATIONS=60
 RUN_ALL=0
 SYNC_TOOLING=1
+DEFAULT_CODEX_MODEL="gpt-5.6-terra"
+DEFAULT_CODEX_REASONING_EFFORT="xhigh"
 
 usage() {
   cat <<'EOF'
@@ -47,7 +49,7 @@ Options:
   -h, --help           Show this help.
 
 Environment:
-  CODEX_MODEL                 Defaults to gpt-5.5.
+  CODEX_MODEL                 Defaults to gpt-5.6-terra (Terra, never Sol).
   CODEX_REASONING_EFFORT      Defaults to xhigh.
   CODEX_EXTRA_ARGS            Extra args appended before the prompt stdin dash.
   RALPH_SKIP_PLAYWRIGHT_INSTALL=1  Skip Playwright browser install preflight.
@@ -208,8 +210,8 @@ build_codex_args() {
   CODEX_ARGS=(
     exec
     --dangerously-bypass-approvals-and-sandbox
-    -m "${CODEX_MODEL:-gpt-5.5}"
-    -c "model_reasoning_effort=${CODEX_REASONING_EFFORT:-xhigh}"
+    -m "${CODEX_MODEL:-$DEFAULT_CODEX_MODEL}"
+    -c "model_reasoning_effort=${CODEX_REASONING_EFFORT:-$DEFAULT_CODEX_REASONING_EFFORT}"
     -C "$REPO_ROOT"
   )
 
@@ -330,6 +332,7 @@ run_active_plan_loop() {
   fi
 
   echo "Starting Ralph Codex loop on $branch - remaining stories: $count - max iterations: $max_iterations"
+  echo "Codex model: ${CODEX_MODEL:-$DEFAULT_CODEX_MODEL} - reasoning effort: ${CODEX_REASONING_EFFORT:-$DEFAULT_CODEX_REASONING_EFFORT}"
 
   for i in $(seq 1 "$max_iterations"); do
     echo ""
