@@ -100,13 +100,17 @@ def test_ranked_human_rating_kill_switch_fails_closed_for_missing_settings() -> 
     assert ranked_human_rating_enabled(object()) is False
 
 
-def test_core_does_not_import_settings() -> None:
-    offenders = [
-        path
-        for path in Path("src/padrino/core").rglob("*.py")
-        if "padrino.settings" in path.read_text(encoding="utf-8")
-    ]
-    assert offenders == []
+def test_core_does_not_import_settings_or_credential_crypto() -> None:
+    forbidden = ("padrino.settings", "cryptography")
+    offenders = {
+        module: [
+            path
+            for path in Path("src/padrino/core").rglob("*.py")
+            if module in path.read_text(encoding="utf-8")
+        ]
+        for module in forbidden
+    }
+    assert offenders == {module: [] for module in forbidden}
 
 
 def test_env_override_human_lane_mock_ai(monkeypatch: pytest.MonkeyPatch) -> None:

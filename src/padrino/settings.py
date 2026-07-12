@@ -6,7 +6,7 @@ import functools
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from padrino.legal.documents import DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS
@@ -63,6 +63,18 @@ class Settings(BaseSettings):
     # name a lower-or-equal explicit spend cap at the trigger boundary.
     padrino_openrouter_probe_trigger_rate_limit_per_minute: int = Field(default=5, gt=0)
     padrino_openrouter_probe_operator_cost_cap_micros: int = Field(default=50_000, ge=0)
+    # Player-owned OpenRouter credentials have a separate AES-256-GCM master
+    # key ring.  It is intentionally optional so mock and platform-funded
+    # deployments still boot without BYOK capability.  The first
+    # ``version:base64url-32-byte-key`` entry is active; later comma-separated
+    # entries remain decrypt-only during online rotation.  The envelope service
+    # validates this only when a connect/BYOK operation is requested, so a bad
+    # deployment key fails that capability closed without stopping the server.
+    padrino_openrouter_credential_master_key_ring: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        exclude=True,
+    )
 
     @field_validator(
         "padrino_openrouter_inference_key_ref",
