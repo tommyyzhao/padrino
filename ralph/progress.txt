@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- OpenRouter requests (US-341): keep attribution headers, router-metadata
+  opt-in, provider preferences, and credential resolution entirely in the
+  impure `llm`/assembly seam. Use `Settings.build_openrouter_routing_policy`
+  to retain the canonical selected slug while passing LiteLLM
+  `custom_llm_provider="openrouter"`, explicit `api_base`/`api_key`, and an
+  `extra_body.provider` map. Platform inference references may fill an absent
+  OpenRouter build reference, but management references must never reach the
+  completion constructor; redact the resolved key from every error/log path.
 - Generic provider runtime assembly (US-340): project `ModelProvider.name`,
   `base_url`, and the opaque `auth_secret_ref` into the impure `AgentBuild`
   value. Mark `auth_secret_ref` `exclude=True` / `repr=False`, resolve it only
@@ -6546,3 +6554,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
   3153 passed / 51 skipped / 10 deselected. Frontend gates not run; story did
   not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-341
+- Added validated OpenRouter deployment settings for separately referenced
+  inference/management credentials, endpoint/app attribution, human-safe ZDR,
+  timeout, and catalog-sync cadence. No raw key has a default or test fixture.
+- Added frozen provider preferences for sort/order/only/fallback/required
+  parameters/max-price/ZDR, and translated them into canonical-slug LiteLLM
+  requests with explicit endpoint/key, attribution, and router metadata.
+- Wired the normal heterogeneous/human adapter assembly to use the OpenRouter
+  settings only in the impure constructor, with within-model casual fallback,
+  and redacted resolved-key diagnostics in both result errors and logs.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/settings.py`, `src/padrino/llm/adapter.py`,
+  `src/padrino/llm/litellm_adapter.py`,
+  `src/padrino/gauntlets/heterogeneous.py`, `tests/test_settings.py`,
+  `tests/llm/test_litellm_adapter.py`,
+  `tests/gauntlets/test_heterogeneous.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/test_settings.py tests/llm/test_litellm_adapter.py -q`
+  initially failed at collection on the missing OpenRouter policy types;
+  focused GREEN including heterogeneous assembly -> 73 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3160 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

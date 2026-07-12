@@ -326,7 +326,7 @@
         "Stubbed tests assert exact request kwargs/headers and redacted failure logs."
       ],
       "notes": "Use existing dependencies; no OpenRouter SDK required.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-342",
