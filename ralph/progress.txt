@@ -3,11 +3,20 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Casual cadence profiles (US-338): keep phase/round timing in pure
+  `core/cadence.py`; snapshots store only the profile id. New explicit casual
+  lobbies default to `casual_standard_v1`, while legacy `ruleset_id` requests
+  retain `builtin_sync_v1`. The human runner persists an absolute phase
+  deadline from injected `now` and passes only its remaining duration to the
+  tick barrier, so worker restart never extends a turn. For registered rulesets,
+  reconstruct runtime snapshots from the module plus the persisted cadence id
+  after validating the full archived body/hash, preserving role order.
 - Custom lobby configuration (US-337): `/lobbies` is now the casual custom
   route. Resolve exactly one rules source (`built_in_ruleset_id`,
   `custom_role_counts`, or legacy `ruleset_id`) to a rules snapshot + member-safe
-  `rules_summary` before writing rows, and reject `ranked` /
-  `integrity_acknowledged` as the deprecated ranked-checkbox contract. Store
+  `rules_summary` before writing rows, and reject truthy `ranked` /
+  `integrity_acknowledged` values as the deprecated ranked-checkbox contract
+  while accepting explicitly false compatibility values. Store
   `Lobby.human_seat_capacity` nullable so legacy rows fall back to full-table
   claimable capacity; new strict built-in/custom requests validate prepicks
   against fixed AI slots (`player_count - human_seat_capacity`) and join claims
@@ -6446,3 +6455,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed after it; `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
   3130 passed / 51 skipped / 10 deselected.
+
+## 2026-07-11 PDT - US-338
+- Added pure frozen fast/standard/relaxed casual cadence profiles mapping every
+  playable phase and discussion round to deadline seconds, symmetric release
+  delay, and a UI countdown label. The standard five-day schedule is explicitly
+  bounded at 1,515 seconds (25m15s).
+- New explicit casual lobbies default to standard cadence and may select or
+  pre-join-update any casual preset. Legacy `ruleset_id` clients retain the
+  settings-driven built-in cadence, and ranked cadence remains absent from the
+  player-selectable set.
+- Human runtime snapshots now derive absolute deadlines from injected `now` and
+  compute each tick from the remaining persisted budget. A resumed or expired
+  phase therefore cannot receive a fresh deadline.
+- Proved multiple human sidecar messages per discussion cycle, one adapter
+  response slot per AI per cycle, deterministic timeout coercion, and the chat
+  action firewall. Registered built-in snapshots now validate archived cadence
+  variants while preserving module role order.
+- Thread URL: n/a (root Codex intervention while Ralph usage-limited).
+- Files changed: `src/padrino/core/cadence.py`,
+  `src/padrino/core/rulesets/snapshot.py`,
+  `src/padrino/api/routes/lobbies.py`, `src/padrino/db/rules_snapshots.py`,
+  `src/padrino/runner/human_lane.py`, `src/padrino/runner/human_tick.py`,
+  `tests/core/test_casual_cadence.py`, `tests/runner/test_human_cadence.py`,
+  `tests/runner/test_human_tick_symmetry.py`,
+  `tests/api/test_human_chat_channel.py`, `tests/api/test_lobby_create.py`,
+  `tests/db/test_rules_snapshot_persistence.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED preceded implementation; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3149 passed / 51 skipped /
+  10 deselected. Frontend gates not run; no frontend files changed.

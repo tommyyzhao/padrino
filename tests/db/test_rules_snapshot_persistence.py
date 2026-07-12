@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.core.cadence import CASUAL_RELAXED_CADENCE_ID
 from padrino.core.enums import LobbyStatus
 from padrino.core.rulesets import get_ruleset, mini7_v1
 from padrino.core.rulesets.snapshot import (
@@ -17,7 +18,10 @@ from padrino.core.rulesets.snapshot import (
 )
 from padrino.db.models import Game, Lobby
 from padrino.db.repositories import games, human_principals, leagues, lobbies
-from padrino.db.rules_snapshots import RulesSnapshotValidationError
+from padrino.db.rules_snapshots import (
+    RulesSnapshotValidationError,
+    runtime_rules_snapshot_from_pair,
+)
 
 FORBIDDEN_SNAPSHOT_KEYS = {
     "auth_secret_ref",
@@ -192,3 +196,17 @@ def test_lobby_and_game_snapshot_columns_are_nullable_for_legacy_rows() -> None:
     assert Game.__table__.columns["rules_snapshot_hash"].nullable is True
     assert Lobby.__table__.columns["rules_snapshot_json"].nullable is True
     assert Lobby.__table__.columns["rules_snapshot_hash"].nullable is True
+
+
+def test_builtin_runtime_snapshot_accepts_archived_casual_cadence_and_keeps_role_order() -> None:
+    persisted = snapshot_from_ruleset(mini7_v1, cadence_id=CASUAL_RELAXED_CADENCE_ID)
+
+    runtime = runtime_rules_snapshot_from_pair(
+        ruleset_id=mini7_v1.RULESET_ID,
+        rules_snapshot_json=canonical_rules_dict(persisted),
+        rules_snapshot_hash=canonical_rules_hash(persisted),
+    )
+
+    assert runtime is not None
+    assert runtime.cadence_id == CASUAL_RELAXED_CADENCE_ID
+    assert list(runtime.ROLE_COUNTS) == list(mini7_v1.ROLE_COUNTS)

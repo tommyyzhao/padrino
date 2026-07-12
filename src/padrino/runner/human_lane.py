@@ -41,6 +41,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.agents.contract import AgentResponse
+from padrino.core.cadence import PLAYER_SELECTABLE_CADENCE_IDS, CadenceProfile, cadence_profile
 from padrino.core.disconnect import SeatPresence, seats_past_grace
 from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog, StoredEvent
@@ -892,21 +893,53 @@ class _RuntimeSnapshotter:
         *,
         game_id: uuid.UUID,
         phase_deadline_seconds: float,
+        release_delay_seconds: float = 0.0,
+        cadence: CadenceProfile | None = None,
         resume: GameResume | None,
+        now: Callable[[], datetime] = _utcnow,
     ) -> None:
         self._session_factory = session_factory
         self._game_id = game_id
         self._phase_deadline_seconds = phase_deadline_seconds
+        self._release_delay_seconds = release_delay_seconds
+        self._cadence = cadence
+        self._now = now
         self._deadlines: dict[str, datetime] = {}
         if resume is not None and resume.deadline_at is not None:
-            self._deadlines[resume.phase] = resume.deadline_at
+            self._deadlines[resume.phase] = _as_aware(resume.deadline_at) or resume.deadline_at
 
-    async def __call__(self, _state: GameState, event_log: EventLog, phase: str) -> None:
-        updated_at = datetime.now(UTC)
+    def _phase_timing(self, state: GameState) -> tuple[float, float]:
+        if self._cadence is None:
+            return self._phase_deadline_seconds, self._release_delay_seconds
+        timing = self._cadence.timing_for(
+            state.current_phase.kind,
+            round_number=state.current_phase.round,
+        )
+        return float(timing.deadline_seconds), float(timing.release_delay_seconds)
+
+    def _deadline_for(self, state: GameState, phase: str, *, now: datetime) -> datetime:
         deadline_at = self._deadlines.get(phase)
         if deadline_at is None:
-            deadline_at = updated_at + timedelta(seconds=self._phase_deadline_seconds)
+            deadline_seconds, _release_delay_seconds = self._phase_timing(state)
+            deadline_at = now + timedelta(seconds=deadline_seconds)
             self._deadlines[phase] = deadline_at
+        return deadline_at
+
+    def tick_config(self, state: GameState) -> HumanTickConfig:
+        """Return the remaining immutable phase budget without extending it."""
+        now = self._now()
+        phase = format_phase_id(state.current_phase)
+        deadline_at = self._deadline_for(state, phase, now=now)
+        _deadline_seconds, release_delay_seconds = self._phase_timing(state)
+        remaining_seconds = max(0.0, (deadline_at - now).total_seconds())
+        return HumanTickConfig(
+            phase_deadline_seconds=remaining_seconds,
+            release_delay_seconds=release_delay_seconds,
+        )
+
+    async def __call__(self, _state: GameState, event_log: EventLog, phase: str) -> None:
+        updated_at = self._now()
+        deadline_at = self._deadline_for(_state, phase, now=updated_at)
         await persist_human_runtime_snapshot(
             self._session_factory,
             game_id=self._game_id,
@@ -932,17 +965,29 @@ def _default_human_game_executor(
     settings: Settings,
     *,
     ai_adapter_factory: AiAdapterFactory | None = None,
+    now: Callable[[], datetime] = _utcnow,
 ) -> HumanGameExecutor:
-    tick_config = HumanTickConfig(
-        phase_deadline_seconds=settings.padrino_human_phase_deadline_seconds,
-        release_delay_seconds=settings.padrino_human_release_delay_seconds,
-    )
-
     async def execute(
         config: GameConfig,
         persistence: GamePersistence,
         adapter: LlmAdapter,
     ) -> None:
+        cadence: CadenceProfile | None = None
+        if (
+            config.rules_snapshot is not None
+            and config.rules_snapshot.cadence_id in PLAYER_SELECTABLE_CADENCE_IDS
+        ):
+            cadence = cadence_profile(config.rules_snapshot.cadence_id)
+        snapshotter = _RuntimeSnapshotter(
+            persistence.session_factory,
+            game_id=persistence.game_id,
+            phase_deadline_seconds=settings.padrino_human_phase_deadline_seconds,
+            release_delay_seconds=settings.padrino_human_release_delay_seconds,
+            cadence=cadence,
+            resume=persistence.resume,
+            now=now,
+        )
+
         # Human-lane ranked mode is segregated from the scientific benchmark:
         # the ranked flag reaches terminal persistence, but human seats keep the
         # scientific Rating/RatingEvent path fail-closed.
@@ -989,16 +1034,10 @@ def _default_human_game_executor(
                 ruleset,
                 ranked,
                 timeout_s,
-                config=tick_config,
+                config=snapshotter.tick_config(state),
                 release_chat=release_chat,
             )
 
-        snapshotter = _RuntimeSnapshotter(
-            persistence.session_factory,
-            game_id=persistence.game_id,
-            phase_deadline_seconds=settings.padrino_human_phase_deadline_seconds,
-            resume=persistence.resume,
-        )
         await drive_game_loop(
             config,
             adapter,

@@ -111,21 +111,26 @@ def runtime_rules_snapshot_from_pair(
     if body is None or snapshot_hash is None:
         return None
 
+    payload = dict(body)
     registered_ruleset = _registered_ruleset(ruleset_id)
     if registered_ruleset is not None:
-        snapshot = snapshot_from_ruleset(registered_ruleset)
-        try:
-            assert_ruleset_id_matches_snapshot(
-                ruleset_id=ruleset_id,
-                snapshot=snapshot,
-                rules_snapshot_hash=snapshot_hash,
-            )
-        except ValueError as exc:
-            raise RulesSnapshotValidationError(str(exc)) from exc
-        return snapshot
+        payload["ruleset_id"] = ruleset_id
+    persisted_snapshot = GameRulesSnapshot.model_validate(payload)
+    try:
+        assert_ruleset_id_matches_snapshot(
+            ruleset_id=ruleset_id,
+            snapshot=persisted_snapshot,
+            rules_snapshot_hash=snapshot_hash,
+        )
+    except ValueError as exc:
+        raise RulesSnapshotValidationError(str(exc)) from exc
+    if registered_ruleset is None:
+        return persisted_snapshot
 
-    payload = dict(body)
-    snapshot = GameRulesSnapshot.model_validate(payload)
+    snapshot = snapshot_from_ruleset(
+        registered_ruleset,
+        cadence_id=persisted_snapshot.cadence_id,
+    )
     try:
         assert_ruleset_id_matches_snapshot(
             ruleset_id=ruleset_id,

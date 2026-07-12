@@ -8,12 +8,11 @@ from typing import Annotated, Final, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
 
+from padrino.core.cadence import BUILTIN_CADENCE_ID, SUPPORTED_CADENCE_IDS
 from padrino.core.engine.canonical_json import canonical_dumps
 from padrino.core.engine.win_conditions import WinCondition, WinConditionKind
 from padrino.core.enums import ActionType, Faction, RatingContextKind, Role, RoleFamily
 
-BUILTIN_CADENCE_ID: Final[str] = "builtin_sync_v1"
-SUPPORTED_CADENCE_IDS: Final[frozenset[str]] = frozenset({BUILTIN_CADENCE_ID})
 DRAW_WINNER: Final[str] = "DRAW"
 
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]

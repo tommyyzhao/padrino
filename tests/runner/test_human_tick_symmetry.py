@@ -90,8 +90,10 @@ class _ScriptedAdapter:
 
     def __init__(self, results: Mapping[str, AdapterResult]) -> None:
         self._results = dict(results)
+        self.calls: list[str] = []
 
     async def complete(self, observation: Observation) -> AdapterResult:
+        self.calls.append(observation.you.player_id)
         return self._results[observation.you.player_id]
 
 
@@ -162,6 +164,27 @@ async def test_ai_and_human_public_messages_share_one_release_schedule() -> None
     release_instants = {m.released_at for m in released}
     assert len(release_instants) == 1
     assert released[0].released_at == result.settled_at
+
+
+async def test_each_ai_gets_at_most_one_response_slot_per_discussion_cycle() -> None:
+    clock = _FakeClock()
+    state = _state(Phase(kind=PhaseKind.DAY_DISCUSSION, day=1, round=1))
+    ai = _ScriptedAdapter({"P01": _ai_result("one message")})
+
+    result = await run_human_tick(
+        state,
+        EventLog(),
+        [SEATS[0]],
+        ai,
+        ruleset=mini7_v1,
+        config=HumanTickConfig(phase_deadline_seconds=30, release_delay_seconds=1),
+        clock=clock.now,
+        sleep=clock.sleep,
+    )
+
+    assert ai.calls == ["P01"]
+    assert [message.text for message in result.released_messages] == ["one message"]
+    assert result.responses["P01"].action.type is ActionType.NOOP
 
 
 async def test_phase_settles_within_deadline_plus_delay_even_with_slow_human() -> None:

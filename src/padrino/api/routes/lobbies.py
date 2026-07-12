@@ -43,6 +43,7 @@ from padrino.api.lobby_presence import (
 )
 from padrino.api.lobby_readiness import evaluate_lobby_rows
 from padrino.api.lobby_state import stream_lobby_state
+from padrino.core.cadence import CASUAL_STANDARD_CADENCE_ID
 from padrino.core.composition import CompositionSummary, composition_summary
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStakes, LobbyStatus
 from padrino.core.lobby import LobbySeatPlanError
@@ -141,7 +142,7 @@ class LobbyCreate(BaseModel):
     #: Backward-compatible alias for pre-US-337 clients. New clients should send
     #: ``built_in_ruleset_id`` or ``custom_role_counts``.
     ruleset_id: str | None = Field(default=None, min_length=1)
-    cadence_preset: str = BUILTIN_CADENCE_ID
+    cadence_preset: str = CASUAL_STANDARD_CADENCE_ID
     human_seat_count: int | None = Field(default=None, ge=1)
     identity_mode: IdentityMode = IdentityMode.ANONYMOUS
     theme_pack_id: str | None = Field(default=None, max_length=64)
@@ -234,11 +235,14 @@ class _ResolvedLobbyRules:
 
 
 def _resolve_rules_for_create(body: LobbyCreate) -> _ResolvedLobbyRules:
+    cadence_preset = body.cadence_preset
+    if body.ruleset_id is not None and "cadence_preset" not in body.model_fields_set:
+        cadence_preset = BUILTIN_CADENCE_ID
     return _resolve_rules(
         built_in_ruleset_id=body.built_in_ruleset_id,
         custom_role_counts=body.custom_role_counts,
         legacy_ruleset_id=body.ruleset_id,
-        cadence_preset=body.cadence_preset,
+        cadence_preset=cadence_preset,
     )
 
 
@@ -257,7 +261,14 @@ def _resolve_rules_for_update(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="unknown_cadence_preset",
             )
-        return _runtime_rules_for_lobby(lobby)
+        current = _runtime_rules_for_lobby(lobby)
+        if body.cadence_preset is None:
+            return current
+        return _resolved_rules_with_cadence(
+            lobby=lobby,
+            current=current,
+            cadence_id=body.cadence_preset,
+        )
     return _resolve_rules(
         built_in_ruleset_id=body.built_in_ruleset_id,
         custom_role_counts=body.custom_role_counts,
@@ -290,6 +301,38 @@ def _runtime_rules_for_lobby(lobby: Lobby) -> _ResolvedLobbyRules:
             if lobby.ruleset_id.startswith("custom:")
             else lobby.ruleset_id,
             custom=lobby.ruleset_id.startswith("custom:"),
+            snapshot=snapshot,
+        ),
+        legacy_ruleset_alias=False,
+    )
+
+
+def _resolved_rules_with_cadence(
+    *,
+    lobby: Lobby,
+    current: _ResolvedLobbyRules,
+    cadence_id: str,
+) -> _ResolvedLobbyRules:
+    custom = lobby.ruleset_id.startswith("custom:")
+    if custom:
+        snapshot = GameRulesSnapshot.model_validate(current.rules_snapshot_json).model_copy(
+            update={"cadence_id": cadence_id}
+        )
+        ruleset_id = snapshot.RULESET_ID
+        ruleset: Any = snapshot
+    else:
+        snapshot = snapshot_from_ruleset(current.ruleset, cadence_id=cadence_id)
+        ruleset_id = lobby.ruleset_id
+        ruleset = current.ruleset
+    return _ResolvedLobbyRules(
+        ruleset_id=ruleset_id,
+        ruleset=ruleset,
+        rules_snapshot_json=canonical_rules_dict(snapshot),
+        rules_snapshot_hash=canonical_rules_hash(snapshot),
+        summary=_rules_summary(
+            ruleset_id=ruleset_id,
+            built_in_ruleset_id=None if custom else lobby.ruleset_id,
+            custom=custom,
             snapshot=snapshot,
         ),
         legacy_ruleset_alias=False,
@@ -329,7 +372,7 @@ def _resolve_rules(
                     "rules_summary": _invalid_custom_rules_summary(custom_role_counts),
                 },
             )
-        snapshot = validation.snapshot
+        snapshot = validation.snapshot.model_copy(update={"cadence_id": cadence_preset})
         snapshot_body = canonical_rules_dict(snapshot)
         snapshot_hash = canonical_rules_hash(snapshot)
         ruleset_id = snapshot.RULESET_ID

@@ -52,11 +52,12 @@ _PUBLIC_MESSAGE_PHASES = frozenset({PhaseKind.DAY_DISCUSSION, PhaseKind.DAY_VOTE
 
 @dataclass(frozen=True, slots=True)
 class HumanTickConfig:
-    """Human-friendly per-phase deadline and the symmetric release delay.
+    """Resolved budget for one specific human-game phase.
 
-    Both values come from settings (``padrino_human_phase_deadline_seconds`` and
-    ``padrino_human_release_delay_seconds``) at the runner seam; they are passed
-    in as plain data so this module reads no settings and no wall clock itself.
+    Casual games derive both values from their archived cadence profile. Legacy
+    built-in games retain the settings fallback. The runner passes only the
+    remaining persisted deadline budget, so restart never grants extra time.
+    This module still reads no settings and no wall clock itself.
     """
 
     phase_deadline_seconds: float

@@ -288,6 +288,41 @@ async def test_idempotent_retry(
 
 
 @pytest.mark.asyncio
+async def test_multiple_messages_are_held_within_one_discussion_cycle(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    token = await _consenting_guest(client)
+    principal_id = await _principal_id_for_token(session_factory)
+    async with session_factory() as session, session.begin():
+        game_id = await _seed_human_game(session, principal_id=principal_id)
+
+    for idempotency_key, text in (("c1", "First thought."), ("c2", "One more thing.")):
+        response = await client.post(
+            f"/human/games/{game_id}/chat",
+            json={
+                "channel": "PUBLIC",
+                "text": text,
+                "idempotency_key": idempotency_key,
+            },
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "HELD"
+
+    async with session_factory() as session:
+        holds = list(
+            (
+                await session.execute(
+                    select(HumanChatSubmission).order_by(HumanChatSubmission.created_at)
+                )
+            ).scalars()
+        )
+    assert [hold.idempotency_key for hold in holds] == ["c1", "c2"]
+    assert [hold.cleaned_text for hold in holds] == ["First thought.", "One more thing."]
+
+
+@pytest.mark.asyncio
 async def test_wrong_seat_rejected(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

@@ -265,7 +265,7 @@
         "Fast/standard/relaxed casual presets are supported; ranked cadence is not player-configurable and lands in Wave 16."
       ],
       "notes": "Use existing round-based engine, not an unbounded continuous-chat scheduler.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-339",

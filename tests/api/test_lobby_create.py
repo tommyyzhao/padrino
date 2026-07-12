@@ -113,6 +113,7 @@ async def test_create_lobby_defaults_casual_anonymous_open(client: AsyncClient) 
     assert body["integrity_acknowledged"] is False
     assert body["game_id"] is None
     assert body["member_count"] == 1
+    assert body["rules_summary"]["cadence_preset"] == "builtin_sync_v1"
     # mini7_v1 = 7 seats: 1 host HUMAN + 6 AI seats.
     assert body["composition"] == {"human_count": 1, "ai_count": 6, "total": 7}
 
@@ -142,7 +143,7 @@ async def test_create_lobby_accepts_explicit_builtin_rules_and_capacity(
         "built_in_ruleset_id": "mini7_v1",
         "custom": False,
         "player_count": 7,
-        "cadence_preset": "builtin_sync_v1",
+        "cadence_preset": "casual_standard_v1",
         "role_counts": [
             {"role": "DETECTIVE", "count": 1},
             {"role": "DOCTOR", "count": 1},
@@ -157,6 +158,52 @@ async def test_create_lobby_accepts_explicit_builtin_rules_and_capacity(
         lobby = await session.get(Lobby, lobby_id)
     assert lobby is not None
     assert lobby.human_seat_capacity == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cadence_preset",
+    ["casual_fast_v1", "casual_standard_v1", "casual_relaxed_v1"],
+)
+async def test_create_lobby_accepts_each_casual_cadence_preset(
+    client: AsyncClient,
+    cadence_preset: str,
+) -> None:
+    token = await _guest_token(client)
+
+    response = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "cadence_preset": cadence_preset,
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["rules_summary"]["cadence_preset"] == cadence_preset
+
+
+@pytest.mark.asyncio
+async def test_host_can_change_casual_cadence_before_any_friend_joins(
+    client: AsyncClient,
+) -> None:
+    token = await _guest_token(client)
+    created = await client.post(
+        "/lobbies",
+        json={"built_in_ruleset_id": "mini7_v1"},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert created.status_code == 201, created.text
+
+    changed = await client.patch(
+        f"/lobbies/{created.json()['id']}/configuration",
+        json={"cadence_preset": "casual_relaxed_v1"},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["rules_summary"]["cadence_preset"] == "casual_relaxed_v1"
 
 
 @pytest.mark.asyncio
