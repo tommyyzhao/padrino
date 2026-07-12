@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- OpenRouter adapter contracts (US-351): pass the model id of each concrete
+  attempt into the safe routing-audit extractor—never stamp an OpenRouter
+  different-model fallback as the primary request. Prefer LiteLLM's hidden
+  response cost, then OpenRouter's usage.cost; redact resolved secrets and
+  entire credential headers before logging or returning errors. Keep real
+  coverage behind both integration / live_llm markers and an explicit runtime
+  switch, preflight a multi-call integer-micros ceiling, and assert each live
+  result reports cost. Compatibility probe summaries remain audit/report data;
+  they do not mutate ranked eligibility.
 - Deterministic whole-game cost estimation (US-350): keep reservation math in
   pure `core/cost_estimator.py` over a frozen `GameRulesSnapshot`, its pinned
   cadence, normalized decimal catalog token prices, and per-seat maximum output
@@ -6924,3 +6933,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m
   "not integration"`. Frontend gates not run; story did not touch
   `web/dashboard`.
+
+## 2026-07-12 PDT - US-351
+- Completed the offline OpenRouter adapter contract: structured
+  response_format, invalid/empty JSON, 402 budget and 403 permission
+  fallthrough, 429 retry, timeout coverage, actual per-attempt fallback audit
+  attribution, and both LiteLLM-hidden and OpenRouter usage.cost extraction.
+  Provider diagnostics now redact complete credential-header values as well as
+  the resolved secret.
+- Added a no-cassette live adapter suite for an affordable structured and
+  prompt-only model across vote and detective night-action observations. It
+  requires the API key, both live markers, and
+  PADRINO_RUN_LIVE_OPENROUTER_ADAPTER=1; a conservative four-call
+  integer-micros preflight, provider price caps, output cap, no retries, and
+  reported-cost assertion bound spend. Probe operator summaries remain
+  audit-only and do not write ranked eligibility.
+- Repaired stale historical migration-test heads after US-349's already
+  shipped 0070 revision. The 0055 exact-column test now upgrades only to
+  0055; all head assertions use 0070. No migration schema was changed.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: src/padrino/llm/litellm_adapter.py,
+  tests/llm/test_litellm_adapter.py,
+  tests/openrouter/test_litellm_adapter_live.py, migration-chain tests
+  0055–0069, ralph/prd.json, ralph/progress.txt.
+- Gates (all GREEN): focused adapter/retry/routing tests -> 59 passed;
+  migration-chain regression slice -> 45 passed; live suite selector skipped
+  without its explicit runtime switch; uv run ruff check .;
+  uv run ruff format --check .; uv run mypy src tests; uv run pytest -m
+  "not integration" -> 3270 passed / 51 skipped / 12 deselected. Frontend
+  gates not run; story did not touch web/dashboard.

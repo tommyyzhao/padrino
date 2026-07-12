@@ -536,7 +536,7 @@
         "A compatibility report can be generated from results without changing ranked eligibility automatically."
       ],
       "notes": "Wave 15 provider contract gate.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-352",
