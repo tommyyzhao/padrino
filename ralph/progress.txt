@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Deterministic whole-game cost estimation (US-350): keep reservation math in
+  pure `core/cost_estimator.py` over a frozen `GameRulesSnapshot`, its pinned
+  cadence, normalized decimal catalog token prices, and per-seat maximum output
+  limits. Convert each component upward to integer USD micros; unknown prompt
+  or completion pricing leaves totals absent and is BYOK-only unless an
+  operator-supplied full override prices it. Bound every AI seat as alive for
+  discussion/vote/night-action calls, and assign hidden mafia-only calls to
+  the greatest marginal per-call reservation cost (never a one-time fixed
+  charge) so any seeded role assignment remains funded. Return the assumptions,
+  catalog hash, per-seat split, and stable policy tokens with the totals.
 - OpenRouter runtime audit (US-349): keep router provenance entirely in the
   impure `openrouter.routing_metadata` seam. Derive the requested canonical
   slug and policy hash from the frozen request, derive actual model/provider /
@@ -6892,3 +6902,25 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3300 selected passed. Frontend gates
   not run; story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-350
+- Added the pure frozen-snapshot estimator for whole-game OpenRouter costs.
+  Decimal catalog prices are rounded upward into integer USD micros across
+  prompt, completion, fixed, request, and reasoning components, with a
+  per-seat safety margin and no DB, provider, or wall-clock dependency.
+- Bounded every AI seat through the full alive-seat schedule, then allocated
+  mafia-only channel calls to the highest marginal per-call cost to cover
+  hidden seeded roles without allowing one-time fixed charges to distort the
+  reservation. The result returns low/expected/reservation totals, seat detail,
+  catalog hash, assumptions, platform/BYOK eligibility, and stable reasons.
+- Added pinned mini7, bench10, and custom-deck bounds; BYOK/override and
+  over-policy coverage; decimal/no-float guard; and Hypothesis monotonicity
+  coverage for price, output cap, discussion cycles, and AI seat count.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/cost_estimator.py`,
+  `tests/core/test_cost_estimator.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused estimator/purity tests; `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m
+  "not integration"`. Frontend gates not run; story did not touch
+  `web/dashboard`.

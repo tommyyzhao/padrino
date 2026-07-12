@@ -514,7 +514,7 @@
         "Property tests prove totals are monotonic as price, token cap, discussion cycles, or AI seat count increase."
       ],
       "notes": "Foundation for $5 admission and UI estimate.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-351",
