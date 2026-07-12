@@ -124,7 +124,7 @@ async def _friend_member_id(client: AsyncClient, lobby_id: str, host_token: str)
     return member_id
 
 
-async def _create_lobby_with_prepick(
+async def _create_lobby_with_legacy_build_reservation(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
     host_token: str,
@@ -134,10 +134,18 @@ async def _create_lobby_with_prepick(
         build_id = build.id
     resp = await client.post(
         "/lobbies",
-        json={"ruleset_id": "mini7_v1", "prepick_agent_build_ids": [str(build_id)]},
+        json={"ruleset_id": "mini7_v1"},
         cookies={HUMAN_SESSION_COOKIE: host_token},
     )
     assert resp.status_code == 201, resp.text
+    lobby_id = uuid.UUID(resp.json()["id"])
+    async with session_factory() as session:
+        seat = await session.scalar(
+            select(LobbySeat).where(LobbySeat.lobby_id == lobby_id, LobbySeat.seat_index == 1)
+        )
+        assert seat is not None
+        seat.agent_build_id = build_id
+        await session.commit()
     return resp.json(), build_id
 
 
@@ -515,7 +523,9 @@ async def test_kick_releases_member_seat_admission_and_allows_refill(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     host = await _guest_token(client)
-    lobby, build_id = await _create_lobby_with_prepick(client, session_factory, host)
+    lobby, build_id = await _create_lobby_with_legacy_build_reservation(
+        client, session_factory, host
+    )
     invite = await _invite_token(client, lobby["id"], host)
     friend = await _guest_token(client)
     friend_principal_id = await _principal_id_for_token(session_factory, friend)

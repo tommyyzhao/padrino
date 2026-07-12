@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +57,10 @@ from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.rules_snapshots import runtime_ruleset_from_pair
+from padrino.openrouter.lobby_model_selection import (
+    LobbyModelSelectionError,
+    materialize_frozen_lobby_model_selection,
+)
 
 
 class LobbyNotLaunchableError(Exception):
@@ -141,6 +145,23 @@ async def launch_lobby(
     )
     if not structural_readiness.allowed:
         raise LobbyNotLaunchableError(structural_readiness.reasons[0].value)
+
+    # US-348 selections are resolved against an immutable catalog while the
+    # lobby is mutable, then materialized only here.  A later catalog refresh
+    # therefore cannot replace a locked seat's chosen slug, prompt/schema,
+    # inference parameters, routing preferences, or funding-owner reference.
+    materialization_now = now if now is not None else datetime.now(UTC)
+    for seat in seats:
+        if seat.seat_kind != LobbySeatKind.AI.value or seat.model_selection is None:
+            continue
+        try:
+            seat.agent_build_id = await materialize_frozen_lobby_model_selection(
+                session,
+                selection_json_value=seat.model_selection,
+                now=materialization_now,
+            )
+        except (LobbyModelSelectionError, ValueError) as exc:
+            raise LobbyNotLaunchableError(str(exc) or "frozen_model_unavailable") from exc
 
     league = await leagues_repo.get(session, lobby.league_id)
     human_seat_count = sum(1 for seat in seats if seat.seat_kind == LobbySeatKind.HUMAN.value)

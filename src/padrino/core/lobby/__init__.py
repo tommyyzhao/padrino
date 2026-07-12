@@ -7,6 +7,12 @@ from padrino.core.lobby.autofill import (
     NotEnoughCuratedModelsError,
     autofill_empty_seats,
 )
+from padrino.core.lobby.model_selection import (
+    ModelAutoFillCandidate,
+    ModelAutoFillPolicy,
+    NotEnoughEligibleModelsError,
+    autofill_model_slugs,
+)
 from padrino.core.lobby.readiness import (
     LobbyReadinessDecision,
     LobbyReadinessMember,
@@ -41,10 +47,14 @@ __all__ = [
     "LobbySeatPlanEntry",
     "LobbySeatPlanError",
     "LobbySeatPlanReason",
+    "ModelAutoFillCandidate",
+    "ModelAutoFillPolicy",
     "NotEnoughCuratedModelsError",
+    "NotEnoughEligibleModelsError",
     "RankedSeatingViolation",
     "assert_strangers_only_ranked",
     "autofill_empty_seats",
+    "autofill_model_slugs",
     "claim_lowest_available_ai_seat",
     "evaluate_lobby_readiness",
     "release_member_seat",

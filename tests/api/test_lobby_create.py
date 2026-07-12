@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
-from padrino.core.enums import LeagueKind, LobbySeatKind, LobbyStatus, Role
+from padrino.core.enums import LeagueKind, LobbyStatus, Role
 from padrino.core.rulesets.snapshot import GameRulesSnapshot, canonical_rules_hash
 from padrino.db.models import (
     AgentBuild,
@@ -356,7 +356,7 @@ async def test_create_lobby_accepts_explicit_false_ranked_fields_as_casual(
 
 
 @pytest.mark.asyncio
-async def test_configuration_update_preserves_existing_prepick_models(
+async def test_configuration_update_preserves_existing_legacy_build_reservations(
     client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -369,12 +369,18 @@ async def test_configuration_update_preserves_existing_prepick_models(
         json={
             "built_in_ruleset_id": "mini7_v1",
             "human_seat_count": 2,
-            "prepick_agent_build_ids": [str(build_id)],
         },
         cookies={HUMAN_SESSION_COOKIE: token},
     )
     assert created.status_code == 201, created.text
     lobby_id = uuid.UUID(created.json()["id"])
+    async with session_factory() as session:
+        legacy_seat = await session.scalar(
+            select(LobbySeat).where(LobbySeat.lobby_id == lobby_id, LobbySeat.seat_index == 2)
+        )
+        assert legacy_seat is not None
+        legacy_seat.agent_build_id = build_id
+        await session.commit()
 
     changed = await client.patch(
         f"/lobbies/{lobby_id}/configuration",
@@ -520,40 +526,19 @@ async def test_create_lobby_with_theme_pack(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_lobby_prepick_models(
-    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    async with session_factory() as session:
-        build = await _make_agent_build(session)
-        build_id = str(build.id)
+async def test_create_lobby_rejects_agent_build_uuid_model_input(client: AsyncClient) -> None:
     token = await _guest_token(client)
     resp = await client.post(
         "/lobbies",
-        json={"ruleset_id": "mini7_v1", "prepick_agent_build_ids": [build_id]},
+        json={"ruleset_id": "mini7_v1", "prepick_agent_build_ids": [str(uuid.uuid4())]},
         cookies={HUMAN_SESSION_COOKIE: token},
     )
-    assert resp.status_code == 201, resp.text
-    lobby_id = uuid.UUID(resp.json()["id"])
-    async with session_factory() as session:
-        seats = list(
-            (
-                await session.execute(
-                    select(LobbySeat)
-                    .where(LobbySeat.lobby_id == lobby_id)
-                    .order_by(LobbySeat.seat_index)
-                )
-            ).scalars()
-        )
-    assert seats[0].seat_kind == LobbySeatKind.HUMAN.value
-    assert seats[0].member_id is not None
-    assert seats[1].seat_kind == LobbySeatKind.AI.value
-    assert str(seats[1].agent_build_id) == build_id
-    # The remaining AI seats are left empty for curated auto-fill (US-149).
-    assert seats[2].agent_build_id is None
+    assert resp.status_code == 422
+    assert resp.json()["detail"][0]["loc"] == ["body", "prepick_agent_build_ids"]
 
 
 @pytest.mark.asyncio
-async def test_create_lobby_rejects_unknown_prepick_model(client: AsyncClient) -> None:
+async def test_create_lobby_rejects_unknown_legacy_uuid_contract(client: AsyncClient) -> None:
     token = await _guest_token(client)
     resp = await client.post(
         "/lobbies",
@@ -564,11 +549,11 @@ async def test_create_lobby_rejects_unknown_prepick_model(client: AsyncClient) -
         cookies={HUMAN_SESSION_COOKIE: token},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"] == "unknown_prepick_model"
+    assert resp.json()["detail"][0]["type"] == "extra_forbidden"
 
 
 @pytest.mark.asyncio
-async def test_create_lobby_rejects_inactive_prepick_model(
+async def test_create_lobby_rejects_inactive_agent_build_uuid_contract(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     async with session_factory() as session:
@@ -584,21 +569,20 @@ async def test_create_lobby_rejects_inactive_prepick_model(
 
 
 @pytest.mark.asyncio
-async def test_create_lobby_rejects_too_many_prepick_models(
+async def test_create_lobby_rejects_many_agent_build_uuid_inputs(
     client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     async with session_factory() as session:
         build = await _make_agent_build(session)
         build_id = str(build.id)
     token = await _guest_token(client)
-    # mini7_v1 has only 6 AI seats; 7 pre-picks is one too many.
     resp = await client.post(
         "/lobbies",
         json={"ruleset_id": "mini7_v1", "prepick_agent_build_ids": [build_id] * 7},
         cookies={HUMAN_SESSION_COOKIE: token},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"] == "too_many_prepick_models"
+    assert resp.json()["detail"][0]["type"] == "extra_forbidden"
 
 
 @pytest.mark.asyncio

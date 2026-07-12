@@ -3,10 +3,9 @@
 A host creates a private lobby and configures the human-multiplayer game it will
 launch: the ruleset/size, the per-game
 ``identity_mode`` (default ANONYMOUS), a static ``theme_pack_id``, the bot
-pre-pick (a list of human-eligible model ``agent_build`` ids) vs curated
-auto-fill, and stakes pinned ``CASUAL``. ``GET /lobbies/{id}`` returns a
-member-scoped view whose composition is COUNTS ONLY — never a per-seat human/AI
-map — produced by the single canonical
+canonical model-slug selections vs curated auto-fill, and stakes pinned
+``CASUAL``. ``GET /lobbies/{id}`` returns a member-scoped view whose composition
+is COUNTS ONLY — never a per-seat human/AI map — produced by the single canonical
 :func:`padrino.core.composition.composition_summary` (US-126/US-142).
 
 There is no public matchmaking in v1 (decision 2): a lobby is reachable only by
@@ -62,7 +61,6 @@ from padrino.core.rulesets.snapshot import (
     snapshot_from_ruleset,
 )
 from padrino.db.models import Lobby
-from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.rules_snapshots import runtime_ruleset_from_pair
@@ -77,6 +75,13 @@ from padrino.economics.human_cost_governance import (
     release_admission_for_member,
     release_inference_reservations_for_lobby,
     rollback_admission_decision,
+)
+from padrino.openrouter.lobby_model_selection import (
+    LobbyModelSelectionError,
+    RequestedAiModelSelection,
+    RequestedAutoFillPolicy,
+    resolve_lobby_model_selections,
+    selection_json,
 )
 
 router = APIRouter()
@@ -100,6 +105,13 @@ def ranked_human_rating_enabled_from_request(request: Request) -> bool:
 
     settings = getattr(request.app.state, "auth_settings", None) or get_settings()
     return getattr(settings, "padrino_ranked_human_rating_enabled", False) is True
+
+
+def _openrouter_default_zdr() -> bool:
+    """Resolve the server-owned casual router privacy default."""
+    from padrino.settings import get_settings
+
+    return get_settings().padrino_openrouter_default_zdr
 
 
 # Map an admission-denial reason to its HTTP status. A breaker-open or per-user
@@ -146,11 +158,12 @@ class LobbyCreate(BaseModel):
     human_seat_count: int | None = Field(default=None, ge=1)
     identity_mode: IdentityMode = IdentityMode.ANONYMOUS
     theme_pack_id: str | None = Field(default=None, max_length=64)
-    #: Pre-picked human-eligible model agent_build ids assigned to AI seats, in
-    #: order. Any AI seat beyond this list is left empty for curated
-    #: deterministic auto-fill at launch (US-149). Length must not exceed the AI
-    #: seat count (player_count - 1, the host's own HUMAN seat).
-    prepick_agent_build_ids: list[uuid.UUID] = Field(default_factory=list)
+    #: Canonical OpenRouter model choices keyed to configured AI slots.  These
+    #: are server-resolved against one immutable catalog snapshot; player-facing
+    #: AgentBuild UUIDs are deliberately not accepted (US-348).
+    ai_model_selections: list[RequestedAiModelSelection] = Field(default_factory=list)
+    #: Deterministically fills every AI slot not explicitly selected above.
+    autofill_policy: RequestedAutoFillPolicy | None = None
     #: Deprecated US-291 checkbox. Ranked invite lobbies are no longer reachable
     #: through this custom/casual route.
     ranked: bool | None = None
@@ -169,7 +182,8 @@ class LobbyConfigUpdate(BaseModel):
     human_seat_count: int | None = Field(default=None, ge=1)
     identity_mode: IdentityMode | None = None
     theme_pack_id: str | None = Field(default=None, max_length=64)
-    prepick_agent_build_ids: list[uuid.UUID] | None = None
+    ai_model_selections: list[RequestedAiModelSelection] | None = None
+    autofill_policy: RequestedAutoFillPolicy | None = None
     ranked: bool | None = None
     integrity_acknowledged: bool | None = None
 
@@ -468,46 +482,22 @@ def _ensure_casual_create(body: LobbyCreate | LobbyConfigUpdate) -> None:
         )
 
 
-async def _validate_prepicks(
-    session: AsyncSession,
-    *,
-    prepick_agent_build_ids: list[uuid.UUID],
-    ai_seat_count: int,
-) -> None:
-    if len(prepick_agent_build_ids) > ai_seat_count:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="too_many_prepick_models",
-        )
-
-    for build_id in prepick_agent_build_ids:
-        build = await agent_builds_repo.get(session, build_id)
-        if build is None or not build.active:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="unknown_prepick_model",
-            )
-
-
 def _configured_seats(
     *,
     player_count: int,
     human_seat_capacity: int,
     host_member_id: uuid.UUID,
-    prepick_agent_build_ids: list[uuid.UUID],
-    legacy_prepick_slots: bool,
+    legacy_agent_build_ids_by_index: Mapping[int, uuid.UUID] | None = None,
 ) -> list[LobbySeatPlanEntry]:
-    prepick_start_index = 1 if legacy_prepick_slots else human_seat_capacity
-    prepicks_by_index = {
-        prepick_start_index + offset: str(build_id)
-        for offset, build_id in enumerate(prepick_agent_build_ids)
-    }
+    legacy_builds = legacy_agent_build_ids_by_index or {}
     return [
         LobbySeatPlanEntry(
             seat_index=seat_index,
             seat_kind=LobbySeatKind.HUMAN if seat_index == 0 else LobbySeatKind.AI,
             member_id=str(host_member_id) if seat_index == 0 else None,
-            agent_build_id=prepicks_by_index.get(seat_index),
+            agent_build_id=(
+                str(legacy_builds[seat_index]) if seat_index in legacy_builds else None
+            ),
         )
         for seat_index in range(player_count)
     ]
@@ -523,9 +513,9 @@ async def create_lobby(
     """Create a private friend lobby owned by the calling human.
 
     The lobby is OPEN and defaults casual; the host occupies seat 0 (HUMAN).
-    The remaining seats are AI: the host's pre-picked human-eligible models fill
-    them in order, any beyond the pre-pick are left empty for curated auto-fill
-    (US-149).
+    Canonical model selections, when supplied, are frozen against one catalog
+    snapshot; legacy lobbies without a selection keep the existing curated-build
+    launch compatibility path.
 
     Admission is enforced FIRST: the calling principal's per-user/day game cap,
     inference-$ cap, and the global cost breaker gate lobby creation (US-151). A
@@ -543,14 +533,29 @@ async def create_lobby(
         player_count=player_count,
         legacy_alias=resolved_rules.legacy_ruleset_alias,
     )
-    ai_seats = _ai_seat_count(player_count=player_count, human_seat_capacity=human_seat_capacity)
-    legacy_prepick_slots = resolved_rules.legacy_ruleset_alias and body.human_seat_count is None
-    prepick_limit = player_count - 1 if legacy_prepick_slots else ai_seats
-    await _validate_prepicks(
-        session,
-        prepick_agent_build_ids=body.prepick_agent_build_ids,
-        ai_seat_count=prepick_limit,
-    )
+    lobby_seed = secrets.token_hex(16)
+    model_selections_by_index: dict[int, dict[str, object]] = {}
+    if body.ai_model_selections or body.autofill_policy is not None:
+        try:
+            resolved_models = await resolve_lobby_model_selections(
+                session,
+                ruleset_id=resolved_rules.ruleset_id,
+                principal_id=ctx.principal_id,
+                ai_seat_indices=tuple(range(human_seat_capacity, player_count)),
+                requested_selections=body.ai_model_selections,
+                autofill_policy=body.autofill_policy,
+                default_zdr=_openrouter_default_zdr(),
+                lobby_seed=lobby_seed,
+            )
+        except LobbyModelSelectionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        model_selections_by_index = {
+            seat_index: selection_json(selection)
+            for seat_index, selection in resolved_models.selections_by_seat.items()
+        }
 
     league = await leagues_repo.get_or_create_humans_included(
         session, ruleset_id=resolved_rules.ruleset_id, ranked=False
@@ -561,7 +566,7 @@ async def create_lobby(
         ruleset_id=resolved_rules.ruleset_id,
         identity_mode=body.identity_mode.value,
         theme_pack_id=body.theme_pack_id,
-        lobby_seed=secrets.token_hex(16),
+        lobby_seed=lobby_seed,
         invite_token=secrets.token_urlsafe(24),
         integrity_acknowledged=False,
         host_principal_id=ctx.principal_id,
@@ -589,8 +594,6 @@ async def create_lobby(
         player_count=player_count,
         human_seat_capacity=human_seat_capacity,
         host_member_id=host_member.id,
-        prepick_agent_build_ids=body.prepick_agent_build_ids,
-        legacy_prepick_slots=legacy_prepick_slots,
     ):
         await lobbies_repo.add_seat(
             session,
@@ -601,6 +604,7 @@ async def create_lobby(
             agent_build_id=(
                 uuid.UUID(seat.agent_build_id) if seat.agent_build_id is not None else None
             ),
+            model_selection=model_selections_by_index.get(seat.seat_index),
         )
 
     await session.commit()
@@ -679,27 +683,39 @@ async def update_lobby_configuration(
         player_count=player_count,
         legacy_alias=False,
     )
-    ai_seats = _ai_seat_count(player_count=player_count, human_seat_capacity=human_seat_capacity)
-    if body.prepick_agent_build_ids is not None:
-        prepicks = body.prepick_agent_build_ids
+    existing_seats = await lobbies_repo.list_seats(session, lobby_id)
+    legacy_agent_build_ids_by_index: dict[int, uuid.UUID] = {}
+    model_selections_by_index: dict[int, dict[str, object]] = {}
+    selection_fields = {"ai_model_selections", "autofill_policy"}
+    if fields & selection_fields:
+        try:
+            resolved_models = await resolve_lobby_model_selections(
+                session,
+                ruleset_id=resolved_rules.ruleset_id,
+                principal_id=ctx.principal_id,
+                ai_seat_indices=tuple(range(human_seat_capacity, player_count)),
+                requested_selections=body.ai_model_selections or [],
+                autofill_policy=body.autofill_policy,
+                default_zdr=_openrouter_default_zdr(),
+                lobby_seed=lobby.lobby_seed,
+            )
+        except LobbyModelSelectionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        model_selections_by_index = {
+            seat_index: selection_json(selection)
+            for seat_index, selection in resolved_models.selections_by_seat.items()
+        }
     else:
-        existing_seats = await lobbies_repo.list_seats(session, lobby_id)
-        prepicks = [
-            seat.agent_build_id
-            for seat in sorted(existing_seats, key=lambda seat: seat.seat_index)
-            if seat.agent_build_id is not None
-        ]
-    legacy_prepick_slots = (
-        body.prepick_agent_build_ids is None
-        and existing_capacity == player_count
-        and bool(prepicks)
-    )
-    prepick_limit = player_count - 1 if legacy_prepick_slots else ai_seats
-    await _validate_prepicks(
-        session,
-        prepick_agent_build_ids=prepicks,
-        ai_seat_count=prepick_limit,
-    )
+        for seat in existing_seats:
+            if seat.seat_index < human_seat_capacity:
+                continue
+            if seat.agent_build_id is not None:
+                legacy_agent_build_ids_by_index[seat.seat_index] = seat.agent_build_id
+            if seat.model_selection is not None:
+                model_selections_by_index[seat.seat_index] = seat.model_selection
     host_member = next(member for member in members if member.is_host)
     updated = await lobbies_repo.update_configuration(
         session,
@@ -720,9 +736,9 @@ async def update_lobby_configuration(
             player_count=player_count,
             human_seat_capacity=human_seat_capacity,
             host_member_id=host_member.id,
-            prepick_agent_build_ids=prepicks,
-            legacy_prepick_slots=legacy_prepick_slots,
+            legacy_agent_build_ids_by_index=legacy_agent_build_ids_by_index,
         ),
+        model_selections=model_selections_by_index,
     )
     summary = await _summary(session, lobby_id=lobby_id)
     await session.commit()

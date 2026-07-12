@@ -471,7 +471,7 @@
         "Auto-fill chooses deterministically from platform/BYOK eligible models under injected price/compatibility policy."
       ],
       "notes": "Model identity may be visible in pregame configuration but never bound to public in-game seat before reveal.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-349",
@@ -482,10 +482,10 @@
         "US-341",
         "US-348"
       ],
-      "title": "Persist actual OpenRouter routing metadata (migration 0068)",
-      "description": "Migration 0068 extends LlmCall/runtime audit data to distinguish requested model from actual provider/model and archive router attempt metadata required for cost/scientific attribution.",
+      "title": "Persist actual OpenRouter routing metadata (migration 0070)",
+      "description": "Migration 0070 extends LlmCall/runtime audit data to distinguish requested model from actual provider/model and archive router attempt metadata required for cost/scientific attribution.",
       "acceptanceCriteria": [
-        "0068 follows 0067 linearly; upgrade/downgrade and ORM export tests pass.",
+        "0070 follows 0069 linearly; upgrade/downgrade and ORM export tests pass.",
         "Each OpenRouter call records requested canonical slug, actual model/provider/endpoint when supplied, generation id, router strategy/attempt/is_byok, normalized attempts/pipeline, catalog snapshot id, and routing-policy hash.",
         "Metadata is bounded/sanitized JSON and excludes auth headers, credentials, prompt content duplicated outside existing retention policy, and provider secrets.",
         "Non-OpenRouter calls remain compatible with nullable fields.",
@@ -566,10 +566,10 @@
       "dependencies": [
         "US-352"
       ],
-      "title": "Encrypted provider credential schema (migration 0069)",
-      "description": "Migration 0069 adds principal-owned provider credential and PKCE-flow tables designed for envelope encryption and rotation without storing plaintext.",
+      "title": "Encrypted provider credential schema (migration 0071)",
+      "description": "Migration 0071 adds principal-owned provider credential and PKCE-flow tables designed for envelope encryption and rotation without storing plaintext.",
       "acceptanceCriteria": [
-        "0069 follows 0068 linearly with SQLite/Postgres round-trip tests.",
+        "0071 follows 0070 linearly with SQLite/Postgres round-trip tests.",
         "Credential row stores principal/provider, ciphertext, nonce, key_version, non-secret display suffix/label, created/updated/last_validated/revoked timestamps, and uniqueness for one active OpenRouter connection per principal.",
         "PKCE flow stores only hashed/signed verifier binding, state/expiry/consumed status and is single-use under races.",
         "No plaintext key column, ORM repr, index, audit row, or migration default exists.",
@@ -647,10 +647,10 @@
       "dependencies": [
         "US-352"
       ],
-      "title": "Promotional credit ledger and reservations (migration 0070)",
-      "description": "Migration 0070 introduces append-only integer-micro grant/charge/release/adjustment ledger rows plus game-scoped reservation state and an operator completion-reserve ledger.",
+      "title": "Promotional credit ledger and reservations (migration 0072)",
+      "description": "Migration 0072 introduces append-only integer-micro grant/charge/release/adjustment ledger rows plus game-scoped reservation state and an operator completion-reserve ledger.",
       "acceptanceCriteria": [
-        "0070 follows 0069 linearly on SQLite/Postgres and adds constraints preventing negative amounts where invalid, duplicate idempotency keys, multiple promo grants per principal, and multiple active reservations per game.",
+        "0072 follows 0071 linearly on SQLite/Postgres and adds constraints preventing negative amounts where invalid, duplicate idempotency keys, multiple promo grants per principal, and multiple active reservations per game.",
         "Balance is derived from append-only entries; no mutable float balance column is authoritative.",
         "Reservation stores estimate/catalog/rules hashes, reserved/consumed/released micros, status, principal, lobby/game ids, and timestamps outside core.",
         "Completion reserve entries are separated from player ledger and attributable to estimate miss/game/model without exposing player PII publicly.",
@@ -1064,10 +1064,10 @@
       "dependencies": [
         "US-375"
       ],
-      "title": "Ranked season and pool persistence (migration 0071)",
-      "description": "Migration 0071 adds ranked seasons, immutable pool entries, role/faction calibration, and lifecycle audit rows. It establishes one active season per mode/ruleset without altering scientific ratings.",
+      "title": "Ranked season and pool persistence (migration 0073)",
+      "description": "Migration 0073 adds ranked seasons, immutable pool entries, role/faction calibration, and lifecycle audit rows. It establishes one active season per mode/ruleset without altering scientific ratings.",
       "acceptanceCriteria": [
-        "0071 follows 0070 linearly with SQLite/Postgres upgrade/downgrade and migration-head tests.",
+        "0073 follows 0072 linearly with SQLite/Postgres upgrade/downgrade and migration-head tests.",
         "Tables persist every season snapshot/hash field and append-only transition audit; pool/calibration rows are immutable after SHADOW.",
         "Partial unique constraints prevent overlapping ACTIVE seasons for the same mode/ruleset while allowing drafts/history.",
         "No raw provider credential, player identity, or scientific Rating foreign key is stored; AI anchors are copied values with provenance snapshot ids.",
@@ -1233,10 +1233,10 @@
       "dependencies": [
         "US-383"
       ],
-      "title": "Season/mode-scoped human rating storage (migration 0072)",
-      "description": "Migration 0072 scopes HumanRating/HumanRatingEvent by season, mode, and ruleset and archives complete rating inputs needed for solo/mixed recomputation while preserving legacy Wave 14 rows.",
+      "title": "Season/mode-scoped human rating storage (migration 0074)",
+      "description": "Migration 0074 scopes HumanRating/HumanRatingEvent by season, mode, and ruleset and archives complete rating inputs needed for solo/mixed recomputation while preserving legacy Wave 14 rows.",
       "acceptanceCriteria": [
-        "0072 follows 0071 linearly, upgrades/downgrades SQLite/Postgres, and assigns legacy rows to an explicit LEGACY_SOLO scope without fabricating an active season.",
+        "0074 follows 0073 linearly, upgrades/downgrades SQLite/Postgres, and assigns legacy rows to an explicit LEGACY_SOLO scope without fabricating an active season.",
         "Uniqueness includes principal/human player, season, mode, ruleset; events include prior/posterior, outcome, role/faction, AI anchor/pool/calibration/policy hashes, participation/forfeit/no-contest, and idempotency.",
         "Existing public ladder can still read legacy rows but new ranked routes always filter explicit scope.",
         "No FK/read dependency to scientific Rating/RatingEvent is introduced.",
@@ -1340,10 +1340,10 @@
       "dependencies": [
         "US-388"
       ],
-      "title": "Persistent ranked queue tickets and claims (migration 0073)",
-      "description": "Migration 0073 adds durable mixed-ranked tickets, leases/claims, readiness checks, and match membership so API/worker restarts cannot duplicate or strand entrants.",
+      "title": "Persistent ranked queue tickets and claims (migration 0075)",
+      "description": "Migration 0075 adds durable mixed-ranked tickets, leases/claims, readiness checks, and match membership so API/worker restarts cannot duplicate or strand entrants.",
       "acceptanceCriteria": [
-        "0073 follows 0072 linearly with SQLite/Postgres round-trip and indexes for active season/status/created/lease.",
+        "0075 follows 0074 linearly with SQLite/Postgres round-trip and indexes for active season/status/created/lease.",
         "One active ticket per principal/mode/season is enforced; ticket stores non-PII matching facts, policy hash, state timestamps, lease owner/expiry, and cancellation/no-show provenance.",
         "Match membership transactionally consumes tickets once and links the eventual game; stale leases are reaped without losing queue age.",
         "No raw IP/email/device/display name or provider credential is stored; anti-cheat references use existing hashed/sidecar facts.",
@@ -1510,10 +1510,10 @@
       "dependencies": [
         "US-390"
       ],
-      "title": "Player reports, blocks, and mutes schema (migration 0074)",
+      "title": "Player reports, blocks, and mutes schema (migration 0076)",
       "description": "Add the minimum strangers-ranked safety substrate: post-game reports, principal blocks, and game-local mutes, segregated from hash-chained mechanics and public identity.",
       "acceptanceCriteria": [
-        "0074 follows 0073 linearly and supports append-only reports with category/evidence refs/status, unique directional blocks, and game/principal mute sidecar state; upgrade/downgrade/index tests pass.",
+        "0076 follows 0075 linearly and supports append-only reports with category/evidence refs/status, unique directional blocks, and game/principal mute sidecar state; upgrade/downgrade/index tests pass.",
         "Reports reference pseudonymous principal/game/sidecar sequence without copying raw chat into hash-chain/audit payloads.",
         "Block API cannot reveal whether another principal blocked the caller; matching uses mutual exclusion privately.",
         "GDPR/retention distinguishes reporter safety evidence from ordinary chat and preserves deterministic event replay.",
@@ -1595,10 +1595,10 @@
         "US-395",
         "US-400"
       ],
-      "title": "Season-stream rating exclusion and deterministic recompute (migration 0075)",
+      "title": "Season-stream rating exclusion and deterministic recompute (migration 0077)",
       "description": "Replace per-principal local rollback as the authority for mixed ranked with canonical season/ruleset stream recomputation, because one exclusion changes later opponents' priors.",
       "acceptanceCriteria": [
-        "0075 follows 0074 linearly and adds season game exclusions/recompute runs/checkpoints/audit; existing per-principal exclusions remain legacy-compatible.",
+        "0077 follows 0076 linearly and adds season game exclusions/recompute runs/checkpoints/audit; existing per-principal exclusions remain legacy-compatible.",
         "Pure recompute orders included game input records by terminal timestamp plus game id, replays every human prior/event from season initial state, and returns byte-identical ratings/events/checkpoints.",
         "Excluding one game recomputes every transitively affected human in the season/ruleset/mode; game events/hash chains and AI anchor snapshots remain untouched.",
         "Admin operation is idempotent, resumable, dry-run diffable, actor/reason audited, and atomically publishes a completed version so readers never see partial ladder.",

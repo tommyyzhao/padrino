@@ -1861,9 +1861,10 @@ class LobbySeat(Base):
     Each seat has a fixed ``seat_index`` in the game-to-be. ``seat_kind``
     (:class:`padrino.core.enums.LobbySeatKind`) marks whether the seat is reserved
     for a HUMAN member or will be filled by an AI. A HUMAN seat may reference the
-    :class:`LobbyMember` reserving it (``member_id``); an AI seat may pin the
-    host's pre-picked human-eligible model (``agent_build_id``) or be left null for
-    curated deterministic auto-fill at launch (US-149). Seats are unique per
+    :class:`LobbyMember` reserving it (``member_id``); an AI seat may retain a
+    legacy ``agent_build_id`` or a US-348 ``model_selection`` snapshot.  The
+    latter records only server-derived catalog/prompt/routing facts while the
+    build remains unmaterialized until launch. Seats are unique per
     ``(lobby_id, seat_index)``.
 
     This holds counts-only-safe configuration data; the canonical disclosed
@@ -1885,6 +1886,9 @@ class LobbySeat(Base):
     )
     agent_build_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("agent_builds.id"), nullable=True
+    )
+    model_selection: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
     )
 
 

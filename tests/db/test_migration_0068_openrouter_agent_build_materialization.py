@@ -68,7 +68,7 @@ def _unique_index_columns(db_path: Path, table_name: str) -> set[tuple[str, ...]
 def test_0068_follows_0067_linearly() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
 
-    assert script.get_heads() == ["0068"]
+    assert script.get_heads() == ["0069"]
     assert script.get_revision("0068").down_revision == "0067"
     assert script.get_revision("0067").down_revision == "0066"
 

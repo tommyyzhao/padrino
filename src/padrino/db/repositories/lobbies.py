@@ -13,6 +13,7 @@ api/runner layer, like every other repository).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 
 from sqlalchemy import delete, select
@@ -287,6 +288,7 @@ async def add_seat(
     seat_kind: LobbySeatKind,
     member_id: uuid.UUID | None = None,
     agent_build_id: uuid.UUID | None = None,
+    model_selection: dict[str, object] | None = None,
 ) -> LobbySeat:
     obj = LobbySeat(
         lobby_id=lobby_id,
@@ -294,6 +296,7 @@ async def add_seat(
         seat_kind=seat_kind.value,
         member_id=member_id,
         agent_build_id=agent_build_id,
+        model_selection=model_selection,
     )
     session.add(obj)
     await session.flush()
@@ -349,6 +352,7 @@ async def replace_seats(
     *,
     lobby_id: uuid.UUID,
     seats: list[LobbySeatPlanEntry],
+    model_selections: Mapping[int, dict[str, object]] | None = None,
 ) -> None:
     """Replace every pre-launch seat row for a host-only lobby reconfiguration."""
     await session.execute(delete(LobbySeat).where(LobbySeat.lobby_id == lobby_id))
@@ -362,6 +366,7 @@ async def replace_seats(
                 agent_build_id=(
                     uuid.UUID(seat.agent_build_id) if seat.agent_build_id is not None else None
                 ),
+                model_selection=(model_selections or {}).get(seat.seat_index),
             )
         )
     await session.flush()

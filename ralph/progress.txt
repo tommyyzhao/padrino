@@ -3,6 +3,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Lobby canonical model selections (US-348): persist one validated,
+  secret-free `model_selection` JSON snapshot per AI `LobbySeat`, keeping the
+  requested canonical slug, immutable catalog entry/snapshot, prompt/schema
+  hashes, normalized inference allowlist, safe router preferences, and opaque
+  funding owner reference. Resolve these facts only while the lobby is mutable,
+  then materialize its AgentBuild from the frozen snapshot at launch so a later
+  catalog refresh cannot change a locked table. Keep automatic choices pure as
+  catalog-derived eligibility facts plus injected price/funding policy and a
+  `SeededRng` draw; explicit casual slots may intentionally repeat a slug and
+  therefore share one immutable build. Add a new linear migration for the
+  snapshot column and move every future planned migration number forward rather
+  than rewriting an already-shipped revision.
 - OpenRouter AgentBuild materialization (US-347): resolve player-selected
   canonical slugs only through an immutable COMPLETE catalog snapshot and a
   server-owned prompt version. Derive every display/version/provenance field
@@ -6812,3 +6824,36 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3225 passed / 51 skipped / 11
   deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-348
+- Replaced the player-facing `prepick_agent_build_ids` contract with canonical
+  per-AI-slot model selections and optional deterministic autofill. The route
+  accepts only safe routing preferences and bounded inference parameters; raw
+  AgentBuild UUIDs are rejected as unknown request fields.
+- Added a frozen, secret-free selection snapshot to each lobby AI seat and
+  migration 0069. It captures catalog entry/snapshot provenance, prompt and
+  schema hashes, normalized inference parameters, router preferences, and
+  funding owner reference. Launch materializes the build from that exact
+  snapshot, so later catalog availability changes cannot mutate a locked
+  lobby. Explicit duplicate slugs deliberately resolve to one shared immutable
+  AgentBuild across distinct game seats.
+- Added the pure price/funding eligibility auto-fill policy, migration
+  round-trip coverage, and route tests for create/update, UUID rejection,
+  unavailable-before-lock failure, and locked-catalog stability. Preserved
+  existing persisted legacy build reservations for old lobbies only.
+- Corrected the future migration schedule: this story consumed 0069; US-349
+  through US-401 now reserve the linear 0070–0077 sequence rather than
+  rewriting shipped migrations.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/lobby/model_selection.py`,
+  `src/padrino/openrouter/lobby_model_selection.py`,
+  `src/padrino/api/routes/lobbies.py`, `src/padrino/api/lobby_launch.py`,
+  `src/padrino/db/models.py`, `src/padrino/db/repositories/lobbies.py`,
+  `src/padrino/db/migrations/versions/0069_lobby_model_selections.py`, lobby
+  and migration tests, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest
+  tests/core/lobby/test_model_selection.py -q` failed on the missing module;
+  focused GREEN -> 8 passed. `uv run ruff check .`; `uv run ruff format
+  --check .`; `uv run mypy src tests`; `uv run pytest -m "not integration"`
+  -> 3238 passed / 51 skipped / 11 deselected. Frontend gates not run; story
+  did not touch `web/dashboard`.
