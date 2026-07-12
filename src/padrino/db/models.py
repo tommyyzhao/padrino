@@ -59,6 +59,12 @@ class ModelProvider(Base):
 
 class ModelConfig(Base):
     __tablename__ = "model_configs"
+    __table_args__ = (
+        UniqueConstraint(
+            "catalog_identity_hash",
+            name="uq_model_configs_catalog_identity_hash",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     provider_id: Mapped[uuid.UUID] = mapped_column(
@@ -71,6 +77,15 @@ class ModelConfig(Base):
     default_top_p: Mapped[float] = mapped_column(Numeric(asdecimal=False), nullable=False)
     default_max_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     supports_structured_outputs: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # Nullable catalog provenance keeps pre-Wave-15 admin/scientific rows
+    # readable. Materialized OpenRouter rows populate the full trio below.
+    catalog_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("model_catalog_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    catalog_canonical_slug: Mapped[str | None] = mapped_column(String, nullable=True)
+    catalog_identity_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -93,6 +108,12 @@ class PromptVersion(Base):
 
 class AgentBuild(Base):
     __tablename__ = "agent_builds"
+    __table_args__ = (
+        UniqueConstraint(
+            "materialization_identity_hash",
+            name="uq_agent_builds_materialization_identity_hash",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     display_name: Mapped[str] = mapped_column(String, nullable=False)
@@ -106,6 +127,16 @@ class AgentBuild(Base):
     inference_params: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False, server_default="v1", default="v1")
+    # These nullable identifiers distinguish new catalog-backed casual builds
+    # without forcing a semantic rewrite of legacy admin/scientific identities.
+    catalog_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("model_catalog_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    qualification_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    inference_params_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    materialization_identity_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
