@@ -721,7 +721,7 @@
         "Funding/model/rules/catalog snapshot hashes are bound together so changing selection invalidates a stale quote/confirmation."
       ],
       "notes": "Reservation must happen before Game/event creation.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-361",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -15,16 +16,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
+from padrino.api.lobby_launch import LobbyNotLaunchableError
 from padrino.db.models import (
     AgentBuild,
+    Game,
     GameSeat,
     Lobby,
     LobbySeat,
     ModelConfig,
     ModelProvider,
+    PromotionalCreditLedgerEntry,
+    PromotionalCreditReservation,
     PromptVersion,
     ProviderCredential,
 )
+from padrino.db.repositories import promotional_credit_ledger
 from padrino.db.repositories.model_catalog_snapshots import (
     CatalogEntryInput,
     create_or_get_completed_snapshot,
@@ -47,6 +53,31 @@ async def _guest_token(client: AsyncClient) -> str:
     response = await client.post("/human/guest")
     assert response.status_code == 201
     return response.cookies[HUMAN_SESSION_COOKIE]
+
+
+async def _grant_promotional_credit(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    token: str,
+) -> uuid.UUID:
+    """Seed the existing integer-micro wallet with an isolated test grant."""
+    me = await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: token})
+    assert me.status_code == 200
+    principal_id = uuid.UUID(me.json()["principal_id"])
+    async with session_factory() as session, session.begin():
+        await promotional_credit_ledger.append_credit_entry(
+            session,
+            principal_id=principal_id,
+            reservation_id=None,
+            game_id=None,
+            entry_type=promotional_credit_ledger.CreditLedgerEntryType.GRANT,
+            amount_micros=5_000_000,
+            idempotency_key=f"test-grant:{principal_id}",
+            reason="test_funding_quote",
+            now=NOW,
+        )
+    return principal_id
 
 
 def _entry(slug: str, *, availability: str = "available") -> CatalogEntryInput:
@@ -228,6 +259,7 @@ async def test_locked_lobby_materializes_frozen_snapshot_despite_later_catalog_c
         entries=[_entry("openai/frozen")],
     )
     token = await _guest_token(client)
+    await _grant_promotional_credit(client, session_factory, token=token)
     create = await client.post(
         "/lobbies",
         json={
@@ -247,8 +279,15 @@ async def test_locked_lobby_materializes_frozen_snapshot_despite_later_catalog_c
         fetched_at=NOW + timedelta(minutes=1),
         entries=[_entry("openai/frozen", availability="disabled")],
     )
+    preflight = await client.post(
+        f"/lobbies/{lobby_id}/funding-preflight",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert preflight.status_code == 200, preflight.text
+    assert preflight.json()["allowed"] is True
     launched = await client.post(
         f"/lobbies/{lobby_id}/launch",
+        json={"funding_quote_hash": preflight.json()["funding_quote_hash"]},
         cookies={HUMAN_SESSION_COOKIE: token},
     )
     assert launched.status_code == 200, launched.text
@@ -359,3 +398,395 @@ async def test_revoked_host_byok_credential_denies_lobby_launch(
     )
     assert launch.status_code == 409
     assert launch.json()["detail"] == "byok_credential_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_platform_launch_reserves_a_confirmed_frozen_funding_quote(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A funded launch holds the frozen quote before materializing its game."""
+    await _seed_openrouter_selection_inputs(
+        session_factory,
+        content_hash="1" * 64,
+        entries=[_entry("openai/funded")],
+    )
+    token = await _guest_token(client)
+    await _grant_promotional_credit(client, session_factory, token=token)
+
+    create = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "human_seat_count": 1,
+            "ai_model_selections": _duplicate_model_selections("openai/funded"),
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert create.status_code == 201, create.text
+    lobby_id = uuid.UUID(create.json()["id"])
+    await _ready_and_lock(client, lobby_id=lobby_id, token=token)
+
+    preflight = await client.post(
+        f"/lobbies/{lobby_id}/funding-preflight",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert preflight.status_code == 200, preflight.text
+    quote = preflight.json()
+    assert quote["allowed"] is True
+    assert quote["funding_source"] == "PLATFORM"
+    assert quote["reservation_micros"] > 0
+
+    launched = await client.post(
+        f"/lobbies/{lobby_id}/launch",
+        json={"funding_quote_hash": quote["funding_quote_hash"]},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert launched.status_code == 200, launched.text
+    game_id = uuid.UUID(launched.json()["game_id"])
+    retry = await client.post(
+        f"/lobbies/{lobby_id}/launch",
+        json={"funding_quote_hash": quote["funding_quote_hash"]},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json() == {
+        "lobby_id": str(lobby_id),
+        "game_id": str(game_id),
+        "status": "LAUNCHED",
+        "created": False,
+    }
+
+    async with session_factory() as session:
+        reservation = await session.scalar(
+            select(PromotionalCreditReservation).where(
+                PromotionalCreditReservation.lobby_id == lobby_id
+            )
+        )
+        assert reservation is not None
+        holds = list(
+            (
+                await session.execute(
+                    select(PromotionalCreditLedgerEntry).where(
+                        PromotionalCreditLedgerEntry.reservation_id == reservation.id,
+                        PromotionalCreditLedgerEntry.entry_type == "RESERVATION",
+                    )
+                )
+            ).scalars()
+        )
+    assert reservation.game_id == game_id
+    assert reservation.status == "ACTIVE"
+    assert reservation.reserved_micros == quote["reservation_micros"]
+    assert len(holds) == 1
+    assert holds[0].amount_micros == -quote["reservation_micros"]
+
+
+@pytest.mark.asyncio
+async def test_changed_model_selection_invalidates_a_platform_funding_confirmation(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A quote cannot reserve funds after any frozen model/catalog change."""
+    await _seed_openrouter_selection_inputs(
+        session_factory,
+        content_hash="2" * 64,
+        entries=[_entry("openai/quote-a"), _entry("openai/quote-b")],
+    )
+    token = await _guest_token(client)
+    await _grant_promotional_credit(client, session_factory, token=token)
+    create = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "human_seat_count": 1,
+            "ai_model_selections": _duplicate_model_selections("openai/quote-a"),
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert create.status_code == 201, create.text
+    lobby_id = uuid.UUID(create.json()["id"])
+    original = await client.post(
+        f"/lobbies/{lobby_id}/funding-preflight",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert original.status_code == 200, original.text
+    assert original.json()["allowed"] is True
+
+    update = await client.patch(
+        f"/lobbies/{lobby_id}/configuration",
+        json={"ai_model_selections": _duplicate_model_selections("openai/quote-b")},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert update.status_code == 200, update.text
+    await _ready_and_lock(client, lobby_id=lobby_id, token=token)
+    principal_id = await _grant_promotional_credit_principal(client, token)
+
+    stale = await client.post(
+        f"/lobbies/{lobby_id}/launch",
+        json={"funding_quote_hash": original.json()["funding_quote_hash"]},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"] == "funding_quote_stale"
+    async with session_factory() as session:
+        games = list((await session.execute(select(Game))).scalars())
+        reservations = list((await session.execute(select(PromotionalCreditReservation))).scalars())
+        totals = await promotional_credit_ledger.get_credit_totals(
+            session,
+            principal_id=principal_id,
+        )
+    assert games == []
+    assert reservations == []
+    assert totals.available_micros == 5_000_000
+
+
+async def _grant_promotional_credit_principal(client: AsyncClient, token: str) -> uuid.UUID:
+    """Read the authenticated principal id without exposing it from a quote."""
+    me = await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: token})
+    assert me.status_code == 200
+    return uuid.UUID(me.json()["principal_id"])
+
+
+@pytest.mark.asyncio
+async def test_platform_preflight_explains_unpriced_models_as_byok_required(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A platform quote fails closed instead of inventing a price for a model."""
+    unpriced = _entry("openai/unpriced").model_copy(
+        update={"pricing_strings": {}, "pricing_micros": {}}
+    )
+    await _seed_openrouter_selection_inputs(
+        session_factory,
+        content_hash="3" * 64,
+        entries=[unpriced],
+    )
+    token = await _guest_token(client)
+    create = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "human_seat_count": 1,
+            "ai_model_selections": _duplicate_model_selections("openai/unpriced"),
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert create.status_code == 201, create.text
+    lobby_id = uuid.UUID(create.json()["id"])
+    await _ready_and_lock(client, lobby_id=lobby_id, token=token)
+    preflight = await client.post(
+        f"/lobbies/{lobby_id}/funding-preflight",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert preflight.status_code == 200, preflight.text
+    assert preflight.json()["allowed"] is False
+    assert preflight.json()["reason"] == "byok_required"
+    assert "unpriceable_model" in preflight.json()["reasons"]
+    assert "byok_required" in preflight.json()["reasons"]
+
+
+@pytest.mark.asyncio
+async def test_byok_launch_requires_and_binds_an_explicit_maximum_without_promo_hold(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """BYOK confirms a bound maximum but cannot reserve or debit promo credit."""
+    await _seed_openrouter_selection_inputs(
+        session_factory,
+        content_hash="4" * 64,
+        entries=[_entry("openai/byok-confirmed")],
+    )
+    token = await _guest_token(client)
+    principal_id = await _grant_promotional_credit_principal(client, token)
+    async with session_factory() as session, session.begin():
+        session.add(
+            ProviderCredential(
+                principal_id=principal_id,
+                provider="openrouter",
+                ciphertext=b"test-ciphertext",
+                nonce=b"test-nonce",
+                key_version="test-v1",
+                display_suffix="firm",
+                label="test key",
+            )
+        )
+
+    create = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "human_seat_count": 1,
+            "ai_model_selections": _duplicate_byok_model_selections("openai/byok-confirmed"),
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert create.status_code == 201, create.text
+    lobby_id = uuid.UUID(create.json()["id"])
+    await _ready_and_lock(client, lobby_id=lobby_id, token=token)
+
+    missing = await client.post(
+        f"/lobbies/{lobby_id}/funding-preflight",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert missing.status_code == 200, missing.text
+    assert missing.json()["allowed"] is False
+    assert missing.json()["reason"] == "byok_maximum_confirmation_required"
+
+    confirmed = await client.post(
+        f"/lobbies/{lobby_id}/funding-preflight",
+        json={"byok_max_estimate_micros": 5_000_000},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    quote = confirmed.json()
+    assert quote["allowed"] is True
+    assert quote["funding_source"] == "BYOK_OWNER"
+    assert quote["reservation_micros"] is None
+    launched = await client.post(
+        f"/lobbies/{lobby_id}/launch",
+        json={
+            "funding_quote_hash": quote["funding_quote_hash"],
+            "byok_max_estimate_micros": 5_000_000,
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert launched.status_code == 200, launched.text
+    async with session_factory() as session:
+        reservations = list((await session.execute(select(PromotionalCreditReservation))).scalars())
+        entries = list((await session.execute(select(PromotionalCreditLedgerEntry))).scalars())
+    assert reservations == []
+    assert entries == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_platform_launches_cannot_overspend_one_wallet(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """One exact-balance principal can admit one of two concurrent tables."""
+    await _seed_openrouter_selection_inputs(
+        session_factory,
+        content_hash="5" * 64,
+        entries=[_entry("openai/race")],
+    )
+    token = await _guest_token(client)
+    principal_id = await _grant_promotional_credit_principal(client, token)
+    lobby_ids: list[uuid.UUID] = []
+    for _ in range(2):
+        create = await client.post(
+            "/lobbies",
+            json={
+                "built_in_ruleset_id": "mini7_v1",
+                "human_seat_count": 1,
+                "ai_model_selections": _duplicate_model_selections("openai/race"),
+            },
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert create.status_code == 201, create.text
+        lobby_id = uuid.UUID(create.json()["id"])
+        lobby_ids.append(lobby_id)
+        await _ready_and_lock(client, lobby_id=lobby_id, token=token)
+
+    preflights = [
+        await client.post(
+            f"/lobbies/{lobby_id}/funding-preflight",
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        for lobby_id in lobby_ids
+    ]
+    assert all(response.status_code == 200 for response in preflights)
+    reservation_micros = preflights[0].json()["reservation_micros"]
+    assert isinstance(reservation_micros, int) and reservation_micros > 0
+    async with session_factory() as session, session.begin():
+        await promotional_credit_ledger.append_credit_entry(
+            session,
+            principal_id=principal_id,
+            reservation_id=None,
+            game_id=None,
+            entry_type=promotional_credit_ledger.CreditLedgerEntryType.GRANT,
+            amount_micros=reservation_micros,
+            idempotency_key=f"race-grant:{principal_id}",
+            reason="test_exact_wallet_race",
+            now=NOW,
+        )
+
+    launches = await asyncio.gather(
+        *(
+            client.post(
+                f"/lobbies/{lobby_id}/launch",
+                json={"funding_quote_hash": quote.json()["funding_quote_hash"]},
+                cookies={HUMAN_SESSION_COOKIE: token},
+            )
+            for lobby_id, quote in zip(lobby_ids, preflights, strict=True)
+        )
+    )
+    assert sorted(response.status_code for response in launches) == [200, 409]
+    assert {
+        response.json().get("detail") for response in launches if response.status_code == 409
+    } == {"insufficient_promotional_credit"}
+    async with session_factory() as session:
+        games = list((await session.execute(select(Game))).scalars())
+        reservations = list((await session.execute(select(PromotionalCreditReservation))).scalars())
+        totals = await promotional_credit_ledger.get_credit_totals(
+            session,
+            principal_id=principal_id,
+        )
+    assert len(games) == 1
+    assert len(reservations) == 1
+    assert reservations[0].reserved_micros == reservation_micros
+    assert totals.available_micros == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_post_reservation_launch_leaves_no_promotional_hold(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A materialization failure cannot strand an active quote reservation."""
+    await _seed_openrouter_selection_inputs(
+        session_factory,
+        content_hash="6" * 64,
+        entries=[_entry("openai/rollback")],
+    )
+    token = await _guest_token(client)
+    principal_id = await _grant_promotional_credit(client, session_factory, token=token)
+    create = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "human_seat_count": 1,
+            "ai_model_selections": _duplicate_model_selections("openai/rollback"),
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert create.status_code == 201, create.text
+    lobby_id = uuid.UUID(create.json()["id"])
+    await _ready_and_lock(client, lobby_id=lobby_id, token=token)
+    preflight = await client.post(
+        f"/lobbies/{lobby_id}/funding-preflight",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert preflight.status_code == 200, preflight.text
+
+    async def _fail_after_reservation(*_args: object, **_kwargs: object) -> object:
+        raise LobbyNotLaunchableError("test_game_materialization_failed")
+
+    monkeypatch.setattr("padrino.api.lobby_launch.games_repo.create", _fail_after_reservation)
+    launch = await client.post(
+        f"/lobbies/{lobby_id}/launch",
+        json={"funding_quote_hash": preflight.json()["funding_quote_hash"]},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert launch.status_code == 409
+    assert launch.json()["detail"] == "test_game_materialization_failed"
+    async with session_factory() as session:
+        reservations = list((await session.execute(select(PromotionalCreditReservation))).scalars())
+        entries = list((await session.execute(select(PromotionalCreditLedgerEntry))).scalars())
+        totals = await promotional_credit_ledger.get_credit_totals(
+            session,
+            principal_id=principal_id,
+        )
+    assert reservations == []
+    assert [entry.entry_type for entry in entries] == ["GRANT"]
+    assert totals.available_micros == 5_000_000

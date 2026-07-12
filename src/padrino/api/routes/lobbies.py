@@ -76,6 +76,11 @@ from padrino.economics.human_cost_governance import (
     release_inference_reservations_for_lobby,
     rollback_admission_decision,
 )
+from padrino.openrouter.funding_preflight import (
+    FundingPreflightError,
+    FundingQuote,
+    build_lobby_funding_quote,
+)
 from padrino.openrouter.lobby_model_selection import (
     LobbyModelSelectionError,
     RequestedAiModelSelection,
@@ -83,6 +88,7 @@ from padrino.openrouter.lobby_model_selection import (
     resolve_lobby_model_selections,
     selection_json,
 )
+from padrino.settings import Settings
 
 router = APIRouter()
 
@@ -112,6 +118,16 @@ def _openrouter_default_zdr() -> bool:
     from padrino.settings import get_settings
 
     return get_settings().padrino_openrouter_default_zdr
+
+
+def _funding_settings(request: Request) -> Settings:
+    """Return the request-scoped deployment policy for funding admission."""
+    from padrino.settings import get_settings
+
+    settings = getattr(request.app.state, "auth_settings", None) or get_settings()
+    if not isinstance(settings, Settings):
+        return get_settings()
+    return settings
 
 
 # Map an admission-denial reason to its HTTP status. A breaker-open or per-user
@@ -921,10 +937,89 @@ class LaunchResponse(BaseModel):
     created: bool
 
 
+class LaunchFundingConfirmation(BaseModel):
+    """Client acknowledgement of the exact frozen funding quote it reviewed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    funding_quote_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    #: BYOK never reserves promo; the host must instead confirm this maximum
+    #: before launch. It is bound into the quote hash and cannot be replayed
+    #: against a changed model/rules/catalog snapshot.
+    byok_max_estimate_micros: int | None = Field(default=None, ge=0)
+
+
+class FundingPreflightResponse(BaseModel):
+    """Safe, secret-free quote details for the custom-lobby launch UI."""
+
+    funded: bool
+    allowed: bool
+    funding_source: str | None
+    reason: str
+    reasons: list[str]
+    reservation_micros: int | None
+    expected_total_micros: int | None
+    funding_quote_hash: str | None
+    estimate_hash: str | None
+    model_hash: str | None
+    catalog_hash: str | None
+    rules_hash: str | None
+    funding_hash: str | None
+    byok_max_estimate_micros: int | None
+
+
+def _funding_preflight_response(quote: FundingQuote) -> FundingPreflightResponse:
+    """Project a quote without any credential or principal reference."""
+    return FundingPreflightResponse(
+        funded=quote.funded,
+        allowed=quote.allowed,
+        funding_source=quote.source.value if quote.source is not None else None,
+        reason=quote.reason,
+        reasons=list(quote.reasons),
+        reservation_micros=quote.reservation_micros,
+        expected_total_micros=quote.expected_total_micros,
+        funding_quote_hash=quote.funding_quote_hash,
+        estimate_hash=quote.estimate_hash,
+        model_hash=quote.model_hash,
+        catalog_hash=quote.catalog_hash,
+        rules_hash=quote.rules_hash,
+        funding_hash=quote.funding_hash,
+        byok_max_estimate_micros=quote.byok_max_estimate_micros,
+    )
+
+
+@router.post("/lobbies/{lobby_id}/funding-preflight", response_model=FundingPreflightResponse)
+async def funding_preflight(
+    lobby_id: uuid.UUID,
+    request: Request,
+    body: LaunchFundingConfirmation | None = None,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> FundingPreflightResponse:
+    """Quote frozen custom-lobby funding without creating a reservation.
+
+    The host may call this while a lobby is still mutable or once it is locked.
+    Launch recomputes it under the wallet-owner lock, so this response is a
+    confirmation contract rather than an authority to spend credit.
+    """
+    lobby = await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    try:
+        quote = await build_lobby_funding_quote(
+            session,
+            lobby=lobby,
+            settings=_funding_settings(request),
+            byok_max_estimate_micros=(body.byok_max_estimate_micros if body is not None else None),
+        )
+    except FundingPreflightError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.reason) from exc
+    return _funding_preflight_response(quote)
+
+
 @router.post("/lobbies/{lobby_id}/launch", response_model=LaunchResponse)
 async def launch(
     lobby_id: uuid.UUID,
     request: Request,
+    body: LaunchFundingConfirmation | None = None,
     ctx: HumanPrincipalContext = Depends(require_human),
     session: AsyncSession = Depends(get_session),
 ) -> LaunchResponse:
@@ -984,8 +1079,11 @@ async def launch(
             source_ip_hash=source_ip_hash,
             now=now,
             stale_seconds=_stale_seconds(),
+            funding_quote_hash=body.funding_quote_hash if body is not None else None,
+            byok_max_estimate_micros=(body.byok_max_estimate_micros if body is not None else None),
+            funding_settings=_funding_settings(request),
         )
-    except (LobbyNotLaunchableError, AutoFillPoolError) as exc:
+    except (LobbyNotLaunchableError, AutoFillPoolError, FundingPreflightError) as exc:
         # Roll the freshly claimed (unbound) slots back so a failed launch leaks
         # neither a count slot nor a held inference reservation.
         await rollback_admission_decision(session, admission)

@@ -41,6 +41,7 @@ from padrino.api.lobby_readiness import (
     evaluate_lobby_rows,
 )
 from padrino.core.engine.role_assignment import assign_roles
+from padrino.core.engine.state import Seat
 from padrino.core.enums import LobbySeatKind, LobbyStatus, SeatKind
 from padrino.core.lobby.autofill import (
     NotEnoughCuratedModelsError,
@@ -52,7 +53,7 @@ from padrino.core.lobby.strangers_only import (
 )
 from padrino.core.observation_privacy import is_anonymous
 from padrino.core.seating import seat_permutation
-from padrino.db.models import GameSeat, LobbyMember
+from padrino.db.models import GameSeat, Lobby, LobbyMember, LobbySeat
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
@@ -61,10 +62,15 @@ from padrino.openrouter.byok_runtime import (
     ByokRuntimeError,
     validate_byok_lobby_credentials_for_lobby,
 )
+from padrino.openrouter.funding_preflight import (
+    admit_lobby_funding_before_game,
+    bind_funding_reservation_to_game,
+)
 from padrino.openrouter.lobby_model_selection import (
     LobbyModelSelectionError,
     materialize_frozen_lobby_model_selection,
 )
+from padrino.settings import Settings
 
 
 class LobbyNotLaunchableError(Exception):
@@ -114,6 +120,9 @@ async def launch_lobby(
     source_ip_hash: str | None = None,
     now: datetime | None = None,
     stale_seconds: float | None = None,
+    funding_quote_hash: str | None = None,
+    byok_max_estimate_micros: int | None = None,
+    funding_settings: Settings | None = None,
 ) -> LaunchResult:
     """Materialize a human-lane game from a LOCKED lobby (idempotent).
 
@@ -232,6 +241,57 @@ async def launch_lobby(
     else:
         source_lobby_slot_by_public_index = tuple(range(ruleset.PLAYER_COUNT))
 
+    if funding_settings is None:
+        from padrino.settings import get_settings
+
+        funding_settings = get_settings()
+    # Funding hold + game materialization are one savepoint. If an unexpected
+    # post-reservation problem occurs, the hold rolls back before the route can
+    # commit its ordinary admission-slot cleanup for the failed attempt.
+    async with session.begin_nested():
+        game_id = await _reserve_and_materialize_game(
+            session,
+            lobby=lobby,
+            lobby_id=lobby_id,
+            game_seed=game_seed,
+            roles_by_index=roles_by_index,
+            seats_by_index=seats_by_index,
+            source_lobby_slot_by_public_index=source_lobby_slot_by_public_index,
+            filled=filled,
+            source_ip_hash=source_ip_hash,
+            funding_quote_hash=funding_quote_hash,
+            byok_max_estimate_micros=byok_max_estimate_micros,
+            funding_settings=funding_settings,
+            now=materialization_now,
+        )
+    return LaunchResult(game_id=game_id, created=True)
+
+
+async def _reserve_and_materialize_game(
+    session: AsyncSession,
+    *,
+    lobby: Lobby,
+    lobby_id: uuid.UUID,
+    game_seed: str,
+    roles_by_index: dict[int, Seat],
+    seats_by_index: dict[int, LobbySeat],
+    source_lobby_slot_by_public_index: tuple[int, ...],
+    filled: dict[int, str],
+    source_ip_hash: str | None,
+    funding_quote_hash: str | None,
+    byok_max_estimate_micros: int | None,
+    funding_settings: Settings,
+    now: datetime,
+) -> uuid.UUID:
+    """Reserve funding before creating one game inside the caller's savepoint."""
+    funding = await admit_lobby_funding_before_game(
+        session,
+        lobby=lobby,
+        settings=funding_settings,
+        funding_quote_hash=funding_quote_hash,
+        byok_max_estimate_micros=byok_max_estimate_micros,
+        now=now,
+    )
     game = await games_repo.create(
         session,
         ruleset_id=lobby.ruleset_id,
@@ -242,9 +302,7 @@ async def launch_lobby(
     )
     game.identity_mode = lobby.identity_mode
     game.ranked_source_ip_hash = source_ip_hash
-
     member_principal = await _member_principals(session, lobby_id)
-
     for public_seat_index, source_lobby_slot in enumerate(source_lobby_slot_by_public_index):
         seat = seats_by_index[source_lobby_slot]
         role_seat = roles_by_index[public_seat_index]
@@ -263,29 +321,31 @@ async def launch_lobby(
                     alive=True,
                 )
             )
-        else:
-            build_id = (
-                str(seat.agent_build_id)
-                if seat.agent_build_id is not None
-                else filled[seat.seat_index]
+            continue
+        build_id = (
+            str(seat.agent_build_id) if seat.agent_build_id is not None else filled[seat.seat_index]
+        )
+        session.add(
+            GameSeat(
+                game_id=game.id,
+                public_player_id=role_seat.public_player_id,
+                seat_index=role_seat.seat_index,
+                agent_build_id=uuid.UUID(build_id),
+                seat_kind=SeatKind.AI.value,
+                role=role_seat.role.value,
+                faction=role_seat.faction.value,
+                alive=True,
             )
-            session.add(
-                GameSeat(
-                    game_id=game.id,
-                    public_player_id=role_seat.public_player_id,
-                    seat_index=role_seat.seat_index,
-                    agent_build_id=uuid.UUID(build_id),
-                    seat_kind=SeatKind.AI.value,
-                    role=role_seat.role.value,
-                    faction=role_seat.faction.value,
-                    alive=True,
-                )
-            )
-
+        )
     lobby.game_id = game.id
     lobby.status = LobbyStatus.LAUNCHED.value
+    await bind_funding_reservation_to_game(
+        session,
+        reservation=funding.reservation,
+        game_id=game.id,
+    )
     await session.flush()
-    return LaunchResult(game_id=game.id, created=True)
+    return game.id
 
 
 async def _member_principals(

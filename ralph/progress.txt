@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Snapshot-bound custom funding admission (US-360): assemble a quote only from
+  frozen `LobbySeat` selection JSON, immutable catalog rows, the persisted
+  rules snapshot, and injected integer-token policy; hash model/catalog/rules/
+  funding/policy facts into a client confirmation. Recompute it after locking
+  the host `Principal` row, then append the whole-game promotional hold before
+  any `Game` row exists. Keep the hold and game materialization in one nested
+  savepoint so a later launch failure rolls both ledger facts back; BYOK binds
+  a confirmed maximum into the same quote but never reads or writes promo.
 - Optional OpenRouter promotional subkeys (US-359): keep management and
   inference credentials on separate, purpose-specific construction paths. The
   management client may call only `/keys`; normal platform inference continues
@@ -7240,3 +7248,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Gates (all GREEN): `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"`. Frontend
   gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-360
+- Added a secret-free custom-lobby funding preflight that derives conservative
+  integer-micro estimates only from frozen model selections, immutable catalog
+  entries, and the archived rules snapshot. Its confirmation hash binds the
+  model, catalog, rules, funding owner/source, estimator policy, and BYOK
+  maximum; a changed selection or cadence makes a prior confirmation stale.
+- Platform launches lock the host wallet owner, re-evaluate availability, and
+  append one reservation plus ledger hold before any `Game` row is created.
+  The reservation binds to the materialized game only after creation. BYOK
+  requires an explicit maximum confirmation and makes no promo reservation.
+  The reservation/game handoff is a nested savepoint, so a materialization
+  failure leaves no stranded hold.
+- Added API coverage for funded launch/retry, stale quote, unpriced BYOK-only
+  reasoning, BYOK confirmation/no-hold, exact-wallet concurrent launches, and
+  post-reservation rollback.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/{openrouter/funding_preflight.py,
+  api/{lobby_launch.py,routes/lobbies.py},settings.py}` and
+  `tests/api/test_lobby_model_selection.py`, plus `ralph/prd.json` and
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused funding/lobby/ledger slice -> 27 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src
+  tests`; `uv run pytest -m "not integration"` -> 3399 passed / 12 deselected.
+  Frontend gates not run; story did not touch `web/dashboard`.

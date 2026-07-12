@@ -82,6 +82,32 @@ class Settings(BaseSettings):
     # name a lower-or-equal explicit spend cap at the trigger boundary.
     padrino_openrouter_probe_trigger_rate_limit_per_minute: int = Field(default=5, gt=0)
     padrino_openrouter_probe_operator_cost_cap_micros: int = Field(default=50_000, ge=0)
+    # Whole-game custom-lobby funding admission (US-360). These are conservative
+    # integer-token/micro bounds consumed only by the impure quote shell, which
+    # translates them into the pure cost estimator before a game is created.
+    # Platform play is deliberately capped well below the USD 5.00 promotion;
+    # player-owned BYOK may confirm a larger bound but never reserves promo.
+    padrino_openrouter_cost_low_input_tokens_per_call: int = Field(default=250, ge=0)
+    padrino_openrouter_cost_expected_initial_input_tokens: int = Field(default=1_000, ge=0)
+    padrino_openrouter_cost_expected_growth_tokens_per_call: int = Field(default=200, ge=0)
+    padrino_openrouter_cost_expected_input_token_cap: int = Field(default=16_000, ge=0)
+    padrino_openrouter_cost_reservation_initial_input_tokens: int = Field(default=2_000, ge=0)
+    padrino_openrouter_cost_reservation_growth_tokens_per_call: int = Field(default=400, ge=0)
+    padrino_openrouter_cost_reservation_input_token_cap: int = Field(default=32_000, ge=0)
+    padrino_openrouter_cost_low_output_tokens_per_call: int = Field(default=32, ge=0)
+    padrino_openrouter_cost_expected_output_tokens_per_call: int = Field(default=256, ge=0)
+    padrino_openrouter_cost_low_reasoning_tokens_per_call: int = Field(default=0, ge=0)
+    padrino_openrouter_cost_expected_reasoning_tokens_per_call: int = Field(default=0, ge=0)
+    padrino_openrouter_cost_reservation_reasoning_tokens_per_call: int = Field(default=0, ge=0)
+    padrino_openrouter_cost_safety_margin_bps: int = Field(default=2_000, ge=0)
+    padrino_openrouter_platform_max_price_micros_per_million: int | None = Field(
+        default=2_000_000,
+        ge=0,
+    )
+    padrino_openrouter_platform_max_reservation_micros: int | None = Field(
+        default=4_000_000,
+        ge=0,
+    )
     # Player-owned OpenRouter credentials have a separate AES-256-GCM master
     # key ring.  It is intentionally optional so mock and platform-funded
     # deployments still boot without BYOK capability.  The first
