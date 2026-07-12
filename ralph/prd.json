@@ -438,18 +438,18 @@
         "US-343",
         "US-345"
       ],
-      "title": "Idempotent on-demand AgentBuild materialization (migration 0067)",
-      "description": "Resolve a selected canonical slug plus rules snapshot/prompt version into a reusable AgentBuild/ModelConfig under the OpenRouter provider, eliminating UUID entry from player workflows. Migration 0067 adds the database uniqueness/hash fields needed to make concurrent materialization authoritative.",
+      "title": "Idempotent on-demand AgentBuild materialization (migration 0068)",
+      "description": "Resolve a selected canonical slug plus rules snapshot/prompt version into a reusable AgentBuild/ModelConfig under the OpenRouter provider, eliminating UUID entry from player workflows. Migration 0068 adds the database uniqueness/hash fields needed to make concurrent materialization authoritative.",
       "acceptanceCriteria": [
         "Service get_or_create is unique/idempotent for provider, canonical slug, catalog snapshot policy, prompt version, adapter version, and inference params hash.",
         "It refuses non-text/deprecated/disabled models and stamps qualification tier/catalog snapshot used at creation.",
         "Display/version fields are derived from canonical catalog data, not player input; inference params are allowlisted and bounded.",
         "Concurrent calls return one logical build on Postgres/SQLite without duplicate rows.",
         "Existing admin-created builds and scientific identities remain readable and are not silently rewritten.",
-        "0067 follows 0066 linearly, adds/backfills nullable identity-hash fields safely, and has SQLite/Postgres upgrade/downgrade plus uniqueness-race coverage."
+        "0068 follows 0067 linearly, adds/backfills nullable identity-hash fields safely, and has SQLite/Postgres upgrade/downgrade plus uniqueness-race coverage."
       ],
-      "notes": "Owns migration 0067; do not weaken concurrency to application-only read-then-insert.",
-      "passes": false
+      "notes": "Owns migration 0068 because US-342 already shipped 0067; do not weaken concurrency to application-only read-then-insert.",
+      "passes": true
     },
     {
       "id": "US-348",

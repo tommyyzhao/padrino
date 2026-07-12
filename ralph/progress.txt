@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- OpenRouter AgentBuild materialization (US-347): resolve player-selected
+  canonical slugs only through an immutable COMPLETE catalog snapshot and a
+  server-owned prompt version. Derive every display/version/provenance field
+  from catalog rows, normalize the small inference allowlist before hashing,
+  and use per-model-config and per-build SHA-256 identity keys with
+  dialect-specific `INSERT ... ON CONFLICT DO NOTHING`—then select by the key.
+  This keeps SQLite/Postgres concurrent callers on one logical build without
+  touching legacy admin/scientific rows. When an earlier story has consumed a
+  planned Alembic number, append a new linear migration and correct only the
+  active Ralph record; do not rewrite shipped migration history.
 - OpenRouter compatibility probes (US-346): keep probes in the impure
   `openrouter.compatibility_probe` seam over static synthetic `Observation`
   values and a stub-friendly transport protocol, never a `Game` or runner.
@@ -6771,3 +6781,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"`. Frontend gates not run; story did not
   touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-347
+- Added the impure OpenRouter materialization service. It resolves an exact
+  catalog snapshot and canonical slug into reusable `ModelConfig` and
+  `AgentBuild` rows under the persisted OpenRouter provider, derives
+  display/version fields from catalog data, stamps the immutable snapshot and
+  qualification tier, and accepts only bounded `temperature`, `top_p`, and
+  `max_tokens` parameters.
+- Added migration 0068 with nullable catalog identity/provenance columns,
+  database-unique SHA-256 keys, and safe legacy inference-parameter hash
+  backfill. Existing admin/scientific rows remain semantically unchanged;
+  their catalog materialization fields stay null. 0067 was already consumed by
+  US-342, so this story's Ralph migration references were corrected to 0068
+  rather than rewriting shipped history.
+- Added catalog rejection, idempotence, legacy compatibility, SQLite
+  concurrency-race, and migration upgrade/downgrade coverage. The normal
+  all-dialects Postgres migration suite remains present but skipped locally
+  because Docker is unavailable.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/openrouter/agent_build_materialization.py`,
+  `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0068_openrouter_agent_build_materialization.py`,
+  `tests/openrouter/test_agent_build_materialization.py`,
+  `tests/db/test_migration_0068_openrouter_agent_build_materialization.py`,
+  migration-head tests, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest
+  tests/openrouter/test_agent_build_materialization.py -q` first failed on the
+  missing module; focused GREEN + migration slice -> 10 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3225 passed / 51 skipped / 11
+  deselected. Frontend gates not run; story did not touch `web/dashboard`.
