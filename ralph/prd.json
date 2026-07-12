@@ -850,7 +850,7 @@
         "Keyboard/screen-reader/mobile interactions and stale-catalog/error states have Playwright coverage."
       ],
       "notes": "Frontend/API integration story.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-367",

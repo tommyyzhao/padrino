@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Selector-safe model explorers (US-366): derive only named public booleans and
+  integer probe summaries at the catalog projection boundary; never forward raw
+  catalog/probe JSON to the browser. Keep price-risk classification server-side,
+  then require UI acknowledgements before a canonical-slug selection can move
+  into casual configuration. For dashboard E2E, override the dashboard/API
+  ports when a developer's default port is serving an unrelated project.
 - Quote-gated Quick Play (US-365): make the browser select a funding source
   only after consent and fetch safe wallet/connection lifecycle projections;
   create the one-human casual lobby solely to obtain its frozen funding quote,
@@ -7437,3 +7443,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   skipped; `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy
   src tests`; `uv run pytest -m "not integration"` -> 3372 passed / 51 skipped
   / 12 deselected.
+
+## 2026-07-12 PDT - US-366
+- Added the `/models` OpenRouter explorer: bounded card rendering with search,
+  provider/price/context/speed/capability filters, a three-model comparison
+  tray, canonical-slug selections, and responsive native controls. Cards make
+  qualification, availability, ZDR/privacy, price risk, and measured probe
+  performance clear without rendering any AgentBuild/ModelConfig UUID.
+- Extended the selector-safe catalog projection only with bounded derived
+  facts: median successful-probe latency, integer throughput, named public
+  open-weight/frontier booleans, and a server-side unpriced/extreme BYOK
+  requirement. Raw catalog metadata, probe payloads, and credential-shaped
+  values remain excluded. Unverified selections require casual-risk consent;
+  extreme or unpriced selections require BYOK and a maximum-spend acknowledgement.
+- Added API and Playwright coverage for safe projection/filtering, three-way
+  comparison, confirmation gates, keyboard-native interactions, plus stale and
+  unavailable catalog states. The standard dashboard port was occupied by an
+  unrelated local project, so the full Playwright gate ran on isolated ports
+  5183/8133.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/model_catalog.py`,
+  `tests/api/test_human_model_catalog.py`,
+  `web/dashboard/src/{lib/api/{client,types}.ts,routes/{+layout,models/+page}.svelte}`,
+  `web/dashboard/tests/e2e/models.spec.ts`, `ralph/prd.json`, and
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused catalog API -> 7 passed; focused model explorer
+  Playwright -> 2 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 3424 selected
+  / 12 deselected; `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`;
+  full Playwright on isolated ports -> 58 passed / 5 visual opt-in skipped.
