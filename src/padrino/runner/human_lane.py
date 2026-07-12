@@ -61,6 +61,7 @@ from padrino.db.models import (
     HumanChatSubmission,
     League,
     Lobby,
+    PromotionalCreditReservation,
 )
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
@@ -70,6 +71,7 @@ from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.db.repositories import scheduler_heartbeats as worker_heartbeats_repo
 from padrino.db.rules_snapshots import runtime_rules_snapshot_from_pair
 from padrino.economics.human_cost_governance import global_breaker_open, human_eligible_pool
+from padrino.economics.platform_completion_adapter import PlatformCompletionReserveAdapter
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
 from padrino.llm.adapter import AdapterResult, LlmAdapter, ProviderNoContestError
@@ -736,6 +738,7 @@ async def build_human_lane_runtime(
 ) -> HumanLaneRuntime:
     """Build an adapter and retain only safe per-call BYOK attribution."""
     bindings: ByokRuntimeBindings | None = None
+    platform_reservation_id: uuid.UUID | None = None
     async with session_factory() as session:
         rows = list(
             (
@@ -755,6 +758,19 @@ async def build_human_lane_runtime(
                 session,
                 game_id=game_id,
                 settings=settings,
+            )
+        if bindings is None:
+            platform_reservation_id = await session.scalar(
+                select(PromotionalCreditReservation.id)
+                .where(
+                    PromotionalCreditReservation.game_id == game_id,
+                    PromotionalCreditReservation.status == "ACTIVE",
+                    PromotionalCreditReservation.completion_reserve_per_game_cap_micros.is_not(
+                        None
+                    ),
+                    PromotionalCreditReservation.completion_reserve_unfunded_policy.is_not(None),
+                )
+                .limit(1)
             )
 
         ai_assignments: dict[str, LlmAgentBuild] = {}
@@ -790,6 +806,15 @@ async def build_human_lane_runtime(
             session_factory=session_factory,
             game_id=game_id,
         )
+        if platform_reservation_id is not None:
+            ai_adapter = PlatformCompletionReserveAdapter(
+                ai_adapter,
+                session_factory=session_factory,
+                game_id=game_id,
+                reservation_id=platform_reservation_id,
+                global_cap_micros=settings.padrino_openrouter_completion_reserve_global_micros,
+                now=_utcnow,
+            )
 
     adapters: dict[str, LlmAdapter] = {}
     for seat in rows:

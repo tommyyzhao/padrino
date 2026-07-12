@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -107,6 +107,21 @@ class Settings(BaseSettings):
     padrino_openrouter_platform_max_reservation_micros: int | None = Field(
         default=4_000_000,
         ge=0,
+    )
+    # US-361: an admitted custom platform game keeps its frozen models even
+    # when actual provider cost exceeds its promotional hold. The per-game cap
+    # and behavior are copied into the reservation at admission; this global
+    # cap is an operational breaker for subsequent admissions.
+    padrino_openrouter_completion_reserve_per_game_micros: int = Field(
+        default=500_000,
+        ge=0,
+    )
+    padrino_openrouter_completion_reserve_global_micros: int = Field(
+        default=5_000_000,
+        ge=0,
+    )
+    padrino_openrouter_completion_reserve_unfunded_policy: Literal["COERCE", "NO_CONTEST"] = (
+        "COERCE"
     )
     # Player-owned OpenRouter credentials have a separate AES-256-GCM master
     # key ring.  It is intentionally optional so mock and platform-funded

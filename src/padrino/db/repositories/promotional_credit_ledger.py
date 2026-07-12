@@ -172,6 +172,8 @@ def _same_reservation(
     catalog_hash: str,
     rules_hash: str,
     reserved_micros: int,
+    completion_reserve_per_game_cap_micros: int | None,
+    completion_reserve_unfunded_policy: str | None,
 ) -> bool:
     return (
         row.principal_id == principal_id
@@ -181,6 +183,8 @@ def _same_reservation(
         and row.catalog_hash == catalog_hash
         and row.rules_hash == rules_hash
         and row.reserved_micros == reserved_micros
+        and row.completion_reserve_per_game_cap_micros == completion_reserve_per_game_cap_micros
+        and row.completion_reserve_unfunded_policy == completion_reserve_unfunded_policy
     )
 
 
@@ -292,6 +296,8 @@ async def create_or_get_credit_reservation(
     reserved_micros: int,
     idempotency_key: str,
     now: datetime,
+    completion_reserve_per_game_cap_micros: int | None = None,
+    completion_reserve_unfunded_policy: str | None = None,
 ) -> tuple[PromotionalCreditReservation, bool]:
     """Create one game quote allocation or return its exact idempotent retry."""
     amount = _micro(reserved_micros, field="reserved_micros")
@@ -301,6 +307,21 @@ async def create_or_get_credit_reservation(
     estimate = _hash(estimate_hash, field="estimate_hash")
     catalog = _hash(catalog_hash, field="catalog_hash")
     rules = _hash(rules_hash, field="rules_hash")
+    completion_cap = (
+        None
+        if completion_reserve_per_game_cap_micros is None
+        else _micro(
+            completion_reserve_per_game_cap_micros,
+            field="completion_reserve_per_game_cap_micros",
+        )
+    )
+    if completion_cap is not None and completion_cap < 0:
+        raise LedgerInputError("completion_reserve_per_game_cap_micros_invalid")
+    completion_policy = completion_reserve_unfunded_policy
+    if (completion_cap is None) != (completion_policy is None):
+        raise LedgerInputError("completion_reserve_policy_pair_invalid")
+    if completion_policy not in {None, "COERCE", "NO_CONTEST"}:
+        raise LedgerInputError("completion_reserve_unfunded_policy_invalid")
     existing = await session.scalar(
         select(PromotionalCreditReservation).where(
             PromotionalCreditReservation.idempotency_key == key
@@ -316,6 +337,8 @@ async def create_or_get_credit_reservation(
             catalog_hash=catalog,
             rules_hash=rules,
             reserved_micros=amount,
+            completion_reserve_per_game_cap_micros=completion_cap,
+            completion_reserve_unfunded_policy=completion_policy,
         ):
             raise LedgerIdempotencyConflict("credit_reservation_idempotency_key_reused")
         return existing, False
@@ -335,6 +358,8 @@ async def create_or_get_credit_reservation(
         reserved_at=now,
         updated_at=now,
         terminal_at=None,
+        completion_reserve_per_game_cap_micros=completion_cap,
+        completion_reserve_unfunded_policy=completion_policy,
     )
     try:
         async with session.begin_nested():
@@ -357,6 +382,8 @@ async def create_or_get_credit_reservation(
             catalog_hash=catalog,
             rules_hash=rules,
             reserved_micros=amount,
+            completion_reserve_per_game_cap_micros=completion_cap,
+            completion_reserve_unfunded_policy=completion_policy,
         ):
             raise LedgerIdempotencyConflict("credit_reservation_idempotency_key_reused") from exc
         return existing, False

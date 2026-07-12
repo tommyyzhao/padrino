@@ -95,7 +95,7 @@ def _index_names(db_path: Path, table_name: str) -> set[str]:
 def test_0067_follows_0066_linearly() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
 
-    assert script.get_heads() == ["0073"]
+    assert script.get_heads() == ["0074"]
     assert script.get_revision("0068").down_revision == "0067"
     assert script.get_revision("0067").down_revision == "0066"
     assert script.get_revision("0066").down_revision == "0065"

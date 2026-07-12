@@ -51,6 +51,10 @@ from padrino.db.models import (
 )
 from padrino.db.repositories import promotional_credit_ledger
 from padrino.db.rules_snapshots import runtime_ruleset_from_pair
+from padrino.economics.completion_reserve import (
+    completion_reserve_global_breaker_open,
+    prepare_completion_reserve_cursors,
+)
 from padrino.openrouter.lobby_model_selection import FrozenLobbyModelSelection
 from padrino.settings import Settings
 
@@ -68,6 +72,7 @@ class FundingPreflightReason(StrEnum):
     FUNDING_QUOTE_STALE = "funding_quote_stale"
     BYOK_MAXIMUM_CONFIRMATION_REQUIRED = "byok_maximum_confirmation_required"
     BYOK_MAXIMUM_BELOW_ESTIMATE = "byok_maximum_below_estimate"
+    COMPLETION_RESERVE_BREAKER_OPEN = "completion_reserve_breaker_open"
 
 
 class FundingPreflightError(ValueError):
@@ -516,7 +521,13 @@ async def build_lobby_funding_quote(
             else None,
         )
     )
-    allowed = decision.allowed and confirmation_reason is None
+    admission_reason = confirmation_reason
+    if source is FundingSource.PLATFORM and await completion_reserve_global_breaker_open(
+        session,
+        global_cap_micros=settings.padrino_openrouter_completion_reserve_global_micros,
+    ):
+        admission_reason = FundingPreflightReason.COMPLETION_RESERVE_BREAKER_OPEN
+    allowed = decision.allowed and admission_reason is None
     quote_hash = _hash(
         {
             "schema": _QUOTE_SCHEMA,
@@ -534,7 +545,7 @@ async def build_lobby_funding_quote(
         else _primary_refusal_reason(
             estimate=estimate,
             funding_reason=decision.reason,
-            confirmation_reason=confirmation_reason,
+            confirmation_reason=admission_reason,
         )
     )
     return FundingQuote(
@@ -545,7 +556,7 @@ async def build_lobby_funding_quote(
         reasons=_quote_reasons(
             estimate=estimate,
             funding_reason=decision.reason,
-            confirmation_reason=confirmation_reason,
+            confirmation_reason=admission_reason,
         ),
         # Show the conservative platform hold even when the wallet cannot
         # currently afford it. The subsequent owner-locked admission still
@@ -623,6 +634,12 @@ async def admit_lobby_funding_before_game(
         reserved_micros=quote.reservation_micros,
         idempotency_key=f"custom-funding:reservation:{lobby.id}:{quote.estimate_hash}",
         now=now,
+        completion_reserve_per_game_cap_micros=(
+            settings.padrino_openrouter_completion_reserve_per_game_micros
+        ),
+        completion_reserve_unfunded_policy=(
+            settings.padrino_openrouter_completion_reserve_unfunded_policy
+        ),
     )
     if quote.reservation_micros:
         await promotional_credit_ledger.append_credit_entry(
@@ -644,6 +661,7 @@ async def bind_funding_reservation_to_game(
     *,
     reservation: PromotionalCreditReservation | None,
     game_id: uuid.UUID,
+    now: datetime,
 ) -> None:
     """Bind a just-admitted mutable reservation to its newly-created game."""
     if reservation is None:
@@ -651,6 +669,11 @@ async def bind_funding_reservation_to_game(
     if reservation.game_id is not None and reservation.game_id != game_id:
         raise FundingPreflightError(FundingPreflightReason.FUNDING_SNAPSHOT_INVALID)
     reservation.game_id = game_id
+    if (
+        reservation.completion_reserve_per_game_cap_micros is not None
+        and reservation.completion_reserve_unfunded_policy is not None
+    ):
+        await prepare_completion_reserve_cursors(session, game_id=game_id, now=now)
     await session.flush()
 
 

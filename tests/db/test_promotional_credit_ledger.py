@@ -111,7 +111,7 @@ def test_0072_follows_0071_and_round_trips_credit_tables(sqlite_db: Path) -> Non
     config = _alembic_config()
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0073"]
+    assert script.get_heads() == ["0074"]
     assert script.get_revision("0072").down_revision == "0071"
 
     command.upgrade(config, "0071")

@@ -58,7 +58,7 @@ def test_0070_follows_0069_linearly_and_round_trips_openrouter_audit_columns(
     config = _alembic_config()
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0073"]
+    assert script.get_heads() == ["0074"]
     assert script.get_revision("0070").down_revision == "0069"
 
     command.upgrade(config, "0069")

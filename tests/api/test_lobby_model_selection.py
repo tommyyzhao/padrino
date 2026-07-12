@@ -35,6 +35,7 @@ from padrino.db.repositories.model_catalog_snapshots import (
     CatalogEntryInput,
     create_or_get_completed_snapshot,
 )
+from padrino.settings import Settings
 
 NOW = datetime(2026, 7, 12, 18, 0, tzinfo=UTC)
 
@@ -477,8 +478,56 @@ async def test_platform_launch_reserves_a_confirmed_frozen_funding_quote(
     assert reservation.game_id == game_id
     assert reservation.status == "ACTIVE"
     assert reservation.reserved_micros == quote["reservation_micros"]
+    assert reservation.completion_reserve_per_game_cap_micros == 500_000
+    assert reservation.completion_reserve_unfunded_policy == "COERCE"
     assert len(holds) == 1
     assert holds[0].amount_micros == -quote["reservation_micros"]
+
+
+@pytest.mark.asyncio
+async def test_completion_reserve_breaker_denies_new_platform_game_not_existing_admissions(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A depleted operator reserve blocks a new quote before game materialization."""
+    app = create_app(session_factory=session_factory, auth_required=True)
+    app.state.auth_settings = Settings(padrino_openrouter_completion_reserve_global_micros=0)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as funded_client:
+        await _seed_openrouter_selection_inputs(
+            session_factory,
+            content_hash="7" * 64,
+            entries=[_entry("openai/completion-breaker")],
+        )
+        token = await _guest_token(funded_client)
+        await _grant_promotional_credit(funded_client, session_factory, token=token)
+        create = await funded_client.post(
+            "/lobbies",
+            json={
+                "built_in_ruleset_id": "mini7_v1",
+                "human_seat_count": 1,
+                "ai_model_selections": _duplicate_model_selections("openai/completion-breaker"),
+            },
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert create.status_code == 201, create.text
+        lobby_id = uuid.UUID(create.json()["id"])
+        await _ready_and_lock(funded_client, lobby_id=lobby_id, token=token)
+        preflight = await funded_client.post(
+            f"/lobbies/{lobby_id}/funding-preflight",
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert preflight.status_code == 200, preflight.text
+        assert preflight.json()["allowed"] is False
+        assert preflight.json()["reason"] == "completion_reserve_breaker_open"
+        launch = await funded_client.post(
+            f"/lobbies/{lobby_id}/launch",
+            json={"funding_quote_hash": preflight.json()["funding_quote_hash"]},
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert launch.status_code == 409
+        assert launch.json()["detail"] == "completion_reserve_breaker_open"
+    async with session_factory() as session:
+        assert list((await session.execute(select(Game))).scalars()) == []
 
 
 @pytest.mark.asyncio

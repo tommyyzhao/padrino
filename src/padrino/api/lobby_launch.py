@@ -343,6 +343,7 @@ async def _reserve_and_materialize_game(
         session,
         reservation=funding.reservation,
         game_id=game.id,
+        now=now,
     )
     await session.flush()
     return game.id

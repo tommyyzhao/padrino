@@ -71,7 +71,7 @@ def test_0073_follows_0072_and_round_trips_the_secret_safe_subkey_table(sqlite_d
     config = _config()
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0073"]
+    assert script.get_heads() == ["0074"]
     assert script.get_revision("0073").down_revision == "0072"
     command.upgrade(config, "0072")
     with sqlite3.connect(sqlite_db) as connection:

@@ -54,6 +54,7 @@ from padrino.observability.metrics import record_invalid_action
 
 _REASON_TIMEOUT = "TIMEOUT"
 _REASON_LLM_EXHAUSTED = "llm_exhausted"
+_REASON_PROVIDER_UNFUNDED = "provider_unfunded"
 _REASON_ILLEGAL_ACTION = "ILLEGAL_ACTION"
 _logger = structlog.get_logger("padrino.llm")
 
@@ -163,6 +164,11 @@ async def _call_one_seat(
 
         if result.status == "exhausted":
             failure = result.failure
+            reason = (
+                _REASON_PROVIDER_UNFUNDED
+                if result.error == _REASON_PROVIDER_UNFUNDED
+                else _REASON_LLM_EXHAUSTED
+            )
             error_kind = failure.error_kind if failure is not None else "Unknown"
             error_message = failure.error_message if failure is not None else (result.error or "")
             attempts_made = failure.attempts if failure is not None else 0
@@ -176,14 +182,12 @@ async def _call_one_seat(
                 state=state,
                 seat=seat,
                 phase_id=phase_id,
-                reason=_REASON_LLM_EXHAUSTED,
+                reason=reason,
                 event_type="ActionTimedOut",
                 payload={
                     "expected_action_type": expected,
-                    "defaulted_to": coerce_to_safe_action(
-                        state.current_phase, _REASON_LLM_EXHAUSTED
-                    ).type.value,
-                    "reason": _REASON_LLM_EXHAUSTED,
+                    "defaulted_to": coerce_to_safe_action(state.current_phase, reason).type.value,
+                    "reason": reason,
                     "error_kind": error_kind,
                     "error_message": error_message,
                     "attempts": attempts_made,

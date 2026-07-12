@@ -57,6 +57,8 @@ EXPECTED_TABLES = {
     "promotional_credit_ledger_entries",
     "promotional_credit_reservations",
     "operator_completion_reserve_ledger_entries",
+    "operator_completion_reserve_cursors",
+    "operator_completion_reserve_settlements",
 }
 
 

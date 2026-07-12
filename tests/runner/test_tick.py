@@ -196,6 +196,29 @@ async def test_timeout_at_night_coerces_to_noop() -> None:
     assert log.events[0].body["payload"]["defaulted_to"] == ActionType.NOOP.value
 
 
+async def test_provider_unfunded_records_a_deterministic_coerced_action() -> None:
+    state = _state(Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    log = EventLog()
+    adapter = _ScriptedAdapter(
+        {
+            "P01": AdapterResult(
+                raw_response="{}",
+                parsed_response=_ok(ActionType.VOTE, "P02"),
+                latency_ms=1,
+                status="exhausted",
+                error="provider_unfunded",
+            )
+        }
+    )
+
+    responses = await run_tick(state, log, [SEATS[0]], adapter, timeout_s=1.0, ruleset=mini7_v1)
+
+    assert responses["P01"].action == Action(type=ActionType.ABSTAIN, target=None)
+    assert log.events[0].body["event_type"] == "ActionTimedOut"
+    assert log.events[0].body["payload"]["reason"] == "provider_unfunded"
+    assert log.events[0].body["payload"]["defaulted_to"] == ActionType.ABSTAIN.value
+
+
 # --- parse / schema failure path -------------------------------------------
 
 

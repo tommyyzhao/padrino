@@ -1707,6 +1707,18 @@ class PromotionalCreditReservation(Base):
             "length(rules_hash) = 64",
             name="ck_promotional_credit_reservations_rules_hash_len",
         ),
+        CheckConstraint(
+            "completion_reserve_per_game_cap_micros IS NULL "
+            "OR completion_reserve_per_game_cap_micros >= 0",
+            name="ck_promotional_credit_reservations_completion_cap_non_negative",
+        ),
+        CheckConstraint(
+            "(completion_reserve_per_game_cap_micros IS NULL "
+            "AND completion_reserve_unfunded_policy IS NULL) "
+            "OR (completion_reserve_per_game_cap_micros IS NOT NULL "
+            "AND completion_reserve_unfunded_policy IN ('COERCE', 'NO_CONTEST'))",
+            name="ck_promotional_credit_reservations_completion_policy_pair",
+        ),
         Index(
             "uq_promotional_credit_reservations_active_game",
             "game_id",
@@ -1745,6 +1757,13 @@ class PromotionalCreditReservation(Base):
     reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # US-361 freezes the per-game reserve policy at admission.  These nullable
+    # columns keep pre-Wave-15 reservations readable; new platform-funded
+    # reservations populate both fields before any game row is created.
+    completion_reserve_per_game_cap_micros: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    completion_reserve_unfunded_policy: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class PromotionalCreditLedgerEntry(Base):
@@ -1855,6 +1874,75 @@ class OperatorCompletionReserveLedgerEntry(Base):
     model_slug: Mapped[str | None] = mapped_column(String, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
     reason: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OperatorCompletionReserveCursor(Base):
+    """A transactional cap cursor; the reserve ledger remains the money authority.
+
+    The cursor only serializes global and per-game cap claims under concurrent
+    writers.  ``charged_micros`` is reconciled from the append-only ledger after
+    recovery, so it is never exposed as an operator balance.
+    """
+
+    __tablename__ = "operator_completion_reserve_cursors"
+    __table_args__ = (
+        CheckConstraint(
+            "charged_micros >= 0",
+            name="ck_operator_completion_reserve_cursors_non_negative_charged",
+        ),
+    )
+
+    scope_key: Mapped[str] = mapped_column(String, primary_key=True)
+    charged_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OperatorCompletionReserveSettlement(Base):
+    """Idempotent, secret-free split of one platform call across funding caps."""
+
+    __tablename__ = "operator_completion_reserve_settlements"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_operator_completion_reserve_settlements_idempotency_key",
+        ),
+        CheckConstraint(
+            "call_cost_micros >= 0 AND promotional_charge_micros >= 0 "
+            "AND completion_reserve_charge_micros >= 0 AND unfunded_micros >= 0",
+            name="ck_operator_completion_reserve_settlements_non_negative_micros",
+        ),
+        CheckConstraint(
+            "promotional_charge_micros + completion_reserve_charge_micros + unfunded_micros "
+            "= call_cost_micros",
+            name="ck_operator_completion_reserve_settlements_conservation",
+        ),
+        CheckConstraint(
+            "unfunded_policy IN ('COERCE', 'NO_CONTEST')",
+            name="ck_operator_completion_reserve_settlements_unfunded_policy",
+        ),
+        Index(
+            "ix_operator_completion_reserve_settlements_game_id",
+            "game_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="RESTRICT"), nullable=False
+    )
+    reservation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("promotional_credit_reservations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    model_slug: Mapped[str] = mapped_column(String, nullable=False)
+    call_cost_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    promotional_charge_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    completion_reserve_charge_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    unfunded_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    unfunded_policy: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -2350,7 +2438,9 @@ __all__ = [
     "OAuthConsumedFlow",
     "OAuthIdentity",
     "OpenRouterPkceFlow",
+    "OperatorCompletionReserveCursor",
     "OperatorCompletionReserveLedgerEntry",
+    "OperatorCompletionReserveSettlement",
     "PlacementRating",
     "PlacementRatingEvent",
     "Principal",
