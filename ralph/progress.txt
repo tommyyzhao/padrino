@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Completion-reserve concurrency (US-361): keep the append-only
+  `OperatorCompletionReserveLedgerEntry` as the monetary authority, and use
+  separate integer-only cap cursors solely to serialize global/per-game claims.
+  Freeze a new platform game's per-game cap and unfunded behavior on its
+  reservation at admission, pre-create its cursor alongside game materialization,
+  and reconcile cursor values from the ledger after recovery.  Each settlement
+  carries an idempotency key and a conservation-checked player/operator/unfunded
+  split; retry lock/serialization failures in a fresh transaction, never by
+  changing the frozen model or routing policy.
 - Snapshot-bound custom funding admission (US-360): assemble a quote only from
   frozen `LobbySeat` selection JSON, immutable catalog rows, the persisted
   rules snapshot, and injected integer-token policy; hash model/catalog/rules/
@@ -7272,4 +7281,23 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Gates (all GREEN): focused funding/lobby/ledger slice -> 27 passed;
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src
   tests`; `uv run pytest -m "not integration"` -> 3399 passed / 12 deselected.
+  Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-361
+- Added migration 0074 for frozen platform-reservation completion policy,
+  idempotent settlement records, and global/per-game cap cursors. Operator
+  charges remain append-only integer-micro ledger entries; cursor recovery
+  derives from that ledger and does not alter event chains, player identity, or
+  selected routing.
+- Platform funding now freezes per-game reserve behavior at admission, blocks
+  new platform launches when the configurable global reserve is exhausted, and
+  pre-creates cap cursors with game materialization. Runtime provider costs use
+  the frozen model: funded calls pass through unchanged, while reserve-exhausted
+  calls deterministically coerce a phase-safe action or use the persisted
+  no-contest policy. No player charge can exceed the accepted reservation.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/{db/{models.py,migrations/versions/0074_completion_reserve_caps.py,repositories/promotional_credit_ledger.py},economics/{completion_reserve.py,platform_completion_adapter.py},openrouter/funding_preflight.py,runner/{human_lane.py,tick.py},api/lobby_launch.py,settings.py}`, funding/migration/runner tests, `ralph/prd.json`, and `ralph/progress.txt`.
+- Gates (all GREEN): focused funding/migration/runner slice -> 69 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src
+  tests`; `uv run pytest -m "not integration"` -> 3409 selected / 12 deselected.
   Frontend gates not run; story did not touch `web/dashboard`.

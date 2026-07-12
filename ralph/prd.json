@@ -741,7 +741,7 @@
         "Tests cover exact boundary, concurrent overruns, restart/reconciliation, and invariants under repeated settlement."
       ],
       "notes": "Recommended policy locked by user.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-362",
