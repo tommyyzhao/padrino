@@ -34,6 +34,7 @@ import type {
   PublicModelLeaderboardResponse,
   PublicRecentIndexResponse,
   PublicRulesetsResponse,
+  PlayerModelCatalogPage,
   SeatGuess,
   TuringGuessResult
 } from './types';
@@ -70,6 +71,8 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
+type QueryValue = string | number | boolean | null | undefined;
+
 export class PadrinoClient {
   readonly baseUrl: string;
   private apiKey: string | null;
@@ -105,7 +108,7 @@ export class PadrinoClient {
     return this.humanSession;
   }
 
-  private buildUrl(path: string, params?: Record<string, string | number | null | undefined>): string {
+  private buildUrl(path: string, params?: Record<string, QueryValue>): string {
     const url = new URL(this.baseUrl + path);
     if (params) {
       for (const [key, value] of Object.entries(params)) {
@@ -134,7 +137,7 @@ export class PadrinoClient {
     throw new PadrinoApiError(response.status, detail);
   }
 
-  private async request<T>(path: string, params?: Record<string, string | number | null | undefined>): Promise<T> {
+  private async request<T>(path: string, params?: Record<string, QueryValue>): Promise<T> {
     const init: RequestInit = { headers: this.authHeaders() };
     if (this.humanSession) {
       init.credentials = 'include';
@@ -238,6 +241,26 @@ export class PadrinoClient {
 
   publicRulesets(): Promise<PublicRulesetsResponse> {
     return this.request('/public/rulesets');
+  }
+
+  /** Browse the safe immutable OpenRouter catalog by canonical slug, never internal build IDs. */
+  listHumanModels(params: {
+    search?: string;
+    provider?: string;
+    max_price_micros_per_million?: number;
+    min_context_length?: number;
+    requires_structured_output?: boolean;
+    tier?: 'unverified' | 'playable' | 'verified_structured' | 'ranked_qualified';
+    privacy?: 'zdr' | 'standard' | 'unknown';
+    availability?: 'available' | 'unavailable' | 'unknown' | 'stale' | 'deprecated';
+    open_weight?: boolean;
+    frontier?: boolean;
+    platform_eligible?: boolean;
+    byok_only?: boolean;
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<PlayerModelCatalogPage> {
+    return this.request('/human/models', params);
   }
 
   legalDocuments(): Promise<LegalDocumentsResponse> {

@@ -200,6 +200,11 @@ async def test_human_models_combines_selector_filters_and_never_leaks_internal_f
         "expires_at": None,
         "platform_eligible": False,
         "platform_ineligibility_reasons": ["qualification_unverified"],
+        "observed_latency_ms": None,
+        "observed_throughput_tokens_per_second": None,
+        "open_weights": None,
+        "frontier": None,
+        "requires_byok": False,
         "catalog_freshness": {
             "content_hash": "a" * 64,
             "fetched_at": "2026-07-12T12:00:00Z",
@@ -275,6 +280,81 @@ async def test_human_models_projects_pure_probe_qualification_without_exposing_e
     assert item["casual_visible"] is True
     rendered = json.dumps(response.json(), sort_keys=True)
     for forbidden in ("schema_coercion_succeeded", "provider_fingerprint", "drift_resolved"):
+        assert forbidden not in rendered
+
+
+async def test_human_models_projects_safe_explorer_facts_and_filters(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Explorer metadata stays bounded to derived facts rather than raw catalog fields."""
+    await _seed_snapshot(
+        session_factory,
+        content_hash="e" * 64,
+        entries=[
+            _entry(
+                "mistral/open-lab",
+                structured=True,
+                availability="available",
+                provider_pinned=True,
+                provider_fingerprint="provider-v1",
+            ),
+            _entry("openai/closed-lab", structured=True, availability="available"),
+        ],
+    )
+    async with session_factory() as session, session.begin():
+        entry = await session.scalar(
+            select(ModelCatalogEntry).where(ModelCatalogEntry.canonical_slug == "mistral/open-lab")
+        )
+        assert entry is not None
+        entry.raw_metadata = {
+            **entry.raw_metadata,
+            "open_weights": True,
+            "frontier": True,
+            "auth_secret_ref": "never-project",
+        }
+        session.add_all(
+            [
+                ModelProbeEvidence(
+                    catalog_snapshot_id=entry.catalog_snapshot_id,
+                    model_catalog_entry_id=entry.id,
+                    prompt_hash=f"{index:064x}",
+                    schema_hash=f"{index + 20:064x}",
+                    probe_suite_version=f"explorer-v{index}",
+                    status="passed",
+                    evidence={
+                        "schema_coercion_succeeded": True,
+                        "strict_schema_observed": True,
+                        "tokens_used": 900,
+                        "latency_ms": latency,
+                        "drift_resolved": True,
+                        "provider_fingerprint": "provider-v1",
+                    },
+                    observed_at=NOW,
+                )
+                for index, latency in enumerate((900, 1_100, 1_300), start=1)
+            ]
+        )
+
+    response = await client.get(
+        "/human/models",
+        params={
+            "open_weight": "true",
+            "frontier": "true",
+            "platform_eligible": "true",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert [item["canonical_slug"] for item in items] == ["mistral/open-lab"]
+    assert items[0]["open_weights"] is True
+    assert items[0]["frontier"] is True
+    assert items[0]["observed_latency_ms"] == 1_100
+    assert items[0]["observed_throughput_tokens_per_second"] == 818
+    assert items[0]["requires_byok"] is False
+    rendered = json.dumps(response.json(), sort_keys=True)
+    for forbidden in ("never-project", "auth_secret_ref", "tokens_used", "provider_fingerprint"):
         assert forbidden not in rendered
 
 

@@ -226,6 +226,48 @@ export interface PublicRulesetsResponse {
   items: PublicRulesetEntry[];
 }
 
+/** Safe, player-facing freshness facts for an immutable OpenRouter catalog page. */
+export interface CatalogFreshnessResponse {
+  content_hash: string | null;
+  fetched_at: string | null;
+  state: 'current' | 'stale' | 'unavailable';
+  is_stale: boolean;
+}
+
+/** A player-selectable catalog projection; it deliberately carries no internal IDs or credentials. */
+export interface PlayerModelCatalogEntry {
+  canonical_slug: string;
+  provider: string;
+  display_name: string;
+  description: string | null;
+  modalities: string[];
+  context_length: number | null;
+  pricing_per_million_micros: Record<string, number>;
+  supported_capabilities: string[];
+  supports_structured_output: boolean;
+  qualification_tier: 'unverified' | 'playable' | 'verified_structured' | 'ranked_qualified';
+  qualification_reasons: string[];
+  casual_visible: boolean;
+  privacy: 'zdr' | 'standard' | 'unknown';
+  availability: 'available' | 'unavailable' | 'unknown' | 'stale' | 'deprecated';
+  availability_reason: string;
+  expires_at: string | null;
+  platform_eligible: boolean;
+  platform_ineligibility_reasons: string[];
+  observed_latency_ms: number | null;
+  observed_throughput_tokens_per_second: number | null;
+  open_weights: boolean | null;
+  frontier: boolean | null;
+  requires_byok: boolean;
+  catalog_freshness: CatalogFreshnessResponse;
+}
+
+export interface PlayerModelCatalogPage {
+  items: PlayerModelCatalogEntry[];
+  next_cursor: string | null;
+  catalog: CatalogFreshnessResponse;
+}
+
 export interface LegalDocumentResponse {
   kind: string;
   version_label: string;

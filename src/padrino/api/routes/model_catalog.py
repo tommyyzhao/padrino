@@ -48,6 +48,7 @@ _CURSOR_VERSION = 1
 _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
 _QUALIFICATION_BUCKET_SECONDS = 60 * 60
+_EXTREME_PRICE_MICROS_PER_MILLION = 5_000_000
 
 QualificationTier = Literal[
     "unverified",
@@ -94,6 +95,11 @@ class PlayerModelCatalogEntry(BaseModel):
     expires_at: datetime | None
     platform_eligible: bool
     platform_ineligibility_reasons: list[str]
+    observed_latency_ms: int | None
+    observed_throughput_tokens_per_second: int | None
+    open_weights: bool | None
+    frontier: bool | None
+    requires_byok: bool
     catalog_freshness: CatalogFreshnessResponse
 
 
@@ -247,6 +253,16 @@ def _source_string(entry: ModelCatalogEntry, key: str) -> str | None:
     return None
 
 
+def _source_boolean(entry: ModelCatalogEntry, *keys: str) -> bool | None:
+    """Read one explicitly named public boolean without projecting raw metadata."""
+    for source in (entry.provider_summary, entry.raw_metadata):
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, bool):
+                return value
+    return None
+
+
 def _int_fact(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
@@ -347,10 +363,52 @@ def _pricing_per_million(entry: ModelCatalogEntry) -> dict[str, int]:
     }
 
 
+def _requires_byok(pricing_per_million_micros: dict[str, int]) -> bool:
+    """Flag price risk that needs a user-funded maximum-spend acknowledgement."""
+    prices = (
+        pricing_per_million_micros.get("prompt_per_million"),
+        pricing_per_million_micros.get("completion_per_million"),
+    )
+    return any(price is None or price > _EXTREME_PRICE_MICROS_PER_MILLION for price in prices)
+
+
+def _positive_int(value: object) -> int | None:
+    integer = _int_fact(value)
+    return integer if integer is not None and integer > 0 else None
+
+
+def _probe_performance(
+    probe_records: Sequence[ModelProbeEvidence],
+) -> tuple[int | None, int | None]:
+    """Derive bounded performance summaries from successful probe evidence."""
+    samples = [
+        (
+            _positive_int(record.evidence.get("latency_ms")),
+            _positive_int(record.evidence.get("tokens_used", record.evidence.get("total_tokens"))),
+        )
+        for record in probe_records
+        if _probe_status_succeeded(record.status)
+    ]
+    latencies = sorted(latency for latency, _ in samples if latency is not None)
+    observed_latency_ms = latencies[len(latencies) // 2] if latencies else None
+    throughput_samples = [
+        (latency, tokens)
+        for latency, tokens in samples
+        if latency is not None and tokens is not None
+    ]
+    total_latency = sum(latency for latency, _ in throughput_samples)
+    total_tokens = sum(tokens for _, tokens in throughput_samples)
+    observed_throughput = (
+        total_tokens * 1_000 // total_latency if total_latency > 0 and total_tokens > 0 else None
+    )
+    return observed_latency_ms, observed_throughput
+
+
 def _platform_eligibility(
     *,
     availability: Availability,
     qualification_tier: QualificationTier,
+    requires_byok: bool,
 ) -> tuple[bool, list[str]]:
     """Fail closed while discovery/probe state is unknown, stale, or deprecated."""
     reasons: list[str] = []
@@ -358,6 +416,8 @@ def _platform_eligibility(
         reasons.append(f"availability_{availability}")
     if qualification_tier == "unverified":
         reasons.append("qualification_unverified")
+    if requires_byok:
+        reasons.append("price_requires_byok")
     return not reasons, reasons
 
 
@@ -378,10 +438,14 @@ def _project_entry(
         probe_records=probe_records,
         now=now,
     )
+    pricing_per_million_micros = _pricing_per_million(entry)
+    requires_byok = _requires_byok(pricing_per_million_micros)
     platform_eligible, platform_ineligibility_reasons = _platform_eligibility(
         availability=availability,
         qualification_tier=qualification_tier,
+        requires_byok=requires_byok,
     )
+    observed_latency_ms, observed_throughput_tokens_per_second = _probe_performance(probe_records)
     return PlayerModelCatalogEntry(
         canonical_slug=entry.canonical_slug,
         provider=_provider_from_slug(entry.canonical_slug),
@@ -389,7 +453,7 @@ def _project_entry(
         description=entry.description,
         modalities=list(entry.modalities),
         context_length=entry.context_length,
-        pricing_per_million_micros=_pricing_per_million(entry),
+        pricing_per_million_micros=pricing_per_million_micros,
         supported_capabilities=sorted(str(value) for value in entry.supported_parameters),
         supports_structured_output=_supports_structured_output(entry),
         qualification_tier=qualification_tier,
@@ -401,6 +465,11 @@ def _project_entry(
         expires_at=entry.expires_at,
         platform_eligible=platform_eligible,
         platform_ineligibility_reasons=platform_ineligibility_reasons,
+        observed_latency_ms=observed_latency_ms,
+        observed_throughput_tokens_per_second=observed_throughput_tokens_per_second,
+        open_weights=_source_boolean(entry, "open_weights", "open_weight", "is_open_source"),
+        frontier=_source_boolean(entry, "frontier", "is_frontier"),
+        requires_byok=requires_byok,
         catalog_freshness=freshness,
     )
 
@@ -442,6 +511,10 @@ def _matches_filters(
     tier: QualificationTier | None,
     privacy: PrivacyTier | None,
     availability: Availability | None,
+    open_weight: bool | None,
+    frontier: bool | None,
+    platform_eligible: bool | None,
+    byok_only: bool | None,
 ) -> bool:
     if min_context_length is not None and (
         item.context_length is None or item.context_length < min_context_length
@@ -456,6 +529,14 @@ def _matches_filters(
     if privacy is not None and item.privacy != privacy:
         return False
     if availability is not None and item.availability != availability:
+        return False
+    if open_weight is not None and item.open_weights is not open_weight:
+        return False
+    if frontier is not None and item.frontier is not frontier:
+        return False
+    if platform_eligible is not None and item.platform_eligible is not platform_eligible:
+        return False
+    if byok_only is not None and item.requires_byok is not byok_only:
         return False
     if max_price_micros_per_million is not None:
         token_prices = (
@@ -502,6 +583,10 @@ async def list_human_models(
     tier: QualificationTier | None = None,
     privacy: PrivacyTier | None = None,
     availability: Availability | None = None,
+    open_weight: bool | None = None,
+    frontier: bool | None = None,
+    platform_eligible: bool | None = None,
+    byok_only: bool | None = None,
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
     cursor: Annotated[str | None, Query(max_length=1024)] = None,
 ) -> PlayerModelCatalogPage:
@@ -589,6 +674,10 @@ async def list_human_models(
             tier=tier,
             privacy=privacy,
             availability=availability,
+            open_weight=open_weight,
+            frontier=frontier,
+            platform_eligible=platform_eligible,
+            byok_only=byok_only,
         )
     ]
     page = filtered[:limit]

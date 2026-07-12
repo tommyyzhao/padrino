@@ -37,6 +37,7 @@
           Quick Play
         </a>
         <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/ladder">Ladder</a>
+        <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/models">Models</a>
         <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/leaderboard" data-testid="nav-leaderboard">Leaderboard</a>
         <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/lobby" data-testid="nav-lobby">Custom Lobby</a>
       </nav>
