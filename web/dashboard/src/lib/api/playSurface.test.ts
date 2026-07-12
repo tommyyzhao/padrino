@@ -3,12 +3,15 @@ import {
   actionAllowed,
   actionTypeDescription,
   actionTypeLabel,
+  anonymousPortraitKey,
   composerStatusFromChat,
   countdownBucket,
   countdownLabel,
   isNightActionPhase,
   isVotePhase,
+  mergeTableSeats,
   nightActionType,
+  seatPseudonym,
   secondsUntil,
   spriteUrl
 } from './playSurface';
@@ -130,5 +133,33 @@ describe('spriteUrl', () => {
     expect(spriteUrl('http://localhost:8000', 'pixel_town', 'placeholder')).toBe(
       'http://localhost:8000/public/sprites/placeholder'
     );
+  });
+});
+
+describe('identity-blind table presentation', () => {
+  it('derives readable pseudonyms and role-agnostic portraits from only public seat ids', () => {
+    expect(seatPseudonym('p1seataa-0000')).toBe('Cipher P1SE');
+    expect(anonymousPortraitKey('p1seataa-0000')).toMatch(/^archetype_[a-d]$/);
+    expect(anonymousPortraitKey('p1seataa-0000')).toBe(anonymousPortraitKey('p1seataa-0000'));
+  });
+
+  it('merges an owner roster with released table facts without resurrecting an eliminated seat', () => {
+    expect(
+      mergeTableSeats(
+        [
+          { public_player_id: 'p1', alive: false },
+          { public_player_id: 'p2', alive: true }
+        ],
+        ['p1', 'p2', 'p3'],
+        ['p4'],
+        'p5'
+      )
+    ).toEqual([
+      { public_player_id: 'p1', alive: false },
+      { public_player_id: 'p2', alive: true },
+      { public_player_id: 'p3', alive: true },
+      { public_player_id: 'p4', alive: false },
+      { public_player_id: 'p5', alive: true }
+    ]);
   });
 });

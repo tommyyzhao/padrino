@@ -18,6 +18,17 @@
 
 import type { LegalActionsView } from './types';
 
+/** A public seat fact suitable for the pre-reveal table. */
+export interface TableSeat {
+  public_player_id: string;
+  alive: boolean;
+}
+
+/** The default art pack when a legacy game has no persisted visual theme. */
+export const DEFAULT_PLAY_THEME = 'classic_noir';
+
+const ANONYMOUS_ARCHETYPES = ['archetype_a', 'archetype_b', 'archetype_c', 'archetype_d'] as const;
+
 /** The lifecycle of one human chat submission as the composer tracks it. */
 export type ComposerStatus = 'idle' | 'pending' | 'released' | 'blocked' | 'error';
 
@@ -100,6 +111,72 @@ export function actionTypeLabel(actionType: string): string {
     .filter((part) => part.length > 0)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join(' ');
+}
+
+/**
+ * Build a readable, identity-blind table name from the public seat token.
+ *
+ * This intentionally consults only the public token: it cannot encode a role,
+ * faction, human/AI controller, model, or lobby identity.
+ */
+export function seatPseudonym(publicPlayerId: string): string {
+  const token = publicPlayerId.replace(/[^a-z0-9]/gi, '').slice(0, 4).toUpperCase();
+  return `Cipher ${token || 'SEAT'}`;
+}
+
+/**
+ * Select one role-agnostic portrait key from a public seat token.
+ *
+ * The browser may use this only for the live anonymous table. It mirrors the
+ * server-side invariant in spirit: the key is a deterministic function of the
+ * public seat label alone and never of any hidden/controller data.
+ */
+export function anonymousPortraitKey(publicPlayerId: string): (typeof ANONYMOUS_ARCHETYPES)[number] {
+  let hash = 0;
+  for (let index = 0; index < publicPlayerId.length; index += 1) {
+    hash = (hash * 31 + publicPlayerId.charCodeAt(index)) >>> 0;
+  }
+  return ANONYMOUS_ARCHETYPES[hash % ANONYMOUS_ARCHETYPES.length] ?? 'archetype_a';
+}
+
+/**
+ * Combine public stream seats with a caller's own observed roster.
+ *
+ * The observation is allowed to reveal the full alive/dead roster to its owner,
+ * while the public stream is the source for released eliminations. Death is
+ * monotonic: a released or observed dead seat can never be resurrected by a
+ * later stale observation frame.
+ */
+export function mergeTableSeats(
+  releasedSeats: readonly TableSeat[],
+  alivePlayerIds: readonly string[],
+  deadPlayerIds: readonly string[],
+  ownSeatId: string | null
+): TableSeat[] {
+  const orderedIds: string[] = [];
+  const seats = new Map<string, TableSeat>();
+
+  const remember = (publicPlayerId: string, alive: boolean): void => {
+    if (publicPlayerId === '') return;
+    const existing = seats.get(publicPlayerId);
+    if (existing === undefined) {
+      orderedIds.push(publicPlayerId);
+      seats.set(publicPlayerId, { public_player_id: publicPlayerId, alive });
+      return;
+    }
+    if (!existing.alive || alive) return;
+    seats.set(publicPlayerId, { public_player_id: publicPlayerId, alive: false });
+  };
+
+  for (const seat of releasedSeats) remember(seat.public_player_id, seat.alive);
+  for (const publicPlayerId of alivePlayerIds) remember(publicPlayerId, true);
+  for (const publicPlayerId of deadPlayerIds) remember(publicPlayerId, false);
+  if (ownSeatId !== null) remember(ownSeatId, true);
+
+  return orderedIds.flatMap((publicPlayerId) => {
+    const seat = seats.get(publicPlayerId);
+    return seat === undefined ? [] : [seat];
+  });
 }
 
 /** A short player-facing description for a currently legal action type. */

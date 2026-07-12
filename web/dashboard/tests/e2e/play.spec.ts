@@ -930,6 +930,91 @@ test.describe('play surface responsive layout (US-282)', () => {
   });
 });
 
+test.describe('atmospheric play table (US-369)', () => {
+  test('uses a spatial identity-blind table with a private self dossier and secondary inspector', async ({
+    page
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await mockStandardPlaySurface(page, {
+      observationFrames: [
+        {
+          type: 'observation',
+          ruleset_id: 'mini7_v1',
+          phase: 'DAY_1_VOTE',
+          you: { player_id: SEAT_ME, alive: true, role: 'DOCTOR', faction: 'TOWN' },
+          alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
+          dead_players: [{ player_id: 'p4seatdd-0000-0000-0000-000000000004' }],
+          legal_actions: { allowed_action_types: ['VOTE', 'ABSTAIN'], legal_targets: [SEAT_OTHER] }
+        },
+        { type: 'phase_deadline', phase: 'DAY_1_VOTE', deadline_at: '2099-01-01T00:02:00Z' }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+
+    const dossier = page.getByTestId('play-self-dossier');
+    await expect(dossier).toBeVisible({ timeout: 15_000 });
+    await expect(dossier).toContainText('Doctor');
+    await expect(dossier).toContainText('Town');
+    await expect(dossier).toContainText('Vote');
+
+    const table = page.getByTestId('play-table');
+    await expect(table).toBeVisible();
+    await expect(table.getByTestId('play-seat-row')).toHaveCount(4);
+    await expect(table.getByTestId('play-seat-portrait').first().getByTestId('play-seat-sprite')).toHaveAttribute(
+      'src',
+      /classic_noir\/archetype_/
+    );
+    await expect(table).not.toContainText('Doctor');
+    await expect(table).not.toContainText('Town');
+    await expectIdentityBlind(table);
+
+    const inspector = page.getByTestId('play-inspector');
+    await expect(inspector).not.toHaveAttribute('open', '');
+    await inspector.locator('summary').click();
+    await expect(inspector).toContainText('mini7_v1');
+    await expect(inspector).toContainText('4 visible seats');
+    await expectIdentityBlind(inspector);
+  });
+
+  test('keeps the table, conversation, and action views independently reachable on mobile', async ({
+    page
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockStandardPlaySurface(page, {
+      observationFrames: [
+        {
+          type: 'observation',
+          ruleset_id: 'mini7_v1',
+          phase: 'NIGHT_1_ACTIONS',
+          you: { player_id: SEAT_ME, alive: true, role: 'DETECTIVE', faction: 'TOWN' },
+          alive_players: [SEAT_ME, SEAT_OTHER, SEAT_THIRD],
+          legal_actions: { allowed_action_types: ['INVESTIGATE'], legal_targets: [SEAT_OTHER] }
+        },
+        {
+          type: 'phase_deadline',
+          phase: 'NIGHT_1_ACTIONS',
+          deadline_at: '2099-01-01T00:02:00Z'
+        }
+      ]
+    });
+
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-self-dossier')).toContainText('Detective', {
+      timeout: 15_000
+    });
+    await expect(page.getByTestId('play-table')).toBeVisible();
+
+    await page.getByTestId('play-mobile-tab-chat').click();
+    await expect(page.getByTestId('play-chat-panel')).toBeVisible();
+    await expect(page.getByTestId('play-chat-input')).toBeInViewport();
+
+    await page.getByTestId('play-mobile-tab-actions').click();
+    await expect(page.getByTestId('play-night-panel')).toBeVisible();
+    await expect(page.getByTestId('play-night-submit')).toBeInViewport();
+  });
+});
+
 test.describe('play connection reliability (US-285)', () => {
   test('live-tail indicator reflects disconnect and recovery on a phone-width viewport', async ({
     page

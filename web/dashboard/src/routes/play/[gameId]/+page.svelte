@@ -10,7 +10,7 @@
   // anonymous mode (US-152), so this surface can never encode role or human/AI
   // (AGENTS.md rule 7).
   import { page } from '$app/stores';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import Button from '$lib/components/Button.svelte';
   import HowToPlayPanel from '$lib/components/HowToPlayPanel.svelte';
@@ -21,12 +21,16 @@
   import {
     actionTypeLabel,
     actionTypeDescription,
+    anonymousPortraitKey,
     composerStatusFromChat,
     countdownBucket,
     countdownLabel,
+    DEFAULT_PLAY_THEME,
     isNightActionPhase,
     isVotePhase,
+    mergeTableSeats,
     nightActionType,
+    seatPseudonym,
     secondsUntil,
     spriteUrl,
     type ComposerStatus
@@ -44,11 +48,15 @@
   let session = $state<PlaySession | null>(null);
   let composition = $state<CompositionSummary | null>(null);
   let themePackId = $state<string | null>(null);
-  let spriteByKey = $state<Record<string, string>>({});
 
   // Seat-scoped observation (legal actions) + transport-only phase deadline.
   let legal = $state<LegalActionsView | null>(null);
   let mySeatId = $state<string | null>(null);
+  let myRole = $state<string | null>(null);
+  let myFaction = $state<string | null>(null);
+  let observedAlivePlayerIds = $state<string[]>([]);
+  let observedDeadPlayerIds = $state<string[]>([]);
+  let rulesetId = $state<string | null>(null);
   let deadlineIso = $state<string | null>(null);
   let nowMs = $state<number>(Date.now());
 
@@ -74,10 +82,14 @@
   let pendingVoteTarget = $state<string | null | undefined>(undefined);
   const nightTarget = $state<{ value: string | null }>({ value: null });
 
-  // Seat board: derived from the released frame stream (identity-blind). The
-  // sprite KEY is resolved server-side to a role-agnostic archetype; here we
-  // only map a stable key per seat for a deterministic placeholder render.
+  // The released stream is identity-blind, while the caller's observation adds
+  // their complete public alive/dead roster. Neither source contains controller
+  // or model facts, and the portrait is derived only from public seat labels.
   const board = $derived(session?.seats ?? []);
+  const tableSeats = $derived(
+    mergeTableSeats(board, observedAlivePlayerIds, observedDeadPlayerIds, mySeatId)
+  );
+  const graveyard = $derived(tableSeats.filter((seat) => !seat.alive));
   const chat = $derived(session?.chat ?? []);
   const phase = $derived(session?.phase ?? '—');
   const phaseBanner = $derived(session?.phaseBanner ?? null);
@@ -94,9 +106,12 @@
   const voteTally = $derived(deriveVoteTally(session?.votes ?? {}));
   const showVoteTally = $derived(isDayVotePhaseId(phase));
   const mySeat = $derived(
-    mySeatId ? (board.find((seat) => seat.public_player_id === mySeatId) ?? null) : null
+    mySeatId ? (tableSeats.find((seat) => seat.public_player_id === mySeatId) ?? null) : null
   );
   const isEliminated = $derived(mySeat ? !mySeat.alive : false);
+  const legalActionLabels = $derived(
+    legal?.allowed_action_types.map((actionType) => actionTypeLabel(actionType)) ?? []
+  );
 
   function isDayVotePhaseId(value: string): boolean {
     const normalized = value.toUpperCase();
@@ -110,7 +125,11 @@
   }
 
   function seatSpriteUrl(publicPlayerId: string): string {
-    return spriteUrl(padrino.baseUrl, themePackId, spriteByKey[publicPlayerId] ?? null);
+    return spriteUrl(
+      padrino.baseUrl,
+      themePackId ?? DEFAULT_PLAY_THEME,
+      anonymousPortraitKey(publicPlayerId)
+    );
   }
 
   async function loadComposition(): Promise<void> {
@@ -128,9 +147,18 @@
     if (frame.type === 'observation') {
       const obs = frame as SeatObservationFrame;
       if (obs.legal_actions) legal = obs.legal_actions;
+      if (obs.ruleset_id) rulesetId = obs.ruleset_id;
+      if (Array.isArray(obs.alive_players)) observedAlivePlayerIds = obs.alive_players;
+      if (Array.isArray(obs.dead_players)) {
+        observedDeadPlayerIds = obs.dead_players.flatMap((player) =>
+          typeof player.player_id === 'string' ? [player.player_id] : []
+        );
+      }
       if (obs.return_notice?.kind === 'away_resuming') returnNotice = obs.return_notice.message;
-      const you = obs['you'] as { player_id?: string } | undefined;
+      const you = obs.you;
       if (you?.player_id) mySeatId = you.player_id;
+      if (you?.role) myRole = you.role;
+      if (you?.faction) myFaction = you.faction;
     } else if (frame.type === 'phase_deadline') {
       const dl = frame as PhaseDeadlineFrame;
       deadlineIso = dl.deadline_at;
@@ -186,6 +214,21 @@
 
   function cancelVote(): void {
     pendingVoteTarget = undefined;
+  }
+
+  async function selectMobilePanel(panel: 'board' | 'chat' | 'actions'): Promise<void> {
+    mobilePanel = panel;
+    const targetTestId =
+      panel === 'board'
+        ? 'play-board-panel'
+        : panel === 'chat'
+          ? 'play-chat-panel'
+          : 'play-action-panel';
+    await tick();
+    document.querySelector<HTMLElement>(`[data-testid="${targetTestId}"]`)?.scrollIntoView({
+      block: 'start',
+      behavior: 'auto'
+    });
   }
 
   async function submitVote(): Promise<void> {
@@ -273,45 +316,54 @@
   });
 </script>
 
-<div class="mb-4">
-  <a class="text-sm underline" href="/">← Home</a>
-</div>
-
-<div class="mb-2 flex flex-wrap items-center gap-3">
-  <div class="flex flex-wrap items-center gap-3">
-    <h1 class="text-xl font-semibold" data-testid="play-title">Play</h1>
-    <span
-      class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
-      data-testid="play-phase"
-    >
-      {phase}
-    </span>
-    <span
-      class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground"
-      data-testid="play-countdown"
-      data-bucket={bucket}
-    >
+<section class="play-command-deck mb-4" aria-label="Table status">
+  <div class="min-w-0">
+    <a class="text-sm text-muted-foreground underline" href="/">← Leave table</a>
+    <p class="padrino-eyebrow mt-4">Private social-deduction table</p>
+    <h1 class="mt-1 text-2xl font-semibold tracking-tight" data-testid="play-title">Play</h1>
+  </div>
+  <div class="flex flex-wrap items-center justify-start gap-2 sm:justify-end">
+    <span class="play-status-chip" data-testid="play-phase">{phase}</span>
+    <span class={`play-status-chip play-status-chip--${bucket}`} data-testid="play-countdown" data-bucket={bucket}>
       {countdownLabel(bucket)}
     </span>
     <span
-      class={`rounded px-2 py-0.5 font-mono text-xs ${
-        connectionState === 'live'
-          ? 'bg-emerald-50 text-emerald-800'
-          : connectionState === 'reconnecting'
-            ? 'bg-amber-50 text-amber-900'
-            : 'bg-red-50 text-red-800'
-      }`}
+      class={`play-connection-chip play-connection-chip--${connectionState}`}
       data-testid="play-connection-indicator"
       data-state={connectionState}
       role="status"
     >
+      <span aria-hidden="true" class="play-connection-dot"></span>
       {connectionLabel(connectionState)}
     </span>
+    <Button variant="outline" testid="play-help-open" onclick={() => (helpOpen = true)}>
+      Rules
+    </Button>
   </div>
-  <Button variant="outline" testid="play-help-open" onclick={() => (helpOpen = true)}>
-    Rules
-  </Button>
-</div>
+</section>
+
+<section class="play-self-dossier mb-4" data-testid="play-self-dossier" aria-label="Your private role card">
+  <div class="play-self-dossier__mark" aria-hidden="true">◈</div>
+  <div class="min-w-0">
+    <p class="padrino-eyebrow">Your private dossier</p>
+    <p class="mt-1 text-base font-semibold">
+      {myRole ? actionTypeLabel(myRole) : 'Role syncing'}
+      <span class="text-muted-foreground">·</span>
+      {myFaction ? actionTypeLabel(myFaction) : 'Faction syncing'}
+    </p>
+    <p class="mt-1 text-xs text-muted-foreground">
+      {mySeatId ? seatPseudonym(mySeatId) : 'Finding your chair'}
+    </p>
+  </div>
+  <div class="play-self-dossier__actions">
+    <span class="text-xs font-medium text-muted-foreground">Legal now</span>
+    {#if legalActionLabels.length > 0}
+      <span class="text-sm font-semibold">{legalActionLabels.join(' · ')}</span>
+    {:else}
+      <span class="text-sm text-muted-foreground">Observe the table</span>
+    {/if}
+  </div>
+</section>
 
 {#if helpOpen}
   <div
@@ -397,12 +449,22 @@
 
 {#if terminal}
   <div
-    class="mb-4 rounded-md border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm"
+    class="mb-4 rounded-xl border border-emerald-400/50 bg-emerald-950/30 px-4 py-3 text-sm"
     data-testid="play-terminal"
     data-winner={String(winner ?? '')}
   >
-    <span class="font-semibold">Game over.</span>
-    {#if winner}Winner: <strong data-testid="play-winner">{winner}</strong>{/if}
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <span><span class="font-semibold">Game over.</span>
+        {#if winner}Winner: <strong data-testid="play-winner">{winner}</strong>{/if}
+      </span>
+      <a
+        class="padrino-button padrino-button--outline inline-flex min-h-10 items-center px-3 py-2 text-sm"
+        href={`/play/${gameId}/reveal`}
+        data-testid="play-reveal-link"
+      >
+        Continue to reveal
+      </a>
+    </div>
   </div>
 {/if}
 
@@ -422,7 +484,7 @@
         : 'border-border bg-card text-foreground'
     }`}
     data-testid="play-mobile-tab-board"
-    onclick={() => (mobilePanel = 'board')}
+    onclick={() => void selectMobilePanel('board')}
   >
     Seats
   </button>
@@ -436,7 +498,7 @@
         : 'border-border bg-card text-foreground'
     }`}
     data-testid="play-mobile-tab-chat"
-    onclick={() => (mobilePanel = 'chat')}
+    onclick={() => void selectMobilePanel('chat')}
   >
     Chat
   </button>
@@ -450,49 +512,66 @@
         : 'border-border bg-card text-foreground'
     }`}
     data-testid="play-mobile-tab-actions"
-    onclick={() => (mobilePanel = 'actions')}
+    onclick={() => void selectMobilePanel('actions')}
   >
     Actions
   </button>
 </div>
 
-<div class="flex flex-col gap-3 md:grid md:grid-cols-[220px_1fr_300px]" data-testid="play-shell">
+<div class="play-table-shell" data-testid="play-shell">
   <div
     class={`${mobilePanel === 'board' ? 'flex' : 'hidden'} flex-col gap-3 md:flex`}
     data-testid="play-board-panel"
   >
-    <Card>
-      <h2 class="mb-2 text-sm font-semibold">Seats</h2>
-      {#if board.length === 0}
+    <Card class="play-table-card" data-testid="play-table">
+      <div class="mb-4 flex items-end justify-between gap-3">
+        <div>
+          <p class="padrino-eyebrow">The circle</p>
+          <h2 class="mt-1 text-lg font-semibold">Everyone at the table</h2>
+        </div>
+        <span class="play-seat-count">{tableSeats.length} visible</span>
+      </div>
+      {#if tableSeats.length === 0}
         <p class="text-xs text-muted-foreground" data-testid="play-seats-empty">Waiting…</p>
       {:else}
-        <ul class="flex flex-col gap-1" data-testid="play-seat-grid">
-          {#each board as seat (seat.public_player_id)}
+        <ul class="play-seat-grid" data-testid="play-seat-grid" aria-label="Table seats">
+          {#each tableSeats as seat (seat.public_player_id)}
             {@const isSelf = mySeatId === seat.public_player_id}
             <li
-              class={'flex items-center gap-2 rounded px-1 py-0.5 text-xs ' +
-                (seat.alive ? '' : 'text-muted-foreground line-through ') +
-                (isSelf && !seat.alive
-                  ? 'border border-red-300 bg-red-50 px-2 py-1 text-red-900'
-                  : isSelf
-                    ? 'border border-border bg-muted px-2 py-1'
-                    : '')}
+              class={`play-seat-card ${seat.alive ? 'play-seat-card--alive' : 'play-seat-card--eliminated'} ${
+                isSelf ? 'play-seat-card--self' : ''
+              }`}
               data-testid="play-seat-row"
               data-player-id={seat.public_player_id}
               data-alive={String(seat.alive)}
               data-self={String(isSelf)}
               data-state={isSelf && !seat.alive ? 'dead-self' : seat.alive ? 'alive' : 'dead'}
             >
-              <img
-                class="h-5 w-5 rounded"
-                alt="seat"
-                src={seatSpriteUrl(seat.public_player_id)}
-                data-testid="play-seat-sprite"
-              />
-              <span class="font-mono">{seat.public_player_id.slice(0, 8)}</span>
+              <span class="play-seat-card__portrait-wrap" data-testid="play-seat-portrait">
+                <img
+                  class="play-seat-card__portrait"
+                  alt=""
+                  src={seatSpriteUrl(seat.public_player_id)}
+                  data-testid="play-seat-sprite"
+                />
+              </span>
+              <span class="min-w-0">
+                <span class="block truncate text-sm font-semibold">{seatPseudonym(seat.public_player_id)}</span>
+                <span class="mt-0.5 block text-xs text-muted-foreground">
+                  {isSelf ? 'Your chair' : seat.alive ? 'At the table' : 'In the graveyard'}
+                </span>
+              </span>
             </li>
           {/each}
         </ul>
+      {/if}
+      {#if graveyard.length > 0}
+        <div class="play-graveyard mt-4" data-testid="play-graveyard">
+          <span class="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Graveyard</span>
+          <span class="text-xs text-muted-foreground">
+            {graveyard.map((seat) => seatPseudonym(seat.public_player_id)).join(' · ')}
+          </span>
+        </div>
       {/if}
     </Card>
   </div>
@@ -501,9 +580,10 @@
     class={`${mobilePanel === 'actions' || mobilePanel === 'chat' ? 'flex' : 'hidden'} flex-col gap-3 md:flex`}
     data-testid="play-main-panel"
   >
-    <div class={`${mobilePanel === 'actions' ? 'block' : 'hidden'} md:block`} data-testid="play-action-panel">
-      <Card>
-        <h2 class="mb-2 text-sm font-semibold">Your move</h2>
+    <div class={`${mobilePanel === 'actions' ? 'block' : 'hidden'} md:order-2 md:block`} data-testid="play-action-panel">
+      <Card class="play-action-card">
+        <p class="padrino-eyebrow mb-1">Decision console</p>
+        <h2 class="mb-3 text-lg font-semibold">Your move</h2>
         {#if terminal}
           <p class="text-xs text-muted-foreground" data-testid="play-action-ended">
             The game has ended.
@@ -619,9 +699,15 @@
       </Card>
     </div>
 
-    <div class={`${mobilePanel === 'chat' ? 'block' : 'hidden'} md:block`} data-testid="play-chat-panel">
-      <Card>
-        <h2 class="mb-2 text-sm font-semibold">Chat</h2>
+    <div class={`${mobilePanel === 'chat' ? 'block' : 'hidden'} md:order-1 md:block`} data-testid="play-chat-panel">
+      <Card class="play-conversation-card">
+        <div class="mb-3 flex items-end justify-between gap-3">
+          <div>
+            <p class="padrino-eyebrow mb-1">Conversation</p>
+            <h2 class="text-lg font-semibold">What the table is saying</h2>
+          </div>
+          <span class="text-xs text-muted-foreground">Released messages only</span>
+        </div>
         {#if chat.length === 0}
           <p class="text-xs text-muted-foreground" data-testid="play-chat-empty">No chat yet.</p>
         {:else}
@@ -736,15 +822,34 @@
       </Card>
     {/if}
 
-    <Card>
-      <h2 class="mb-2 text-sm font-semibold">This game</h2>
-      <p class="text-xs text-muted-foreground">
-        Seats are shown identity-blind: you only ever see how many humans vs AI are present, never
-        which seat is which, until the endgame reveal.
-      </p>
+    <Card class="play-inspector-card">
+      <details data-testid="play-inspector">
+        <summary class="cursor-pointer text-sm font-semibold">Table inspector</summary>
+        <div class="mt-3 grid gap-2 text-xs text-muted-foreground">
+          <p>
+            <span class="font-medium text-foreground">Rules:</span>
+            {rulesetId ?? 'Loading rule snapshot'}
+          </p>
+          <p>
+            <span class="font-medium text-foreground">Table:</span>
+            {tableSeats.length} visible seats
+          </p>
+          <p>
+            <span class="font-medium text-foreground">Model-controlled seats:</span>
+            {composition?.ai_count ?? '—'}
+          </p>
+          <p>
+            <span class="font-medium text-foreground">Replay position:</span>
+            {session?.lastSequence ?? 'Waiting for the first released event'}
+          </p>
+          <p>
+            This panel keeps player and model identities sealed until the endgame reveal.
+          </p>
+        </div>
+      </details>
       {#if mySeatId}
-        <p class="mt-2 font-mono text-xs text-muted-foreground" data-testid="play-my-seat">
-          You: {mySeatId.slice(0, 8)}
+        <p class="mt-4 font-mono text-xs text-muted-foreground" data-testid="play-my-seat">
+          Your chair: {seatPseudonym(mySeatId)}
         </p>
       {/if}
     </Card>

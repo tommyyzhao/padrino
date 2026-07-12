@@ -574,6 +574,254 @@
     text-align: right;
   }
 
+  .play-command-deck {
+    display: grid;
+    gap: 1rem;
+    border: 1px solid hsl(var(--border) / 0.8);
+    border-radius: var(--radius-lg);
+    padding: 1rem;
+    background:
+      radial-gradient(circle at 80% 0%, hsl(var(--cyan) / 0.12), transparent 14rem),
+      linear-gradient(135deg, hsl(229 29% 12% / 0.9), hsl(var(--card) / 0.82));
+    box-shadow: var(--elevation-1);
+  }
+
+  .play-status-chip,
+  .play-connection-chip,
+  .play-seat-count {
+    display: inline-flex;
+    min-height: 2.25rem;
+    align-items: center;
+    gap: 0.45rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: 999px;
+    padding: 0.35rem 0.7rem;
+    background: hsl(var(--background) / 0.48);
+    color: hsl(var(--foreground));
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .play-status-chip--ending {
+    border-color: hsl(var(--danger) / 0.72);
+    color: hsl(352 100% 87%);
+  }
+
+  .play-status-chip--soon {
+    border-color: hsl(var(--warning) / 0.72);
+    color: hsl(42 100% 84%);
+  }
+
+  .play-connection-chip--live {
+    border-color: hsl(var(--success) / 0.64);
+    color: hsl(149 86% 82%);
+  }
+
+  .play-connection-chip--reconnecting {
+    border-color: hsl(var(--warning) / 0.64);
+    color: hsl(42 100% 84%);
+  }
+
+  .play-connection-chip--offline {
+    border-color: hsl(var(--danger) / 0.64);
+    color: hsl(352 100% 86%);
+  }
+
+  .play-connection-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    background: currentColor;
+    box-shadow: 0 0 0.7rem currentColor;
+  }
+
+  .play-self-dossier {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.75rem;
+    align-items: center;
+    border: 1px solid hsl(var(--violet) / 0.45);
+    border-radius: var(--radius-lg);
+    padding: 1rem;
+    background:
+      linear-gradient(110deg, hsl(var(--violet) / 0.16), transparent 52%),
+      hsl(var(--card) / 0.86);
+    box-shadow: var(--elevation-1);
+  }
+
+  .play-self-dossier__mark {
+    display: grid;
+    width: 2.6rem;
+    height: 2.6rem;
+    place-items: center;
+    border: 1px solid hsl(var(--violet) / 0.7);
+    border-radius: 50%;
+    color: hsl(var(--violet));
+    font-size: 1.25rem;
+  }
+
+  .play-self-dossier__actions {
+    grid-column: 1 / -1;
+    display: grid;
+    gap: 0.15rem;
+    border-top: 1px solid hsl(var(--violet) / 0.24);
+    padding-top: 0.7rem;
+  }
+
+  .play-table-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+
+  .play-table-card {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .play-table-card::before {
+    position: absolute;
+    top: -6rem;
+    left: 50%;
+    width: 18rem;
+    height: 18rem;
+    border: 1px solid hsl(var(--cyan) / 0.13);
+    border-radius: 50%;
+    transform: translateX(-50%);
+    content: "";
+    pointer-events: none;
+  }
+
+  .play-seat-count {
+    min-height: 1.9rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 0.6875rem;
+  }
+
+  .play-seat-grid {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .play-seat-card {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.65rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.75rem;
+    padding: 0.65rem;
+    background: hsl(var(--background) / 0.36);
+  }
+
+  .play-seat-card--alive {
+    border-color: hsl(var(--cyan) / 0.38);
+  }
+
+  .play-seat-card--eliminated {
+    opacity: 0.64;
+    filter: saturate(0.45);
+  }
+
+  .play-seat-card--self {
+    border-color: hsl(var(--primary) / 0.72);
+    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.14), 0 0.6rem 1.6rem hsl(var(--primary) / 0.08);
+  }
+
+  .play-seat-card__portrait-wrap {
+    display: block;
+    flex: 0 0 auto;
+    width: 2.25rem;
+    height: 2.25rem;
+    overflow: hidden;
+    border: 1px solid hsl(var(--border));
+    border-radius: 50%;
+    background: hsl(var(--muted));
+  }
+
+  .play-seat-card__portrait {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .play-graveyard {
+    display: grid;
+    gap: 0.35rem;
+    border-top: 1px dashed hsl(var(--border));
+    padding-top: 0.8rem;
+  }
+
+  .play-conversation-card {
+    min-height: 20rem;
+  }
+
+  .play-conversation-card [data-testid="play-chat-feed"] {
+    max-height: 19rem;
+    overflow-y: auto;
+    padding-right: 0.25rem;
+  }
+
+  .play-conversation-card [data-testid="play-chat-line"] {
+    border-left: 2px solid hsl(var(--cyan) / 0.4);
+    padding: 0.35rem 0.55rem;
+    background: hsl(var(--background) / 0.25);
+  }
+
+  .play-action-card {
+    border-color: hsl(var(--primary) / 0.35);
+  }
+
+  .play-inspector-card details summary::marker {
+    color: hsl(var(--cyan));
+  }
+
+  @media (min-width: 640px) {
+    .play-command-deck {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      padding: 1.25rem;
+    }
+
+    .play-self-dossier {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      padding: 1.1rem 1.25rem;
+    }
+
+    .play-self-dossier__actions {
+      grid-column: auto;
+      min-width: 10rem;
+      border-top: 0;
+      border-left: 1px solid hsl(var(--violet) / 0.24);
+      padding-top: 0;
+      padding-left: 1rem;
+    }
+  }
+
+  @media (min-width: 768px) {
+    .play-table-shell {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr) 300px;
+      align-items: start;
+    }
+
+    .play-seat-grid {
+      grid-template-columns: 1fr;
+      gap: 0.4rem;
+    }
+
+    .play-seat-card {
+      padding: 0.5rem;
+    }
+  }
+
   @keyframes padrino-shimmer {
     to {
       background-position: -220% 0;

@@ -711,8 +711,16 @@ export interface ReturnNoticeView {
 /** The seat's own identity-mode-aware observation projection frame (US-136). */
 export interface SeatObservationFrame {
   type: 'observation';
+  ruleset_id?: string;
   phase?: string;
   alive_players?: string[];
+  dead_players?: Array<{ player_id?: string }>;
+  you?: {
+    player_id?: string;
+    alive?: boolean;
+    role?: string;
+    faction?: string;
+  };
   legal_actions?: LegalActionsView;
   return_notice?: ReturnNoticeView;
   [key: string]: unknown;
