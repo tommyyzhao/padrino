@@ -53,9 +53,10 @@ from padrino.api.rate_limit_store import (
 from padrino.core.engine.state import Seat
 from padrino.core.enums import Faction, PhaseKind
 from padrino.core.observations import format_phase_id
-from padrino.core.rulesets import get_ruleset
+from padrino.db.models import Game
 from padrino.db.repositories import human_chat_submissions as holds_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
+from padrino.db.rules_snapshots import runtime_ruleset_from_pair
 from padrino.runner.human_state_cache import resolve_current_human_state
 
 CHANNEL_PUBLIC = "PUBLIC"
@@ -132,6 +133,9 @@ async def submit_chat(
     resolved = await resolve_current_human_state(session, game_id)
     if resolved is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GAME_NOT_FOUND_DETAIL)
+    game = await session.get(Game, game_id)
+    if game is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GAME_NOT_FOUND_DETAIL)
 
     state = resolved.state
     if state.terminal_result is not None:
@@ -143,7 +147,11 @@ async def submit_chat(
     if not core_seat.alive:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=CHAT_NOT_ALLOWED_DETAIL)
 
-    ruleset = get_ruleset(state.ruleset_id)
+    ruleset = runtime_ruleset_from_pair(
+        ruleset_id=game.ruleset_id,
+        rules_snapshot_json=game.rules_snapshot_json,
+        rules_snapshot_hash=game.rules_snapshot_hash,
+    )
     limit = (
         ruleset.PUBLIC_MESSAGE_MAX_CHARS
         if channel == CHANNEL_PUBLIC

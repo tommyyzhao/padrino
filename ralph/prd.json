@@ -222,7 +222,7 @@
         "No DB/network import is added under core; impure shells load and inject the snapshot."
       ],
       "notes": "Large seam story but bounded to rules injection; no UI/API deck builder here.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-337",

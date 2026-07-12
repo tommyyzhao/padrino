@@ -40,6 +40,7 @@ from padrino.db.repositories import campaigns as campaigns_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
+from padrino.db.rules_snapshots import runtime_rules_snapshot_from_pair
 from padrino.economics.benchmark_admission import (
     BenchmarkBudgetReservation,
     game_binding_key,
@@ -333,12 +334,20 @@ async def _run_one_game(
             reservation = decision.reservation
             game_seed = game.game_seed
             ruleset_id = game.ruleset_id
+            rules_snapshot = runtime_rules_snapshot_from_pair(
+                ruleset_id=ruleset_id,
+                rules_snapshot_json=game.rules_snapshot_json,
+                rules_snapshot_hash=game.rules_snapshot_hash,
+            )
+            rules_snapshot_hash = game.rules_snapshot_hash
 
         adapter = adapter_factory()
         config = GameConfig(
             game_id=str(game_id),
             game_seed=game_seed,
             ruleset_id=ruleset_id,
+            rules_snapshot=rules_snapshot,
+            rules_snapshot_hash=rules_snapshot_hash,
         )
         persistence = GamePersistence(
             session_factory=session_factory,

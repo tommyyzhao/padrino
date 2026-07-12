@@ -48,6 +48,7 @@ from padrino.core.engine.hashing import compute_event_hash
 from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType, LeagueKind, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
+from padrino.core.rulesets.snapshot import GameRulesSnapshot
 from padrino.db.game_status import (
     GAME_STATUS_COMPLETED,
     GAME_STATUS_RUNNING,
@@ -66,6 +67,7 @@ from padrino.db.repositories import human_action_submissions as human_actions_re
 from padrino.db.repositories import human_game_runtime as runtime_repo
 from padrino.db.repositories import human_seat_presence as presence_repo
 from padrino.db.repositories import scheduler_heartbeats as worker_heartbeats_repo
+from padrino.db.rules_snapshots import runtime_rules_snapshot_from_pair
 from padrino.economics.human_cost_governance import global_breaker_open, human_eligible_pool
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
@@ -177,6 +179,19 @@ class AppliedTakeover:
     seat_id: str
     replacement_agent_build_id: uuid.UUID
     event: StoredEvent
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedHumanGame:
+    """DB-loaded human-lane game configuration for one worker claim."""
+
+    game_seed: str
+    ruleset_id: str
+    prior_status: str
+    league_id: uuid.UUID | None
+    ranked: bool
+    rules_snapshot: GameRulesSnapshot | None
+    rules_snapshot_hash: str | None
 
 
 class TakeoverApplyRecoveryError(RuntimeError):
@@ -1048,13 +1063,12 @@ async def human_lane_admission(
 async def _claim_game(
     session_factory: async_sessionmaker[AsyncSession],
     game_id: uuid.UUID,
-) -> tuple[str, str, str, uuid.UUID | None, bool] | None:
+) -> ClaimedHumanGame | None:
     """Atomically flip a claimable human-lane game to RUNNING.
 
-    Returns ``(game_seed, ruleset_id, prior_status, league_id, ranked)`` on a
-    successful claim, or ``None`` when the game vanished, already completed, or
-    is not a human-lane game (so a concurrent worker / the benchmark lane never
-    double-runs it).
+    Returns a :class:`ClaimedHumanGame` on a successful claim, or ``None`` when
+    the game vanished, already completed, or is not a human-lane game (so a
+    concurrent worker / the benchmark lane never double-runs it).
     """
     async with session_factory() as session, session.begin():
         game = await games_repo.get(session, game_id)
@@ -1064,12 +1078,26 @@ async def _claim_game(
             return None
         seed = game.game_seed
         ruleset_id = game.ruleset_id
+        rules_snapshot = runtime_rules_snapshot_from_pair(
+            ruleset_id=ruleset_id,
+            rules_snapshot_json=game.rules_snapshot_json,
+            rules_snapshot_hash=game.rules_snapshot_hash,
+        )
+        rules_snapshot_hash = game.rules_snapshot_hash
         prior_status = game.status
         league_id, ranked = await _bound_humans_included_league(session, game_id=game_id)
         if game.status != STATUS_RUNNING:
             game.status = STATUS_RUNNING
             await session.flush()
-    return seed, ruleset_id, prior_status, league_id, ranked
+    return ClaimedHumanGame(
+        game_seed=seed,
+        ruleset_id=ruleset_id,
+        prior_status=prior_status,
+        league_id=league_id,
+        ranked=ranked,
+        rules_snapshot=rules_snapshot,
+        rules_snapshot_hash=rules_snapshot_hash,
+    )
 
 
 async def _bound_humans_included_league(
@@ -1115,8 +1143,7 @@ async def _run_one_human_game(
         claimed = await _claim_game(session_factory, game_id)
         if claimed is None:
             return
-        game_seed, ruleset_id, prior_status, league_id, ranked = claimed
-        if prior_status == STATUS_RUNNING and resume is None:
+        if claimed.prior_status == STATUS_RUNNING and resume is None:
             _logger.warning(
                 "human_lane.running_game_missing_runtime_snapshot",
                 game_id=str(game_id),
@@ -1134,7 +1161,13 @@ async def _run_one_human_game(
             )
         else:
             adapter = _InjectedExecutorAdapter()
-        config = GameConfig(game_id=str(game_id), game_seed=game_seed, ruleset_id=ruleset_id)
+        config = GameConfig(
+            game_id=str(game_id),
+            game_seed=claimed.game_seed,
+            ruleset_id=claimed.ruleset_id,
+            rules_snapshot=claimed.rules_snapshot,
+            rules_snapshot_hash=claimed.rules_snapshot_hash,
+        )
         # Human seats carry no agent_build_id in ``agent_builds``, so the
         # scientific rating write path still fails closed even when a ranked
         # Humans-Included lobby reaches the terminal path (US-234a).
@@ -1142,8 +1175,8 @@ async def _run_one_human_game(
             session_factory=session_factory,
             game_id=game_id,
             agent_builds={},
-            league_id=league_id,
-            ranked=ranked,
+            league_id=claimed.league_id,
+            ranked=claimed.ranked,
             resume=resume,
             settings=settings,
         )

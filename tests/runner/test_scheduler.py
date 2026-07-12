@@ -32,6 +32,12 @@ from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets.custom_deck import validate_custom_role_deck
+from padrino.core.rulesets.snapshot import (
+    GameRulesSnapshot,
+    canonical_rules_dict,
+    canonical_rules_hash,
+)
 from padrino.db.game_status import (
     GAME_STATUS_COMPLETED,
     GAME_STATUS_CREATED,
@@ -426,6 +432,20 @@ class _AlwaysFailingExecutor(_FakeExecutor):
 
 def _adapter_factory_noop() -> LlmAdapter:
     return NoopMockAdapter()
+
+
+def _custom_rules_snapshot() -> GameRulesSnapshot:
+    result = validate_custom_role_deck(
+        {
+            Role.MAFIA_GOON: 1,
+            Role.DETECTIVE: 1,
+            Role.DOCTOR: 1,
+            Role.VILLAGER: 4,
+        },
+        player_count=7,
+    )
+    assert result.snapshot is not None
+    return result.snapshot
 
 
 def _game_created_body(game_id: uuid.UUID, game_seed: str) -> dict[str, Any]:
@@ -1271,6 +1291,49 @@ async def test_default_game_executor_threads_persistence_resume(
     )
 
     assert seen["resume"] is resume
+
+
+async def test_run_one_game_loads_custom_rules_snapshot_from_game_row(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    snapshot = _custom_rules_snapshot()
+    snapshot_hash = canonical_rules_hash(snapshot)
+    async with session_factory() as session, session.begin():
+        game = await games_repo.create(
+            session,
+            ruleset_id=snapshot.RULESET_ID,
+            game_seed="custom-scheduler-seed",
+            rules_snapshot_json=canonical_rules_dict(snapshot),
+            rules_snapshot_hash=snapshot_hash,
+        )
+        game_id = game.id
+
+    executor = _FakeExecutor()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    halt = await scheduler_module._run_one_game(
+        session_factory,
+        gauntlet_id=uuid.uuid4(),
+        game_id=game_id,
+        agent_builds_by_seat={},
+        league_id=uuid.uuid4(),
+        semaphore=asyncio.Semaphore(1),
+        adapter_factory=_adapter_factory_noop,
+        game_executor=executor,
+        ranked=False,
+        worker_id="custom-snapshot-worker",
+        clock=lambda: now,
+        lease_ttl=timedelta(seconds=60),
+        options=SchedulerOptions(),
+        budget_admission_lock=asyncio.Lock(),
+    )
+
+    assert halt is None
+    config, persistence, ranked = executor.calls[0]
+    assert config.ruleset_id == snapshot.RULESET_ID
+    assert config.rules_snapshot == snapshot
+    assert config.rules_snapshot_hash == snapshot_hash
+    assert persistence.game_id == game_id
+    assert ranked is False
 
 
 async def test_scheduler_retry_rehydrates_started_benchmark_game(

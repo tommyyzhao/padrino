@@ -49,9 +49,9 @@ from padrino.core.observation_privacy import (
     is_anonymous,
 )
 from padrino.core.observations import build_observation, format_phase_id
-from padrino.core.rulesets import get_ruleset
 from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import human_seat_presence as presence_repo
+from padrino.db.rules_snapshots import runtime_ruleset_from_pair
 from padrino.runner.human_chat_observation import (
     hydrate_observation_human_chat,
     load_released_human_chat_texts,
@@ -155,7 +155,11 @@ async def build_seat_observation_snapshot(
         # wrong seat rather than leaking an empty/foreign view.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=WRONG_SEAT_DETAIL)
 
-    ruleset = get_ruleset(game.ruleset_id)
+    ruleset = runtime_ruleset_from_pair(
+        ruleset_id=game.ruleset_id,
+        rules_snapshot_json=game.rules_snapshot_json,
+        rules_snapshot_hash=game.rules_snapshot_hash,
+    )
     observation = build_observation(state, core_seat, event_log, ruleset)
     texts_by_sequence = await load_released_human_chat_texts(session, game_id=game_id)
     observation = hydrate_observation_human_chat(observation, texts_by_sequence)

@@ -53,6 +53,7 @@ from padrino.core.enums import ActionType, Faction, LeagueKind, PhaseKind, Ratin
 from padrino.core.observations import Observation, format_phase_id
 from padrino.core.rulesets import Ruleset as CoreRuleset
 from padrino.core.rulesets import get_ruleset, mini7_v1
+from padrino.core.rulesets.snapshot import GameRulesSnapshot, assert_ruleset_id_matches_snapshot
 from padrino.db.game_status import GAME_STATUS_COMPLETED
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
@@ -116,11 +117,32 @@ OBSERVATION_FEEDBACK_CODES: Final[frozenset[str]] = frozenset(
 _RULESETS: dict[str, Any] = {}
 
 
+class RulesSnapshotMismatchError(ValueError):
+    """A supplied rules snapshot does not address the requested ruleset id."""
+
+
 def _ruleset_for(ruleset_id: str) -> CoreRuleset:
     override = _RULESETS.get(ruleset_id)
     if override is not None:
         return cast(CoreRuleset, override)
     return get_ruleset(ruleset_id)
+
+
+def _ruleset_for_config(config: GameConfig) -> CoreRuleset:
+    snapshot = config.rules_snapshot
+    if snapshot is None:
+        if config.rules_snapshot_hash is not None:
+            raise RulesSnapshotMismatchError("rules_snapshot_pair_required")
+        return _ruleset_for(config.ruleset_id)
+    try:
+        assert_ruleset_id_matches_snapshot(
+            ruleset_id=config.ruleset_id,
+            snapshot=snapshot,
+            rules_snapshot_hash=config.rules_snapshot_hash,
+        )
+    except ValueError as exc:
+        raise RulesSnapshotMismatchError(str(exc)) from exc
+    return cast(CoreRuleset, snapshot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +210,8 @@ class GameConfig(BaseModel):
     game_id: str
     game_seed: str
     ruleset_id: str = mini7_v1.RULESET_ID
+    rules_snapshot: GameRulesSnapshot | None = None
+    rules_snapshot_hash: str | None = None
     timeout_s: float = float(mini7_v1.LLM_TIMEOUT_SECONDS)
 
 
@@ -1188,7 +1212,7 @@ async def drive_game_loop(
     ``tick_runner`` defaults to the benchmark tick barrier. The human lane uses
     the same deterministic game loop but supplies a human-aware tick wrapper.
     """
-    ruleset = _ruleset_for(config.ruleset_id)
+    ruleset = _ruleset_for_config(config)
     event_log = resume.event_log if resume is not None else EventLog()
     llm_calls: list[AdapterResult] = []
     recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls, persistence)
@@ -1464,6 +1488,7 @@ __all__ = [
     "GamePersistence",
     "GameResume",
     "PhaseSnapshotHook",
+    "RulesSnapshotMismatchError",
     "TickRunner",
     "drive_game_loop",
     "run_game",

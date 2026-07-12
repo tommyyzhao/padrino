@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Runtime rules snapshots (US-336): custom `custom:<hash>` games should run
+  from the archived `GameRulesSnapshot` object and validate
+  `ruleset_id == custom:<canonical hash>` before the first event append.
+  Registered built-in rows may persist sorted canonical JSON, but runtime
+  execution must reconstruct the built-in snapshot from the registered module
+  after validating the persisted hash, otherwise sorted `role_counts` changes
+  `assign_roles` insertion-order parity and breaks golden/human-lane behavior.
+  Impure DB shells should use `runtime_ruleset_from_pair` /
+  `runtime_rules_snapshot_from_pair`; pure replay accepts an optional snapshot
+  and must never call `get_ruleset(custom_id)`.
 - Custom role deck validation (US-335): keep custom deck support in a pure
   declarative ruleset module (`core/rulesets/custom_deck.py`) that returns
   stable `CustomRoleDeckReason` tokens plus a `GameRulesSnapshot` on success.
@@ -6341,4 +6351,42 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 145 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3113 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-336
+- Threaded archived `GameRulesSnapshot` support through `GameConfig`,
+  benchmark scheduler claims, human-lane claims, benchmark resume,
+  human observation rendering, human chat limit validation, and pure replay.
+- Added pre-emit snapshot address validation so a mismatched requested
+  `ruleset_id` / `custom:<hash>` pair raises before `GameCreated` is appended.
+- Added custom snapshot runner/replay coverage plus scheduler/human-lane
+  injection regressions. Custom games run to terminal and deterministic
+  frozen-response replay reproduces the same hash head without resolving
+  `get_ruleset(custom_id)`.
+- Preserved built-in byte stability by validating persisted built-in snapshot
+  hashes but reconstructing runtime built-in snapshots from registered modules
+  so role-count insertion order remains identical to canonical rulesets.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/human_chat.py`,
+  `src/padrino/api/human_observation.py`,
+  `src/padrino/core/engine/replay.py`,
+  `src/padrino/core/rulesets/snapshot.py`,
+  `src/padrino/db/rules_snapshots.py`,
+  `src/padrino/runner/benchmark_durability.py`,
+  `src/padrino/runner/game_runner.py`,
+  `src/padrino/runner/human_lane.py`,
+  `src/padrino/runner/scheduler.py`, `tests/core/test_replay.py`,
+  `tests/runner/test_game_runner.py`,
+  `tests/runner/test_human_lane_wiring.py`,
+  `tests/runner/test_scheduler.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first
+  `uv run pytest tests/core/test_replay.py::test_replay_events_accepts_archived_custom_rules_snapshot tests/core/test_replay.py::test_replay_event_log_accepts_archived_custom_rules_snapshot tests/core/test_replay.py::test_replay_rejects_rules_snapshot_id_mismatch -q`
+  and
+  `uv run pytest tests/runner/test_game_runner.py::test_custom_rules_snapshot_runs_and_replays_without_registered_ruleset tests/runner/test_game_runner.py::test_rules_snapshot_id_mismatch_fails_before_event_emit -q`
+  failed on missing snapshot replay/runner symbols. Focused GREEN includes
+  custom scheduler/human-lane injection tests and canonical byte stability.
+  Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3120 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

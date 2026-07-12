@@ -12,6 +12,9 @@ from __future__ import annotations
 import ast
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, cast
+
+import pytest
 
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.engine.actions import Action
@@ -29,8 +32,16 @@ from padrino.core.rulesets import (
     roleblock10_v1,
     visit12_v1,
 )
+from padrino.core.rulesets.custom_deck import validate_custom_role_deck
+from padrino.core.rulesets.snapshot import GameRulesSnapshot, canonical_rules_hash
 from padrino.llm.mock import DeterministicMockAdapter
-from padrino.runner.game_runner import GameConfig, GameOutcome, _resolve_night_events, run_game
+from padrino.runner.game_runner import (
+    GameConfig,
+    GameOutcome,
+    RulesSnapshotMismatchError,
+    _resolve_night_events,
+    run_game,
+)
 from tests.conftest import (
     make_mafia_win_script,
     make_town_win_script,
@@ -98,6 +109,20 @@ def _typed_events(outcome: GameOutcome) -> list[Event]:
     return [EventAdapter.validate_python(stored.body) for stored in outcome.event_log.events]
 
 
+def _custom_rules_snapshot() -> GameRulesSnapshot:
+    result = validate_custom_role_deck(
+        {
+            Role.MAFIA_GOON: 1,
+            Role.DETECTIVE: 1,
+            Role.DOCTOR: 1,
+            Role.VILLAGER: 4,
+        },
+        player_count=7,
+    )
+    assert result.snapshot is not None
+    return result.snapshot
+
+
 # --- terminal scenarios -----------------------------------------------------
 
 
@@ -157,6 +182,70 @@ async def test_passive_day_cap_hash_chain_stable_for_canonical_rulesets() -> Non
         assert [event.event_hash for event in first.event_log.events] == [
             event.event_hash for event in second.event_log.events
         ]
+
+
+async def test_custom_rules_snapshot_runs_and_replays_without_registered_ruleset() -> None:
+    snapshot = _custom_rules_snapshot()
+    ruleset = cast(Any, snapshot)
+    seed = "custom-snapshot-runner-001"
+    seats = assign_roles(seed, ruleset)
+    script = make_villager_script(
+        [seat.public_player_id for seat in seats],
+        _phase_ids_for(ruleset),
+    )
+    config = GameConfig(
+        game_id="G-CUSTOM-SNAPSHOT",
+        game_seed=seed,
+        ruleset_id=snapshot.RULESET_ID,
+        rules_snapshot=snapshot,
+        rules_snapshot_hash=canonical_rules_hash(snapshot),
+        timeout_s=1.0,
+    )
+
+    first = await run_game(config, _adapter(script), ranked=False)
+    replay = await run_game(config, _adapter(script), ranked=False)
+
+    assert first.final_state.ruleset_id == snapshot.RULESET_ID
+    assert first.final_state.terminal_result == "DRAW"
+    assert first.event_log.events[0].body["payload"] == {
+        "ruleset_id": snapshot.RULESET_ID,
+        "game_id": "G-CUSTOM-SNAPSHOT",
+        "game_seed": seed,
+        "player_count": snapshot.PLAYER_COUNT,
+    }
+    assert replay_events(_typed_events(first), rules_snapshot=snapshot) == first.final_state
+    assert replay_event_log(first.event_log.events, rules_snapshot=snapshot).events == (
+        first.event_log.events
+    )
+    assert [stored.event_hash for stored in first.event_log.events] == [
+        stored.event_hash for stored in replay.event_log.events
+    ]
+
+
+async def test_rules_snapshot_id_mismatch_fails_before_event_emit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _custom_rules_snapshot()
+    emitted = False
+
+    def fail_on_emit(*_args: object, **_kwargs: object) -> GameState:
+        nonlocal emitted
+        emitted = True
+        raise AssertionError("snapshot mismatch should fail before _emit")
+
+    monkeypatch.setattr("padrino.runner.game_runner._emit", fail_on_emit)
+
+    bad_config = GameConfig(
+        game_id="G-CUSTOM-SNAPSHOT-BAD",
+        game_seed="custom-snapshot-bad",
+        ruleset_id="custom:" + "0" * 64,
+        rules_snapshot=snapshot,
+        rules_snapshot_hash=canonical_rules_hash(snapshot),
+        timeout_s=1.0,
+    )
+    with pytest.raises(RulesSnapshotMismatchError, match="ruleset_id"):
+        await run_game(bad_config, _adapter({}), ranked=False)
+    assert emitted is False
 
 
 async def test_roleblock10_runner_blocks_detective_with_structured_feedback() -> None:

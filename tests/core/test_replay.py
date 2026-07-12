@@ -42,10 +42,13 @@ from padrino.core.engine.events import (
 from padrino.core.engine.reducer import apply_event, initial_state
 from padrino.core.engine.replay import (
     ReplayHashMismatchError,
+    ReplayRulesSnapshotMismatchError,
     replay_event_log,
     replay_events,
 )
 from padrino.core.enums import Faction, Role
+from padrino.core.rulesets.custom_deck import validate_custom_role_deck
+from padrino.core.rulesets.snapshot import GameRulesSnapshot
 
 
 def _seat_assignments() -> tuple[SeatAssignment, ...]:
@@ -179,6 +182,45 @@ def _scripted_events() -> list[Event]:
     ]
 
 
+def _custom_rules_snapshot() -> GameRulesSnapshot:
+    result = validate_custom_role_deck(
+        {
+            Role.MAFIA_GOON: 1,
+            Role.DETECTIVE: 1,
+            Role.DOCTOR: 1,
+            Role.VILLAGER: 4,
+        },
+        player_count=7,
+    )
+    assert result.snapshot is not None
+    return result.snapshot
+
+
+def _custom_snapshot_events(snapshot: GameRulesSnapshot) -> list[Event]:
+    return [
+        GameCreated(
+            sequence=0,
+            phase="SETUP",
+            payload=GameCreatedPayload(
+                ruleset_id=snapshot.RULESET_ID,
+                game_id="g-custom-replay-01",
+                game_seed="seed-custom-replay",
+                player_count=snapshot.PLAYER_COUNT,
+            ),
+        ),
+        RolesAssigned(
+            sequence=1,
+            phase="SETUP",
+            payload=RolesAssignedPayload(assignments=_seat_assignments()),
+        ),
+        GameTerminated(
+            sequence=2,
+            phase="SETUP",
+            payload=GameTerminatedPayload(winner="DRAW", reason="MAX_DAYS_REACHED"),
+        ),
+    ]
+
+
 def test_replay_events_matches_incremental_apply() -> None:
     events = _scripted_events()
     expected = initial_state()
@@ -199,6 +241,15 @@ def test_replay_events_terminal_state_fields() -> None:
     assert final.game_id == "g-replay-01"
 
 
+def test_replay_events_accepts_archived_custom_rules_snapshot() -> None:
+    snapshot = _custom_rules_snapshot()
+    final = replay_events(_custom_snapshot_events(snapshot), rules_snapshot=snapshot)
+
+    assert final.ruleset_id == snapshot.RULESET_ID
+    assert final.game_id == "g-custom-replay-01"
+    assert final.terminal_result == "DRAW"
+
+
 def test_replay_event_log_reproduces_sequences_and_hashes() -> None:
     original = EventLog()
     for ev in _scripted_events():
@@ -211,6 +262,30 @@ def test_replay_event_log_reproduces_sequences_and_hashes() -> None:
         assert new.sequence == orig.sequence
         assert new.prev_event_hash == orig.prev_event_hash
         assert new.event_hash == orig.event_hash
+
+
+def test_replay_event_log_accepts_archived_custom_rules_snapshot() -> None:
+    snapshot = _custom_rules_snapshot()
+    original = EventLog()
+    for ev in _custom_snapshot_events(snapshot):
+        original.append(ev.model_dump(mode="json"))
+
+    replayed = replay_event_log(original.events, rules_snapshot=snapshot)
+
+    assert replayed.events[-1].event_hash == original.events[-1].event_hash
+
+
+def test_replay_rejects_rules_snapshot_id_mismatch() -> None:
+    snapshot = _custom_rules_snapshot()
+    events = _custom_snapshot_events(snapshot)
+    bad = events[0].model_copy(
+        update={
+            "payload": events[0].payload.model_copy(update={"ruleset_id": "custom:" + "0" * 64})
+        }
+    )
+
+    with pytest.raises(ReplayRulesSnapshotMismatchError, match="ruleset_id"):
+        replay_events([bad, *events[1:]], rules_snapshot=snapshot)
 
 
 def test_replay_event_log_validates_via_event_adapter() -> None:

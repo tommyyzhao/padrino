@@ -510,6 +510,28 @@ def custom_ruleset_id(snapshot: GameRulesSnapshot) -> str:
     return f"custom:{canonical_rules_hash(snapshot)}"
 
 
+def assert_ruleset_id_matches_snapshot(
+    *,
+    ruleset_id: str,
+    snapshot: GameRulesSnapshot,
+    rules_snapshot_hash: str | None = None,
+) -> None:
+    """Validate that ``ruleset_id`` addresses ``snapshot``.
+
+    Built-in snapshots carry their registered ``ruleset_id`` at runtime. Custom
+    snapshots omit it and are addressed as ``custom:<sha256(canonical rules)>``.
+    The optional persisted hash is checked against the same canonical body.
+    """
+    actual_hash = canonical_rules_hash(snapshot)
+    if rules_snapshot_hash is not None and rules_snapshot_hash != actual_hash:
+        raise ValueError("rules_snapshot_hash_mismatch")
+    expected_ruleset_id = snapshot.ruleset_id or f"custom:{actual_hash}"
+    if ruleset_id != expected_ruleset_id:
+        raise ValueError(
+            f"ruleset_id_snapshot_mismatch: expected {expected_ruleset_id!r}, got {ruleset_id!r}"
+        )
+
+
 def _unique_roles(roles: Iterable[object], field_name: str) -> frozenset[Role]:
     seen: set[Role] = set()
     for role in roles:
@@ -553,6 +575,7 @@ __all__ = [
     "RoleFamilySnapshot",
     "RoleNightActionSnapshot",
     "WinConditionSnapshot",
+    "assert_ruleset_id_matches_snapshot",
     "canonical_rules_dict",
     "canonical_rules_hash",
     "canonical_rules_json",

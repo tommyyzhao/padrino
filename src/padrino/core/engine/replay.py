@@ -23,9 +23,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from padrino.core.engine.event_log import EventLog, StoredEvent
-from padrino.core.engine.events import Event
+from padrino.core.engine.events import Event, GameCreated
 from padrino.core.engine.reducer import apply_event, initial_state
 from padrino.core.engine.state import GameState
+from padrino.core.rulesets.snapshot import GameRulesSnapshot, assert_ruleset_id_matches_snapshot
 
 
 class ReplayHashMismatchError(ValueError):
@@ -44,18 +45,34 @@ class ReplayHashMismatchError(ValueError):
         self.actual = actual
 
 
-def replay_events(events: Sequence[Event]) -> GameState:
+class ReplayRulesSnapshotMismatchError(ValueError):
+    """Raised when archived events disagree with the supplied rules snapshot."""
+
+
+def replay_events(
+    events: Sequence[Event],
+    *,
+    rules_snapshot: GameRulesSnapshot | None = None,
+) -> GameState:
     """Fold ``events`` through :func:`apply_event` and return the final state."""
+    if events:
+        _validate_game_created_event(events[0], rules_snapshot)
     state = initial_state()
     for event in events:
         state = apply_event(state, event)
     return state
 
 
-def replay_event_log(stored_events: Sequence[StoredEvent]) -> EventLog:
+def replay_event_log(
+    stored_events: Sequence[StoredEvent],
+    *,
+    rules_snapshot: GameRulesSnapshot | None = None,
+) -> EventLog:
     """Re-seal each prior body through a fresh :class:`EventLog` and verify."""
     log = EventLog()
     for prior in stored_events:
+        if prior.sequence == 0:
+            _validate_game_created_body(prior.body, rules_snapshot)
         replayed = log.append(prior.body)
         if replayed.event_hash != prior.event_hash:
             raise ReplayHashMismatchError(
@@ -66,4 +83,59 @@ def replay_event_log(stored_events: Sequence[StoredEvent]) -> EventLog:
     return log
 
 
-__all__ = ["ReplayHashMismatchError", "replay_event_log", "replay_events"]
+def _validate_game_created_event(
+    event: Event,
+    rules_snapshot: GameRulesSnapshot | None,
+) -> None:
+    if rules_snapshot is None or not isinstance(event, GameCreated):
+        return
+    _validate_game_created_payload(
+        ruleset_id=event.payload.ruleset_id,
+        player_count=event.payload.player_count,
+        rules_snapshot=rules_snapshot,
+    )
+
+
+def _validate_game_created_body(
+    body: dict[str, object],
+    rules_snapshot: GameRulesSnapshot | None,
+) -> None:
+    if rules_snapshot is None or body.get("event_type") != "GameCreated":
+        return
+    payload = body.get("payload")
+    if not isinstance(payload, dict):
+        raise ReplayRulesSnapshotMismatchError("GameCreated payload is missing")
+    ruleset_id = payload.get("ruleset_id")
+    player_count = payload.get("player_count")
+    if not isinstance(ruleset_id, str) or not isinstance(player_count, int):
+        raise ReplayRulesSnapshotMismatchError("GameCreated payload is malformed")
+    _validate_game_created_payload(
+        ruleset_id=ruleset_id,
+        player_count=player_count,
+        rules_snapshot=rules_snapshot,
+    )
+
+
+def _validate_game_created_payload(
+    *,
+    ruleset_id: str,
+    player_count: int,
+    rules_snapshot: GameRulesSnapshot,
+) -> None:
+    try:
+        assert_ruleset_id_matches_snapshot(ruleset_id=ruleset_id, snapshot=rules_snapshot)
+    except ValueError as exc:
+        raise ReplayRulesSnapshotMismatchError(str(exc)) from exc
+    if player_count != rules_snapshot.PLAYER_COUNT:
+        raise ReplayRulesSnapshotMismatchError(
+            "rules_snapshot_player_count_mismatch:"
+            f" expected {rules_snapshot.PLAYER_COUNT}, got {player_count}"
+        )
+
+
+__all__ = [
+    "ReplayHashMismatchError",
+    "ReplayRulesSnapshotMismatchError",
+    "replay_event_log",
+    "replay_events",
+]

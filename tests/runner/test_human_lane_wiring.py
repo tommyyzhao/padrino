@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
@@ -34,6 +35,12 @@ from padrino.core.enums import ActionType, Faction, LeagueKind, Role, SeatKind
 from padrino.core.human_chat import human_chat_content_ref
 from padrino.core.observations import Observation
 from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets.custom_deck import validate_custom_role_deck
+from padrino.core.rulesets.snapshot import (
+    GameRulesSnapshot,
+    canonical_rules_dict,
+    canonical_rules_hash,
+)
 from padrino.db.models import (
     AgentBuild,
     Game,
@@ -139,6 +146,20 @@ class _NoopAdapter:
             parsed_response=response,
             latency_ms=0,
         )
+
+
+def _custom_rules_snapshot() -> GameRulesSnapshot:
+    result = validate_custom_role_deck(
+        {
+            Role.MAFIA_GOON: 1,
+            Role.DETECTIVE: 1,
+            Role.DOCTOR: 1,
+            Role.VILLAGER: 4,
+        },
+        player_count=7,
+    )
+    assert result.snapshot is not None
+    return result.snapshot
 
 
 def _call_names(path: Path) -> set[str]:
@@ -247,6 +268,96 @@ async def test_human_lane_threads_settings_into_game_persistence(
 
     assert captured["game_id"] == str(game_id)
     assert captured["settings"] is settings
+
+
+@pytest.mark.asyncio
+async def test_human_lane_loads_custom_rules_snapshot_from_game_row(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    snapshot = _custom_rules_snapshot()
+    ruleset = cast(Any, snapshot)
+    snapshot_hash = canonical_rules_hash(snapshot)
+    async with session_factory() as session, session.begin():
+        principal = Principal(kind="guest", display_name=None)
+        league = League(
+            name="custom-human-lane",
+            ruleset_id=snapshot.RULESET_ID,
+            ranked=False,
+            kind=LeagueKind.HUMANS_INCLUDED.value,
+        )
+        game = Game(
+            gauntlet_id=None,
+            ruleset_id=snapshot.RULESET_ID,
+            game_seed="custom-human-lane-seed",
+            status="PENDING",
+            rules_snapshot_json=canonical_rules_dict(snapshot),
+            rules_snapshot_hash=snapshot_hash,
+        )
+        session.add_all([principal, league, game])
+        await session.flush()
+        session.add(
+            Lobby(
+                ruleset_id=snapshot.RULESET_ID,
+                identity_mode="ANONYMOUS",
+                invite_token=f"invite-{uuid.uuid4()}",
+                theme_pack_id=None,
+                stakes="CASUAL",
+                lobby_seed=f"seed-{uuid.uuid4()}",
+                host_principal_id=principal.id,
+                league_id=league.id,
+                game_id=game.id,
+                rules_snapshot_json=canonical_rules_dict(snapshot),
+                rules_snapshot_hash=snapshot_hash,
+            )
+        )
+        for seat in assign_roles("custom-human-lane-seed", ruleset):
+            session.add(
+                GameSeat(
+                    game_id=game.id,
+                    public_player_id=seat.public_player_id,
+                    seat_index=seat.seat_index,
+                    agent_build_id=None,
+                    seat_kind=SeatKind.HUMAN.value,
+                    occupant_principal_id=principal.id,
+                    role=seat.role.value,
+                    faction=seat.faction.value,
+                    alive=True,
+                )
+            )
+        await session.flush()
+        game_id = game.id
+
+    captured: dict[str, object] = {}
+
+    async def executor(
+        config: GameConfig,
+        persistence: GamePersistence,
+        adapter: LlmAdapter,
+    ) -> None:
+        captured["ruleset_id"] = config.ruleset_id
+        captured["rules_snapshot"] = config.rules_snapshot
+        captured["rules_snapshot_hash"] = config.rules_snapshot_hash
+        captured["game_id"] = persistence.game_id
+        captured["ranked"] = persistence.ranked
+        captured["adapter"] = adapter
+
+    await _run_one_human_game(
+        session_factory,
+        game_id=game_id,
+        semaphore=asyncio.Semaphore(1),
+        adapter_factory=None,
+        ai_adapter_factory=None,
+        game_executor=executor,
+        settings=Settings(),
+        build_production_adapter=False,
+        resume=None,
+    )
+
+    assert captured["ruleset_id"] == snapshot.RULESET_ID
+    assert captured["rules_snapshot"] == snapshot
+    assert captured["rules_snapshot_hash"] == snapshot_hash
+    assert captured["game_id"] == game_id
+    assert captured["ranked"] is False
 
 
 @pytest.mark.asyncio

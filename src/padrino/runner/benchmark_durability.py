@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.core.observations import format_phase_id
 from padrino.db.models import GameEvent
 from padrino.db.repositories import events as events_repo
+from padrino.db.repositories import games as games_repo
+from padrino.db.rules_snapshots import runtime_ruleset_from_pair
 from padrino.runner.game_runner import GameResume, _resume_phase, _ruleset_for
 from padrino.runner.human_durability import replay_state_from_rows
 
@@ -71,7 +73,15 @@ async def rehydrate_benchmark_game(
         rows = await events_repo.list_events(session, game_id)
         state, event_log = replay_state_from_rows(rows)
 
-    ruleset = _ruleset_for(state.ruleset_id)
+    game = await games_repo.get(session, game_id)
+    if game is None:
+        ruleset = _ruleset_for(state.ruleset_id)
+    else:
+        ruleset = runtime_ruleset_from_pair(
+            ruleset_id=game.ruleset_id,
+            rules_snapshot_json=game.rules_snapshot_json,
+            rules_snapshot_hash=game.rules_snapshot_hash,
+        )
     phase, _already_started = _resume_phase(state, event_log, ruleset)
     return GameResume(
         state=state,

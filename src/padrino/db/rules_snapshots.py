@@ -5,11 +5,16 @@ from __future__ import annotations
 import hashlib
 import string
 from collections.abc import Mapping
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from padrino.core.engine.canonical_json import canonical_dumps
-from padrino.core.rulesets import get_ruleset
-from padrino.core.rulesets.snapshot import canonical_rules_dict, snapshot_from_ruleset
+from padrino.core.rulesets import Ruleset, get_ruleset
+from padrino.core.rulesets.snapshot import (
+    GameRulesSnapshot,
+    assert_ruleset_id_matches_snapshot,
+    canonical_rules_dict,
+    snapshot_from_ruleset,
+)
 
 RulesSnapshotJson = dict[str, Any]
 
@@ -92,6 +97,63 @@ def validate_rules_snapshot_pair(
     return body, rules_snapshot_hash
 
 
+def runtime_rules_snapshot_from_pair(
+    *,
+    ruleset_id: str,
+    rules_snapshot_json: Mapping[str, Any] | None,
+    rules_snapshot_hash: str | None,
+) -> GameRulesSnapshot | None:
+    """Rebuild a runtime rules snapshot from a persisted canonical pair."""
+    body, snapshot_hash = validate_rules_snapshot_pair(
+        rules_snapshot_json=rules_snapshot_json,
+        rules_snapshot_hash=rules_snapshot_hash,
+    )
+    if body is None or snapshot_hash is None:
+        return None
+
+    registered_ruleset = _registered_ruleset(ruleset_id)
+    if registered_ruleset is not None:
+        snapshot = snapshot_from_ruleset(registered_ruleset)
+        try:
+            assert_ruleset_id_matches_snapshot(
+                ruleset_id=ruleset_id,
+                snapshot=snapshot,
+                rules_snapshot_hash=snapshot_hash,
+            )
+        except ValueError as exc:
+            raise RulesSnapshotValidationError(str(exc)) from exc
+        return snapshot
+
+    payload = dict(body)
+    snapshot = GameRulesSnapshot.model_validate(payload)
+    try:
+        assert_ruleset_id_matches_snapshot(
+            ruleset_id=ruleset_id,
+            snapshot=snapshot,
+            rules_snapshot_hash=snapshot_hash,
+        )
+    except ValueError as exc:
+        raise RulesSnapshotValidationError(str(exc)) from exc
+    return snapshot
+
+
+def runtime_ruleset_from_pair(
+    *,
+    ruleset_id: str,
+    rules_snapshot_json: Mapping[str, Any] | None,
+    rules_snapshot_hash: str | None,
+) -> Ruleset:
+    """Resolve the runtime ruleset from an archived snapshot or legacy registry id."""
+    snapshot = runtime_rules_snapshot_from_pair(
+        ruleset_id=ruleset_id,
+        rules_snapshot_json=rules_snapshot_json,
+        rules_snapshot_hash=rules_snapshot_hash,
+    )
+    if snapshot is not None:
+        return cast(Ruleset, snapshot)
+    return get_ruleset(ruleset_id)
+
+
 def ensure_lobby_rules_snapshot_mutable(status: str) -> None:
     """Reject rules snapshot changes once a lobby has launched."""
     if status == "LAUNCHED":
@@ -100,6 +162,13 @@ def ensure_lobby_rules_snapshot_mutable(status: str) -> None:
 
 def _hash_snapshot_body(body: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_dumps(body)).hexdigest()
+
+
+def _registered_ruleset(ruleset_id: str) -> Ruleset | None:
+    try:
+        return get_ruleset(ruleset_id)
+    except ValueError:
+        return None
 
 
 def _forbidden_snapshot_keys(value: object) -> frozenset[str]:
@@ -121,6 +190,8 @@ __all__ = [
     "RulesSnapshotValidationError",
     "ensure_lobby_rules_snapshot_mutable",
     "resolve_rules_snapshot_pair",
+    "runtime_rules_snapshot_from_pair",
+    "runtime_ruleset_from_pair",
     "snapshot_pair_for_ruleset",
     "validate_rules_snapshot_pair",
 ]
