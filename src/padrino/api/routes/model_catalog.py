@@ -15,6 +15,8 @@ import binascii
 import hashlib
 import json
 import re
+import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
@@ -26,7 +28,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.api.auth import _get_auth_settings, _get_rate_limiter
 from padrino.api.deps import get_session
 from padrino.api.human_auth import HumanPrincipalContext, get_human_context
-from padrino.db.models import CatalogSnapshot, ModelCatalogEntry
+from padrino.core.model_qualification import (
+    CompatibilityFacts,
+    ModelQualificationPolicy,
+    ProbeEvidenceFacts,
+    ProviderAvailabilityFacts,
+    evaluate_model_qualification,
+)
+from padrino.db.models import CatalogSnapshot, ModelCatalogEntry, ModelProbeEvidence
 from padrino.db.repositories.model_catalog_snapshots import get_latest_complete_snapshot
 from padrino.settings import Settings
 
@@ -38,6 +47,7 @@ _PROVIDER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _CURSOR_VERSION = 1
 _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
+_QUALIFICATION_BUCKET_SECONDS = 60 * 60
 
 QualificationTier = Literal[
     "unverified",
@@ -77,6 +87,7 @@ class PlayerModelCatalogEntry(BaseModel):
     supports_structured_output: bool
     qualification_tier: QualificationTier
     qualification_reasons: list[str]
+    casual_visible: bool
     privacy: PrivacyTier
     availability: Availability
     availability_reason: str
@@ -213,10 +224,119 @@ def _supports_structured_output(entry: ModelCatalogEntry) -> bool:
     )
 
 
-def _qualification_for_entry(entry: ModelCatalogEntry) -> tuple[QualificationTier, list[str]]:
-    """Return the safe pre-probe default until US-345/346 publish evidence policy."""
-    del entry
-    return "unverified", ["no_compatibility_evidence"]
+def _source_has_state(entry: ModelCatalogEntry, *states: str) -> bool:
+    return any(
+        _source_text(source.get("availability") or source.get("status")) in states
+        for source in (entry.raw_metadata, entry.provider_summary)
+    )
+
+
+def _source_bool(entry: ModelCatalogEntry, key: str) -> bool | None:
+    for source in (entry.provider_summary, entry.raw_metadata):
+        value = source.get(key)
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _source_string(entry: ModelCatalogEntry, key: str) -> str | None:
+    for source in (entry.provider_summary, entry.raw_metadata):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _int_fact(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _time_bucket(value: datetime) -> int:
+    return int(_as_utc(value).timestamp()) // _QUALIFICATION_BUCKET_SECONDS
+
+
+def _qualification_policy(now: datetime) -> ModelQualificationPolicy:
+    """Supply the current operator policy to the pure qualification seam."""
+    return ModelQualificationPolicy(
+        current_time_bucket=_time_bucket(now),
+        max_probe_age_buckets=7 * 24,
+        playable_max_tokens=20_000,
+        playable_max_latency_ms=8_000,
+        ranked_max_latency_ms=2_500,
+        ranked_max_price_micros_per_million=5_000_000,
+        ranked_min_successful_samples=3,
+    )
+
+
+def _probe_status_succeeded(status_value: str) -> bool:
+    return _source_text(status_value) in {"success", "succeeded", "passed", "ok"}
+
+
+def _probe_evidence_facts(record: ModelProbeEvidence) -> ProbeEvidenceFacts:
+    """Translate persisted probe payloads without passing ORM state into core."""
+    payload = record.evidence
+    schema_coercion = payload.get("schema_coercion_succeeded")
+    strict_schema = payload.get("strict_schema_observed")
+    drift_resolved = payload.get("drift_resolved")
+    provider_fingerprint = payload.get("provider_fingerprint")
+    tokens_used = payload.get("tokens_used", payload.get("total_tokens"))
+    return ProbeEvidenceFacts(
+        probe_id=str(record.id),
+        observed_at_bucket=_time_bucket(record.observed_at),
+        schema_coercion_succeeded=(
+            schema_coercion is True if _probe_status_succeeded(record.status) else False
+        ),
+        strict_schema_observed=strict_schema if isinstance(strict_schema, bool) else None,
+        tokens_used=_int_fact(tokens_used),
+        latency_ms=_int_fact(payload.get("latency_ms")),
+        drift_resolved=drift_resolved if isinstance(drift_resolved, bool) else None,
+        provider_fingerprint=(
+            provider_fingerprint.strip()
+            if isinstance(provider_fingerprint, str) and provider_fingerprint.strip()
+            else None
+        ),
+    )
+
+
+def _qualification_for_entry(
+    entry: ModelCatalogEntry,
+    *,
+    probe_records: Sequence[ModelProbeEvidence],
+    now: datetime,
+) -> tuple[QualificationTier, list[str], bool]:
+    """Project ORM catalog/probe rows into the deterministic core decision."""
+    availability, _ = _source_availability(entry)
+    decision = evaluate_model_qualification(
+        CompatibilityFacts(
+            is_text_model=any(str(modality).lower() == "text" for modality in entry.modalities),
+            explicitly_disabled=_source_has_state(entry, "disabled"),
+            explicitly_deprecated=_source_has_state(entry, "deprecated", "retired", "sunset"),
+            expires_at_bucket=(
+                _time_bucket(entry.expires_at) if entry.expires_at is not None else None
+            ),
+            advertised_strict_schema=_supports_structured_output(entry),
+            prompt_price_micros_per_million=_int_fact(
+                entry.pricing_micros.get("prompt_per_million")
+            ),
+            completion_price_micros_per_million=_int_fact(
+                entry.pricing_micros.get("completion_per_million")
+            ),
+            provider_availability=ProviderAvailabilityFacts(
+                pinned=_source_bool(entry, "provider_pinned"),
+                available=availability == "available",
+                fingerprint=_source_string(entry, "provider_fingerprint"),
+            ),
+        ),
+        (_probe_evidence_facts(record) for record in probe_records),
+        policy=_qualification_policy(now),
+    )
+    return (
+        decision.tier.value,
+        [reason.value for reason in decision.reasons],
+        decision.casual_visible,
+    )
 
 
 def _pricing_per_million(entry: ModelCatalogEntry) -> dict[str, int]:
@@ -244,6 +364,7 @@ def _platform_eligibility(
 def _project_entry(
     entry: ModelCatalogEntry,
     *,
+    probe_records: Sequence[ModelProbeEvidence],
     freshness: CatalogFreshnessResponse,
     now: datetime,
 ) -> PlayerModelCatalogEntry:
@@ -252,7 +373,11 @@ def _project_entry(
         freshness=freshness,
         now=now,
     )
-    qualification_tier, qualification_reasons = _qualification_for_entry(entry)
+    qualification_tier, qualification_reasons, casual_visible = _qualification_for_entry(
+        entry,
+        probe_records=probe_records,
+        now=now,
+    )
     platform_eligible, platform_ineligibility_reasons = _platform_eligibility(
         availability=availability,
         qualification_tier=qualification_tier,
@@ -269,6 +394,7 @@ def _project_entry(
         supports_structured_output=_supports_structured_output(entry),
         qualification_tier=qualification_tier,
         qualification_reasons=qualification_reasons,
+        casual_visible=casual_visible,
         privacy=_privacy_from_entry(entry),
         availability=availability,
         availability_reason=availability_reason,
@@ -431,11 +557,32 @@ async def list_human_models(
     entries = list(
         (await session.execute(statement.order_by(ModelCatalogEntry.canonical_slug))).scalars()
     )
+    probe_records_by_entry: dict[uuid.UUID, list[ModelProbeEvidence]] = {}
+    if entries:
+        probe_records = list(
+            (
+                await session.execute(
+                    select(ModelProbeEvidence).where(
+                        ModelProbeEvidence.catalog_snapshot_id == snapshot.id,
+                        ModelProbeEvidence.model_catalog_entry_id.in_(
+                            [entry.id for entry in entries]
+                        ),
+                    )
+                )
+            ).scalars()
+        )
+        for record in probe_records:
+            probe_records_by_entry.setdefault(record.model_catalog_entry_id, []).append(record)
     filtered = [
         projected
         for entry in entries
         if _matches_filters(
-            projected := _project_entry(entry, freshness=freshness, now=now),
+            projected := _project_entry(
+                entry,
+                probe_records=probe_records_by_entry.get(entry.id, []),
+                freshness=freshness,
+                now=now,
+            ),
             max_price_micros_per_million=max_price_micros_per_million,
             min_context_length=min_context_length,
             requires_structured_output=requires_structured_output,

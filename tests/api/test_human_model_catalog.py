@@ -9,11 +9,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.auth import RateLimiter
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
+from padrino.db.models import ModelCatalogEntry, ModelProbeEvidence
 from padrino.db.repositories.model_catalog_snapshots import (
     CatalogEntryInput,
     create_or_get_completed_snapshot,
@@ -58,6 +60,8 @@ def _entry(
     structured: bool = False,
     privacy: str | None = None,
     availability: str | None = None,
+    provider_pinned: bool = False,
+    provider_fingerprint: str | None = None,
     expires_at: datetime | None = None,
     secret_marker: str | None = None,
 ) -> CatalogEntryInput:
@@ -70,6 +74,10 @@ def _entry(
         pricing_micros["completion_per_million"] = completion_price
         pricing_strings["completion"] = "0.0000002"
     provider_summary: dict[str, object] = {}
+    if provider_pinned:
+        provider_summary["provider_pinned"] = True
+    if provider_fingerprint is not None:
+        provider_summary["provider_fingerprint"] = provider_fingerprint
     raw_metadata: dict[str, object] = {"architecture": {"output_modalities": ["text"]}}
     if privacy is not None:
         provider_summary["privacy"] = privacy
@@ -184,7 +192,8 @@ async def test_human_models_combines_selector_filters_and_never_leaks_internal_f
         "supported_capabilities": ["response_format", "temperature"],
         "supports_structured_output": True,
         "qualification_tier": "unverified",
-        "qualification_reasons": ["no_compatibility_evidence"],
+        "qualification_reasons": ["probe_evidence_missing"],
+        "casual_visible": True,
         "privacy": "zdr",
         "availability": "available",
         "availability_reason": "source_available",
@@ -208,6 +217,64 @@ async def test_human_models_combines_selector_filters_and_never_leaks_internal_f
         "catalog_snapshot_id",
         '"id"',
     ):
+        assert forbidden not in rendered
+
+
+async def test_human_models_projects_pure_probe_qualification_without_exposing_evidence(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed_snapshot(
+        session_factory,
+        content_hash="d" * 64,
+        entries=[
+            _entry(
+                "openai/qualified",
+                structured=True,
+                availability="available",
+                provider_pinned=True,
+                provider_fingerprint="provider-v1",
+            )
+        ],
+    )
+    async with session_factory() as session, session.begin():
+        entry = await session.scalar(
+            select(ModelCatalogEntry).where(ModelCatalogEntry.canonical_slug == "openai/qualified")
+        )
+        assert entry is not None
+        session.add_all(
+            [
+                ModelProbeEvidence(
+                    catalog_snapshot_id=entry.catalog_snapshot_id,
+                    model_catalog_entry_id=entry.id,
+                    prompt_hash=f"{index:064x}",
+                    schema_hash=f"{index + 10:064x}",
+                    probe_suite_version=f"v{index}",
+                    status="passed",
+                    evidence={
+                        "schema_coercion_succeeded": True,
+                        "strict_schema_observed": True,
+                        "tokens_used": 800,
+                        "latency_ms": 900,
+                        "drift_resolved": True,
+                        "provider_fingerprint": "provider-v1",
+                    },
+                    observed_at=NOW,
+                )
+                for index in range(1, 4)
+            ]
+        )
+
+    response = await client.get("/human/models", params={"tier": "ranked_qualified"})
+
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["canonical_slug"] == "openai/qualified"
+    assert item["qualification_tier"] == "ranked_qualified"
+    assert item["qualification_reasons"] == []
+    assert item["casual_visible"] is True
+    rendered = json.dumps(response.json(), sort_keys=True)
+    for forbidden in ("schema_coercion_succeeded", "provider_fingerprint", "drift_resolved"):
         assert forbidden not in rendered
 
 

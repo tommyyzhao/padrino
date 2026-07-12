@@ -407,7 +407,7 @@
         "Boundary tests cover missing/lying supported_parameters, free models, extreme pricing, expiration, and probe drift."
       ],
       "notes": "Pure core policy; network/database shells only resolve facts.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-346",

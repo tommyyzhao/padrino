@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Model qualification (US-345): keep qualification in
+  `core/model_qualification.py` as a data-only policy over normalized catalog
+  facts, integer time buckets, and append-only probe facts. The impure catalog
+  route may translate ORM evidence but must never pass ORM rows or wall-clock
+  values into the policy. Return the tier plus ordered lower-snake-case reason
+  tokens and a separate casual-visibility bit: unprobed text models remain
+  visible/unverified, while explicit disabled/deprecated/non-text rows do not.
+  Provider pin/availability, bounded price/latency samples, and drift evidence
+  gate only `RANKED_QUALIFIED`; qualification is computed now but does not
+  affect ratings in Wave 15.
 - Player selector catalog reads (US-344): serve `/human/models` from exactly
   one immutable COMPLETE catalog snapshot. A cursor must encode the snapshot
   content hash plus the last `canonical_slug`, then keep reading that snapshot
@@ -6685,5 +6695,35 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   test_catalog_sync.py`, `tests/api/test_guest_quickplay.py`, and
   `tests/api/test_public_surface_only.py` -> 41 passed. Backend gates:
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"`. Frontend gates not run; story did not
+  touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-345
+- Added the pure, injected-time-bucket model qualification policy. It derives
+  unverified, playable, verified-structured, and ranked-qualified tiers from
+  normalized catalog/provider facts and ordered probe observations without any
+  database, network, or clock dependency.
+- Text models remain casually visible while unverified unless disabled,
+  deprecated, expired, or non-text. Schema/coercion success must meet token and
+  latency bounds; strict output requires both catalog advertisement and probe
+  observation. Ranked qualification additionally requires a pinned available
+  provider, known bounded price, three successful samples, ranked latency, and
+  resolved provider-fingerprint drift. Popularity is intentionally ignored.
+- Wired `/human/models` to translate current-snapshot probe records into those
+  pure facts, expose only tier/reason/visibility outputs, and keep the raw
+  evidence payload (including provider fingerprints) out of the response.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/model_qualification.py`,
+  `src/padrino/api/routes/model_catalog.py`,
+  `tests/core/test_model_qualification.py`,
+  `tests/api/test_human_model_catalog.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first
+  `uv run pytest tests/core/test_model_qualification.py -q` failed at missing
+  module collection; the selector-qualified focused test initially returned no
+  ranked item. Focused GREEN: `uv run pytest
+  tests/core/test_model_qualification.py tests/api/test_human_model_catalog.py
+  -q` -> 24 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"`. Frontend gates not run; story did not
   touch `web/dashboard`.
