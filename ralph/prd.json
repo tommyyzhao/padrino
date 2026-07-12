@@ -427,7 +427,7 @@
         "Admin/CLI trigger is rate/cost limited and idempotent for the same model+suite+catalog+prompt tuple."
       ],
       "notes": "Uses the ModelProbeEvidence table deliberately created by US-342 migration 0066; never edit 0066 after it ships.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-347",

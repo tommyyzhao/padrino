@@ -3,6 +3,19 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- OpenRouter compatibility probes (US-346): keep probes in the impure
+  `openrouter.compatibility_probe` seam over static synthetic `Observation`
+  values and a stub-friendly transport protocol, never a `Game` or runner.
+  Use the immutable `(catalog snapshot, entry, prompt hash, schema hash, suite
+  version)` key for evidence idempotency; use a distinct live-suite version so
+  no-spend fake evidence can never satisfy an opted-in live probe. Persist only
+  bounded hashes, integer usage/cost, safe provider/routing facts, and derived
+  outcomes through `create_or_get_probe_evidence`; reject raw request/response,
+  credential, and error-message keys before the append-only write. Query old
+  evidence before applying a persistent trigger rate-limit, then require a
+  preflight catalog-price estimate within both an explicit live spend cap and
+  the operator cap. This keeps retries free and leaves game/runtime snapshots
+  untouched while the catalog route recomputes eligibility from new evidence.
 - Model qualification (US-345): keep qualification in
   `core/model_qualification.py` as a data-only policy over normalized catalog
   facts, integer time buckets, and append-only probe facts. The impure catalog
@@ -6697,6 +6710,37 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"`. Frontend gates not run; story did not
   touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-346
+- Added the bounded OpenRouter compatibility probe suite over canonical JSON,
+  public-message, vote, and every current night-action family observation.
+  Deterministic fake transport is the default; real HTTP probes are explicit,
+  integration/live-LLM marked, and require a configured credential plus a
+  micro-dollar spend cap.
+- Added sanitized append-only probe-evidence persistence with idempotency and
+  race handling. Records bind an immutable catalog entry/snapshot to prompt and
+  schema hashes, result hashes/status, provider/routing facts, token/latency/
+  cost totals, and observed time. Raw credentials, request/response bodies,
+  and error messages are rejected before persistence.
+- Added admin and `padrino catalog probe` triggers. Both use persistent
+  per-trigger rate limiting, reuse exact prior evidence without a second
+  transport call, and bound live work by catalog-derived estimated cost plus an
+  operator ceiling. Failed evidence demotes only the derived catalog
+  qualification and does not alter historical evidence or game state.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/openrouter/compatibility_probe.py`,
+  `src/padrino/db/repositories/model_catalog_snapshots.py`,
+  `src/padrino/api/routes/admin.py`, `src/padrino/cli.py`,
+  `src/padrino/settings.py`, `tests/openrouter/test_compatibility_probe.py`,
+  `tests/openrouter/test_compatibility_probe_live.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first
+  `uv run pytest tests/openrouter/test_compatibility_probe.py -q` failed on the
+  missing module; focused GREEN -> 7 passed. Related catalog/admin/settings
+  slice -> 61 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m
+  "not integration"` -> 3213 passed / 51 skipped / 11 deselected. Frontend
+  gates not run; story did not touch `web/dashboard`.
 
 ## 2026-07-12 PDT - US-345
 - Added the pure, injected-time-bucket model qualification policy. It derives
