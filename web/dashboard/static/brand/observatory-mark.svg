@@ -1,0 +1,16 @@
+<!--
+  Original Padrino geometric observatory mark. Authored in-repository for this
+  dashboard; no third-party asset, runtime image generation, or external URL.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="ember" x1="8" y1="6" x2="40" y2="42" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFBC72"/>
+      <stop offset="1" stop-color="#E66D45"/>
+    </linearGradient>
+  </defs>
+  <path d="M24 3.5 41.75 13.75v20.5L24 44.5 6.25 34.25v-20.5L24 3.5Z" stroke="url(#ember)" stroke-width="2"/>
+  <path d="M14 25c2.5-5.25 5.83-7.88 10-7.88S31.5 19.75 34 25c-2.5 5.25-5.83 7.88-10 7.88S16.5 30.25 14 25Z" fill="#111524" stroke="#8CEBFA" stroke-width="1.5"/>
+  <circle cx="24" cy="25" r="3.5" fill="#8CEBFA"/>
+  <path d="M24 8v5M24 37v3M7.5 24h5M35.5 24h5" stroke="#B698FF" stroke-linecap="round" stroke-width="1.5"/>
+</svg>

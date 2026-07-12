@@ -2463,6 +2463,7 @@ __all__ = [
     "OAuthConsumedFlow",
     "OAuthIdentity",
     "OpenRouterPkceFlow",
+    "OpenRouterPlatformSubkey",
     "OperatorCompletionReserveCursor",
     "OperatorCompletionReserveLedgerEntry",
     "OperatorCompletionReserveSettlement",

@@ -73,8 +73,8 @@
 </div>
 
 <h1 class="mb-2 text-xl font-semibold" data-testid="replay-title">Replay</h1>
-<p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="replay-game-id">
-  {gameId}
+<p class="mb-4 text-xs text-muted-foreground" data-testid="replay-game-id">
+  Replay reference <span class="font-mono">{gameId?.slice(0, 8) ?? '—'}</span>
 </p>
 
 {#if loading && allEvents.length === 0}

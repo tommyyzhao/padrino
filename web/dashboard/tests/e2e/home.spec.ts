@@ -66,7 +66,7 @@ test.describe('home', () => {
 
     const primary = page.getByTestId('home-play-vs-ai-cta');
     await expect(primary).toBeVisible();
-    await expect(primary).toHaveClass(/bg-primary/);
+    await expect(primary).toHaveClass(/padrino-button--primary/);
     await expect(page.getByTestId('home-watch-link')).toBeVisible();
     await expect(page.getByTestId('home-leaderboard-link')).toBeVisible();
     await expect(page.getByTestId('nav-play-vs-ai')).toHaveText('Play vs AI');

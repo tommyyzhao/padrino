@@ -44,7 +44,9 @@
 </div>
 
 <h1 class="mb-4 text-xl font-semibold" data-testid="recap-title">Post-Match Recap</h1>
-<p class="mb-6 font-mono text-xs text-muted-foreground" data-testid="recap-game-id">{gameId}</p>
+<p class="mb-6 text-xs text-muted-foreground" data-testid="recap-game-id">
+  Match reference <span class="font-mono">{gameId.slice(0, 8)}</span>
+</p>
 
 {#if loading}
   <p class="text-sm text-muted-foreground" data-testid="recap-loading">Loading analytics…</p>

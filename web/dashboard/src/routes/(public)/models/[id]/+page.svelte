@@ -2,6 +2,7 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
+  import ModelBadge from '$lib/components/ModelBadge.svelte';
   import { padrino } from '$lib/clientStore.svelte';
   import { CANONICAL_TEAM_RULESET_FALLBACK_IDS, canonicalTeamRulesets } from '$lib/rulesets';
   import type {
@@ -85,8 +86,8 @@
 {:else}
   <div class="mb-6">
     <h1 class="text-xl font-semibold" data-testid="model-display-name">{agent.display_name}</h1>
-    <p class="mt-1 font-mono text-xs text-muted-foreground" data-testid="model-build-id">
-      {agentBuildId}
+    <p class="mt-1 text-xs text-muted-foreground" data-testid="model-build-id">
+      Build reference <span class="font-mono">{agentBuildId.slice(0, 8)}</span>
     </p>
   </div>
 
@@ -95,19 +96,13 @@
       <div class="text-xs uppercase tracking-wider text-muted-foreground">Ordinal</div>
       <div class="mt-1 text-3xl font-semibold" data-testid="model-ordinal">{agent.ordinal}</div>
       {#if agent.provisional}
-        <span
-          class="mt-1 inline-block rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700"
-          data-testid="model-provisional-badge"
-        >
-          provisional
-        </span>
+        <div class="mt-2">
+          <ModelBadge tier="provisional" label="Provisional" testid="model-provisional-badge" />
+        </div>
       {:else}
-        <span
-          class="mt-1 inline-block rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700"
-          data-testid="model-established-badge"
-        >
-          established
-        </span>
+        <div class="mt-2">
+          <ModelBadge tier="established" label="Established" testid="model-established-badge" />
+        </div>
       {/if}
     </Card>
     <Card>

@@ -10,6 +10,6 @@
   let { class: className = '', children, ...rest }: Props = $props();
 </script>
 
-<div class={cn('rounded-lg border border-border bg-card p-4 shadow-sm', className)} {...rest}>
+<div class={cn('padrino-card p-4 sm:p-5', className)} {...rest}>
   {@render children?.()}
 </div>

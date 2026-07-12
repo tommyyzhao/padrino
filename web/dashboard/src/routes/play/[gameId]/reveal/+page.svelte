@@ -15,6 +15,7 @@
   import { onMount } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import Button from '$lib/components/Button.svelte';
+  import EndgameRoleBadge from '$lib/components/EndgameRoleBadge.svelte';
   import { padrino } from '$lib/clientStore.svelte';
   import { spriteUrl } from '$lib/api/playSurface';
   import { revealSpriteKey } from '$lib/api/reveal';
@@ -263,9 +264,12 @@
             >
               {seat.is_human ? 'Human' : 'AI'}
             </span>
-            <span class="font-mono text-xs text-muted-foreground" data-testid="reveal-seat-role">
-              {seat.role} · {seat.faction}
-            </span>
+            <EndgameRoleBadge
+              role={seat.role}
+              faction={seat.faction}
+              revealed={true}
+              testid="reveal-seat-role"
+            />
             {#if seat.takeover_provenance !== 'HUMAN' && seat.takeover_provenance !== 'AI'}
               <span
                 class="rounded bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] text-amber-800"

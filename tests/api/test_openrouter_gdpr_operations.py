@@ -41,6 +41,9 @@ _REQUEST_HASH = "b" * 64
 _ESTIMATE_HASH = "c" * 64
 _CATALOG_HASH = "d" * 64
 _RULES_HASH = "e" * 64
+_FRONTEND_TEXT_FIXTURE_SUFFIXES = frozenset(
+    {".css", ".html", ".js", ".json", ".md", ".svelte", ".ts"}
+)
 
 
 def _encoded_key(byte: bytes) -> str:
@@ -415,7 +418,7 @@ async def test_sentinel_secret_scanner_covers_player_archive_and_fixture_surface
     frontend_fixtures = "\n".join(
         path.read_text(encoding="utf-8")
         for path in Path("web/dashboard/tests").rglob("*")
-        if path.is_file()
+        if path.is_file() and path.suffix in _FRONTEND_TEXT_FIXTURE_SUFFIXES
     )
     surfaces = {
         "logs": caplog.text,

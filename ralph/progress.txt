@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Identity-safe design system (US-364): keep live-seat visual helpers limited
+  to public presence facts (`alive`), and make role/faction palette use an
+  explicit endgame-reveal boundary. Centralize dark-first accessibility in
+  tokens/CSS (focus, contrast, reduced motion, forced colors) so reusable
+  components do not invent their own semantic colors. Visual regression
+  fixtures are binary assets, so text-only secret scanners must filter by
+  extension rather than trying to decode every test artifact.
 - Credential/credit GDPR lifecycle (US-363): model player-owned credentials
   and platform subkeys as local envelope lifecycles: self-exports project only
   display/lifecycle and immutable integer-micro ledger facts, while deletion
@@ -7364,3 +7371,34 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   slice -> 42 passed; `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 3423 passed
   / 12 deselected. Frontend gates not run; story did not modify the dashboard.
+
+## 2026-07-12 PDT - US-364
+- Rebuilt the dashboard around a dark-first neo-noir occult-laboratory system:
+  deep ink surfaces, ember primary actions, cyan/violet instrumentation,
+  responsive shell branding, high-contrast/forced-color support, reduced
+  motion, and visible keyboard focus. Added repo-native original SVG branding
+  with source notes; no generated or third-party runtime image assets.
+- Added reusable badges (status/model/terminal-role), cards, native dialogs,
+  tooltips, tabs, skeletons, toasts, and technical data lists. Live-safe seat
+  styling is data-limited to alive state, while role/faction tokens are
+  endgame-only. Model/replay/watch surfaces now use concise references instead
+  of full raw UUID presentation.
+- Added a `/laboratory` component field guide, keyboard interaction coverage,
+  and committed desktop/mobile Playwright screenshot baselines. Browser review
+  confirmed the served page, navigation, dialog, and console-error-free build.
+- Updated the OpenRouter sentinel scanner to inspect text fixture formats only,
+  so committed PNG visual baselines remain compatible; exported the existing
+  `OpenRouterPlatformSubkey` ORM model from its authoritative `__all__` list.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: dashboard design tokens/components/field-guide/static SVG,
+  global styling/layout and consumer display surfaces, visual/e2e coverage and
+  baselines; `src/padrino/db/models.py`,
+  `tests/api/test_openrouter_gdpr_operations.py`, `ralph/prd.json`, and
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `tokens.test.ts` first failed on the missing
+  module; focused frontend checks and visual snapshot update -> 3 passed;
+  `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`; full
+  `pnpm -C web/dashboard test:e2e` -> 60 passed / 5 visual opt-in skipped;
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src
+  tests`; focused scanner/model-export regression -> 2 passed; `uv run pytest
+  -m "not integration"` -> 3372 passed / 51 skipped / 12 deselected.

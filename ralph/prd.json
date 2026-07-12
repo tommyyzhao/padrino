@@ -807,7 +807,7 @@
         "Visual regression screenshots pin desktop/mobile core components and eliminate raw UUID/admin-form styling."
       ],
       "notes": "Frontend story: run lint/check/e2e.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-365",

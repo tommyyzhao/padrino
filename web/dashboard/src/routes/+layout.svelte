@@ -14,29 +14,38 @@
   });
 </script>
 
-<div class="min-h-screen">
-  <header class="border-b border-border bg-card">
-    <div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-      <a href="/" class="text-lg font-semibold">Padrino</a>
-      <nav class="flex flex-wrap items-center gap-4 text-sm">
-        <a class="hover:underline" href="/">Home</a>
+<div class="padrino-shell min-h-screen">
+  <header class="border-b border-border bg-card/90 backdrop-blur">
+    <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:py-4">
+      <a href="/" class="group flex min-w-0 items-center gap-2.5" aria-label="Padrino home">
+        <!-- Original geometric mark, created for Padrino; no third-party asset license applies. -->
+        <img class="h-8 w-8 shrink-0" src="/brand/observatory-mark.svg" alt="" />
+        <span class="min-w-0">
+          <span class="padrino-wordmark block text-lg font-bold leading-none">Padrino</span>
+          <span class="mt-1 block text-[0.6rem] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+            Occult laboratory
+          </span>
+        </span>
+      </a>
+      <nav class="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 text-sm sm:gap-x-4" aria-label="Primary navigation">
+        <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/">Home</a>
         <a
-          class="rounded-md bg-primary px-3 py-1.5 text-background hover:opacity-90"
+          class="padrino-button padrino-button--primary inline-flex min-h-9 items-center justify-center px-3 py-1.5 text-sm"
           href="/#play-vs-ai"
           data-testid="nav-play-vs-ai"
         >
           Play vs AI
         </a>
-        <a class="hover:underline" href="/ladder">Ladder</a>
-        <a class="hover:underline" href="/leaderboard" data-testid="nav-leaderboard">Leaderboard</a>
-        <a class="hover:underline" href="/lobby" data-testid="nav-lobby">Play with friends</a>
+        <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/ladder">Ladder</a>
+        <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/leaderboard" data-testid="nav-leaderboard">Leaderboard</a>
+        <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/lobby" data-testid="nav-lobby">Play with friends</a>
       </nav>
     </div>
   </header>
-  <main class="mx-auto max-w-6xl px-4 py-6">
+  <main class="mx-auto max-w-6xl px-4 py-6 sm:py-8">
     {@render children?.()}
   </main>
-  <footer class="border-t border-border py-4 text-center text-xs text-muted-foreground">
-    Padrino dashboard · API base: <code>{padrino.baseUrl}</code>
+  <footer class="mt-8 border-t border-border py-5 text-center text-xs text-muted-foreground">
+    Padrino · deterministic social deduction · API <code>{padrino.baseUrl}</code>
   </footer>
 </div>

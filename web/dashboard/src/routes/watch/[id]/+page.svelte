@@ -215,7 +215,9 @@
   {/if}
 </div>
 
-<p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="watch-game-id">{gameId}</p>
+<p class="mb-4 text-xs text-muted-foreground" data-testid="watch-game-id">
+  Match reference <span class="font-mono">{gameId?.slice(0, 8) ?? '—'}</span>
+</p>
 
 {#if error}
   <p class="mb-4 text-sm text-red-500" data-testid="watch-error">
