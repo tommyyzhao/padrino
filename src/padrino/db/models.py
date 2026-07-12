@@ -532,6 +532,13 @@ class LlmCall(Base):
             sqlite_where=text("raw_response IS NOT NULL"),
             postgresql_where=text("raw_response IS NOT NULL"),
         ),
+        Index(
+            "uq_llm_calls_charge_idempotency_key",
+            "charge_idempotency_key",
+            unique=True,
+            sqlite_where=text("charge_idempotency_key IS NOT NULL"),
+            postgresql_where=text("charge_idempotency_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -568,6 +575,12 @@ class LlmCall(Base):
     funding_source: Mapped[str] = mapped_column(
         String, nullable=False, default="PLATFORM", server_default="PLATFORM"
     )
+    # US-362 records an immutable settlement identity and integer-micro cost on
+    # every billable call.  The key is derived from this row's UUID, not from
+    # mutable phase state, so recovery cannot charge the same persisted call
+    # twice.
+    charge_idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    charge_amount_micros: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # OpenRouter's optional router metadata stays out of core events. Every
     # field remains nullable so legacy and non-OpenRouter call rows retain
     # their exact shape and semantics.
@@ -1925,6 +1938,13 @@ class OperatorCompletionReserveSettlement(Base):
             "ix_operator_completion_reserve_settlements_game_id",
             "game_id",
         ),
+        Index(
+            "uq_operator_completion_reserve_settlements_llm_call",
+            "llm_call_id",
+            unique=True,
+            sqlite_where=text("llm_call_id IS NOT NULL"),
+            postgresql_where=text("llm_call_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -1935,6 +1955,11 @@ class OperatorCompletionReserveSettlement(Base):
         Uuid,
         ForeignKey("promotional_credit_reservations.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    llm_call_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("llm_calls.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     model_slug: Mapped[str] = mapped_column(String, nullable=False)
     call_cost_micros: Mapped[int] = mapped_column(Integer, nullable=False)

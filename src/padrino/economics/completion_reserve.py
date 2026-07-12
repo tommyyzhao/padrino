@@ -138,13 +138,95 @@ def _same_settlement(
     reservation_id: uuid.UUID,
     model_slug: str,
     call_cost_micros: int,
+    llm_call_id: uuid.UUID | None,
 ) -> bool:
     return (
         row.game_id == game_id
         and row.reservation_id == reservation_id
         and row.model_slug == model_slug
         and row.call_cost_micros == call_cost_micros
+        and row.llm_call_id == llm_call_id
     )
+
+
+async def _append_promotional_charge_pair(
+    session: AsyncSession,
+    *,
+    reservation: PromotionalCreditReservation,
+    amount_micros: int,
+    idempotency_key: str,
+    now: datetime,
+) -> None:
+    """Convert part of one durable hold into an immutable call charge.
+
+    The original reservation debit remains in the ledger while the game is
+    live.  A same-amount release therefore accompanies every call charge: the
+    pair leaves the held balance unchanged until terminal settlement releases
+    only the unused remainder, while the charge history reports actual spend.
+    """
+    if amount_micros == 0:
+        return
+    await promotional_credit_ledger.append_credit_entry(
+        session,
+        principal_id=reservation.principal_id,
+        reservation_id=reservation.id,
+        game_id=reservation.game_id,
+        entry_type=promotional_credit_ledger.CreditLedgerEntryType.CHARGE,
+        amount_micros=-amount_micros,
+        idempotency_key=f"{idempotency_key}:promotional_charge",
+        reason="custom_game_openrouter_call",
+        now=now,
+    )
+    await promotional_credit_ledger.append_credit_entry(
+        session,
+        principal_id=reservation.principal_id,
+        reservation_id=reservation.id,
+        game_id=reservation.game_id,
+        entry_type=promotional_credit_ledger.CreditLedgerEntryType.RELEASE,
+        amount_micros=amount_micros,
+        idempotency_key=f"{idempotency_key}:reservation_consumed",
+        reason="reservation_consumed",
+        now=now,
+    )
+
+
+async def _existing_settlement(
+    session: AsyncSession,
+    *,
+    row: OperatorCompletionReserveSettlement,
+    game_id: uuid.UUID,
+    reservation_id: uuid.UUID,
+    model_slug: str,
+    call_cost_micros: int,
+    llm_call_id: uuid.UUID | None,
+    idempotency_key: str,
+    now: datetime,
+) -> CompletionReserveSettlement:
+    """Return an exact retry while repairing pre-US-362 ledger pair gaps."""
+    if not _same_settlement(
+        row,
+        game_id=game_id,
+        reservation_id=reservation_id,
+        model_slug=model_slug,
+        call_cost_micros=call_cost_micros,
+        llm_call_id=llm_call_id,
+    ):
+        raise CompletionReserveSettlementError("completion_reserve_idempotency_key_reused")
+    reservation = await session.scalar(
+        select(PromotionalCreditReservation)
+        .where(PromotionalCreditReservation.id == reservation_id)
+        .with_for_update()
+    )
+    if reservation is None:
+        raise CompletionReserveSettlementError("completion_reserve_reservation_invalid")
+    await _append_promotional_charge_pair(
+        session,
+        reservation=reservation,
+        amount_micros=row.promotional_charge_micros,
+        idempotency_key=idempotency_key,
+        now=now,
+    )
+    return _settlement_from_row(row)
 
 
 async def _charged_from_ledger(
@@ -260,14 +342,15 @@ async def settle_platform_completion_reserve(
     idempotency_key: str,
     global_cap_micros: int,
     now: datetime,
+    llm_call_id: uuid.UUID | None = None,
 ) -> CompletionReserveSettlement:
     """Split one actual platform call without exceeding player or operator caps.
 
-    The promotional hold is already in the player's append-only ledger.  This
-    method advances only the reservation's durable consumed counter; US-362
-    turns that counter into its paired call charge/release entries.  The
-    completion-reserve charge is appended immediately because it represents an
-    estimate miss that must constrain later games before their admission.
+    The promotional hold is already in the player's append-only ledger.  The
+    reservation's consumed counter is paired with immutable player charge
+    and conversion-release entries.  The completion-reserve charge is appended
+    immediately because it represents an estimate miss that must constrain
+    later games before their admission.
     """
     cost = _non_negative_int(call_cost_micros, field="call_cost_micros")
     cap = _non_negative_int(global_cap_micros, field="global_cap_micros")
@@ -280,15 +363,17 @@ async def settle_platform_completion_reserve(
         )
     )
     if existing is not None:
-        if not _same_settlement(
-            existing,
+        return await _existing_settlement(
+            session,
+            row=existing,
             game_id=game_id,
             reservation_id=reservation_id,
             model_slug=slug,
             call_cost_micros=cost,
-        ):
-            raise CompletionReserveSettlementError("completion_reserve_idempotency_key_reused")
-        return _settlement_from_row(existing)
+            llm_call_id=llm_call_id,
+            idempotency_key=key,
+            now=now,
+        )
 
     for _ in range(4):
         try:
@@ -373,9 +458,17 @@ async def settle_platform_completion_reserve(
                     )
                 reservation.consumed_micros += decision.promotional_charge_micros
                 reservation.updated_at = now
+                await _append_promotional_charge_pair(
+                    session,
+                    reservation=reservation,
+                    amount_micros=decision.promotional_charge_micros,
+                    idempotency_key=key,
+                    now=now,
+                )
                 row = OperatorCompletionReserveSettlement(
                     game_id=game_id,
                     reservation_id=reservation.id,
+                    llm_call_id=llm_call_id,
                     model_slug=slug,
                     call_cost_micros=cost,
                     promotional_charge_micros=decision.promotional_charge_micros,
@@ -390,24 +483,24 @@ async def settle_platform_completion_reserve(
                 return _settlement_from_row(row)
         except _ConcurrentCapChanged:
             continue
-        except IntegrityError as exc:
+        except IntegrityError:
             existing = await session.scalar(
                 select(OperatorCompletionReserveSettlement).where(
                     OperatorCompletionReserveSettlement.idempotency_key == key
                 )
             )
             if existing is not None:
-                if not _same_settlement(
-                    existing,
+                return await _existing_settlement(
+                    session,
+                    row=existing,
                     game_id=game_id,
                     reservation_id=reservation_id,
                     model_slug=slug,
                     call_cost_micros=cost,
-                ):
-                    raise CompletionReserveSettlementError(
-                        "completion_reserve_idempotency_key_reused"
-                    ) from exc
-                return _settlement_from_row(existing)
+                    llm_call_id=llm_call_id,
+                    idempotency_key=key,
+                    now=now,
+                )
             raise
     raise CompletionReserveSettlementError("completion_reserve_concurrent_retry_exhausted")
 
@@ -468,6 +561,7 @@ async def settle_platform_completion_reserve_with_retry(
     idempotency_key: str,
     global_cap_micros: int,
     now: datetime,
+    llm_call_id: uuid.UUID | None = None,
 ) -> CompletionReserveSettlement:
     """Run an idempotent settlement in its own retryable transaction.
 
@@ -489,6 +583,7 @@ async def settle_platform_completion_reserve_with_retry(
                     idempotency_key=idempotency_key,
                     global_cap_micros=global_cap_micros,
                     now=now,
+                    llm_call_id=llm_call_id,
                 )
         except OperationalError as exc:
             last_error = exc

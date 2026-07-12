@@ -69,6 +69,13 @@ from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.db.repositories import ranked_bans as ranked_bans_repo
 from padrino.db.repositories import rating_contexts as rating_contexts_repo
+from padrino.economics.call_settlement import (
+    CallFundingSettlement,
+    reconcile_game_call_settlements,
+    settle_persisted_llm_call,
+    settle_terminal_reservation,
+)
+from padrino.economics.completion_reserve import CompletionReserveUnfundedPolicy
 from padrino.economics.human_cost_governance import (
     PRICE_BASIS_FALLBACK_TABLE,
     PRICE_BASIS_PROVIDER_RESPONSE_COST,
@@ -216,6 +223,7 @@ class GamePersistence:
     settings: Settings | None = None
     worker_id: str | None = None
     lease_clock: Callable[[], Any] | None = None
+    settlement_clock: Callable[[], Any] | None = None
     db_write_lock: asyncio.Lock | None = field(default=None, repr=False, compare=False)
 
 
@@ -283,13 +291,22 @@ class _RecordingAdapter:
         try:
             result = await self._inner.complete(observation)
         except ProviderNoContestError as exc:
-            self._sink.append(exc.result)
+            persisted_result = exc.result
             if self._persistence is not None:
-                await _persist_llm_call(self._persistence, observation, exc.result)
-            raise
-        self._sink.append(result)
+                persisted_result, _ = await _persist_llm_call(
+                    self._persistence,
+                    observation,
+                    persisted_result,
+                )
+            self._sink.append(persisted_result)
+            raise ProviderNoContestError(reason=exc.reason, result=persisted_result) from exc
         if self._persistence is not None:
-            await _persist_llm_call(self._persistence, observation, result)
+            result, no_contest = await _persist_llm_call(self._persistence, observation, result)
+            self._sink.append(result)
+            if no_contest:
+                raise ProviderNoContestError(reason="provider_unfunded", result=result)
+            return result
+        self._sink.append(result)
         return result
 
 
@@ -656,6 +673,20 @@ async def _persist_terminated_event(
             return
         if not _lease_fence_allows_finalize(persistence, game):
             return
+        if persistence.settlement_clock is not None:
+            settlement_settings = persistence.settings or get_settings()
+            settlement_now = persistence.settlement_clock()
+            await reconcile_game_call_settlements(
+                session,
+                game_id=persistence.game_id,
+                global_cap_micros=settlement_settings.padrino_openrouter_completion_reserve_global_micros,
+                now=settlement_now,
+            )
+            await settle_terminal_reservation(
+                session,
+                game_id=persistence.game_id,
+                now=settlement_now,
+            )
         apply_human_ratings = await _should_apply_human_ratings(session, persistence, ranked, state)
         apply_placement = _should_apply_placement(persistence, ranked, state, game)
         if apply_placement:
@@ -830,7 +861,7 @@ async def _persist_llm_call(
     persistence: GamePersistence,
     observation: Observation,
     result: AdapterResult,
-) -> None:
+) -> tuple[AdapterResult, bool]:
     request_json = observation.model_dump(mode="json")
     failure = result.failure
     pricing = _pricing_stamp(persistence, result)
@@ -845,7 +876,7 @@ async def _persist_llm_call(
         dict(openrouter_audit.routing_metadata) if openrouter_audit is not None else {}
     )
     async with _persistence_transaction(persistence) as session:
-        await llm_calls_repo.record_call(
+        call = await llm_calls_repo.record_call(
             session,
             game_id=persistence.game_id,
             agent_build_id=persistence.agent_builds.get(observation.you.player_id),
@@ -869,7 +900,9 @@ async def _persist_llm_call(
             provider_credential_id=(attribution.credential_id if attribution is not None else None),
             provider_response_id=result.provider_response_id,
             openrouter_requested_model_slug=(
-                openrouter_audit.requested_model_slug if openrouter_audit is not None else None
+                openrouter_audit.requested_model_slug
+                if openrouter_audit is not None
+                else result.model_id
             ),
             openrouter_actual_model=(
                 openrouter_audit.actual_model if openrouter_audit is not None else None
@@ -891,6 +924,28 @@ async def _persist_llm_call(
                 openrouter_audit.routing_policy_hash if openrouter_audit is not None else None
             ),
         )
+        settlement: CallFundingSettlement | None = None
+        if pricing.cost_usd is not None and persistence.settlement_clock is not None:
+            settings = persistence.settings or get_settings()
+            settlement = await settle_persisted_llm_call(
+                session,
+                call=call,
+                global_cap_micros=settings.padrino_openrouter_completion_reserve_global_micros,
+                now=persistence.settlement_clock(),
+            )
+        if settlement is None or settlement.unfunded_micros == 0:
+            return result, False
+        exhausted = result.model_copy(
+            update={
+                "status": "exhausted",
+                "error": "provider_unfunded",
+                "failure": None,
+            }
+        )
+        call.status = exhausted.status
+        call.error = exhausted.error
+        no_contest = settlement.policy is CompletionReserveUnfundedPolicy.NO_CONTEST
+        return exhausted, no_contest
 
 
 def _eligible_seats(state: GameState) -> list[Seat]:

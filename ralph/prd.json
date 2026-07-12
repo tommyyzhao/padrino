@@ -763,7 +763,7 @@
         "Existing funding_source field is populated accurately for all human-lane calls and cost reports sum byte-stably."
       ],
       "notes": "Financial correctness blocker.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-363",

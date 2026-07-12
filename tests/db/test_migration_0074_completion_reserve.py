@@ -47,7 +47,7 @@ def test_0074_follows_0073_and_round_trips_completion_reserve_state(sqlite_db: P
     config = _config()
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0074"]
+    assert script.get_heads() == ["0075"]
     assert script.get_revision("0074").down_revision == "0073"
 
     command.upgrade(config, "0073")

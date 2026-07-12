@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Call-bound settlement (US-362): mint a charge idempotency key only from the
+  persisted `LlmCall` UUID, convert every player-funded portion of a hold into
+  paired immutable `CHARGE` / conversion-`RELEASE` entries, and link the
+  operator split to that exact call.  Commit the call and its charge together
+  whenever possible; a stable creation-order reconciler must repair legacy or
+  interrupted call rows before terminal settlement releases only the unused
+  hold.  Inject the money clock from the human worker boundary so the runner
+  retains its clock-free contract, and retain BYOK as cost audit only.
 - Completion-reserve concurrency (US-361): keep the append-only
   `OperatorCompletionReserveLedgerEntry` as the monetary authority, and use
   separate integer-only cap cursors solely to serialize global/per-game claims.
@@ -7301,3 +7309,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src
   tests`; `uv run pytest -m "not integration"` -> 3409 selected / 12 deselected.
   Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-362
+- Added migration 0075 with a unique per-billable-call charge idempotency key,
+  integer-micro charge amount, and optional LLM-call provenance on each
+  completion-reserve settlement. Updated migration-head expectations for the
+  new linear head and covered SQLite upgrade/downgrade.
+- Platform call settlement now atomically converts its held promotional amount
+  into paired `CHARGE` / conversion-`RELEASE` ledger entries, draws any
+  estimate miss from the frozen operator reserve, and links the exact split to
+  its persisted call. BYOK calls receive the same safe integer cost audit but
+  never debit promotional credit. The stable per-source cost report reads only
+  persisted integer amounts.
+- Recording-layer settlement runs after the LLM call row exists; terminal and
+  no-contest paths reconcile any uncharged committed calls then release unused
+  reservation micros exactly once in their durable terminal transaction. The
+  clock is injected from the human worker to preserve the runner's no-wall-
+  clock invariant.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/{db/models.py,db/migrations/versions/0075_call_charge_settlement.py,economics/{call_settlement,completion_reserve}.py,runner/{game_runner,human_lane}.py}`, migration-head/migration coverage, and `tests/economics/test_call_settlement.py`, plus `ralph/prd.json` and `ralph/progress.txt`.
+- Gates (all GREEN): focused settlement/migration/runner slices; `uv run ruff
+  check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run
+  pytest -m "not integration"` (3428 collected, 12 deselected). Frontend gates
+  not run; story did not touch `web/dashboard`.
