@@ -677,7 +677,7 @@
         "Rate limits prevent grant/wallet probing abuse."
       ],
       "notes": "Formal promotions/legal review is required before public marketing but not code implementation.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-359",

@@ -38,6 +38,8 @@ class FundingPolicyReason(StrEnum):
     PROMOTIONAL_ACCOUNT_REQUIRED = "promotional_account_required"
     PROMOTIONAL_EMAIL_UNVERIFIED = "promotional_email_unverified"
     PROMOTIONAL_ACCOUNT_DELETED = "promotional_account_deleted"
+    PROMOTIONAL_CREDIT_ABUSE_BANNED = "promotional_credit_abuse_banned"
+    PROMOTIONAL_CREDIT_BAN_STATE_UNKNOWN = "promotional_credit_ban_state_unknown"
     PROMOTIONAL_GRANT_ALREADY_ISSUED = "promotional_grant_already_issued"
     PROMOTIONAL_GRANT_STATE_UNKNOWN = "promotional_grant_state_unknown"
     PROMOTIONAL_GRANT_ALLOWED = "promotional_grant_allowed"
@@ -63,6 +65,9 @@ class PromotionalGrantFacts:
     principal_kind: str | None = None
     email_verified: bool | None = None
     deleted: bool | None = None
+    #: This is deliberately independent of ranked-ban eligibility.  The shell
+    #: resolves it from operator-owned credit-abuse policy only.
+    credit_abuse_banned: bool | None = False
     promotional_grant_issued: bool | None = None
 
 
@@ -163,6 +168,10 @@ def evaluate_promotional_grant(
         return _grant_refused(FundingPolicyReason.PROMOTIONAL_EMAIL_UNVERIFIED)
     if facts.deleted is not False:
         return _grant_refused(FundingPolicyReason.PROMOTIONAL_ACCOUNT_DELETED)
+    if facts.credit_abuse_banned is True:
+        return _grant_refused(FundingPolicyReason.PROMOTIONAL_CREDIT_ABUSE_BANNED)
+    if facts.credit_abuse_banned is not False:
+        return _grant_refused(FundingPolicyReason.PROMOTIONAL_CREDIT_BAN_STATE_UNKNOWN)
     if facts.promotional_grant_issued is True:
         return _grant_refused(FundingPolicyReason.PROMOTIONAL_GRANT_ALREADY_ISSUED)
     if facts.promotional_grant_issued is not False:

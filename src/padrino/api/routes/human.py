@@ -130,6 +130,11 @@ from padrino.economics.human_cost_governance import (
     release_inference_reservations_for_lobby,
     rollback_admission_decision,
 )
+from padrino.economics.promotional_wallet import (
+    WalletSnapshot,
+    get_wallet_snapshot,
+    grant_promotional_credit,
+)
 from padrino.openrouter.connection import (
     OPENROUTER_PKCE_VERIFIER_COOKIE,
     OpenRouterConnectionClient,
@@ -198,6 +203,40 @@ class OpenRouterConnectionStatus(BaseModel):
     display_suffix: str | None
     validated_at: datetime | None
     credit_capability: str | None
+
+
+class WalletRecentEntry(BaseModel):
+    """A deliberately narrow, secret-free private ledger entry projection."""
+
+    entry_type: str
+    amount_micros: int
+    reason: str
+    created_at: datetime
+
+
+class WalletResponse(BaseModel):
+    """Integer-micro promotional wallet facts for the authenticated principal."""
+
+    granted_micros: int
+    available_micros: int
+    reserved_micros: int
+    spent_micros: int
+    completion_subsidy_micros: int
+    recent_entries: list[WalletRecentEntry]
+
+
+class WalletGrantResult(BaseModel):
+    """The stable result of a lazy one-time promotional-grant request."""
+
+    created: bool
+    reason: str
+
+
+class WalletGrantResponse(BaseModel):
+    """Grant outcome paired with the post-attempt wallet projection."""
+
+    grant: WalletGrantResult
+    wallet: WalletResponse
 
 
 class MatchResponse(BaseModel):
@@ -336,6 +375,145 @@ def _project_human_stats(
             rate=_ratio(row.voting_accurate_votes, row.voting_total_votes),
         ),
         detection_accuracy=_detection_accuracy_string(row),
+    )
+
+
+_WALLET_RECENT_ENTRY_LIMIT = 20
+_SAFE_WALLET_REASONS = frozenset(
+    {
+        "verified_account_promotion",
+        "game_admission",
+        "openrouter_call",
+        "reservation_consumed",
+        "terminal_unused_reservation",
+        "estimate_miss",
+    }
+)
+
+
+def _wallet_response(snapshot: WalletSnapshot) -> WalletResponse:
+    """Project only bounded, allowlisted wallet facts to the browser."""
+    return WalletResponse(
+        granted_micros=snapshot.granted_micros,
+        available_micros=snapshot.available_micros,
+        reserved_micros=snapshot.reserved_micros,
+        spent_micros=snapshot.spent_micros,
+        completion_subsidy_micros=snapshot.completion_subsidy_micros,
+        recent_entries=[
+            WalletRecentEntry(
+                entry_type=entry.entry_type,
+                amount_micros=entry.amount_micros,
+                reason=(
+                    entry.reason
+                    if entry.reason in _SAFE_WALLET_REASONS
+                    else "accounting_adjustment"
+                ),
+                created_at=entry.created_at,
+            )
+            for entry in snapshot.recent_entries
+        ],
+    )
+
+
+async def _enforce_wallet_rate_limit(
+    request: Request,
+    *,
+    principal_id: uuid.UUID,
+) -> None:
+    """Bound wallet/grant requests without storing raw principal ids in buckets."""
+    settings = _get_auth_settings(request)
+    ceiling = settings.padrino_rate_limit_wallet_per_minute
+    if ceiling <= 0:
+        return
+    bucket = hashlib.sha256(f"wallet:{principal_id}".encode()).hexdigest()
+    allowed, retry_after = await _get_rate_limiter(request).hit(
+        bucket,
+        limit_per_minute=ceiling,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="wallet_rate_limited",
+            headers={"Retry-After": str(max(1, round(retry_after)))},
+        )
+
+
+def _credit_abuse_ban_fact(settings: Settings, *, principal_id: uuid.UUID) -> bool | None:
+    """Resolve only the server-owned credit-abuse denylist, never ranked bans.
+
+    A malformed deployment value deliberately becomes an unknown fact, which
+    makes the pure funding policy refuse grants rather than accidentally issue
+    promotional credit under a broken operator control.
+    """
+    raw = settings.padrino_promotional_credit_abuse_banned_principal_ids
+    try:
+        blocked = {uuid.UUID(item.strip()) for item in raw.split(",") if item.strip()}
+    except ValueError:
+        return None
+    return principal_id in blocked
+
+
+@router.get("/human/wallet", response_model=WalletResponse)
+async def get_wallet(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> WalletResponse:
+    """Return a bounded private wallet projection without issuing a new grant."""
+    await _enforce_wallet_rate_limit(request, principal_id=ctx.principal_id)
+    snapshot = await get_wallet_snapshot(
+        session,
+        principal_id=ctx.principal_id,
+        recent_limit=_WALLET_RECENT_ENTRY_LIMIT,
+    )
+    return _wallet_response(snapshot)
+
+
+@router.post(
+    "/human/wallet/grant",
+    response_model=WalletGrantResponse,
+)
+async def post_wallet_grant(
+    request: Request,
+    response: Response,
+    ctx: HumanPrincipalContext | None = Depends(get_human_context),
+    session: AsyncSession = Depends(get_session),
+) -> WalletGrantResponse:
+    """Lazily issue the exact one-time verified-account promotional grant."""
+    if ctx is None:
+        if await deleted_human_session_present(request, session):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="promotional_account_deleted",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="human_authentication_required",
+        )
+    await _enforce_wallet_rate_limit(request, principal_id=ctx.principal_id)
+    settings = _get_auth_settings(request)
+    grant = await grant_promotional_credit(
+        session,
+        principal_id=ctx.principal_id,
+        credit_abuse_banned=_credit_abuse_ban_fact(settings, principal_id=ctx.principal_id),
+        now=datetime.now(UTC),
+    )
+    grant_already_issued = grant.decision.reason.value == "promotional_grant_already_issued"
+    if not grant.decision.allowed and not grant_already_issued:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=grant.decision.reason.value,
+        )
+    if grant.created:
+        response.status_code = status.HTTP_201_CREATED
+    snapshot = await get_wallet_snapshot(
+        session,
+        principal_id=ctx.principal_id,
+        recent_limit=_WALLET_RECENT_ENTRY_LIMIT,
+    )
+    return WalletGrantResponse(
+        grant=WalletGrantResult(created=grant.created, reason=grant.decision.reason.value),
+        wallet=_wallet_response(snapshot),
     )
 
 

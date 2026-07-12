@@ -113,7 +113,14 @@ async def anonymize_principal_for_delete(
     *,
     now: datetime,
 ) -> Principal | None:
-    """Soft-delete a principal and scrub display/ranked handle fields."""
+    """Soft-delete public identity while preserving required accounting audit.
+
+    The principal row remains as a tombstone because append-only promotional
+    credit and reservation rows use restrictive foreign keys for legal/accounting
+    reconciliation.  Only public identity fields are scrubbed here; their UUID
+    remains an internal pseudonymous accounting reference and is never projected
+    by the wallet API.
+    """
     obj = await session.get(Principal, principal_id)
     if obj is None:
         return None

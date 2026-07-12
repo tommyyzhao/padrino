@@ -182,6 +182,10 @@ class Settings(BaseSettings):
     # same RateLimitStore, keyed by the session hash so it shares no bucket with
     # any api_key.
     padrino_rate_limit_human_per_minute: int = 120
+    # Wallet reads and one-time promotional-grant attempts get a dedicated
+    # account bucket.  It is deliberately independent from human gameplay so
+    # repeated balance checks cannot consume action/chat capacity.
+    padrino_rate_limit_wallet_per_minute: int = 20
     # Human action POST channel (US-168). These ceilings are distinct from the
     # shared per-session human read bucket and from chat buckets, so action spam
     # cannot consume observation/chat capacity or bypass a channel-specific cap.
@@ -194,6 +198,11 @@ class Settings(BaseSettings):
     padrino_rate_limit_human_chat_per_minute: int = 30
     padrino_rate_limit_human_chat_per_game_phase_per_minute: int = 120
     padrino_human_chat_guard_timeout_seconds: float = 2.0
+
+    # A comma-separated, server-only principal UUID denylist for confirmed
+    # promotional-credit abuse.  It is a funding-control fact, never a ranked
+    # ban, and is intentionally absent from all browser/API projections.
+    padrino_promotional_credit_abuse_banned_principal_ids: str = ""
 
     # Guest quickplay (US-128). How long a freshly-minted guest/account human
     # session cookie stays valid, and whether the cookie carries the ``Secure``

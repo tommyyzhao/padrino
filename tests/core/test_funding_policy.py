@@ -112,6 +112,32 @@ def test_promotional_grant_fails_closed_for_ineligible_or_unknown_account_facts(
     assert decision.reason is reason
 
 
+@pytest.mark.parametrize(
+    ("credit_abuse_banned", "reason"),
+    [
+        (True, FundingPolicyReason.PROMOTIONAL_CREDIT_ABUSE_BANNED),
+        (None, FundingPolicyReason.PROMOTIONAL_CREDIT_BAN_STATE_UNKNOWN),
+    ],
+)
+def test_credit_abuse_ban_is_a_distinct_fail_closed_promotional_grant_fact(
+    credit_abuse_banned: bool | None,
+    reason: FundingPolicyReason,
+) -> None:
+    decision = evaluate_promotional_grant(
+        PromotionalGrantFacts(
+            principal_kind="account",
+            email_verified=True,
+            deleted=False,
+            credit_abuse_banned=credit_abuse_banned,
+            promotional_grant_issued=False,
+        )
+    )
+
+    assert decision.allowed is False
+    assert decision.grant_micros == 0
+    assert decision.reason is reason
+
+
 def test_platform_custom_admission_reserves_only_available_promotional_credit() -> None:
     decision = evaluate_custom_funding(_platform_facts())
 

@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Promotional wallet boundary (US-358): issue the verified-account grant only
+  through a fixed principal-scoped idempotency key plus the ledger's one-grant
+  partial index, then treat a concurrent losing request as an already-issued
+  success. Keep credit-abuse eligibility as a distinct server-owned funding
+  fact, never a ranked-ban lookup. Project wallet data from integer-micro
+  ledger/reservation rows, and derive a caller's completion subsidy only by a
+  game-id read-side join so the operator ledger never stores principal identity.
+  Browser entries should be newest-first, bounded, and reason-allowlisted; rate
+  limit their hashed-principal bucket separately from gameplay.
 - Promotional-credit accounting (US-357): keep monetary authority in append-only
   signed integer-micro ledger entries whose allowed sign is fixed by an entry
   type check; derive wallet availability with `SUM(amount_micros)`, never a
@@ -7168,3 +7177,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   format --check .`; `uv run mypy src tests`; `uv run pytest -m "not
   integration"` -> 3320 passed / 51 skipped / 12 deselected. Frontend gates
   not run; story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-358
+- Added `POST /human/wallet/grant` for the lazy, idempotent $5 verified-account
+  grant and `GET /human/wallet` for a safe integer-micro wallet projection.
+  The response contains only granted/available/reserved/spent/subsidy totals
+  and bounded allowlisted ledger entries; provider credentials, subkeys,
+  model/provider details, raw identifiers, and idempotency keys never cross
+  this browser boundary.
+- The grant policy now receives a distinct server-owned credit-abuse fact (with
+  a fail-closed malformed configuration path) and deliberately does not read
+  ranked bans.  Soft deletion scrubs public identity while retaining only the
+  pseudonymous, legally required append-only accounting reference.
+- Added coverage for concurrent SQLite grant requests, verified/unverified/
+  guest/deleted/banned principals, ranked-ban separation, precise wallet totals
+  including completion subsidy, secret-safe entry projection, dedicated wallet
+  rate limits, and GDPR tombstone audit preservation.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/{api/routes/human.py,core/funding_policy.py,
+  economics/promotional_wallet.py,settings.py,db/repositories/{human_principals,
+  promotional_credit_ledger}.py}`, `tests/{api/test_promotional_wallet.py,
+  core/test_funding_policy.py}`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 3331 passed
+  / 51 skipped / 12 deselected. Frontend gates not run; story did not touch
+  `web/dashboard`.

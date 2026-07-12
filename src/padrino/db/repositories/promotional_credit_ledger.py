@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +58,16 @@ class CreditTotals:
     available_micros: int
     reserved_micros: int
     spent_micros: int
+
+
+@dataclass(frozen=True, slots=True)
+class CreditLedgerEntrySummary:
+    """The bounded immutable facts needed for a private wallet projection."""
+
+    entry_type: str
+    amount_micros: int
+    reason: str
+    created_at: datetime
 
 
 def _nonempty(value: str, *, field: str) -> str:
@@ -470,8 +480,90 @@ async def get_credit_totals(
     )
 
 
+async def has_promotional_grant(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> bool:
+    """Return whether a principal already owns the immutable one-time grant."""
+    statement = (
+        select(PromotionalCreditLedgerEntry.id)
+        .where(
+            PromotionalCreditLedgerEntry.principal_id == principal_id,
+            PromotionalCreditLedgerEntry.entry_type == CreditLedgerEntryType.GRANT.value,
+        )
+        .limit(1)
+    )
+    return (await session.execute(statement)).first() is not None
+
+
+async def list_recent_credit_entries(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    limit: int,
+) -> list[CreditLedgerEntrySummary]:
+    """Read a bounded newest-first private ledger projection for one principal."""
+    if limit < 1:
+        raise LedgerInputError("recent_entry_limit_invalid")
+    statement = (
+        select(PromotionalCreditLedgerEntry)
+        .where(PromotionalCreditLedgerEntry.principal_id == principal_id)
+        .order_by(
+            desc(PromotionalCreditLedgerEntry.created_at), desc(PromotionalCreditLedgerEntry.id)
+        )
+        .limit(limit)
+    )
+    rows = list((await session.execute(statement)).scalars())
+    return [
+        CreditLedgerEntrySummary(
+            entry_type=row.entry_type,
+            amount_micros=row.amount_micros,
+            reason=row.reason,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+async def get_completion_subsidy_micros(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> int:
+    """Sum operator completion spend for games funded by this private wallet.
+
+    The operator ledger remains free of principal identifiers.  This read-side
+    projection joins only through the player's own immutable game-linked ledger
+    rows, so it can explain a caller's subsidy without denormalizing identity
+    into operator accounting.
+    """
+    funded_game_ids = (
+        select(PromotionalCreditLedgerEntry.game_id)
+        .where(
+            PromotionalCreditLedgerEntry.principal_id == principal_id,
+            PromotionalCreditLedgerEntry.game_id.is_not(None),
+        )
+        .distinct()
+    )
+    subsidy = await session.scalar(
+        select(
+            func.coalesce(
+                func.sum(-OperatorCompletionReserveLedgerEntry.amount_micros),
+                0,
+            )
+        ).where(
+            OperatorCompletionReserveLedgerEntry.entry_type
+            == CompletionReserveEntryType.CHARGE.value,
+            OperatorCompletionReserveLedgerEntry.game_id.in_(funded_game_ids),
+        )
+    )
+    return int(subsidy or 0)
+
+
 __all__ = [
     "CompletionReserveEntryType",
+    "CreditLedgerEntrySummary",
     "CreditLedgerEntryType",
     "CreditTotals",
     "LedgerIdempotencyConflict",
@@ -479,5 +571,8 @@ __all__ = [
     "append_completion_reserve_entry",
     "append_credit_entry",
     "create_or_get_credit_reservation",
+    "get_completion_subsidy_micros",
     "get_credit_totals",
+    "has_promotional_grant",
+    "list_recent_credit_entries",
 ]
