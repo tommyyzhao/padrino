@@ -115,6 +115,46 @@ def metrics(
     typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
+catalog_app = typer.Typer(
+    help="Synchronize and inspect the immutable OpenRouter model catalog.",
+    no_args_is_help=True,
+)
+app.add_typer(catalog_app, name="catalog")
+
+
+@catalog_app.command("sync")
+def catalog_sync(
+    db_url: str | None = typer.Option(
+        None,
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL. Falls back to PADRINO_DB_URL / Settings default.",
+    ),
+) -> None:
+    """Fetch and atomically publish the newest OpenRouter Models API catalog."""
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.openrouter.catalog_sync import CatalogSyncState, sync_openrouter_catalog
+    from padrino.settings import get_settings
+
+    settings = get_settings()
+    resolved_url = db_url if db_url is not None else settings.padrino_db_url
+
+    async def _run() -> Any:
+        engine = create_engine(resolved_url)
+        try:
+            return await sync_openrouter_catalog(
+                session_factory=create_session_factory(engine),
+                settings=settings,
+            )
+        finally:
+            await engine.dispose()
+
+    result = asyncio.run(_run())
+    typer.echo(json.dumps(result.operator_summary().model_dump(mode="json"), sort_keys=True))
+    if result.state is CatalogSyncState.UNAVAILABLE:
+        raise typer.Exit(code=1)
+
+
 @app.command("ranked-audit")
 def ranked_audit(
     db_url: str = typer.Option(

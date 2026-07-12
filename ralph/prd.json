@@ -367,7 +367,7 @@
         "Concurrent sync attempts serialize or dedupe under Postgres and SQLite."
       ],
       "notes": "Do not make game launch depend on live OpenRouter availability.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-344",

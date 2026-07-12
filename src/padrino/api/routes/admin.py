@@ -15,10 +15,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.auth import ApiKeyContext, require_admin, require_read
-from padrino.api.deps import get_session
+from padrino.api.deps import get_session, get_session_factory
 from padrino.api.pagination import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -177,6 +177,15 @@ class RankedRollbackResponse(BaseModel):
     audit_created: bool
 
 
+class CatalogSyncResponse(_StrictModel):
+    """Safe operator summary for a catalog discovery attempt."""
+
+    status: str
+    model_count: int
+    content_hash: str | None
+    fetched_at: str | None
+
+
 def _ranked_ban_response(row: RankedBan) -> RankedBanResponse:
     return RankedBanResponse(
         id=row.id,
@@ -197,6 +206,31 @@ def _admin_actor(ctx: ApiKeyContext) -> str:
     if ctx.via_admin_token:
         return "legacy_admin_token"
     return "synthetic_admin"
+
+
+@router.post(
+    "/admin/openrouter/catalog/sync",
+    response_model=CatalogSyncResponse,
+)
+async def sync_openrouter_model_catalog(
+    _: ApiKeyContext = Depends(require_admin),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+) -> CatalogSyncResponse:
+    """Run one catalog sync without exposing credentials or source headers."""
+    from padrino.openrouter.catalog_sync import sync_openrouter_catalog
+    from padrino.settings import get_settings
+
+    result = await sync_openrouter_catalog(
+        session_factory=session_factory,
+        settings=get_settings(),
+    )
+    summary = result.operator_summary()
+    return CatalogSyncResponse(
+        status=summary.status,
+        model_count=summary.model_count,
+        content_hash=summary.content_hash,
+        fetched_at=summary.fetched_at,
+    )
 
 
 @router.post(

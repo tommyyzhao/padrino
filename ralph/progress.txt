@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- OpenRouter catalog synchronization (US-343): keep the Models API client in
+  the impure `openrouter.catalog_sync` seam. Validate every source model before
+  deriving the text-only play projection, use the content hash for database
+  idempotency, and publish through the immutable-snapshot repository. Send
+  `If-None-Match` from the latest complete snapshot; all transport, rate-limit,
+  schema, credential, and publication failures must return that last complete
+  snapshot with safe freshness metadata. Operator surfaces expose only
+  status/count/hash/fetched-at, never source headers or credential material.
 - Immutable OpenRouter catalogs (US-342): persist a normalized catalog through
   `db.repositories.model_catalog_snapshots.create_or_get_completed_snapshot`.
   Insert its child entries while the parent is `PENDING`, then mark it
@@ -6618,3 +6626,25 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
   3168 passed / 51 skipped / 10 deselected. Frontend gates not run; story did
   not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-343
+- Added the impure OpenRouter Models API synchronizer with complete-payload
+  validation, text-output-only catalog projection, conditional ETag fetches,
+  atomic immutable snapshot publication, and stale-last-good fallback facts.
+  Concurrent calls serialize in process and collapse through the persisted
+  content hash across sessions.
+- Added the safe `padrino catalog sync` CLI command and the admin catalog-sync
+  trigger. Both return only status, model count, content hash, and fetched-at;
+  request headers and credentials never reach their output contracts.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/openrouter/__init__.py`,
+  `src/padrino/openrouter/catalog_sync.py`, `src/padrino/cli.py`,
+  `src/padrino/api/routes/admin.py`,
+  `src/padrino/db/repositories/model_catalog_snapshots.py`,
+  `tests/openrouter/test_catalog_sync.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused
+  `uv run pytest tests/openrouter/test_catalog_sync.py -q` -> 7 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"`. Frontend gates
+  not run; story did not touch `web/dashboard`.

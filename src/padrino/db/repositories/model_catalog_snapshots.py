@@ -12,10 +12,10 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -206,8 +206,28 @@ async def create_or_get_completed_snapshot(
     return snapshot, True
 
 
+async def get_latest_complete_snapshot(session: AsyncSession) -> CatalogSnapshot | None:
+    """Return the newest complete catalog snapshot, never an in-flight row.
+
+    Runtime catalog consumers must only ever resolve an immutable ``COMPLETE``
+    snapshot.  A synchronizer is free to be fetching or validating a newer
+    source response, but it cannot make that partial result observable through
+    this read path.
+    """
+    return cast(
+        CatalogSnapshot | None,
+        await session.scalar(
+            select(CatalogSnapshot)
+            .where(CatalogSnapshot.status == "COMPLETE")
+            .order_by(desc(CatalogSnapshot.fetched_at), desc(CatalogSnapshot.id))
+            .limit(1)
+        ),
+    )
+
+
 __all__ = [
     "CatalogEntryInput",
     "CatalogSnapshotPersistenceError",
     "create_or_get_completed_snapshot",
+    "get_latest_complete_snapshot",
 ]
