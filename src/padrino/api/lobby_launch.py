@@ -51,12 +51,12 @@ from padrino.core.lobby.strangers_only import (
     assert_strangers_only_ranked,
 )
 from padrino.core.observation_privacy import is_anonymous
-from padrino.core.rulesets import get_ruleset
 from padrino.core.seating import seat_permutation
 from padrino.db.models import GameSeat, LobbyMember
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
+from padrino.db.rules_snapshots import runtime_ruleset_from_pair
 
 
 class LobbyNotLaunchableError(Exception):
@@ -124,7 +124,11 @@ async def launch_lobby(
     if lobby.status != LobbyStatus.LOCKED.value:
         raise LobbyNotLaunchableError("lobby_not_locked")
 
-    ruleset = get_ruleset(lobby.ruleset_id)
+    ruleset = runtime_ruleset_from_pair(
+        ruleset_id=lobby.ruleset_id,
+        rules_snapshot_json=lobby.rules_snapshot_json,
+        rules_snapshot_hash=lobby.rules_snapshot_hash,
+    )
     members = await lobbies_repo.list_members(session, lobby_id)
     seats = await lobbies_repo.list_seats(session, lobby_id)
     structural_readiness = evaluate_lobby_rows(

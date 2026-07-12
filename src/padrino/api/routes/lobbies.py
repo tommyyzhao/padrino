@@ -17,14 +17,16 @@ from __future__ import annotations
 
 import secrets
 import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from padrino.api.auth import _get_auth_settings
 from padrino.api.deps import get_session, get_session_factory
 from padrino.api.human_auth import HumanPrincipalContext, require_human
 from padrino.api.human_consent import client_ip_hash
@@ -41,16 +43,28 @@ from padrino.api.lobby_presence import (
 )
 from padrino.api.lobby_readiness import evaluate_lobby_rows
 from padrino.api.lobby_state import stream_lobby_state
-from padrino.api.ranked_eligibility import resolve_ranked_eligibility
 from padrino.core.composition import CompositionSummary, composition_summary
 from padrino.core.enums import IdentityMode, LobbySeatKind, LobbyStakes, LobbyStatus
 from padrino.core.lobby import LobbySeatPlanError
-from padrino.core.ranked_eligibility import evaluate_ranked_eligibility
+from padrino.core.lobby.seating import LobbySeatPlanEntry
 from padrino.core.rulesets import Ruleset, get_ruleset
+from padrino.core.rulesets.custom_deck import (
+    CustomRoleDeckReason,
+    validate_custom_role_deck,
+)
+from padrino.core.rulesets.snapshot import (
+    BUILTIN_CADENCE_ID,
+    SUPPORTED_CADENCE_IDS,
+    GameRulesSnapshot,
+    canonical_rules_dict,
+    canonical_rules_hash,
+    snapshot_from_ruleset,
+)
 from padrino.db.models import Lobby
 from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
+from padrino.db.rules_snapshots import runtime_ruleset_from_pair
 from padrino.economics.human_cost_governance import (
     ACTION_CREATE,
     ACTION_JOIN,
@@ -118,11 +132,17 @@ async def _enforce_admission(
 
 
 class LobbyCreate(BaseModel):
-    """Host configuration for a new private lobby (US-147)."""
+    """Host configuration for a casual custom private lobby (US-337)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    ruleset_id: str = Field(min_length=1)
+    built_in_ruleset_id: str | None = Field(default=None, min_length=1)
+    custom_role_counts: dict[str, int] | None = None
+    #: Backward-compatible alias for pre-US-337 clients. New clients should send
+    #: ``built_in_ruleset_id`` or ``custom_role_counts``.
+    ruleset_id: str | None = Field(default=None, min_length=1)
+    cadence_preset: str = BUILTIN_CADENCE_ID
+    human_seat_count: int | None = Field(default=None, ge=1)
     identity_mode: IdentityMode = IdentityMode.ANONYMOUS
     theme_pack_id: str | None = Field(default=None, max_length=64)
     #: Pre-picked human-eligible model agent_build ids assigned to AI seats, in
@@ -130,12 +150,46 @@ class LobbyCreate(BaseModel):
     #: deterministic auto-fill at launch (US-149). Length must not exceed the AI
     #: seat count (player_count - 1, the host's own HUMAN seat).
     prepick_agent_build_ids: list[uuid.UUID] = Field(default_factory=list)
-    #: Opt in to the segregated Humans-Included ranked lane. Default remains
-    #: casual/unrated.
-    ranked: bool = False
-    #: Ranked integrity acknowledgement: out-of-band coaching is structurally
-    #: unpreventable, so ranked lobbies require an explicit host acknowledgement.
-    integrity_acknowledged: bool = False
+    #: Deprecated US-291 checkbox. Ranked invite lobbies are no longer reachable
+    #: through this custom/casual route.
+    ranked: bool | None = None
+    integrity_acknowledged: bool | None = None
+
+
+class LobbyConfigUpdate(BaseModel):
+    """Host-only mutable lobby configuration before the roster freezes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    built_in_ruleset_id: str | None = Field(default=None, min_length=1)
+    custom_role_counts: dict[str, int] | None = None
+    ruleset_id: str | None = Field(default=None, min_length=1)
+    cadence_preset: str | None = None
+    human_seat_count: int | None = Field(default=None, ge=1)
+    identity_mode: IdentityMode | None = None
+    theme_pack_id: str | None = Field(default=None, max_length=64)
+    prepick_agent_build_ids: list[uuid.UUID] | None = None
+    ranked: bool | None = None
+    integrity_acknowledged: bool | None = None
+
+
+class RoleCountSummary(BaseModel):
+    """One normalized role-count row for API rules summaries."""
+
+    role: str
+    count: int
+
+
+class RulesSummary(BaseModel):
+    """Rules snapshot summary safe to return to lobby members."""
+
+    ruleset_id: str
+    built_in_ruleset_id: str | None
+    custom: bool
+    player_count: int
+    cadence_preset: str
+    role_counts: list[RoleCountSummary]
+    validation_errors: list[str] = Field(default_factory=list)
 
 
 class LobbySummary(BaseModel):
@@ -143,11 +197,14 @@ class LobbySummary(BaseModel):
 
     id: uuid.UUID
     ruleset_id: str
+    rules_summary: RulesSummary
     identity_mode: str
     theme_pack_id: str | None
     stakes: str
     ranked: bool
     integrity_acknowledged: bool
+    human_seat_capacity: int
+    ai_seat_count: int
     status: str
     invite_token: str
     league_id: uuid.UUID
@@ -164,6 +221,253 @@ def _ruleset_or_422(ruleset_id: str) -> Ruleset:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="unknown_ruleset",
         ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedLobbyRules:
+    ruleset_id: str
+    ruleset: Any
+    rules_snapshot_json: dict[str, object]
+    rules_snapshot_hash: str
+    summary: RulesSummary
+    legacy_ruleset_alias: bool
+
+
+def _resolve_rules_for_create(body: LobbyCreate) -> _ResolvedLobbyRules:
+    return _resolve_rules(
+        built_in_ruleset_id=body.built_in_ruleset_id,
+        custom_role_counts=body.custom_role_counts,
+        legacy_ruleset_id=body.ruleset_id,
+        cadence_preset=body.cadence_preset,
+    )
+
+
+def _resolve_rules_for_update(
+    body: LobbyConfigUpdate,
+    *,
+    lobby: Lobby,
+) -> _ResolvedLobbyRules:
+    if (
+        body.built_in_ruleset_id is None
+        and body.custom_role_counts is None
+        and body.ruleset_id is None
+    ):
+        if body.cadence_preset is not None and body.cadence_preset not in SUPPORTED_CADENCE_IDS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="unknown_cadence_preset",
+            )
+        return _runtime_rules_for_lobby(lobby)
+    return _resolve_rules(
+        built_in_ruleset_id=body.built_in_ruleset_id,
+        custom_role_counts=body.custom_role_counts,
+        legacy_ruleset_id=body.ruleset_id,
+        cadence_preset=body.cadence_preset or BUILTIN_CADENCE_ID,
+    )
+
+
+def _runtime_rules_for_lobby(lobby: Lobby) -> _ResolvedLobbyRules:
+    ruleset = runtime_ruleset_from_pair(
+        ruleset_id=lobby.ruleset_id,
+        rules_snapshot_json=lobby.rules_snapshot_json,
+        rules_snapshot_hash=lobby.rules_snapshot_hash,
+    )
+    snapshot = (
+        GameRulesSnapshot.model_validate(lobby.rules_snapshot_json)
+        if lobby.rules_snapshot_json is not None
+        else snapshot_from_ruleset(ruleset)
+    )
+    body = canonical_rules_dict(snapshot)
+    snapshot_hash = canonical_rules_hash(snapshot)
+    return _ResolvedLobbyRules(
+        ruleset_id=lobby.ruleset_id,
+        ruleset=ruleset,
+        rules_snapshot_json=body,
+        rules_snapshot_hash=snapshot_hash,
+        summary=_rules_summary(
+            ruleset_id=lobby.ruleset_id,
+            built_in_ruleset_id=None
+            if lobby.ruleset_id.startswith("custom:")
+            else lobby.ruleset_id,
+            custom=lobby.ruleset_id.startswith("custom:"),
+            snapshot=snapshot,
+        ),
+        legacy_ruleset_alias=False,
+    )
+
+
+def _resolve_rules(
+    *,
+    built_in_ruleset_id: str | None,
+    custom_role_counts: Mapping[str, int] | None,
+    legacy_ruleset_id: str | None,
+    cadence_preset: str,
+) -> _ResolvedLobbyRules:
+    if cadence_preset not in SUPPORTED_CADENCE_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="unknown_cadence_preset",
+        )
+    sources = [
+        built_in_ruleset_id is not None,
+        custom_role_counts is not None,
+        legacy_ruleset_id is not None,
+    ]
+    if sum(sources) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="one_rules_source_required",
+        )
+
+    if custom_role_counts is not None:
+        validation = validate_custom_role_deck(custom_role_counts)
+        if not validation.ok or validation.snapshot is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "validation_errors": _reason_values(validation.reasons),
+                    "rules_summary": _invalid_custom_rules_summary(custom_role_counts),
+                },
+            )
+        snapshot = validation.snapshot
+        snapshot_body = canonical_rules_dict(snapshot)
+        snapshot_hash = canonical_rules_hash(snapshot)
+        ruleset_id = snapshot.RULESET_ID
+        return _ResolvedLobbyRules(
+            ruleset_id=ruleset_id,
+            ruleset=snapshot,
+            rules_snapshot_json=snapshot_body,
+            rules_snapshot_hash=snapshot_hash,
+            summary=_rules_summary(
+                ruleset_id=ruleset_id,
+                built_in_ruleset_id=None,
+                custom=True,
+                snapshot=snapshot,
+            ),
+            legacy_ruleset_alias=False,
+        )
+
+    registered_id = built_in_ruleset_id or legacy_ruleset_id
+    assert registered_id is not None
+    ruleset = _ruleset_or_422(registered_id)
+    snapshot = snapshot_from_ruleset(ruleset, cadence_id=cadence_preset)
+    return _ResolvedLobbyRules(
+        ruleset_id=ruleset.RULESET_ID,
+        ruleset=ruleset,
+        rules_snapshot_json=canonical_rules_dict(snapshot),
+        rules_snapshot_hash=canonical_rules_hash(snapshot),
+        summary=_rules_summary(
+            ruleset_id=ruleset.RULESET_ID,
+            built_in_ruleset_id=ruleset.RULESET_ID,
+            custom=False,
+            snapshot=snapshot,
+        ),
+        legacy_ruleset_alias=legacy_ruleset_id is not None,
+    )
+
+
+def _rules_summary(
+    *,
+    ruleset_id: str,
+    built_in_ruleset_id: str | None,
+    custom: bool,
+    snapshot: GameRulesSnapshot,
+    validation_errors: list[str] | None = None,
+) -> RulesSummary:
+    return RulesSummary(
+        ruleset_id=ruleset_id,
+        built_in_ruleset_id=built_in_ruleset_id,
+        custom=custom,
+        player_count=snapshot.PLAYER_COUNT,
+        cadence_preset=snapshot.cadence_id,
+        role_counts=[
+            RoleCountSummary(role=entry.role.value, count=entry.count)
+            for entry in sorted(snapshot.role_counts, key=lambda item: item.role.value)
+        ],
+        validation_errors=validation_errors or [],
+    )
+
+
+def _invalid_custom_rules_summary(role_counts: Mapping[str, int]) -> dict[str, object]:
+    normalized: dict[str, int] = {}
+    for role, count in role_counts.items():
+        normalized[role] = normalized.get(role, 0) + count
+    return {
+        "custom": True,
+        "player_count": sum(count for count in normalized.values() if count > 0),
+        "role_counts": [{"role": role, "count": normalized[role]} for role in sorted(normalized)],
+    }
+
+
+def _reason_values(reasons: tuple[CustomRoleDeckReason, ...]) -> list[str]:
+    return [reason.value for reason in reasons]
+
+
+def _human_capacity(body_value: int | None, *, player_count: int, legacy_alias: bool) -> int:
+    capacity = player_count if body_value is None and legacy_alias else body_value or 1
+    if capacity < 1 or capacity > player_count:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="invalid_human_seat_count",
+        )
+    return capacity
+
+
+def _ai_seat_count(*, player_count: int, human_seat_capacity: int) -> int:
+    return player_count - human_seat_capacity
+
+
+def _ensure_casual_create(body: LobbyCreate | LobbyConfigUpdate) -> None:
+    if body.ranked is not None or body.integrity_acknowledged is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="ranked_lobbies_deprecated",
+        )
+
+
+async def _validate_prepicks(
+    session: AsyncSession,
+    *,
+    prepick_agent_build_ids: list[uuid.UUID],
+    ai_seat_count: int,
+) -> None:
+    if len(prepick_agent_build_ids) > ai_seat_count:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="too_many_prepick_models",
+        )
+
+    for build_id in prepick_agent_build_ids:
+        build = await agent_builds_repo.get(session, build_id)
+        if build is None or not build.active:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="unknown_prepick_model",
+            )
+
+
+def _configured_seats(
+    *,
+    player_count: int,
+    human_seat_capacity: int,
+    host_member_id: uuid.UUID,
+    prepick_agent_build_ids: list[uuid.UUID],
+    legacy_prepick_slots: bool,
+) -> list[LobbySeatPlanEntry]:
+    prepick_start_index = 1 if legacy_prepick_slots else human_seat_capacity
+    prepicks_by_index = {
+        prepick_start_index + offset: str(build_id)
+        for offset, build_id in enumerate(prepick_agent_build_ids)
+    }
+    return [
+        LobbySeatPlanEntry(
+            seat_index=seat_index,
+            seat_kind=LobbySeatKind.HUMAN if seat_index == 0 else LobbySeatKind.AI,
+            member_id=str(host_member_id) if seat_index == 0 else None,
+            agent_build_id=prepicks_by_index.get(seat_index),
+        )
+        for seat_index in range(player_count)
+    ]
 
 
 @router.post("/lobbies", response_model=LobbySummary, status_code=status.HTTP_201_CREATED)
@@ -184,66 +488,45 @@ async def create_lobby(
     inference-$ cap, and the global cost breaker gate lobby creation (US-151). A
     denied decision is a 429 before any row is written.
     """
-    if body.ranked and not body.integrity_acknowledged:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="integrity_acknowledgement_required",
-        )
-
+    _ensure_casual_create(body)
+    resolved_rules = _resolve_rules_for_create(body)
     now = datetime.now(UTC)
-    ruleset: Ruleset | None = None
-    if body.ranked:
-        ruleset = _ruleset_or_422(body.ruleset_id)
-        facts = await resolve_ranked_eligibility(
-            session,
-            principal_id=ctx.principal_id,
-            settings=_get_auth_settings(request),
-            now=now,
-        )
-        decision = evaluate_ranked_eligibility(facts)
-        if not decision.allowed:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=decision.reason.value,
-            )
-
     admission = await _enforce_admission(
         request, session, principal_id=ctx.principal_id, action=ACTION_CREATE
     )
-    if ruleset is None:
-        ruleset = _ruleset_or_422(body.ruleset_id)
-    player_count: int = ruleset.PLAYER_COUNT
-    ai_seat_count = player_count - 1
-
-    if len(body.prepick_agent_build_ids) > ai_seat_count:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="too_many_prepick_models",
-        )
-
-    for build_id in body.prepick_agent_build_ids:
-        build = await agent_builds_repo.get(session, build_id)
-        if build is None or not build.active:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="unknown_prepick_model",
-            )
+    player_count = resolved_rules.ruleset.PLAYER_COUNT
+    human_seat_capacity = _human_capacity(
+        body.human_seat_count,
+        player_count=player_count,
+        legacy_alias=resolved_rules.legacy_ruleset_alias,
+    )
+    ai_seats = _ai_seat_count(player_count=player_count, human_seat_capacity=human_seat_capacity)
+    legacy_prepick_slots = resolved_rules.legacy_ruleset_alias and body.human_seat_count is None
+    prepick_limit = player_count - 1 if legacy_prepick_slots else ai_seats
+    await _validate_prepicks(
+        session,
+        prepick_agent_build_ids=body.prepick_agent_build_ids,
+        ai_seat_count=prepick_limit,
+    )
 
     league = await leagues_repo.get_or_create_humans_included(
-        session, ruleset_id=body.ruleset_id, ranked=body.ranked
+        session, ruleset_id=resolved_rules.ruleset_id, ranked=False
     )
 
     lobby = await lobbies_repo.create_lobby(
         session,
-        ruleset_id=body.ruleset_id,
+        ruleset_id=resolved_rules.ruleset_id,
         identity_mode=body.identity_mode.value,
         theme_pack_id=body.theme_pack_id,
         lobby_seed=secrets.token_hex(16),
         invite_token=secrets.token_urlsafe(24),
-        integrity_acknowledged=body.integrity_acknowledged if body.ranked else False,
+        integrity_acknowledged=False,
         host_principal_id=ctx.principal_id,
         league_id=league.id,
         now=now,
+        human_seat_capacity=human_seat_capacity,
+        rules_snapshot_json=resolved_rules.rules_snapshot_json,
+        rules_snapshot_hash=resolved_rules.rules_snapshot_hash,
     )
 
     host_member = await lobbies_repo.add_member(
@@ -259,25 +542,22 @@ async def create_lobby(
         session, admission, lobby_id=lobby.id, lobby_member_id=host_member.id
     )
 
-    await lobbies_repo.add_seat(
-        session,
-        lobby_id=lobby.id,
-        seat_index=0,
-        seat_kind=LobbySeatKind.HUMAN,
-        member_id=host_member.id,
-    )
-    for offset in range(ai_seat_count):
-        prepick = (
-            body.prepick_agent_build_ids[offset]
-            if offset < len(body.prepick_agent_build_ids)
-            else None
-        )
+    for seat in _configured_seats(
+        player_count=player_count,
+        human_seat_capacity=human_seat_capacity,
+        host_member_id=host_member.id,
+        prepick_agent_build_ids=body.prepick_agent_build_ids,
+        legacy_prepick_slots=legacy_prepick_slots,
+    ):
         await lobbies_repo.add_seat(
             session,
             lobby_id=lobby.id,
-            seat_index=offset + 1,
-            seat_kind=LobbySeatKind.AI,
-            agent_build_id=prepick,
+            seat_index=seat.seat_index,
+            seat_kind=LobbySeatKind(seat.seat_kind),
+            member_id=uuid.UUID(seat.member_id) if seat.member_id is not None else None,
+            agent_build_id=(
+                uuid.UUID(seat.agent_build_id) if seat.agent_build_id is not None else None
+            ),
         )
 
     await session.commit()
@@ -300,6 +580,93 @@ async def get_lobby(
     """
     lobby = await _require_member_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
     await _reconcile_lifecycle(session, lobby)
+    summary = await _summary(session, lobby_id=lobby_id)
+    await session.commit()
+    return summary
+
+
+@router.patch("/lobbies/{lobby_id}/configuration", response_model=LobbySummary)
+async def update_lobby_configuration(
+    lobby_id: uuid.UUID,
+    body: LobbyConfigUpdate,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> LobbySummary:
+    """Host-only mutable lobby configuration.
+
+    Rules/identity/capacity/model choices freeze after the first non-host joins.
+    Theme remains safe while the lobby is still OPEN; LOCKED freezes everything.
+    """
+    _ensure_casual_create(body)
+    lobby = await _require_host_lobby(session, lobby_id=lobby_id, principal_id=ctx.principal_id)
+    if lobby.status != LobbyStatus.OPEN.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="lobby_config_locked")
+
+    fields = body.model_fields_set
+    structural_fields = fields - {"theme_pack_id"}
+    members = await lobbies_repo.list_members(session, lobby_id)
+    has_non_host_member = any(not member.is_host for member in members)
+    now = datetime.now(UTC)
+    if structural_fields and has_non_host_member:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="lobby_config_frozen_after_join",
+        )
+
+    if not structural_fields:
+        if "theme_pack_id" not in fields:
+            summary = await _summary(session, lobby_id=lobby_id)
+            await session.commit()
+            return summary
+        await lobbies_repo.update_theme(
+            session,
+            lobby_id=lobby_id,
+            theme_pack_id=body.theme_pack_id,
+            now=now,
+        )
+        summary = await _summary(session, lobby_id=lobby_id)
+        await session.commit()
+        return summary
+
+    resolved_rules = _resolve_rules_for_update(body, lobby=lobby)
+    player_count = resolved_rules.ruleset.PLAYER_COUNT
+    existing_capacity = _effective_human_capacity(lobby, player_count=player_count)
+    human_seat_capacity = _human_capacity(
+        body.human_seat_count if body.human_seat_count is not None else existing_capacity,
+        player_count=player_count,
+        legacy_alias=False,
+    )
+    ai_seats = _ai_seat_count(player_count=player_count, human_seat_capacity=human_seat_capacity)
+    prepicks = body.prepick_agent_build_ids if body.prepick_agent_build_ids is not None else []
+    await _validate_prepicks(
+        session,
+        prepick_agent_build_ids=prepicks,
+        ai_seat_count=ai_seats,
+    )
+    host_member = next(member for member in members if member.is_host)
+    updated = await lobbies_repo.update_configuration(
+        session,
+        lobby_id=lobby_id,
+        ruleset_id=resolved_rules.ruleset_id,
+        identity_mode=(body.identity_mode or IdentityMode(lobby.identity_mode)).value,
+        theme_pack_id=body.theme_pack_id if "theme_pack_id" in fields else lobby.theme_pack_id,
+        human_seat_capacity=human_seat_capacity,
+        rules_snapshot_json=resolved_rules.rules_snapshot_json,
+        rules_snapshot_hash=resolved_rules.rules_snapshot_hash,
+        now=now,
+    )
+    assert updated is not None
+    await lobbies_repo.replace_seats(
+        session,
+        lobby_id=lobby_id,
+        seats=_configured_seats(
+            player_count=player_count,
+            human_seat_capacity=human_seat_capacity,
+            host_member_id=host_member.id,
+            prepick_agent_build_ids=prepicks,
+            legacy_prepick_slots=False,
+        ),
+    )
     summary = await _summary(session, lobby_id=lobby_id)
     await session.commit()
     return summary
@@ -765,7 +1132,7 @@ async def _assert_lobby_readiness(
     available_ai_build_count: int | None,
 ) -> None:
     """Fail closed when lobby rows cannot safely advance toward launch."""
-    ruleset = _ruleset_or_422(lobby.ruleset_id)
+    ruleset = _runtime_ruleset_for_lobby(lobby)
     decision = evaluate_lobby_rows(
         members=await lobbies_repo.list_members(session, lobby.id),
         seats=await lobbies_repo.list_seats(session, lobby.id),
@@ -788,12 +1155,36 @@ def _as_aware(value: datetime) -> datetime:
     return value
 
 
+def _runtime_ruleset_for_lobby(lobby: Lobby) -> Ruleset:
+    try:
+        return runtime_ruleset_from_pair(
+            ruleset_id=lobby.ruleset_id,
+            rules_snapshot_json=lobby.rules_snapshot_json,
+            rules_snapshot_hash=lobby.rules_snapshot_hash,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc) or "invalid_rules_snapshot",
+        ) from exc
+
+
+def _effective_human_capacity(lobby: Lobby, *, player_count: int) -> int:
+    if lobby.human_seat_capacity is None:
+        return player_count
+    return lobby.human_seat_capacity
+
+
 async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummary:
     lobby = await lobbies_repo.get_lobby(session, lobby_id)
     assert lobby is not None  # callers resolve the lobby first
     members = await lobbies_repo.list_members(session, lobby_id)
     seats = await lobbies_repo.list_seats(session, lobby_id)
     league = await leagues_repo.get(session, lobby.league_id)
+    resolved_rules = _runtime_rules_for_lobby(lobby)
+    human_seat_capacity = _effective_human_capacity(
+        lobby, player_count=resolved_rules.ruleset.PLAYER_COUNT
+    )
     composition = composition_summary(
         # A lobby HUMAN seat maps to a game-time HUMAN; an AI seat maps to AI.
         # Counts only — the per-seat layout is never exposed.
@@ -803,11 +1194,17 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
     return LobbySummary(
         id=lobby.id,
         ruleset_id=lobby.ruleset_id,
+        rules_summary=resolved_rules.summary,
         identity_mode=lobby.identity_mode,
         theme_pack_id=lobby.theme_pack_id,
         stakes=LobbyStakes(lobby.stakes).value,
         ranked=league.ranked if league is not None else False,
         integrity_acknowledged=lobby.integrity_acknowledged,
+        human_seat_capacity=human_seat_capacity,
+        ai_seat_count=_ai_seat_count(
+            player_count=resolved_rules.ruleset.PLAYER_COUNT,
+            human_seat_capacity=human_seat_capacity,
+        ),
         status=lobby.status,
         invite_token=lobby.invite_token,
         league_id=lobby.league_id,

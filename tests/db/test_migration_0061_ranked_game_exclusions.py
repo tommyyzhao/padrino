@@ -66,8 +66,8 @@ def test_0061_is_inserted_linearly_between_0060_and_0062() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0065"]
-    assert script.get_revision("0065").down_revision == "0064"
+    assert script.get_heads() == ["0066"]
+    assert script.get_revision("0066").down_revision == "0065"
     assert script.get_revision("0061").down_revision == "0060"
     assert script.get_revision("0062").down_revision == "0061"
     assert script.get_revision("0060").down_revision == "0059"

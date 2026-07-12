@@ -20,8 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
-from padrino.core.enums import LeagueKind, LobbySeatKind
-from padrino.core.ranked_eligibility import RankedEligibilityReason
+from padrino.core.enums import LeagueKind, LobbySeatKind, LobbyStatus, Role
+from padrino.core.rulesets.snapshot import GameRulesSnapshot, canonical_rules_hash
 from padrino.db.models import (
     AgentBuild,
     League,
@@ -115,6 +115,242 @@ async def test_create_lobby_defaults_casual_anonymous_open(client: AsyncClient) 
     assert body["member_count"] == 1
     # mini7_v1 = 7 seats: 1 host HUMAN + 6 AI seats.
     assert body["composition"] == {"human_count": 1, "ai_count": 6, "total": 7}
+
+
+@pytest.mark.asyncio
+async def test_create_lobby_accepts_explicit_builtin_rules_and_capacity(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    token = await _guest_token(client)
+    resp = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "human_seat_count": 2,
+            "theme_pack_id": "classic_noir",
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["ruleset_id"] == "mini7_v1"
+    assert body["human_seat_capacity"] == 2
+    assert body["ai_seat_count"] == 5
+    assert body["rules_summary"] == {
+        "ruleset_id": "mini7_v1",
+        "built_in_ruleset_id": "mini7_v1",
+        "custom": False,
+        "player_count": 7,
+        "cadence_preset": "builtin_sync_v1",
+        "role_counts": [
+            {"role": "DETECTIVE", "count": 1},
+            {"role": "DOCTOR", "count": 1},
+            {"role": "MAFIA_GOON", "count": 2},
+            {"role": "VILLAGER", "count": 3},
+        ],
+        "validation_errors": [],
+    }
+
+    lobby_id = uuid.UUID(body["id"])
+    async with session_factory() as session:
+        lobby = await session.get(Lobby, lobby_id)
+    assert lobby is not None
+    assert lobby.human_seat_capacity == 2
+
+
+@pytest.mark.asyncio
+async def test_create_lobby_accepts_custom_role_counts_and_persists_snapshot(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    token = await _guest_token(client)
+    resp = await client.post(
+        "/lobbies",
+        json={
+            "custom_role_counts": {
+                Role.MAFIA_GOON.value: 2,
+                Role.DETECTIVE.value: 1,
+                Role.DOCTOR.value: 1,
+                Role.VILLAGER.value: 3,
+            },
+            "human_seat_count": 3,
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["ruleset_id"].startswith("custom:")
+    assert body["rules_summary"]["custom"] is True
+    assert body["rules_summary"]["built_in_ruleset_id"] is None
+    assert body["rules_summary"]["validation_errors"] == []
+    assert body["human_seat_capacity"] == 3
+    assert body["ai_seat_count"] == 4
+    league_id = uuid.UUID(body["league_id"])
+    lobby_id = uuid.UUID(body["id"])
+
+    async with session_factory() as session:
+        league = await session.get(League, league_id)
+        lobby = await session.get(Lobby, lobby_id)
+
+    assert league is not None
+    assert league.kind == LeagueKind.HUMANS_INCLUDED.value
+    assert league.ranked is False
+    assert lobby is not None
+    assert lobby.rules_snapshot_json is not None
+    snapshot = GameRulesSnapshot.model_validate(lobby.rules_snapshot_json)
+    assert lobby.rules_snapshot_hash == canonical_rules_hash(snapshot)
+    assert lobby.ruleset_id == f"custom:{lobby.rules_snapshot_hash}"
+
+
+@pytest.mark.asyncio
+async def test_create_lobby_rejects_ambiguous_or_invalid_rules(client: AsyncClient) -> None:
+    token = await _guest_token(client)
+    both = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "custom_role_counts": {Role.MAFIA_GOON.value: 2, Role.VILLAGER.value: 5},
+            "human_seat_count": 2,
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert both.status_code == 422
+    assert both.json()["detail"] == "one_rules_source_required"
+
+    invalid = await client.post(
+        "/lobbies",
+        json={
+            "custom_role_counts": {Role.MAFIA_GOON.value: 4, Role.VILLAGER.value: 3},
+            "human_seat_count": 2,
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["validation_errors"] == ["invalid_faction_ratio"]
+
+    unsupported = await client.post(
+        "/lobbies",
+        json={
+            "custom_role_counts": {"GHOST": 1, Role.MAFIA_GOON.value: 2, Role.VILLAGER.value: 5},
+            "human_seat_count": 2,
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert unsupported.status_code == 422
+    assert unsupported.json()["detail"]["validation_errors"] == ["role_unsupported"]
+
+
+@pytest.mark.asyncio
+async def test_create_lobby_capacity_limits_human_joins(client: AsyncClient) -> None:
+    host = await _guest_token(client)
+    created = await client.post(
+        "/lobbies",
+        json={"built_in_ruleset_id": "mini7_v1", "human_seat_count": 2},
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert created.status_code == 201, created.text
+    invite = created.json()["invite_token"]
+
+    first_friend = await _guest_token(client)
+    joined = await client.post(
+        f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: first_friend}
+    )
+    assert joined.status_code == 200, joined.text
+    assert joined.json()["member_count"] == 2
+    assert joined.json()["composition"] == {"human_count": 2, "ai_count": 5, "total": 7}
+
+    second_friend = await _guest_token(client)
+    denied = await client.post(
+        f"/lobbies/join/{invite}", cookies={HUMAN_SESSION_COOKIE: second_friend}
+    )
+    assert denied.status_code == 409
+    assert denied.json()["detail"] == "lobby_full"
+
+
+@pytest.mark.asyncio
+async def test_create_lobby_rejects_ranked_and_unknown_fields(client: AsyncClient) -> None:
+    token = await _guest_token(client)
+    ranked = await client.post(
+        "/lobbies",
+        json={"built_in_ruleset_id": "mini7_v1", "ranked": True},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert ranked.status_code == 422
+    assert ranked.json()["detail"] == "ranked_lobbies_deprecated"
+
+    unknown = await client.post(
+        "/lobbies",
+        json={"built_in_ruleset_id": "mini7_v1", "ai_seat_count": 5},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert unknown.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_update_lobby_configuration_freezes_after_join_and_lock(
+    client: AsyncClient,
+) -> None:
+    host = await _guest_token(client)
+    created = await client.post(
+        "/lobbies",
+        json={"built_in_ruleset_id": "mini7_v1", "human_seat_count": 2},
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert created.status_code == 201, created.text
+    lobby_id = created.json()["id"]
+
+    changed = await client.patch(
+        f"/lobbies/{lobby_id}/configuration",
+        json={"human_seat_count": 3, "identity_mode": "TRANSPARENT"},
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["human_seat_capacity"] == 3
+    assert changed.json()["identity_mode"] == "TRANSPARENT"
+
+    friend = await _guest_token(client)
+    joined = await client.post(
+        f"/lobbies/join/{created.json()['invite_token']}",
+        cookies={HUMAN_SESSION_COOKIE: friend},
+    )
+    assert joined.status_code == 200, joined.text
+
+    frozen = await client.patch(
+        f"/lobbies/{lobby_id}/configuration",
+        json={"human_seat_count": 4},
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert frozen.status_code == 409
+    assert frozen.json()["detail"] == "lobby_config_frozen_after_join"
+
+    theme = await client.patch(
+        f"/lobbies/{lobby_id}/configuration",
+        json={"theme_pack_id": "neon_city"},
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert theme.status_code == 200, theme.text
+    assert theme.json()["theme_pack_id"] == "neon_city"
+
+    for token in (host, friend):
+        ready = await client.post(
+            f"/lobbies/{lobby_id}/ready",
+            json={"ready": True},
+            cookies={HUMAN_SESSION_COOKIE: token},
+        )
+        assert ready.status_code == 200, ready.text
+
+    locked = await client.post(f"/lobbies/{lobby_id}/lock", cookies={HUMAN_SESSION_COOKIE: host})
+    assert locked.status_code == 200, locked.text
+    assert locked.json()["status"] == LobbyStatus.LOCKED.value
+
+    locked_theme = await client.patch(
+        f"/lobbies/{lobby_id}/configuration",
+        json={"theme_pack_id": "classic_noir"},
+        cookies={HUMAN_SESSION_COOKIE: host},
+    )
+    assert locked_theme.status_code == 409
+    assert locked_theme.json()["detail"] == "lobby_config_locked"
 
 
 @pytest.mark.asyncio
@@ -295,15 +531,11 @@ async def test_ranked_lobby_switch_off_rejects_before_ranked_league_create(
     ranked_token = await _guest_token(client)
     ranked = await client.post(
         "/lobbies",
-        json={
-            "ruleset_id": "mini7_v1",
-            "ranked": True,
-            "integrity_acknowledged": True,
-        },
+        json={"ruleset_id": "mini7_v1", "ranked": True},
         cookies={HUMAN_SESSION_COOKIE: ranked_token},
     )
-    assert ranked.status_code == 403
-    assert ranked.json()["detail"] == RankedEligibilityReason.RANKED_DISABLED.value
+    assert ranked.status_code == 422
+    assert ranked.json()["detail"] == "ranked_lobbies_deprecated"
 
     casual_league_id = uuid.UUID(casual.json()["league_id"])
     async with session_factory() as session:
@@ -329,13 +561,13 @@ async def test_ranked_lobby_requires_integrity_acknowledgement_before_ranked_gat
         cookies={HUMAN_SESSION_COOKIE: token},
     )
     assert refused.status_code == 422
-    assert refused.json()["detail"] == "integrity_acknowledgement_required"
+    assert refused.json()["detail"] == "ranked_lobbies_deprecated"
 
     async with session_factory() as session:
         lobby_count = (await session.execute(select(func.count()).select_from(Lobby))).scalar_one()
     assert lobby_count == 0
 
-    ranked = await client.post(
+    ranked_with_old_ack = await client.post(
         "/lobbies",
         json={
             "ruleset_id": "mini7_v1",
@@ -344,8 +576,7 @@ async def test_ranked_lobby_requires_integrity_acknowledgement_before_ranked_gat
         },
         cookies={HUMAN_SESSION_COOKIE: token},
     )
-    assert ranked.status_code == 403
-    assert ranked.json()["detail"] == RankedEligibilityReason.RANKED_DISABLED.value
+    assert ranked_with_old_ack.status_code == 422
 
     casual_token = await _guest_token(client)
     casual = await client.post(

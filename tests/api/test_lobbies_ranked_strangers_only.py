@@ -14,13 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE, generate_session_token
-from padrino.api.human_consent import hash_source_ip, record_consent, record_ranked_consent
-from padrino.core.enums import LobbySeatKind, LobbyStatus, SeatKind
+from padrino.api.human_consent import record_consent, record_ranked_consent
+from padrino.core.enums import LobbySeatKind, SeatKind
 from padrino.db.models import (
     AgentBuild,
     Game,
     GameSeat,
-    Lobby,
     LobbyMember,
     LobbySeat,
     ModelConfig,
@@ -135,7 +134,7 @@ async def _seed_curated_builds(session: AsyncSession, *, count: int) -> None:
     await session.commit()
 
 
-async def _create_ranked_lobby(client: AsyncClient, token: str) -> uuid.UUID:
+async def _assert_ranked_lobby_rejected(client: AsyncClient, token: str) -> None:
     response = await client.post(
         "/lobbies",
         json={
@@ -145,10 +144,8 @@ async def _create_ranked_lobby(client: AsyncClient, token: str) -> uuid.UUID:
         },
         cookies={HUMAN_SESSION_COOKIE: token},
     )
-    assert response.status_code == 201, response.text
-    lobby_id = uuid.UUID(response.json()["id"])
-    await _set_ready(client, lobby_id=lobby_id, token=token)
-    return lobby_id
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "ranked_lobbies_deprecated"
 
 
 async def _set_ready(client: AsyncClient, *, lobby_id: uuid.UUID, token: str) -> None:
@@ -215,117 +212,18 @@ async def _row_count(
 
 
 @pytest.mark.asyncio
-async def test_ranked_launch_with_multiple_human_seats_rejected_without_game_rows(
+async def test_ranked_lobby_checkbox_rejected_without_game_rows(
     ranked_client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     host = await _account_with_session(session_factory, subject=f"host-{uuid.uuid4()}")
-    friend = await _account_with_session(session_factory, subject=f"friend-{uuid.uuid4()}")
-    friend_principal_id = await _principal_id_for_token(session_factory, friend)
-    lobby_id = await _create_ranked_lobby(ranked_client, host)
-
-    async with session_factory() as session:
-        lobby = await session.get(Lobby, lobby_id)
-        assert lobby is not None
-        invite = lobby.invite_token
-
-    joined = await ranked_client.post(
-        f"/lobbies/join/{invite}",
-        cookies={HUMAN_SESSION_COOKIE: friend},
-    )
-    assert joined.status_code == 200, joined.text
-    await _set_ready(ranked_client, lobby_id=lobby_id, token=friend)
-    await _make_second_seat_human(
-        session_factory,
-        lobby_id=lobby_id,
-        principal_id=friend_principal_id,
-    )
-
-    locked = await ranked_client.post(
-        f"/lobbies/{lobby_id}/lock",
-        cookies={HUMAN_SESSION_COOKIE: host},
-    )
-    assert locked.status_code == 200, locked.text
-    assert locked.json()["status"] == LobbyStatus.LOCKED.value
-    assert locked.json()["composition"] == {"human_count": 2, "ai_count": 5, "total": 7}
-
     before_games = await _row_count(session_factory, Game)
     before_seats = await _row_count(session_factory, GameSeat)
 
-    launched = await ranked_client.post(
-        f"/lobbies/{lobby_id}/launch",
-        cookies={HUMAN_SESSION_COOKIE: host},
-    )
+    await _assert_ranked_lobby_rejected(ranked_client, host)
 
-    assert launched.status_code == 409, launched.text
-    assert launched.json()["detail"] == "ranked_requires_single_human_seat"
     assert await _row_count(session_factory, Game) == before_games
     assert await _row_count(session_factory, GameSeat) == before_seats
-
-
-@pytest.mark.asyncio
-async def test_ranked_launch_with_one_host_human_still_succeeds(
-    ranked_client: AsyncClient,
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with session_factory() as session:
-        await _seed_curated_builds(session, count=6)
-    host = await _account_with_session(session_factory, subject=f"host-{uuid.uuid4()}")
-    lobby_id = await _create_ranked_lobby(ranked_client, host)
-    locked = await ranked_client.post(
-        f"/lobbies/{lobby_id}/lock",
-        cookies={HUMAN_SESSION_COOKIE: host},
-    )
-    assert locked.status_code == 200, locked.text
-
-    launched = await ranked_client.post(
-        f"/lobbies/{lobby_id}/launch",
-        cookies={HUMAN_SESSION_COOKIE: host},
-    )
-
-    assert launched.status_code == 200, launched.text
-    game_id = uuid.UUID(launched.json()["game_id"])
-    async with session_factory() as session:
-        seats = list(
-            (
-                await session.execute(
-                    select(GameSeat)
-                    .where(GameSeat.game_id == game_id)
-                    .order_by(GameSeat.seat_index)
-                )
-            ).scalars()
-        )
-    assert len([seat for seat in seats if seat.seat_kind == SeatKind.HUMAN.value]) == 1
-    assert len([seat for seat in seats if seat.seat_kind == SeatKind.AI.value]) == 6
-
-
-@pytest.mark.asyncio
-async def test_ranked_launch_persists_request_ip_hash_not_raw_ip(
-    ranked_client: AsyncClient,
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with session_factory() as session:
-        await _seed_curated_builds(session, count=6)
-    host = await _account_with_session(session_factory, subject=f"host-{uuid.uuid4()}")
-    lobby_id = await _create_ranked_lobby(ranked_client, host)
-    locked = await ranked_client.post(
-        f"/lobbies/{lobby_id}/lock",
-        cookies={HUMAN_SESSION_COOKIE: host},
-    )
-    assert locked.status_code == 200, locked.text
-
-    launched = await ranked_client.post(
-        f"/lobbies/{lobby_id}/launch",
-        cookies={HUMAN_SESSION_COOKIE: host},
-    )
-
-    assert launched.status_code == 200, launched.text
-    game_id = uuid.UUID(launched.json()["game_id"])
-    async with session_factory() as session:
-        game = await session.get(Game, game_id)
-    assert game is not None
-    assert game.ranked_source_ip_hash == hash_source_ip("127.0.0.1")
-    assert game.ranked_source_ip_hash != "127.0.0.1"
 
 
 @pytest.mark.asyncio

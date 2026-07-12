@@ -52,6 +52,7 @@ def claim_lowest_available_ai_seat(
     seats: Iterable[LobbySeatPlanEntry],
     *,
     joining_member_id: str,
+    human_seat_capacity: int | None = None,
 ) -> LobbySeatPlan:
     """Return a new plan with ``joining_member_id`` on the lowest AI seat.
 
@@ -61,9 +62,13 @@ def claim_lowest_available_ai_seat(
     plan = _validate_and_canonicalize(seats)
     if any(seat.member_id == joining_member_id for seat in plan):
         raise LobbySeatPlanError(LobbySeatPlanReason.DUPLICATE_MEMBER_SEATING)
+    if human_seat_capacity is not None and _human_count(plan) >= human_seat_capacity:
+        raise LobbySeatPlanError(LobbySeatPlanReason.LOBBY_FULL)
 
     for seat in plan:
-        if seat.seat_kind == LobbySeatKind.AI:
+        if seat.seat_kind == LobbySeatKind.AI and _claimable_by_capacity(
+            seat, human_seat_capacity=human_seat_capacity
+        ):
             return tuple(
                 _claim_seat(seat, joining_member_id=joining_member_id)
                 if candidate.seat_index == seat.seat_index
@@ -120,6 +125,14 @@ def _release_seat(seat: LobbySeatPlanEntry) -> LobbySeatPlanEntry:
         ),
         ai_reservation_policy=seat.ai_reservation_policy,
     )
+
+
+def _human_count(seats: LobbySeatPlan) -> int:
+    return sum(1 for seat in seats if seat.seat_kind == LobbySeatKind.HUMAN)
+
+
+def _claimable_by_capacity(seat: LobbySeatPlanEntry, *, human_seat_capacity: int | None) -> bool:
+    return human_seat_capacity is None or seat.seat_index < human_seat_capacity
 
 
 def _validate_and_canonicalize(seats: Iterable[LobbySeatPlanEntry]) -> LobbySeatPlan:

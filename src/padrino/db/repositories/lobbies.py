@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.core.enums import LobbySeatKind
@@ -48,6 +48,7 @@ async def create_lobby(
     host_principal_id: uuid.UUID,
     league_id: uuid.UUID,
     now: datetime,
+    human_seat_capacity: int | None = None,
     rules_snapshot_json: RulesSnapshotJson | None = None,
     rules_snapshot_hash: str | None = None,
 ) -> Lobby:
@@ -70,6 +71,7 @@ async def create_lobby(
         lobby_seed=lobby_seed,
         invite_token=invite_token,
         integrity_acknowledged=integrity_acknowledged,
+        human_seat_capacity=human_seat_capacity,
         host_principal_id=host_principal_id,
         league_id=league_id,
         created_at=now,
@@ -127,6 +129,55 @@ async def update_rules_snapshot(
     )
     lobby.rules_snapshot_json = snapshot_json
     lobby.rules_snapshot_hash = snapshot_hash
+    await session.flush()
+    return lobby
+
+
+async def update_configuration(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    ruleset_id: str,
+    identity_mode: str,
+    theme_pack_id: str | None,
+    human_seat_capacity: int,
+    rules_snapshot_json: RulesSnapshotJson | None,
+    rules_snapshot_hash: str | None,
+    now: datetime,
+) -> Lobby | None:
+    """Replace pre-launch mutable lobby configuration."""
+    lobby = await session.get(Lobby, lobby_id)
+    if lobby is None:
+        return None
+    ensure_lobby_rules_snapshot_mutable(lobby.status)
+    snapshot_json, snapshot_hash = validate_rules_snapshot_pair(
+        rules_snapshot_json=rules_snapshot_json,
+        rules_snapshot_hash=rules_snapshot_hash,
+    )
+    lobby.ruleset_id = ruleset_id
+    lobby.identity_mode = identity_mode
+    lobby.theme_pack_id = theme_pack_id
+    lobby.human_seat_capacity = human_seat_capacity
+    lobby.rules_snapshot_json = snapshot_json
+    lobby.rules_snapshot_hash = snapshot_hash
+    lobby.updated_at = now
+    await session.flush()
+    return lobby
+
+
+async def update_theme(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    theme_pack_id: str | None,
+    now: datetime,
+) -> Lobby | None:
+    """Update the safe cosmetic lobby theme while the lobby is still open."""
+    lobby = await session.get(Lobby, lobby_id)
+    if lobby is None:
+        return None
+    lobby.theme_pack_id = theme_pack_id
+    lobby.updated_at = now
     await session.flush()
     return lobby
 
@@ -261,9 +312,13 @@ async def claim_member_seat(
     supported so concurrent last-seat joins serialize on Postgres; SQLite ignores
     the clause and still runs the same pure planner under the transaction.
     """
+    lobby = await session.get(Lobby, lobby_id)
+    human_seat_capacity = lobby.human_seat_capacity if lobby is not None else None
     seats = await _locked_seats(session, lobby_id)
     plan = claim_lowest_available_ai_seat(
-        _seat_plan_entries(seats), joining_member_id=str(member_id)
+        _seat_plan_entries(seats),
+        joining_member_id=str(member_id),
+        human_seat_capacity=human_seat_capacity,
     )
     await _apply_seat_plan(session, seats=seats, plan=plan)
     claimed = next(seat for seat in seats if seat.member_id == member_id)
@@ -287,6 +342,29 @@ async def list_seats(session: AsyncSession, lobby_id: uuid.UUID) -> list[LobbySe
         select(LobbySeat).where(LobbySeat.lobby_id == lobby_id).order_by(LobbySeat.seat_index)
     )
     return list(result.scalars())
+
+
+async def replace_seats(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    seats: list[LobbySeatPlanEntry],
+) -> None:
+    """Replace every pre-launch seat row for a host-only lobby reconfiguration."""
+    await session.execute(delete(LobbySeat).where(LobbySeat.lobby_id == lobby_id))
+    for seat in seats:
+        session.add(
+            LobbySeat(
+                lobby_id=lobby_id,
+                seat_index=seat.seat_index,
+                seat_kind=LobbySeatKind(seat.seat_kind).value,
+                member_id=uuid.UUID(seat.member_id) if seat.member_id is not None else None,
+                agent_build_id=(
+                    uuid.UUID(seat.agent_build_id) if seat.agent_build_id is not None else None
+                ),
+            )
+        )
+    await session.flush()
 
 
 async def _locked_seats(session: AsyncSession, lobby_id: uuid.UUID) -> list[LobbySeat]:
@@ -343,10 +421,13 @@ __all__ = [
     "list_seats",
     "release_member_seat",
     "remove_member",
+    "replace_seats",
     "set_host",
     "set_lobby_status",
     "set_member_ready",
     "touch_lobby",
     "touch_member_presence",
+    "update_configuration",
     "update_rules_snapshot",
+    "update_theme",
 ]

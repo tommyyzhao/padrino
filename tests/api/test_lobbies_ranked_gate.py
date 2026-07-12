@@ -235,8 +235,8 @@ async def test_ranked_lobby_flag_off_returns_reason_and_writes_no_rows(
         cookies={HUMAN_SESSION_COOKIE: token},
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == RankedEligibilityReason.RANKED_DISABLED.value
+    assert response.status_code == 422
+    assert response.json()["detail"] == "ranked_lobbies_deprecated"
     assert await _league_count(session_factory) == before_leagues
     assert await _lobby_count(session_factory) == before_lobbies
 
@@ -259,8 +259,8 @@ async def test_ranked_lobby_guest_denied_with_machine_reason(
         cookies={HUMAN_SESSION_COOKIE: token},
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == RankedEligibilityReason.GUEST_PRINCIPAL.value
+    assert response.status_code == 422
+    assert response.json()["detail"] == "ranked_lobbies_deprecated"
     assert await _league_count(session_factory) == before_leagues
 
 
@@ -281,19 +281,15 @@ async def test_ranked_lobby_verified_consented_user_creates_ranked_league(
         cookies={HUMAN_SESSION_COOKIE: token},
     )
 
-    assert response.status_code == 201, response.text
-    payload = response.json()
-    assert payload["ranked"] is True
-    assert payload["integrity_acknowledged"] is True
-    async with session_factory() as session:
-        league = await session.get(League, uuid.UUID(payload["league_id"]))
-    assert league is not None
-    assert league.ranked is True
+    assert response.status_code == 422
+    assert response.json()["detail"] == "ranked_lobbies_deprecated"
+    assert await _league_count(session_factory) == 0
+    assert await _lobby_count(session_factory) == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("kwargs", "reason"),
+    ("kwargs", "_reason"),
     [
         ({"email_verified": False}, RankedEligibilityReason.EMAIL_UNVERIFIED),
         ({"consent": False}, RankedEligibilityReason.BASE_CONSENT_MISSING),
@@ -305,7 +301,7 @@ async def test_ranked_lobby_denials_return_predicate_reason_tokens(
     ranked_client: AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
     kwargs: dict[str, bool],
-    reason: RankedEligibilityReason,
+    _reason: RankedEligibilityReason,
 ) -> None:
     token = await _account_with_session(session_factory, **kwargs)
     before_leagues = await _league_count(session_factory)
@@ -320,8 +316,8 @@ async def test_ranked_lobby_denials_return_predicate_reason_tokens(
         cookies={HUMAN_SESSION_COOKIE: token},
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == reason.value
+    assert response.status_code == 422
+    assert response.json()["detail"] == "ranked_lobbies_deprecated"
     assert await _league_count(session_factory) == before_leagues
 
 
@@ -343,7 +339,7 @@ async def test_ranked_integrity_ack_is_checked_before_eligibility(
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "integrity_acknowledgement_required"
+    assert response.json()["detail"] == "ranked_lobbies_deprecated"
 
 
 @pytest.mark.asyncio
@@ -361,12 +357,12 @@ async def test_casual_lobby_create_unaffected_for_guest_and_unverified_account(
 
     guest_response = await ranked_client.post(
         "/lobbies",
-        json={"ruleset_id": "mini7_v1", "ranked": False},
+        json={"ruleset_id": "mini7_v1"},
         cookies={HUMAN_SESSION_COOKIE: guest},
     )
     account_response = await ranked_client.post(
         "/lobbies",
-        json={"ruleset_id": "mini7_v1", "ranked": False},
+        json={"ruleset_id": "mini7_v1"},
         cookies={HUMAN_SESSION_COOKIE: unverified},
     )
 

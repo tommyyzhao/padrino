@@ -3,6 +3,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Custom lobby configuration (US-337): `/lobbies` is now the casual custom
+  route. Resolve exactly one rules source (`built_in_ruleset_id`,
+  `custom_role_counts`, or legacy `ruleset_id`) to a rules snapshot + member-safe
+  `rules_summary` before writing rows, and reject `ranked` /
+  `integrity_acknowledged` as the deprecated ranked-checkbox contract. Store
+  `Lobby.human_seat_capacity` nullable so legacy rows fall back to full-table
+  claimable capacity; new strict built-in/custom requests validate prepicks
+  against fixed AI slots (`player_count - human_seat_capacity`) and join claims
+  only AI seats with `seat_index < human_seat_capacity`. Structural config
+  changes are host-only while only the host is present; after a non-host joins,
+  only `theme_pack_id` remains mutable until lock, and `LOCKED` freezes all
+  config.
 - Runtime rules snapshots (US-336): custom `custom:<hash>` games should run
   from the archived `GameRulesSnapshot` object and validate
   `ruleset_id == custom:<canonical hash>` before the first event append.
@@ -6389,4 +6401,35 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3120 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-337
+- Replaced the lobby create contract with explicit casual custom config:
+  built-in rules via `built_in_ruleset_id`, custom supported decks via
+  `custom_role_counts`, `cadence_preset`, identity/theme, capacity, prepicks,
+  normalized `rules_summary`, and stable custom-deck validation errors.
+- Added `0066` with nullable `lobbies.human_seat_capacity`, wired joins through
+  capacity-aware pure seating, and kept legacy `ruleset_id` behavior compatible
+  for existing clients/tests.
+- Deprecated the ranked checkbox on `/lobbies`: `ranked` and old
+  `integrity_acknowledged` request fields now fail before league/lobby writes;
+  ranked route tests were updated to assert the hidden path is closed.
+- Added host-only `PATCH /lobbies/{id}/configuration` with structural freeze
+  after first non-host join, theme-only cosmetic edits while OPEN, and full
+  freeze once LOCKED.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/routes/lobbies.py`,
+  `src/padrino/api/lobby_launch.py`, `src/padrino/core/lobby/seating.py`,
+  `src/padrino/db/models.py`, `src/padrino/db/repositories/lobbies.py`,
+  `src/padrino/db/migrations/versions/0066_lobby_human_seat_capacity.py`,
+  `tests/api/test_lobby_create.py`, `tests/api/test_lobbies_ranked_gate.py`,
+  `tests/api/test_lobbies_ranked_strangers_only.py`,
+  `tests/db/test_migration_0066_lobby_human_seat_capacity.py`, migration-head
+  lineage tests, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first
+  `uv run pytest tests/api/test_lobby_create.py -q` failed on missing
+  built-in/custom/capacity/config APIs; focused GREEN plus ranked/lobby/migration
+  slices. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3128 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

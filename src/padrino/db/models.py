@@ -1635,6 +1635,7 @@ class Lobby(Base):
     integrity_acknowledged: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    human_seat_capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="OPEN", server_default="OPEN"
     )
