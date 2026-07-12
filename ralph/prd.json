@@ -492,7 +492,7 @@
         "Retention/export/privacy tests specify which metadata persists and prove no human credential/key hash is exposed."
       ],
       "notes": "OpenRouter router metadata is impure audit data, excluded from core event hashes.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-350",

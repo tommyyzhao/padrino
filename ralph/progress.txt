@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- OpenRouter runtime audit (US-349): keep router provenance entirely in the
+  impure `openrouter.routing_metadata` seam. Derive the requested canonical
+  slug and policy hash from the frozen request, derive actual model/provider /
+  endpoint and generation id only from the response, and persist a strict,
+  bounded allowlist for strategy, attempt, BYOK, attempts, and pipeline stages.
+  Strip URLs' query/fragment credentials, omit free-form pipeline data and
+  summaries, and run the same sanitizer in the `llm_calls` repository as a
+  defence-in-depth boundary. Archive it only on `LlmCall`, never an event;
+  retention scrubs raw prompt/response payloads but preserves this safe audit
+  record, while game exports omit all LLM-call data.
 - Lobby canonical model selections (US-348): persist one validated,
   secret-free `model_selection` JSON snapshot per AI `LobbySeat`, keeping the
   requested canonical slug, immutable catalog entry/snapshot, prompt/schema
@@ -6857,3 +6867,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   --check .`; `uv run mypy src tests`; `uv run pytest -m "not integration"`
   -> 3238 passed / 51 skipped / 11 deselected. Frontend gates not run; story
   did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-349
+- Added migration 0070 and nullable `LlmCall` attribution fields for the
+  frozen requested OpenRouter slug and catalog snapshot, actual
+  model/provider/endpoint, generation id, policy hash, and bounded router JSON.
+  Legacy and non-OpenRouter call rows retain NULL in every new column.
+- Added a response-bound OpenRouter metadata extractor and a second repository
+  sanitization boundary. It preserves only safe strategy/attempt/BYOK,
+  provider/model/status attempts, and narrow pipeline facts; credentials,
+  header/query secrets, prompt-like summaries, and free-form plugin data are
+  discarded. Router records remain outside core event hashes.
+- Raw LLM payload retention leaves safe routing attribution intact. Exports
+  continue to omit every LLM-call row, including routing metadata and any
+  human key material.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/openrouter/routing_metadata.py`,
+  `src/padrino/llm/{adapter,litellm_adapter}.py`,
+  `src/padrino/gauntlets/tournament.py`, `src/padrino/runner/game_runner.py`,
+  `src/padrino/db/{models.py,repositories/llm_calls.py,migrations/versions/0070_openrouter_routing_metadata.py}`,
+  and OpenRouter/LLM/persistence/export/retention/migration tests,
+  `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused routing/persistence/export suite -> 76 passed;
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3300 selected passed. Frontend gates
+  not run; story did not touch `web/dashboard`.
