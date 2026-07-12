@@ -98,7 +98,7 @@ def test_0071_follows_0070_and_round_trips_credential_and_pkce_tables(sqlite_db:
     config = _alembic_config()
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0072"]
+    assert script.get_heads() == ["0073"]
     assert script.get_revision("0071").down_revision == "0070"
 
     command.upgrade(config, "0070")

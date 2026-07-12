@@ -6,7 +6,7 @@ import functools
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from padrino.legal.documents import DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS
@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     padrino_openrouter_default_zdr: bool = True
     padrino_openrouter_timeout_seconds: float = Field(default=45.0, gt=0)
     padrino_openrouter_catalog_sync_interval_seconds: int = Field(default=3600, gt=0)
+    # OpenRouter's documented Management API supports per-key USD limits and
+    # expiry.  Model-key allowlists are not documented there today, so this is
+    # intentionally an opt-in deployment capability rather than an optimistic
+    # unsupported request field.  When a compatible upstream provides one,
+    # set its exact field name (for example ``allowed_models``); Padrino still
+    # persists its frozen local allowlist either way.
+    padrino_openrouter_subkey_allowlist_field: str | None = None
     # Player-owned OpenRouter connection configuration (US-355). This is
     # intentionally separate from account sign-in OAuth: the fixed callback
     # receives only a short-lived code that exchanges into a user-controlled
@@ -100,6 +107,28 @@ class Settings(BaseSettings):
         if not normalized.startswith(("env:", "file:")):
             raise ValueError("OpenRouter keys must be configured as opaque secret references")
         return normalized
+
+    @field_validator("padrino_openrouter_subkey_allowlist_field")
+    @classmethod
+    def _validate_openrouter_subkey_allowlist_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or not normalized.replace("_", "").isalnum():
+            raise ValueError("OpenRouter subkey allowlist field must be a simple field name")
+        return normalized
+
+    @model_validator(mode="after")
+    def _keep_openrouter_key_purposes_separate(self) -> Settings:
+        if (
+            self.padrino_openrouter_inference_key_ref is not None
+            and self.padrino_openrouter_inference_key_ref
+            == self.padrino_openrouter_management_key_ref
+        ):
+            raise ValueError(
+                "OpenRouter inference and management references must not share a value"
+            )
+        return self
 
     @field_validator("padrino_openrouter_base_url", "padrino_openrouter_app_url")
     @classmethod

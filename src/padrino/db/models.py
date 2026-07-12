@@ -1546,6 +1546,84 @@ class ProviderCredential(Base):
         )
 
 
+class OpenRouterPlatformSubkey(Base):
+    """An encrypted, account-scoped inference key minted by a management key.
+
+    This table intentionally has no management credential reference or raw key
+    material.  ``upstream_key_hash`` is the only durable management handle;
+    it permits best-effort disable/delete without turning the database into a
+    second source of deploy credentials.  A disabled/revoked row clears its
+    envelope so it cannot be selected for an inference call.
+    """
+
+    __tablename__ = "openrouter_platform_subkeys"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ACTIVE', 'DISABLED', 'REVOKED')",
+            name="ck_openrouter_platform_subkeys_status",
+        ),
+        CheckConstraint(
+            "limit_micros >= 0",
+            name="ck_openrouter_platform_subkeys_limit_non_negative",
+        ),
+        CheckConstraint(
+            "length(upstream_key_hash) = 64",
+            name="ck_openrouter_platform_subkeys_upstream_hash_len",
+        ),
+        CheckConstraint(
+            "length(request_hash) = 64",
+            name="ck_openrouter_platform_subkeys_request_hash_len",
+        ),
+        CheckConstraint(
+            "status != 'ACTIVE' OR (ciphertext IS NOT NULL AND nonce IS NOT NULL)",
+            name="ck_openrouter_platform_subkeys_active_envelope",
+        ),
+        Index(
+            "uq_openrouter_platform_subkeys_active_principal",
+            "principal_id",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE'"),
+            postgresql_where=text("status = 'ACTIVE'"),
+        ),
+        Index(
+            "ix_openrouter_platform_subkeys_principal_status",
+            "principal_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    key_version: Mapped[str] = mapped_column(String, nullable=False)
+    upstream_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    key_name: Mapped[str] = mapped_column(String, nullable=False)
+    display_suffix: Mapped[str] = mapped_column(String, nullable=False)
+    label: Mapped[str | None] = mapped_column(String, nullable=True)
+    limit_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    allowed_models: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    allowlist_enforced_upstream: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="ACTIVE")
+    provisioned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        """Return only lifecycle metadata, never envelope or management facts."""
+        return (
+            "OpenRouterPlatformSubkey("
+            f"id={self.id!s}, principal_id={self.principal_id!s}, status={self.status!r}, "
+            f"upstream_key_hash=<redacted>)"
+        )
+
+
 class OpenRouterPkceFlow(Base):
     """Short-lived, single-use OpenRouter connection-flow state (US-353).
 

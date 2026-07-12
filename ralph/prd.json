@@ -697,7 +697,7 @@
         "MockTransport tests cover create-once, timeout-after-create reconciliation, rotation, upstream 403/429, and no-secret outputs."
       ],
       "notes": "Defense in depth, not the sole balance authority.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-360",

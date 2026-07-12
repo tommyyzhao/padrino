@@ -15,10 +15,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Final
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.api.auth import _get_auth_settings
 from padrino.api.deps import get_session
 from padrino.db.repositories import gauntlets as gauntlets_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
@@ -43,6 +44,18 @@ class HumanLaneHealthResponse(BaseModel):
     last_heartbeat_at: datetime | None
     waiting_games: int
     running_games: int
+
+
+class OpenRouterFundingHealthResponse(BaseModel):
+    """Safe OpenRouter promotional-funding capability summary."""
+
+    mode: str
+    management_configured: bool
+    management_available: bool
+    inference_configured: bool
+    inference_available: bool
+    encryption_available: bool
+    upstream_allowlist_enabled: bool
 
 
 def _heartbeat_liveness_status(
@@ -120,10 +133,28 @@ async def healthz_human_lane(
     )
 
 
+@router.get("/healthz/openrouter-funding", response_model=OpenRouterFundingHealthResponse)
+async def healthz_openrouter_funding(request: Request) -> OpenRouterFundingHealthResponse:
+    """Expose the explicit subkey/fallback mode without exposing credential details."""
+    from padrino.openrouter.platform_subkeys import platform_subkey_health
+
+    summary = platform_subkey_health(_get_auth_settings(request))
+    return OpenRouterFundingHealthResponse(
+        mode=summary.mode,
+        management_configured=summary.management_configured,
+        management_available=summary.management_available,
+        inference_configured=summary.inference_configured,
+        inference_available=summary.inference_available,
+        encryption_available=summary.encryption_available,
+        upstream_allowlist_enabled=summary.upstream_allowlist_enabled,
+    )
+
+
 __all__ = [
     "HEARTBEAT_DOWN_THRESHOLD_S",
     "PENDING_DEGRADED_THRESHOLD_S",
     "HumanLaneHealthResponse",
+    "OpenRouterFundingHealthResponse",
     "SchedulerHealthResponse",
     "router",
 ]

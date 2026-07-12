@@ -3,6 +3,18 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Optional OpenRouter promotional subkeys (US-359): keep management and
+  inference credentials on separate, purpose-specific construction paths. The
+  management client may call only `/keys`; normal platform inference continues
+  to resolve only the server inference reference. Persist a principal-bound
+  AES-GCM envelope plus the upstream key hash and safe limits/expiry/allowlist
+  metadata—never a management reference or plaintext. Since a timed-out key
+  creation cannot recover its one-time plaintext, list by an opaque deterministic
+  key name, retire any discovered orphan, and rotate once. Disable locally and
+  erase the envelope before best-effort upstream disable/delete, so accounting
+  and settlement never depend on an upstream management response. Health should
+  expose only configured/available capability booleans and the explicit
+  `server_inference_fallback` mode.
 - Promotional wallet boundary (US-358): issue the verified-account grant only
   through a fixed principal-scoped idempotency key plus the ledger's one-grant
   partial index, then treat a concurrent losing request as an already-issued
@@ -7202,3 +7214,29 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 3331 passed
   / 51 skipped / 12 deselected. Frontend gates not run; story did not touch
   `web/dashboard`.
+
+## 2026-07-12 PDT - US-359
+- Added optional management-key-backed, account-scoped OpenRouter promotional
+  subkeys. Management and inference references are purpose-separated, the
+  management HTTP client is hard-limited to `/keys`, and platform fallback
+  remains the existing server inference key when management/encryption is
+  absent or unavailable.
+- Added migration 0073 for encrypted subkey envelopes plus only safe upstream
+  key hash, limit/expiry, allowlist, status, and request metadata. Provisioning
+  is idempotent for one account/request, supports an opt-in upstream allowlist
+  field, reconciles response-timeout orphans by retiring then rotating, and
+  locally erases envelopes before best-effort upstream disable/delete.
+- Added a secret-free `/healthz/openrouter-funding` capability projection and
+  MockTransport contracts covering key-purpose isolation, one-time encryption,
+  configured allowlists, timeout reconciliation, rotation, 403/429, local
+  disable, fallback, and no-secret output. Updated all migration-head checks
+  for the new linear 0073 head.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/openrouter/platform_subkeys.py`,
+  `src/padrino/db/{models.py,repositories/openrouter_platform_subkeys.py,migrations/versions/0073_openrouter_platform_subkeys.py}`,
+  `src/padrino/{settings.py,api/routes/health.py}`, OpenRouter/subkey and
+  migration tests, migration-head tests, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"`. Frontend
+  gates not run; story did not touch `web/dashboard`.
