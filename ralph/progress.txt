@@ -3,6 +3,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Immutable OpenRouter catalogs (US-342): persist a normalized catalog through
+  `db.repositories.model_catalog_snapshots.create_or_get_completed_snapshot`.
+  Insert its child entries while the parent is `PENDING`, then mark it
+  `COMPLETE` in the same transaction; SQLite/Postgres guards prevent changes to
+  the completed parent or its entries, while `ModelProbeEvidence` is
+  append-only. Catalog payload validation rejects credential, authorization,
+  account-credit, and player-identifier-shaped metadata before any DB write;
+  retain source price decimals as strings and derived price micros as integers.
+  When a predecessor has already consumed a planned migration revision, append
+  the next linear revision and correct the Ralph story rather than rewriting
+  shipped history.
 - OpenRouter requests (US-341): keep attribution headers, router-metadata
   opt-in, provider preferences, and credential resolution entirely in the
   impure `llm`/assembly seam. Use `Settings.build_openrouter_routing_policy`
@@ -6579,3 +6590,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3160 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-342
+- Added `CatalogSnapshot`, `ModelCatalogEntry`, and `ModelProbeEvidence` ORM
+  records plus a normalized catalog repository that atomically persists a
+  content-addressed snapshot, makes duplicate hashes idempotent, preserves
+  source ETag/version and all model metadata needed by later catalog UI and
+  compatibility work, and rejects sensitive metadata before persistence.
+- Added migration `0067` with cross-dialect immutable-completed-snapshot and
+  append-only-evidence guards, slug/browse indexes, unique probe keys, and
+  snapshot/entry pairing protection. The original plan's `0066` number was
+  already used by US-337, so this story was corrected to preserve linear
+  migration history (`0067 -> 0066`) rather than modifying a shipped revision.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/model_catalog_snapshots.py`,
+  `src/padrino/db/migrations/versions/0067_openrouter_catalog_snapshots.py`,
+  `tests/db/test_model_catalog_snapshots.py`,
+  `tests/db/test_migration_0067_openrouter_catalog.py`,
+  migration/dialect coverage under `tests/db/`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/db/test_model_catalog_snapshots.py tests/db/test_migration_0067_openrouter_catalog.py -q`
+  failed first at missing catalog models; focused GREEN -> 6 passed. Database
+  + scheduler guard slice -> 196 passed / 9 skipped. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
+  3168 passed / 51 skipped / 10 deselected. Frontend gates not run; story did
+  not touch `web/dashboard`.

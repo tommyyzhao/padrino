@@ -17,6 +17,9 @@ ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 EXPECTED_TABLES = {
     "model_providers",
     "model_configs",
+    "model_catalog_snapshots",
+    "model_catalog_entries",
+    "model_probe_evidence",
     "prompt_versions",
     "agent_builds",
     "leagues",

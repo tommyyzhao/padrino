@@ -336,18 +336,18 @@
       "dependencies": [
         "US-341"
       ],
-      "title": "Persist immutable OpenRouter catalog snapshots (migration 0066)",
-      "description": "Migration 0066 adds catalog snapshot and model-entry tables that preserve the exact OpenRouter discovery data used when a lobby/game is configured.",
+      "title": "Persist immutable OpenRouter catalog snapshots (migration 0067)",
+      "description": "Migration 0067 adds catalog snapshot and model-entry tables that preserve the exact OpenRouter discovery data used when a lobby/game is configured.",
       "acceptanceCriteria": [
-        "0066 follows 0065 linearly and has SQLite/Postgres upgrade/downgrade coverage.",
+        "0067 follows the already-shipped 0066 linearly and has SQLite/Postgres upgrade/downgrade coverage.",
         "CatalogSnapshot stores fetched_at outside core, canonical content hash, source ETag/version when available, and status; ModelCatalogEntry stores canonical slug, display name, description, modalities, context, pricing strings/micros, supported params, provider summary, expiration, and raw normalized metadata.",
         "A snapshot is immutable after completion and duplicate content hashes are idempotent.",
         "No API key, request authorization header, account credit, or player identifier is persisted in catalog tables.",
         "Indexes support canonical_slug lookup and filtered/paginated catalog browsing.",
-        "0066 also reserves the append-only ModelProbeEvidence table keyed by model/catalog/prompt/schema/probe-suite so later probe stories never edit this shipped migration."
+        "0067 also reserves the append-only ModelProbeEvidence table keyed by model/catalog/prompt/schema/probe-suite so later probe stories never edit this shipped migration."
       ],
       "notes": "Pricing conversion must be decimal/string based, never float balance math.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-343",

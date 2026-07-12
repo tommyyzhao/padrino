@@ -74,7 +74,8 @@ def test_0056_chains_after_0055_and_0057_chains_after_0056() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0066"]
+    assert script.get_heads() == ["0067"]
+    assert script.get_revision("0067").down_revision == "0066"
     assert script.get_revision("0066").down_revision == "0065"
     assert script.get_revision("0056").down_revision == "0055"
     assert script.get_revision("0057").down_revision == "0056"

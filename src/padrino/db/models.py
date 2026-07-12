@@ -4,6 +4,7 @@ Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``agent_builds``, ``leagues``, ``campaigns``, ``campaign_pairings``,
 ``gauntlets``, ``gauntlet_roster_slots``, ``games``, ``game_seats``,
 ``game_events``, ``llm_calls``,
+OpenRouter catalog snapshots / entries / compatibility-probe evidence,
 ``rating_contexts``, ``ratings``, ``rating_events``, the ranked human-lane
 siblings ``human_rating`` / ``human_rating_event``, the
 non-canonical context sibling rating tables, generic budget reservation slots,
@@ -25,6 +26,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -104,6 +106,138 @@ class AgentBuild(Base):
     inference_params: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False, server_default="v1", default="v1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class CatalogSnapshot(Base):
+    """One immutable normalized OpenRouter model-catalog discovery result.
+
+    Discovery happens in the impure OpenRouter sync shell.  The snapshot stores
+    the fetch instant and source validators, while the exact normalized model
+    payload is represented by immutable :class:`ModelCatalogEntry` children.
+    A unique content hash makes a repeated discovery idempotent.
+    """
+
+    __tablename__ = "model_catalog_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'COMPLETE', 'ERROR')",
+            name="ck_model_catalog_snapshots_status",
+        ),
+        CheckConstraint(
+            "length(content_hash) = 64",
+            name="ck_model_catalog_snapshots_content_hash_len",
+        ),
+        Index("ix_catalog_snapshots_status_fetched_at", "status", "fetched_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_etag: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class ModelCatalogEntry(Base):
+    """One exact normalized model row belonging to a catalog snapshot."""
+
+    __tablename__ = "model_catalog_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "catalog_snapshot_id",
+            "canonical_slug",
+            name="uq_model_catalog_entries_snapshot_slug",
+        ),
+        UniqueConstraint(
+            "id",
+            "catalog_snapshot_id",
+            name="uq_model_catalog_entries_id_snapshot",
+        ),
+        Index("ix_model_catalog_entries_canonical_slug", "canonical_slug"),
+        Index(
+            "ix_model_catalog_entries_snapshot_expires_slug",
+            "catalog_snapshot_id",
+            "expires_at",
+            "canonical_slug",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    catalog_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("model_catalog_snapshots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    canonical_slug: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    modalities: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    context_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pricing_strings: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    pricing_micros: Mapped[dict[str, int]] = mapped_column(JSON, nullable=False)
+    supported_parameters: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    provider_summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class ModelProbeEvidence(Base):
+    """Append-only compatibility-probe result reserved for later probe runs."""
+
+    __tablename__ = "model_probe_evidence"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["model_catalog_entry_id", "catalog_snapshot_id"],
+            ["model_catalog_entries.id", "model_catalog_entries.catalog_snapshot_id"],
+            name="fk_model_probe_evidence_entry_snapshot",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "catalog_snapshot_id",
+            "model_catalog_entry_id",
+            "prompt_hash",
+            "schema_hash",
+            "probe_suite_version",
+            name="uq_model_probe_evidence_probe_key",
+        ),
+        CheckConstraint(
+            "length(prompt_hash) = 64",
+            name="ck_model_probe_evidence_prompt_hash_len",
+        ),
+        CheckConstraint(
+            "length(schema_hash) = 64",
+            name="ck_model_probe_evidence_schema_hash_len",
+        ),
+        Index(
+            "ix_model_probe_evidence_entry_observed_at",
+            "model_catalog_entry_id",
+            "observed_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    catalog_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("model_catalog_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    model_catalog_entry_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    prompt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    probe_suite_version: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -1761,6 +1895,7 @@ __all__ = [
     "BudgetReservationSlot",
     "Campaign",
     "CampaignPairing",
+    "CatalogSnapshot",
     "Game",
     "GameEvent",
     "GameSeat",
@@ -1788,7 +1923,9 @@ __all__ = [
     "LobbyMember",
     "LobbySeat",
     "MaterializedGameAnalytics",
+    "ModelCatalogEntry",
     "ModelConfig",
+    "ModelProbeEvidence",
     "ModelProvider",
     "OAuthConsumedFlow",
     "OAuthIdentity",
