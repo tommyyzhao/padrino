@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Credential-envelope rotation (US-354): parse the optional deployment key
+  ring only at the OpenRouter connect/BYOK capability boundary, keeping normal
+  mock and platform-funded boot usable when it is absent or invalid. Use a
+  first-active versioned AES-256-GCM key ring, bind principal/provider/
+  credential UUID as canonical associated data, and keep historical versions
+  decrypt-only for online rewrapping. The rotation helper locks and rewrites
+  the row inside its caller-owned transaction, while envelope/key-ring/settings
+  diagnostics expose only safe metadata and never plaintext or encryption
+  bytes.
 - Encrypted provider credentials (US-353): persist only the envelope bytes,
   nonce, version, and non-secret lifecycle/display facts; clear the bytes on
   GDPR revocation while retaining safe metadata. Bind OpenRouter PKCE state and
@@ -7025,3 +7034,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   passed / 2 Postgres skips (Docker unavailable); `uv run ruff check .`; `uv
   run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m "not
   integration"`. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-12T03:46 PDT - US-354
+- Added an impure OpenRouter AES-256-GCM envelope service backed by a
+  versioned deployment key ring. Credential ciphertext is authenticated to its
+  principal id, normalized provider, and credential id, so a swapped row fails
+  closed. Missing or malformed ring configuration leaves connection/BYOK
+  unavailable without blocking ordinary mock or platform-funded startup.
+- Added a caller-transaction-owned, row-locked online rotation helper. It
+  decrypts only with a configured historical version, immediately rewraps with
+  the active version, and updates the envelope atomically without caching a
+  plaintext value.
+- Added sentinel-secret coverage for setting/redaction behavior, associated
+  context swapping, transactional rotation, captured logs/tracebacks, ORM
+  repr, event and export serialization, JSON responses, and the core
+  cryptography/settings firewall. No runtime dependencies were added.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/openrouter/credentials.py`,
+  `src/padrino/settings.py`, `tests/openrouter/test_provider_credentials.py`,
+  `tests/test_settings.py`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first failed at the missing credential-service
+  import; focused GREEN `tests/openrouter/test_provider_credentials.py`
+  + `tests/test_settings.py` -> 38 passed; `uv run ruff check .`; `uv run ruff
+  format --check .`; `uv run mypy src tests`; `uv run pytest -m "not
+  integration"` -> 3355 passed / 12 deselected. Frontend gates not run; story
+  did not touch `web/dashboard`.

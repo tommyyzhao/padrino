@@ -596,7 +596,7 @@
         "Core imports no cryptography/settings and no new runtime dependency is added."
       ],
       "notes": "Treat server memory as trusted impure boundary; never cache plaintext across games.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-355",
