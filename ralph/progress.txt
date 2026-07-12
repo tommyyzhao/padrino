@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Identity-safe play tables (US-369): compose the live public reducer with the
+  caller's own alive/dead observation roster so every table seat renders without
+  reaching for controller/model data. Keep the player's role, faction, and legal
+  actions in a separate private dossier; derive every other seat's pseudonym and
+  portrait solely from the public seat token. Mobile task switches should scroll
+  the newly selected panel into view after Svelte flushes its visibility state.
 - Event-driven custom waiting rooms (US-368): treat the member-scoped SSE
   snapshot as the source of truth for display labels, self/host/presence/ready
   facts, and server-derived readiness tokens; use an occasional heartbeat only
@@ -7540,3 +7546,27 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   isolated ports 5183/8133; `uv run ruff check .`; `uv run ruff format --check
   .`; `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 3425
   selected / 12 deselected.
+
+## 2026-07-12 PDT - US-369
+- Rebuilt the live play surface as an atmospheric social table: anonymous
+  portrait cards and readable codenames now cover the observation-complete
+  alive/dead roster, with a graveyard treatment, conversation-first center,
+  phase/connection command deck, and replay-safe secondary inspector.
+- Added a prominent private dossier for the caller's own role, faction, and
+  server-authorized actions. Other roles and all human/model-controller facts
+  remain outside the pre-reveal table. Mobile Seats, Chat, and Actions views
+  retain their state and scroll the newly selected task panel into reach.
+- Added pure table-presentation coverage and desktop/mobile Playwright cases
+  for identity-safe portraits, a private role card, day vote, night action,
+  inspector metadata, and responsive panel reachability.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/app.css`,
+  `web/dashboard/src/lib/api/{playSurface.ts,playSurface.test.ts,types.ts}`,
+  `web/dashboard/src/routes/play/[gameId]/+page.svelte`,
+  `web/dashboard/tests/e2e/play.spec.ts`, `ralph/prd.json`, and
+  `ralph/progress.txt`.
+- Gates (all GREEN): `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard
+  check`; `pnpm -C web/dashboard test` -> 72 passed; full Playwright on isolated
+  ports 5176/18123 -> 62 passed / 4 visual opt-ins skipped; `uv run ruff check
+  .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest
+  -m "not integration"` -> 3425 selected / 12 deselected.

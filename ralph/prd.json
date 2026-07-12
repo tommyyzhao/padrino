@@ -920,7 +920,7 @@
         "Existing action/chat/idempotency/SSE behavior remains functional and Playwright covers representative day/night roles."
       ],
       "notes": "Do not rewrite mechanics in frontend.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-370",
