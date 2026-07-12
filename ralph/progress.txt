@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Quote-bound custom table builders (US-367): keep the editable browser state
+  separate from a draft lobby, and create/update that lobby only when the host
+  requests a server quote. Every deck, cadence, roster, or funding mutation
+  invalidates the displayed quote; hand its opaque hash and any integer BYOK
+  maximum through the waiting room, then submit both at launch. Never render
+  raw error details: translate stable funding reasons to actionable local copy.
 - Selector-safe model explorers (US-366): derive only named public booleans and
   integer probe summaries at the catalog projection boundary; never forward raw
   catalog/probe JSON to the browser. Keep price-risk classification server-side,
@@ -7472,3 +7478,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 3424 selected
   / 12 deselected; `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard check`;
   full Playwright on isolated ports -> 58 passed / 5 visual opt-in skipped.
+
+## 2026-07-12 PDT - US-367
+- Replaced the legacy custom-lobby form with a staged casual table builder:
+  built-in presets or live-validated supported role cards, configurable human
+  invitations, duplicate-capable OpenRouter model slots, cadence, identity,
+  theme, and promotional/BYOK funding. The builder explicitly explains that
+  pre-game roster choices never assign hidden roles or public in-game seats.
+- Added a draft-lobby quote loop that re-freezes configuration before each
+  funding preflight, marks quotes stale on every material change, and carries
+  the opaque quote hash plus integer BYOK maximum to the waiting room. The host
+  now sends that confirmation to the funded launch route. Existing invite joins
+  remain available alongside the new builder.
+- Added inline, secret-free recovery states for invalid decks, human-only table
+  capacity, unavailable/stale models, stale quotes, disconnected BYOK, and
+  exhausted promotional credit. Initial guest creation now precedes funding
+  reads, avoiding first-visit authentication noise.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/{lib/api/{client,types}.ts,routes/lobby/{+page.svelte,[id]/+page.svelte}}`,
+  `web/dashboard/src/lib/api/client.test.ts`,
+  `web/dashboard/tests/e2e/lobby.spec.ts`, `ralph/prd.json`, and
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED test first; focused builder/invite Playwright
+  slice -> 3 passed. `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard
+  check`; full Playwright on isolated ports -> passed (visual opt-ins skipped
+  by suite); `uv run ruff check .`; `uv run ruff format --check .`; `uv run
+  mypy src tests`; `uv run pytest -m "not integration"` -> 3424 selected /
+  12 deselected. Browser verification on a local dev server confirmed the
+  rendered builder, no framework overlay, and no console errors.

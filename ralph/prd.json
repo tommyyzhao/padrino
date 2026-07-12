@@ -874,7 +874,7 @@
         "Invalid decks, full human capacity, unavailable models, stale quotes, disconnected BYOK, and insufficient promo are resolved inline with no raw server tokens."
       ],
       "notes": "Primary custom-game setup UX.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-368",

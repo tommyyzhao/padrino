@@ -19,6 +19,7 @@ import type {
   LaunchResponse,
   LegalDocumentResponse,
   LegalDocumentsResponse,
+  LobbyConfigurationInput,
   LobbyRoster,
   LobbySummary,
   OpenRouterConnectionStatus,
@@ -446,31 +447,13 @@ export class PadrinoClient {
 
   // ---- lobby (US-147/148/149)
 
-  createLobby(body: {
-    ruleset_id?: string;
-    built_in_ruleset_id?: string;
-    cadence_preset?: string;
-    human_seat_count?: number;
-    identity_mode?: string;
-    theme_pack_id?: string | null;
-    prepick_agent_build_ids?: string[];
-    ai_model_selections?: Array<{
-      seat_index: number;
-      model_slug: string;
-      inference_params?: Record<string, unknown>;
-      routing_preferences?: Record<string, unknown> | null;
-      funding_source?: 'platform' | 'byok';
-    }>;
-    autofill_policy?: {
-      funding_source: 'platform' | 'byok';
-      max_total_price_micros_per_million?: number | null;
-      inference_params?: Record<string, unknown>;
-      routing_preferences?: Record<string, unknown> | null;
-    } | null;
-    ranked?: boolean;
-    integrity_acknowledged?: boolean;
-  }): Promise<LobbySummary> {
+  createLobby(body: LobbyConfigurationInput): Promise<LobbySummary> {
     return this.mutate('POST', '/lobbies', body);
+  }
+
+  /** Update a host's unlocked casual table; the server re-freezes selections. */
+  updateLobbyConfiguration(lobbyId: string, body: LobbyConfigurationInput): Promise<LobbySummary> {
+    return this.mutate('PATCH', `/lobbies/${encodeURIComponent(lobbyId)}/configuration`, body);
   }
 
   getLobby(lobbyId: string): Promise<LobbySummary> {

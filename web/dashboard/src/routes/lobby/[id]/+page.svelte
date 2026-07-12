@@ -11,6 +11,16 @@
   import type { LobbyRoster, LobbySummary } from '$lib/api/types';
 
   let lobbyId = $derived($page.params.id);
+  // The table builder passes this opaque confirmation through the waiting room.
+  // It is never a credential and is supplied to the server only at launch.
+  let fundingQuoteHash = $derived($page.url.searchParams.get('funding_quote_hash'));
+  let fundingSource = $derived($page.url.searchParams.get('funding_source'));
+  let byokMaximumMicros = $derived.by(() => {
+    const raw = $page.url.searchParams.get('byok_max_estimate_micros');
+    if (raw === null || !/^\d+$/.test(raw)) return null;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  });
 
   let summary = $state<LobbySummary | null>(null);
   let roster = $state<LobbyRoster | null>(null);
@@ -105,11 +115,22 @@
 
   async function startGame(): Promise<void> {
     if (!lobbyId) return;
+    if (fundingQuoteHash === null) {
+      error = 'Return to the table builder and refresh the funding quote before starting.';
+      return;
+    }
+    if (fundingSource === 'byok' && byokMaximumMicros === null) {
+      error = 'The connected-funding maximum is missing. Return to the table builder to confirm it.';
+      return;
+    }
     launching = true;
     error = null;
     try {
       await padrino.client.lockLobby(lobbyId);
-      const launched = await padrino.client.launchLobby(lobbyId);
+      const launched = await padrino.client.launchFundedLobby(lobbyId, {
+        funding_quote_hash: fundingQuoteHash,
+        byok_max_estimate_micros: fundingSource === 'byok' ? byokMaximumMicros : null
+      });
       await goto(`/play/${encodeURIComponent(launched.game_id)}`);
     } catch (e) {
       error = (e as Error).message;
@@ -238,9 +259,20 @@
 
           {#if isHost}
             <div class="mt-4 border-t border-border pt-3">
+              {#if fundingQuoteHash === null}
+                <p class="mb-2 text-xs text-warning" data-testid="lobby-funding-quote-missing">
+                  A fresh funding quote is required before this casual table can start.
+                </p>
+              {:else}
+                <p class="mb-2 text-xs text-muted-foreground" data-testid="lobby-funding-quote-bound">
+                  {fundingSource === 'byok'
+                    ? 'Connected OpenRouter maximum is bound to this launch confirmation.'
+                    : 'Promotional-credit quote is bound to this launch confirmation.'}
+                </p>
+              {/if}
               <Button
                 testid="lobby-start"
-                disabled={launching || !allReady}
+                disabled={launching || !allReady || fundingQuoteHash === null || (fundingSource === 'byok' && byokMaximumMicros === null)}
                 onclick={() => void startGame()}
               >
                 {launching ? 'Starting…' : 'Start game'}

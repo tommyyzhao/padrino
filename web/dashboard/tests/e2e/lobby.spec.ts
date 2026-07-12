@@ -309,63 +309,210 @@ test.describe('lobby UI (US-154)', () => {
     await expectIdentityBlind(page.getByTestId('lobby-roster'));
   });
 
-  test('create form shows ruleset, identity mode, ranked toggle, and CASUAL default', async ({
+  test('builds a custom casual table with a validated deck, duplicate model slots, and a bound quote', async ({
     page
   }) => {
-    await routeRulesets(page);
-    await page.goto('/lobby');
-    await expect(page.getByTestId('lobby-create-form')).toBeVisible();
-    const rulesetSelect = page.getByTestId('lobby-create-ruleset');
-    await expect(rulesetSelect).toBeVisible();
-    await expect(rulesetSelect.locator('option')).toHaveCount(2);
-    await expect(rulesetSelect.locator('option[value="roleblock10_v1"]')).toHaveText(
-      'Roleblock 10 canonical team (10 players)'
-    );
-    await rulesetSelect.selectOption('roleblock10_v1');
-    await expect(rulesetSelect).toHaveValue('roleblock10_v1');
-    await expect(page.getByTestId('lobby-create-identity-mode')).toBeVisible();
-    await expect(page.getByTestId('lobby-create-ranked')).not.toBeChecked();
-    await expect(page.getByTestId('lobby-create-stakes')).toContainText('CASUAL');
-  });
-
-  test('ranked create toggle submits ranked lobbies without identity markers', async ({ page }) => {
-    let createBody: Record<string, unknown> | null = null;
     const isApi = (route: import('@playwright/test').Route) => {
       const t = route.request().resourceType();
       return t === 'fetch' || t === 'xhr';
     };
+    let createBody: Record<string, unknown> | null = null;
+    let updateBody: Record<string, unknown> | null = null;
+    let launchBody: Record<string, unknown> | null = null;
 
     await routeRulesets(page);
-    await page.route('**/human/guest', async (route) => {
+    await page.route('**/human/models*', async (route) => {
       if (!isApi(route)) return route.continue();
       await route.fulfill({
-        status: 201,
+        status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ principal_id: HOST_PRINCIPAL, kind: 'guest', display_name: null })
+        body: JSON.stringify({
+          catalog: { content_hash: 'catalog-hash', fetched_at: null, state: 'current', is_stale: false },
+          next_cursor: null,
+          items: [
+            {
+              canonical_slug: 'openai/fast', provider: 'OpenAI', display_name: 'Fast Oracle', description: null,
+              modalities: ['text'], context_length: 128000,
+              pricing_per_million_micros: { prompt_per_million: 500000, completion_per_million: 1500000 },
+              supported_capabilities: ['structured_output'], supports_structured_output: true,
+              qualification_tier: 'verified_structured', qualification_reasons: [], casual_visible: true,
+              privacy: 'zdr', availability: 'available', availability_reason: 'current', expires_at: null,
+              platform_eligible: true, platform_ineligibility_reasons: [], observed_latency_ms: 700,
+              observed_throughput_tokens_per_second: 120, open_weights: false, frontier: false,
+              requires_byok: false, catalog_freshness: { content_hash: 'catalog-hash', fetched_at: null, state: 'current', is_stale: false }
+            },
+            {
+              canonical_slug: 'acme/offline', provider: 'Acme', display_name: 'Offline Engine', description: null,
+              modalities: ['text'], context_length: null, pricing_per_million_micros: {},
+              supported_capabilities: [], supports_structured_output: false,
+              qualification_tier: 'unverified', qualification_reasons: ['unavailable'], casual_visible: true,
+              privacy: 'unknown', availability: 'unavailable', availability_reason: 'provider unavailable', expires_at: null,
+              platform_eligible: false, platform_ineligibility_reasons: ['model_unavailable_before_lock'], observed_latency_ms: null,
+              observed_throughput_tokens_per_second: null, open_weights: null, frontier: null,
+              requires_byok: true, catalog_freshness: { content_hash: 'catalog-hash', fetched_at: null, state: 'current', is_stale: false }
+            }
+          ]
+        })
+      });
+    });
+    await page.route('**/human/wallet', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ granted_micros: 5000000, available_micros: 3000000, reserved_micros: 0, spent_micros: 2000000, completion_subsidy_micros: 0, recent_entries: [] }) });
+    });
+    await page.route('**/human/openrouter/connect', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ connected: false, label: null, display_suffix: null, validated_at: null, credit_capability: null }) });
+    });
+    await page.route('**/human/guest', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ principal_id: HOST_PRINCIPAL, kind: 'guest', display_name: null }) });
+    });
+    await page.route('**/human/consent', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ consented: true, required_versions: { TOS: '1', PRIVACY: '1', AGE_GATE: '1' } })
+      });
+    });
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ principal_id: HOST_PRINCIPAL, kind: 'guest', display_name: 'Host' })
       });
     });
     await page.route('**/lobbies', async (route) => {
       if (!isApi(route)) return route.continue();
       createBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(lobbySummary()) });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/configuration`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      updateBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(lobbySummary()) });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/funding-preflight`, async (route) => {
+      if (!isApi(route)) return route.continue();
       await route.fulfill({
-        status: 201,
+        status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ ...lobbySummary(), ranked: true })
+        body: JSON.stringify({
+          funded: true, allowed: true, funding_source: 'PLATFORM', reason: 'ok', reasons: [],
+          reservation_micros: 240000, expected_total_micros: 240000, funding_quote_hash: 'q'.repeat(64),
+          estimate_hash: 'e'.repeat(64), model_hash: 'm'.repeat(64), catalog_hash: 'c'.repeat(64),
+          rules_hash: 'r'.repeat(64), funding_hash: 'f'.repeat(64), byok_max_estimate_micros: null
+        })
       });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/roster`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: LOBBY_ID,
+          status: 'OPEN',
+          member_count: 1,
+          composition: { human_count: 1, ai_count: 6, total: 7 },
+          members: [{ member_id: 'host-member', display_label: 'Host', is_self: true, host: true, ready: true, present: true }]
+        })
+      });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/lock`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(lobbySummary('LOCKED')) });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/launch`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      launchBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ lobby_id: LOBBY_ID, game_id: 'bound-custom-game', status: 'LAUNCHED', created: true }) });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(lobbySummary()) });
     });
 
     await page.goto('/lobby');
-    await page.getByTestId('lobby-create-ranked').check();
-    await page.getByTestId('lobby-create-integrity-ack').check();
-    await expect(page.getByTestId('lobby-create-stakes')).toContainText('RANKED');
-    await page.getByTestId('lobby-create-submit').click();
+    await expect(page.getByTestId('custom-table-builder')).toBeVisible();
+    await expect(page.getByTestId('custom-table-builder')).toContainText(/casual/i);
+    await expect(page.getByTestId('custom-table-builder')).not.toContainText(/ranked/i);
 
+    await page.getByTestId('table-builder-custom-deck').click();
+    await expect(page.getByTestId('table-builder-role-explanation')).toContainText(/never assigns a chosen person/i);
+    await expect(page.getByTestId('table-builder-deck-validation')).toContainText(/add roles/i);
+    await page.getByTestId('role-add-MAFIA_GOON').click();
+    await page.getByTestId('role-add-MAFIA_GOON').click();
+    await page.getByTestId('role-add-DETECTIVE').click();
+    await page.getByTestId('role-add-DOCTOR').click();
+    await page.getByTestId('role-add-VILLAGER').click();
+    await page.getByTestId('role-add-VILLAGER').click();
+    await page.getByTestId('role-add-VILLAGER').click();
+    await expect(page.getByTestId('table-builder-deck-validation')).toContainText(/ready/i);
+
+    await page.getByTestId('table-builder-human-slots').fill('2');
+    await page.getByTestId('model-assign-openai-fast').click();
+    await page.getByTestId('ai-slot-3').selectOption('openai/fast');
+    await expect(page.getByTestId('ai-slot-2')).toHaveValue('openai/fast');
+    await expect(page.getByTestId('ai-slot-3')).toHaveValue('openai/fast');
+    await expect(page.getByTestId('model-unavailable-acme-offline')).toContainText(/unavailable/i);
+
+    await page.getByTestId('table-builder-get-quote').click();
     await expect.poll(() => createBody).toMatchObject({
-      ruleset_id: 'mini7_v1',
-      identity_mode: 'ANONYMOUS',
-      ranked: true,
-      integrity_acknowledged: true
+      custom_role_counts: { MAFIA_GOON: 2, DETECTIVE: 1, DOCTOR: 1, VILLAGER: 3 },
+      human_seat_count: 2,
+      ai_model_selections: [
+        { seat_index: 2, model_slug: 'openai/fast', funding_source: 'platform' },
+        { seat_index: 3, model_slug: 'openai/fast', funding_source: 'platform' }
+      ]
     });
-    expect(JSON.stringify(createBody)).not.toMatch(/seat_kind|is_human/i);
+    await expect(page.getByTestId('table-builder-quote')).toContainText('$0.24');
+    await expect(page.getByTestId('table-builder-quote')).toContainText(/bound/i);
+
+    await page.getByTestId('table-builder-cadence').selectOption('builtin_sync_v1');
+    await expect(page.getByTestId('table-builder-quote-stale')).toContainText(/refresh/i);
+    await page.getByTestId('table-builder-get-quote').click();
+    await expect.poll(() => updateBody).toMatchObject({ cadence_preset: 'builtin_sync_v1' });
+
+    await page.getByTestId('table-builder-open-waiting-room').click();
+    await expect(page).toHaveURL(new RegExp(`/lobby/${LOBBY_ID}\\?funding_quote_hash=${'q'.repeat(64)}`));
+    await expect(page.getByTestId('lobby-funding-quote-bound')).toBeVisible();
+    await page.getByTestId('lobby-start').click();
+    await expect.poll(() => launchBody).toEqual({
+      funding_quote_hash: 'q'.repeat(64),
+      byok_max_estimate_micros: null
+    });
+    await expect(page).toHaveURL(/\/play\/bound-custom-game$/);
+  });
+
+  test('keeps disconnected BYOK and insufficient promotional credit errors inline', async ({ page }) => {
+    const isApi = (route: import('@playwright/test').Route) => {
+      const t = route.request().resourceType();
+      return t === 'fetch' || t === 'xhr';
+    };
+    await routeRulesets(page);
+    await page.route('**/human/models*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ catalog: { content_hash: null, fetched_at: null, state: 'current', is_stale: false }, next_cursor: null, items: [] }) });
+    });
+    await page.route('**/human/wallet', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ granted_micros: 5000000, available_micros: 0, reserved_micros: 0, spent_micros: 5000000, completion_subsidy_micros: 0, recent_entries: [] }) });
+    });
+    await page.route('**/human/openrouter/connect', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ connected: false, label: null, display_suffix: null, validated_at: null, credit_capability: null }) });
+    });
+    await page.route('**/human/guest', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ principal_id: GUEST_PRINCIPAL, kind: 'guest', display_name: null }) });
+    });
+
+    await page.goto('/lobby');
+    await expect(page.getByTestId('table-builder-promo-unavailable')).toContainText(/no promotional credit/i);
+    await page.getByLabel('Use connected OpenRouter funding').check();
+    await expect(page.getByTestId('table-builder-byok-disconnected')).toContainText(/connect your openrouter/i);
+    expect((await page.getByTestId('custom-table-builder').textContent()) ?? '').not.toMatch(/token|api key|credential=/i);
   });
 });

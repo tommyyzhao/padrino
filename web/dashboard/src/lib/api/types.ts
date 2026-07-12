@@ -499,17 +499,62 @@ export interface PublicCompositionResponse {
 export interface LobbySummary {
   id: string;
   ruleset_id: string;
+  rules_summary?: RulesSummary;
   identity_mode: string;
   theme_pack_id: string | null;
   stakes: string;
   ranked: boolean;
   integrity_acknowledged: boolean;
+  human_seat_capacity?: number;
+  ai_seat_count?: number;
   status: string;
   invite_token: string;
   league_id: string;
   game_id: string | null;
   member_count: number;
   composition: CompositionSummary;
+}
+
+/** A safe summary of a frozen rules snapshot for a custom-lobby member. */
+export interface RulesSummary {
+  ruleset_id: string;
+  built_in_ruleset_id: string | null;
+  custom: boolean;
+  player_count: number;
+  cadence_preset: string;
+  role_counts: Array<{ role: string; count: number }>;
+  validation_errors: string[];
+}
+
+/** Canonical OpenRouter selection for one visible pre-game AI slot. */
+export interface LobbyAiModelSelection {
+  seat_index: number;
+  model_slug: string;
+  inference_params?: Record<string, unknown>;
+  routing_preferences?: Record<string, unknown> | null;
+  funding_source: 'platform' | 'byok';
+}
+
+/** Server-resolved policy for any AI slots left unassigned by the host. */
+export interface LobbyAutoFillPolicy {
+  funding_source: 'platform' | 'byok';
+  max_total_price_micros_per_million?: number | null;
+  inference_params?: Record<string, unknown>;
+  routing_preferences?: Record<string, unknown> | null;
+}
+
+/** The mutable, casual-only custom-table configuration accepted by `/lobbies`. */
+export interface LobbyConfigurationInput {
+  /** Legacy API alias retained for existing callers; the table builder uses `built_in_ruleset_id`. */
+  ruleset_id?: string;
+  built_in_ruleset_id?: string;
+  custom_role_counts?: Record<string, number>;
+  cadence_preset?: string;
+  human_seat_count?: number;
+  identity_mode?: 'ANONYMOUS' | 'TRANSPARENT';
+  theme_pack_id?: string | null;
+  ai_model_selections?: LobbyAiModelSelection[];
+  autofill_policy?: LobbyAutoFillPolicy | null;
 }
 
 /** Identity-blind roster entry: no principal id, seat_kind, or human/AI map. */
