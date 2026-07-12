@@ -576,7 +576,7 @@
         "Cascade/GDPR behavior revokes/deletes ciphertext without touching game events/replay."
       ],
       "notes": "Use existing cryptography dependency; no KMS SDK required.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-354",

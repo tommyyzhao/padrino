@@ -51,6 +51,8 @@ EXPECTED_TABLES = {
     "ranked_rating_rollback_audit",
     "ranked_game_signals",
     "ranked_flags",
+    "provider_credentials",
+    "openrouter_pkce_flows",
 }
 
 

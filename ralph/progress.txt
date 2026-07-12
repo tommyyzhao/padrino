@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Encrypted provider credentials (US-353): persist only the envelope bytes,
+  nonce, version, and non-secret lifecycle/display facts; clear the bytes on
+  GDPR revocation while retaining safe metadata. Bind OpenRouter PKCE state and
+  verifier by SHA-256 hashes, then atomically consume with both values plus
+  expiry in the predicate so racing callbacks have exactly one winner. Keep
+  every credential/flow foreign key cascading to the human principal and never
+  attach secret handling to game events, replays, or audit rows.
 - Funding policy (US-352): keep player-selectable funding in a pure core seam
   over only resolved account, host, credential, model, and integer-micro facts.
   Return one source/payer decision for the entire custom table; platform
@@ -6991,3 +6998,30 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run
   pytest -m "not integration"` -> 3344 selected passed. Frontend gates not run;
   story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-353
+- Added migration 0071 for principal-owned encrypted provider credentials and
+  short-lived OpenRouter PKCE flows. Active `(principal, provider)` connections
+  are partial-unique, while revoked credential rows can retain only safe
+  lifecycle/display metadata after their ciphertext and nonce are erased.
+- Added lifecycle repository operations that erase all credential envelopes on
+  GDPR deletion without touching game events, plus a hash-bound conditional
+  PKCE consume update that permits only one unexpired matching callback under
+  concurrent requests. Credential and flow reprs omit every secret-bearing
+  field.
+- Added SQLite migration round-trip, ORM safety, uniqueness, deletion/cascade,
+  game-event preservation, and concurrent PKCE tests; all-dialect migration
+  coverage now also requires both new tables. Updated historical migration-head
+  assertions to 0071 without rewriting their earlier migration checks.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/{provider_credentials,human_principals}.py`,
+  `src/padrino/db/migrations/versions/0071_provider_credentials.py`,
+  `tests/db/test_migration_0071_provider_credentials.py`, migration-head/all-
+  dialect table tests, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first failed at missing schema imports;
+  focused GREEN `tests/db/test_migration_0071_provider_credentials.py` -> 4
+  passed; GDPR route slice -> 6 passed; migration regression slice -> 57
+  passed / 2 Postgres skips (Docker unavailable); `uv run ruff check .`; `uv
+  run ruff format --check .`; `uv run mypy src tests`; `uv run pytest -m "not
+  integration"`. Frontend gates not run; story did not touch `web/dashboard`.

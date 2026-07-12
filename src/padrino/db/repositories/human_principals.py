@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.core.gdpr_delete import anonymized_principal_token
 from padrino.core.ranked_handle_policy import RankedHandleReason, validate_ranked_handle
 from padrino.db.models import HumanSession, Principal
+from padrino.db.repositories.provider_credentials import revoke_and_erase_for_principal
 
 PRINCIPAL_KIND_GUEST: Final[str] = "guest"
 PRINCIPAL_KIND_ACCOUNT: Final[str] = "account"
@@ -122,6 +123,11 @@ async def anonymize_principal_for_delete(
     obj.ranked_handle = None
     obj.ranked_handle_normalized = None
     obj.updated_at = now
+    await revoke_and_erase_for_principal(
+        session,
+        principal_id=principal_id,
+        revoked_at=now,
+    )
     await session.flush()
     return obj
 

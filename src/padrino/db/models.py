@@ -29,6 +29,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -1488,6 +1489,106 @@ class HumanSession(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ProviderCredential(Base):
+    """An encrypted, principal-owned provider credential (US-353).
+
+    The credential value is deliberately represented only by an authenticated
+    encryption envelope.  A revoked or GDPR-erased row retains safe lifecycle
+    metadata but clears both envelope bytes, so a past connection cannot be
+    resurrected from this table.  The impure credentials service owns every
+    encrypt/decrypt operation; this ORM model never carries plaintext.
+    """
+
+    __tablename__ = "provider_credentials"
+    __table_args__ = (
+        CheckConstraint(
+            "revoked_at IS NOT NULL OR (ciphertext IS NOT NULL AND nonce IS NOT NULL)",
+            name="ck_provider_credentials_active_envelope",
+        ),
+        Index(
+            "uq_provider_credentials_active_principal_provider",
+            "principal_id",
+            "provider",
+            unique=True,
+            sqlite_where=text("revoked_at IS NULL"),
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    key_version: Mapped[str] = mapped_column(String, nullable=False)
+    display_suffix: Mapped[str] = mapped_column(String, nullable=False)
+    label: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+    last_validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        """Return a lifecycle-only representation without encryption bytes."""
+        return (
+            "ProviderCredential("
+            f"id={self.id!s}, principal_id={self.principal_id!s}, provider={self.provider!r}, "
+            f"revoked_at={self.revoked_at!r})"
+        )
+
+
+class OpenRouterPkceFlow(Base):
+    """Short-lived, single-use OpenRouter connection-flow state (US-353).
+
+    The browser/server exchange retains the raw PKCE verifier in neither this
+    row nor a game record.  This table keeps only hashes that bind a signed
+    callback state to its verifier, then records a successful claim with
+    ``consumed_at``.  The repository performs the conditional single-use
+    update before an OAuth code exchange begins.
+    """
+
+    __tablename__ = "openrouter_pkce_flows"
+    __table_args__ = (
+        UniqueConstraint("state_hash", name="uq_openrouter_pkce_flows_state_hash"),
+        CheckConstraint(
+            "length(state_hash) = 64",
+            name="ck_openrouter_pkce_flows_state_hash_len",
+        ),
+        CheckConstraint(
+            "length(verifier_binding_hash) = 64",
+            name="ck_openrouter_pkce_flows_verifier_binding_hash_len",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
+    )
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    verifier_binding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    def __repr__(self) -> str:
+        """Avoid exposing signed state or verifier-binding material in diagnostics."""
+        return (
+            "OpenRouterPkceFlow("
+            f"id={self.id!s}, principal_id={self.principal_id!s}, "
+            f"expires_at={self.expires_at!r}, consumed_at={self.consumed_at!r})"
+        )
+
+
 class OAuthIdentity(Base):
     """A provider account linked to an account :class:`Principal` (US-129).
 
@@ -1979,10 +2080,12 @@ __all__ = [
     "ModelProvider",
     "OAuthConsumedFlow",
     "OAuthIdentity",
+    "OpenRouterPkceFlow",
     "PlacementRating",
     "PlacementRatingEvent",
     "Principal",
     "PromptVersion",
+    "ProviderCredential",
     "RankedBan",
     "RankedFlag",
     "RankedGameExclusion",
