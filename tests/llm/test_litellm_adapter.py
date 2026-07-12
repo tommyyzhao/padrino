@@ -40,6 +40,7 @@ from padrino.llm.adapter import (
     SameModelHost,
 )
 from padrino.llm.litellm_adapter import LiteLlmAdapter, build_messages
+from padrino.llm.retry import DEFAULT_RETRY_ON, RetryPolicy
 from padrino.llm.secrets import SecretResolutionError
 
 ACOMPLETION_PATH = "padrino.llm.litellm_adapter.litellm.acompletion"
@@ -155,10 +156,16 @@ def _build_adapter(
     )
 
 
-def _build_openrouter_adapter(*, catalog_snapshot_id: uuid.UUID | None = None) -> LiteLlmAdapter:
+def _build_openrouter_adapter(
+    *,
+    catalog_snapshot_id: uuid.UUID | None = None,
+    fallback: str | None = None,
+    inference_params: dict[str, Any] | None = None,
+    retry_policy: RetryPolicy | None = None,
+) -> LiteLlmAdapter:
     policy = RoutingPolicy(
         primary_model="meta-llama/llama-3.3-70b-instruct",
-        fallback_model=None,
+        fallback_model=fallback,
         openrouter=OpenRouterRequestPolicy(
             app_url="https://padrino.example.test",
             app_title="Padrino Test",
@@ -177,7 +184,7 @@ def _build_openrouter_adapter(*, catalog_snapshot_id: uuid.UUID | None = None) -
         provider="openrouter",
         model_id="meta-llama/llama-3.3-70b-instruct",
         prompt_version="prompt_classic15_v1_001",
-        inference_params={"temperature": 0.7, "top_p": 1.0},
+        inference_params=inference_params or {"temperature": 0.7, "top_p": 1.0},
         adapter_version="litellm-1",
         catalog_snapshot_id=catalog_snapshot_id,
     )
@@ -187,6 +194,8 @@ def _build_openrouter_adapter(*, catalog_snapshot_id: uuid.UUID | None = None) -
         timeout_s=45.0,
         auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
         api_base="https://openrouter.ai/api/v1",
+        retry_policy=retry_policy,
+        sleeper=AsyncMock(),
     )
 
 
@@ -266,6 +275,25 @@ def test_openrouter_request_uses_canonical_slug_headers_and_provider_preferences
     }
 
 
+def test_openrouter_forwards_structured_response_format() -> None:
+    response = _fake_completion(content=_valid_response_json(Action(type=ActionType.ABSTAIN)))
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "padrino_agent_response", "schema": {"type": "object"}},
+    }
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)) as mock_acomp:
+        result = asyncio.run(
+            _build_openrouter_adapter(
+                inference_params={"response_format": response_format}
+            ).complete(obs)
+        )
+
+    assert result.status == "ok"
+    assert mock_acomp.call_args.kwargs["response_format"] == response_format
+
+
 def test_openrouter_response_attaches_safe_router_audit_to_adapter_result() -> None:
     snapshot_id = uuid.uuid4()
     response = _fake_completion(content=_valid_response_json(Action(type=ActionType.ABSTAIN)))
@@ -301,6 +329,110 @@ def test_openrouter_response_attaches_safe_router_audit_to_adapter_result() -> N
     assert result.openrouter_audit.catalog_snapshot_id == snapshot_id
 
 
+@pytest.mark.parametrize("error_kind", ["budget", "permission"])
+def test_openrouter_402_403_errors_do_not_retry_and_stamp_fallback_metadata(
+    error_kind: str,
+) -> None:
+    from httpx import Request, Response
+    from litellm.exceptions import BudgetExceededError, PermissionDeniedError
+
+    if error_kind == "budget":
+        error: BaseException = BudgetExceededError(current_cost=1.0, max_budget=1.0)
+    else:
+        error = PermissionDeniedError(
+            message="403 provider access denied",
+            llm_provider="openrouter",
+            model="meta-llama/llama-3.3-70b-instruct",
+            response=Response(403, request=Request("POST", "https://openrouter.invalid")),
+        )
+    response = _fake_completion(content=_valid_response_json(Action(type=ActionType.ABSTAIN)))
+    response.model = "openai/gpt-4o-mini"
+    response._response_headers = {"x-generation-id": "fallback-generation"}
+    response.openrouter_metadata = {
+        "endpoints": {
+            "available": [
+                {
+                    "provider": "OpenAI",
+                    "model": "openai/gpt-4o-mini",
+                    "endpoint": "https://provider.example/v1/chat",
+                    "selected": True,
+                }
+            ]
+        }
+    }
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(side_effect=[error, response])) as mock_acomp:
+        adapter = _build_openrouter_adapter(fallback="openai/gpt-4o-mini")
+        result = asyncio.run(adapter.complete(obs))
+
+    assert mock_acomp.call_count == 2
+    assert [call.kwargs["model"] for call in mock_acomp.call_args_list] == [
+        "meta-llama/llama-3.3-70b-instruct",
+        "openai/gpt-4o-mini",
+    ]
+    assert result.status == "fallback_ok"
+    assert [attempt.status for attempt in adapter.last_attempts] == [
+        "primary_failed",
+        "fallback_ok",
+    ]
+    assert result.openrouter_audit is not None
+    assert result.openrouter_audit.requested_model_slug == "openai/gpt-4o-mini"
+    assert result.openrouter_audit.actual_model == "openai/gpt-4o-mini"
+
+
+def test_openrouter_429_retries_before_returning_success() -> None:
+    from litellm.exceptions import RateLimitError
+
+    response = _fake_completion(content=_valid_response_json(Action(type=ActionType.ABSTAIN)))
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    rate_limited = RateLimitError(
+        message="429 slow down",
+        llm_provider="openrouter",
+        model="meta-llama/llama-3.3-70b-instruct",
+    )
+    retry_policy = RetryPolicy(
+        max_attempts=2,
+        base_delay_s=0.0,
+        max_delay_s=0.0,
+        retry_on=DEFAULT_RETRY_ON,
+    )
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(side_effect=[rate_limited, response])) as mock_acomp:
+        result = asyncio.run(_build_openrouter_adapter(retry_policy=retry_policy).complete(obs))
+
+    assert mock_acomp.call_count == 2
+    assert result.status == "ok"
+    assert len(result.model_dump_json()) > 0
+
+
+def test_openrouter_empty_content_is_safe_invalid_json() -> None:
+    response = _fake_completion(content="")
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
+        result = asyncio.run(_build_openrouter_adapter().complete(obs))
+
+    assert result.status == "invalid_json"
+    assert isinstance(result.parsed_response, ResponseError)
+    assert result.parsed_response.reason == "INVALID_JSON"
+    assert result.raw_response == ""
+
+
+def test_openrouter_extracts_usage_cost_when_litellm_hidden_cost_is_absent() -> None:
+    response = _fake_completion(
+        content=_valid_response_json(Action(type=ActionType.ABSTAIN)), cost=None
+    )
+    response.usage.cost = 0.000321
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
+        result = asyncio.run(_build_openrouter_adapter().complete(obs))
+
+    assert result.status == "ok"
+    assert result.cost_usd == 0.000321
+
+
 def test_openrouter_provider_failure_redacts_resolved_key_from_result_and_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -325,7 +457,8 @@ def test_openrouter_provider_failure_redacts_resolved_key_from_result_and_log(
     rendered = f"{result.error}\n{result.parsed_response}\n{capture.entries}"
     assert result.status == "primary_failed"
     assert sentinel not in rendered
-    assert "[redacted]" in rendered
+    assert "Authorization:" not in rendered
+    assert "[credential header redacted]" in rendered
 
 
 def test_openrouter_policy_rejects_invalid_routing_values_and_noncanonical_models() -> None:

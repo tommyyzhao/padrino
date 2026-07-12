@@ -54,7 +54,8 @@ def test_0055_chains_after_0054_and_later_revisions_stay_linear() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0069"]
+    assert script.get_heads() == ["0070"]
+    assert script.get_revision("0070").down_revision == "0069"
     assert script.get_revision("0068").down_revision == "0067"
     assert script.get_revision("0067").down_revision == "0066"
     assert script.get_revision("0066").down_revision == "0065"
@@ -76,7 +77,7 @@ def test_0055_adds_nullable_llm_call_pricing_columns(sqlite_db: Path) -> None:
     before_columns = _column_names(sqlite_db, TABLE_NAME)
     assert ADDED_COLUMNS.isdisjoint(before_columns)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0055")
 
     assert _column_names(sqlite_db, TABLE_NAME) - before_columns == ADDED_COLUMNS
     info = _column_info(sqlite_db, TABLE_NAME)

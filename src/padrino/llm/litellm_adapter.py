@@ -23,6 +23,7 @@ Impure module: lives in the ``llm`` layer and is never imported by pure-core.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Final
@@ -307,7 +308,7 @@ class LiteLlmAdapter:
                 status="provider_error",
                 error=f"{exc.error_kind}: {error_message}",
                 failure=failure,
-                openrouter_audit=self._openrouter_audit(None),
+                openrouter_audit=self._openrouter_audit(None, requested_model_slug=model_id),
             )
         except Exception as exc:
             latency_ms = _elapsed_ms(start)
@@ -329,7 +330,7 @@ class LiteLlmAdapter:
                 model_id=model_id,
                 status="provider_error",
                 error=f"{error_kind}: {error_message}",
-                openrouter_audit=self._openrouter_audit(None),
+                openrouter_audit=self._openrouter_audit(None, requested_model_slug=model_id),
             )
 
         latency_ms = _elapsed_ms(start)
@@ -354,17 +355,19 @@ class LiteLlmAdapter:
             model_id=model_id,
             provider_response_id=_extract_response_id(response),
             status=status,
-            openrouter_audit=self._openrouter_audit(response),
+            openrouter_audit=self._openrouter_audit(response, requested_model_slug=model_id),
         )
 
-    def _openrouter_audit(self, response: object | None) -> OpenRouterCallAudit | None:
+    def _openrouter_audit(
+        self, response: object | None, *, requested_model_slug: str
+    ) -> OpenRouterCallAudit | None:
         """Return the safe OpenRouter audit snapshot, if this adapter uses it."""
         openrouter = self._policy.openrouter
         if openrouter is None:
             return None
         return extract_openrouter_call_audit(
             response,
-            requested_model_slug=self._policy.primary_model,
+            requested_model_slug=requested_model_slug,
             provider_preferences=openrouter.provider.as_request_dict(),
             catalog_snapshot_id=self._build.catalog_snapshot_id,
         )
@@ -375,10 +378,15 @@ def _elapsed_ms(start: float) -> int:
 
 
 def _redact_error_message(message: str, secret: str | None) -> str:
-    """Remove the resolved credential from provider-originated diagnostics."""
-    if secret is None or not secret:
-        return message
-    return message.replace(secret, "[redacted]")
+    """Remove credentials and credential headers from provider diagnostics."""
+    redacted = message
+    if secret:
+        redacted = redacted.replace(secret, "[redacted]")
+    return re.sub(
+        r"(?i)\b(?:authorization|x-api-key|api-key)\s*:\s*[^,;\r\n]+",
+        "[credential header redacted]",
+        redacted,
+    )
 
 
 def _log_provider_failure(*, model_id: str, error_kind: str, error_message: str) -> None:
@@ -446,9 +454,26 @@ def _extract_output_tokens(response: Any) -> int | None:
 def _extract_cost(response: Any) -> float | None:
     hidden = getattr(response, "_hidden_params", None)
     if isinstance(hidden, dict):
-        cost = hidden.get("response_cost")
-        if isinstance(cost, int | float):
-            return float(cost)
+        cost = _as_cost(hidden.get("response_cost"))
+        if cost is not None:
+            return cost
+    usage = getattr(response, "usage", None)
+    if isinstance(usage, Mapping):
+        return _as_cost(usage.get("cost"))
+    return _as_cost(getattr(usage, "cost", None))
+
+
+def _as_cost(value: object) -> float | None:
+    """Normalize a LiteLLM/OpenRouter cost field without accepting booleans."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
     return None
 
 
