@@ -827,7 +827,7 @@
         "Desktop/mobile Playwright covers guest consent, verified wallet, connected BYOK, exhausted credit, and ranked-coming-next states."
       ],
       "notes": "Do not enable Wave16 ranked routes.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-366",

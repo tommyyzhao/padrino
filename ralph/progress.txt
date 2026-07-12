@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Quote-gated Quick Play (US-365): make the browser select a funding source
+  only after consent and fetch safe wallet/connection lifecycle projections;
+  create the one-human casual lobby solely to obtain its frozen funding quote,
+  then submit that exact hash when the ready/lock/launch sequence materializes
+  the game. Keep credit and connection errors as friendly local copy, never
+  raw server tokens, credentials, or provider balances. Existing guest funnels
+  now end at funding selection unless an eligible funding path is available.
 - Identity-safe design system (US-364): keep live-seat visual helpers limited
   to public presence facts (`alive`), and make role/faction palette use an
   explicit endgame-reveal boundary. Centralize dark-first accessibility in
@@ -7402,3 +7409,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src
   tests`; focused scanner/model-export regression -> 2 passed; `uv run pytest
   -m "not integration"` -> 3372 passed / 51 skipped / 12 deselected.
+
+## 2026-07-12 PDT - US-365
+- Rebuilt the home as the three-mode entry point: Quick Play, Custom Lobby, and
+  an explicitly disabled Ranked-coming-next preview. Each mode now states its
+  audience, rating policy, configuration freedom, expected duration, and
+  funding model; Custom is clearly casual-only.
+- Added first-run/reopenable day/chat/vote/night/reveal briefing and a
+  consent-gated Quick Play funding flow. It reads only safe promotional-wallet
+  and OpenRouter connection projections, obtains a frozen lobby quote before
+  game materialization, and supplies that quote hash at launch. Empty, loading,
+  and offline states use actionable laboratory copy rather than dashes or raw
+  API errors.
+- Added API client contracts plus desktop/mobile Playwright coverage for guest
+  consent, verified promotional credit, connected BYOK, exhausted credit,
+  quote-to-launch order, ranked preview, and branded offline behavior. Updated
+  prior funnel/legal tests for the now-required funding step.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `web/dashboard/src/routes/+page.svelte`,
+  `web/dashboard/src/routes/+layout.svelte`,
+  `web/dashboard/src/lib/api/{client.ts,types.ts,client.test.ts}`,
+  `web/dashboard/src/lib/components/HowToPlayPanel.svelte`,
+  `web/dashboard/tests/e2e/{home,funnel,legal-consent}.spec.ts`,
+  `ralph/prd.json`, and `ralph/progress.txt`.
+- Gates (all GREEN): `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard
+  check`; `pnpm -C web/dashboard test:e2e` -> 56 passed / 5 visual opt-in
+  skipped; `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy
+  src tests`; `uv run pytest -m "not integration"` -> 3372 passed / 51 skipped
+  / 12 deselected.
