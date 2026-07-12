@@ -68,8 +68,11 @@ class ScriptedAction:
 class ScriptPhaseRuleset(Protocol):
     """Ruleset fields required to enumerate deterministic script phases."""
 
-    MAX_DAYS: int
-    DISCUSSION_ROUNDS_PER_DAY: int
+    @property
+    def MAX_DAYS(self) -> int: ...
+
+    @property
+    def DISCUSSION_ROUNDS_PER_DAY(self) -> int: ...
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

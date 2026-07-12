@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
@@ -46,19 +46,26 @@ from padrino.api.auth import SCOPE_SPECTATOR, RateLimiter, generate_raw_key
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.api.human_observation import DEADLINE_FRAME, OBSERVATION_FRAME
 from padrino.core.agents.contract import AgentResponse
+from padrino.core.cadence import CASUAL_FAST_CADENCE_ID, cadence_profile
+from padrino.core.engine.event_log import StoredEvent
+from padrino.core.engine.events import EventAdapter
 from padrino.core.engine.legal_actions import legal_actions_for
+from padrino.core.engine.replay import replay_event_log, replay_events
 from padrino.core.enums import ActionType, Faction, Role, SeatKind
 from padrino.core.human_chat import human_chat_content_ref
 from padrino.core.observation_privacy import assert_anonymous_safe
 from padrino.core.observations import Observation, format_phase_id
+from padrino.core.rulesets.snapshot import GameRulesSnapshot, canonical_rules_hash
 from padrino.db.models import (
     Game,
     GameEvent,
     GameSeat,
     HumanActionSubmission,
     HumanChatMessage,
+    HumanPlayerStats,
     HumanRating,
     HumanRatingEvent,
+    Lobby,
     Rating,
     RatingEvent,
 )
@@ -70,11 +77,16 @@ from padrino.llm.mock import DeterministicMockAdapter
 from padrino.llm.multiplex import SeatMultiplexAdapter
 from padrino.public.broadcast_index import BroadcastState
 from padrino.public.live_tail import LiveTailConfig, stream_live_tail
-from padrino.runner.human_durability import replay_state_from_rows
+from padrino.runner.human_durability import rehydrate_active_human_games, replay_state_from_rows
 from padrino.runner.human_lane import _default_human_game_executor, _run_one_human_game
 from padrino.runner.human_state_cache import resolve_current_human_state
 from padrino.settings import Settings
-from tests.conftest import make_town_win_script
+from tests.conftest import (
+    ScriptedAction,
+    make_role_aware_script,
+    make_town_win_script,
+    phase_ids_for_ruleset,
+)
 
 _RULESET = "mini7_v1"
 _PLAYER_COUNT = 7
@@ -117,8 +129,13 @@ async def _consent(client: AsyncClient, token: str) -> None:
     assert resp.status_code == 201, resp.text
 
 
-async def _seed_curated_pool(session: AsyncSession, *, count: int) -> None:
-    """Seed ``count`` active curated builds targeting mini7_v1 (the auto-fill pool)."""
+async def _seed_curated_pool(
+    session: AsyncSession,
+    *,
+    count: int,
+    ruleset_id: str,
+) -> None:
+    """Seed ``count`` active curated builds targeting one ruleset."""
     from padrino.db.models import AgentBuild, ModelConfig, ModelProvider, PromptVersion
 
     suffix = uuid.uuid4().hex
@@ -138,7 +155,7 @@ async def _seed_curated_pool(session: AsyncSession, *, count: int) -> None:
     )
     session.add(mc)
     pv = PromptVersion(
-        ruleset_id=_RULESET,
+        ruleset_id=ruleset_id,
         version="v1",
         system_prompt="play",
         developer_prompt="json",
@@ -245,6 +262,70 @@ def _town_win_script_from_seats(seats: list[GameSeat]) -> dict[tuple[str, str], 
     )
 
 
+def _custom_tracker_watcher_counts() -> dict[str, int]:
+    return {
+        Role.MAFIA_GOON.value: 2,
+        Role.DETECTIVE.value: 1,
+        Role.DOCTOR.value: 1,
+        Role.TRACKER.value: 1,
+        Role.WATCHER.value: 1,
+        Role.VILLAGER.value: 1,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _CustomNarPlan:
+    tracker: str
+    watcher: str
+    tracked_mafia: str
+    watched_target: str
+
+
+def _custom_tracker_watcher_script_from_seats(
+    seats: list[GameSeat],
+    rules_snapshot: GameRulesSnapshot,
+) -> tuple[dict[tuple[str, str], AgentResponse], _CustomNarPlan]:
+    """Drive a custom seven-seat deck through tracker/watcher NAR effects."""
+    mafia = [s.public_player_id for s in seats if s.faction == Faction.MAFIA.value]
+    town = [s.public_player_id for s in seats if s.faction == Faction.TOWN.value]
+    doctor = next(s.public_player_id for s in seats if s.role == Role.DOCTOR.value)
+    detective = next(s.public_player_id for s in seats if s.role == Role.DETECTIVE.value)
+    tracker = next(s.public_player_id for s in seats if s.role == Role.TRACKER.value)
+    watcher = next(s.public_player_id for s in seats if s.role == Role.WATCHER.value)
+    if len(mafia) != 2:
+        raise AssertionError("custom tracker/watcher proof expects exactly two mafia")
+
+    watched_target = next(sid for sid in town if sid not in {doctor, tracker, watcher})
+    actions: dict[tuple[str, str], ScriptedAction] = {}
+    for sid in town:
+        actions[("DAY_1_VOTE", sid)] = ScriptedAction(ActionType.VOTE, mafia[0])
+        actions[("DAY_2_VOTE", sid)] = ScriptedAction(ActionType.VOTE, mafia[1])
+    for mid in mafia:
+        actions[("NIGHT_1_ACTIONS", mid)] = ScriptedAction(
+            ActionType.MAFIA_KILL,
+            watched_target,
+        )
+    actions[("NIGHT_1_ACTIONS", doctor)] = ScriptedAction(ActionType.PROTECT, watched_target)
+    actions[("NIGHT_1_ACTIONS", detective)] = ScriptedAction(
+        ActionType.INVESTIGATE,
+        mafia[1],
+    )
+    actions[("NIGHT_1_ACTIONS", tracker)] = ScriptedAction(ActionType.TRACK, mafia[1])
+    actions[("NIGHT_1_ACTIONS", watcher)] = ScriptedAction(ActionType.WATCH, watched_target)
+
+    script = make_role_aware_script(
+        [s.public_player_id for s in seats],
+        phase_ids_for_ruleset(rules_snapshot),
+        actions=actions,
+    )
+    return script, _CustomNarPlan(
+        tracker=tracker,
+        watcher=watcher,
+        tracked_mafia=mafia[1],
+        watched_target=watched_target,
+    )
+
+
 def _ai_adapter_factory(
     script: Mapping[tuple[str, str], AgentResponse],
 ) -> LlmAdapter:
@@ -278,14 +359,13 @@ async def _launch_lobby(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     human_count: int,
+    lobby_body: Mapping[str, object] | None = None,
+    player_count: int = _PLAYER_COUNT,
 ) -> tuple[uuid.UUID, list[_JoinedHuman], list[GameSeat]]:
-    async with session_factory() as session:
-        await _seed_curated_pool(session, count=_PLAYER_COUNT)
-
     host_token, host_principal_id = await _new_consented_guest(client)
     created = await client.post(
         "/lobbies",
-        json={"ruleset_id": _RULESET},
+        json=dict(lobby_body or {"ruleset_id": _RULESET}),
         cookies={HUMAN_SESSION_COOKIE: host_token},
     )
     assert created.status_code == 201, created.text
@@ -293,7 +373,10 @@ async def _launch_lobby(
     lobby_id = uuid.UUID(lobby["id"])
     invite_token = lobby["invite_token"]
     assert "seats" not in lobby
-    assert lobby["composition"]["total"] == _PLAYER_COUNT
+    assert lobby["composition"]["total"] == player_count
+
+    async with session_factory() as session:
+        await _seed_curated_pool(session, count=player_count, ruleset_id=lobby["ruleset_id"])
 
     sessions: list[tuple[str, uuid.UUID]] = [(host_token, host_principal_id)]
     for _ in range(human_count - 1):
@@ -488,6 +571,7 @@ async def _run_human_lane_game(
     humans: Sequence[_JoinedHuman],
     script: Mapping[tuple[str, str], AgentResponse],
     disconnected: set[str] | None = None,
+    after_runtime_started: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     settings = _human_lane_settings()
     disconnected_ids = disconnected or set()
@@ -522,6 +606,8 @@ async def _run_human_lane_game(
         )
     )
     await _wait_for_runtime(session_factory, game_id)
+    if after_runtime_started is not None:
+        await after_runtime_started()
     await _assert_human_observation_access(
         client,
         game_id,
@@ -613,6 +699,148 @@ async def _read_events(
                 )
             ).scalars()
         )
+
+
+def _stored_events_from_rows(rows: Sequence[GameEvent]) -> list[StoredEvent]:
+    return [
+        StoredEvent(
+            sequence=row.sequence,
+            prev_event_hash=row.prev_event_hash,
+            event_hash=row.event_hash,
+            body={
+                "event_type": row.event_type,
+                "sequence": row.sequence,
+                "phase": row.phase,
+                "visibility": row.visibility,
+                "actor_player_id": row.actor_player_id,
+                "payload": row.payload,
+            },
+        )
+        for row in rows
+    ]
+
+
+async def _lobby_game_event_counts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[int, int, int]:
+    async with session_factory() as session:
+        lobbies = (await session.execute(select(func.count()).select_from(Lobby))).scalar_one()
+        games = (await session.execute(select(func.count()).select_from(Game))).scalar_one()
+        events = (await session.execute(select(func.count()).select_from(GameEvent))).scalar_one()
+    return lobbies, games, events
+
+
+async def _rules_snapshot_for_game(
+    session_factory: async_sessionmaker[AsyncSession],
+    game_id: uuid.UUID,
+) -> tuple[GameRulesSnapshot, str]:
+    async with session_factory() as session:
+        game = await session.get(Game, game_id)
+    assert game is not None
+    assert game.rules_snapshot_json is not None
+    assert game.rules_snapshot_hash is not None
+    snapshot = GameRulesSnapshot.model_validate(game.rules_snapshot_json)
+    assert canonical_rules_hash(snapshot) == game.rules_snapshot_hash
+    return snapshot, game.rules_snapshot_hash
+
+
+async def _assert_custom_nar_effects(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    plan: _CustomNarPlan,
+) -> None:
+    rows = await _read_events(session_factory, game_id)
+    by_type: dict[str, list[GameEvent]] = {}
+    for row in rows:
+        by_type.setdefault(row.event_type, []).append(row)
+
+    assert any(
+        row.actor_player_id == plan.tracker and row.payload.get("target") == plan.tracked_mafia
+        for row in by_type.get("TrackSubmitted", [])
+    )
+    assert any(
+        row.actor_player_id == plan.watcher and row.payload.get("target") == plan.watched_target
+        for row in by_type.get("WatchSubmitted", [])
+    )
+
+    feedback = by_type.get("NightFeedbackDelivered", [])
+    assert any(
+        row.actor_player_id == plan.tracker
+        and row.payload.get("code") == "TRACK_RESULT"
+        and row.payload.get("target") == plan.tracked_mafia
+        for row in feedback
+    ), [(row.actor_player_id, row.payload) for row in feedback]
+    assert any(
+        row.actor_player_id == plan.watcher
+        and row.payload.get("code") == "WATCH_RESULT"
+        and row.payload.get("target") == plan.watched_target
+        for row in feedback
+    ), [(row.actor_player_id, row.payload) for row in feedback]
+
+
+async def _assert_custom_replay_without_live_ruleset(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    rules_snapshot: GameRulesSnapshot,
+) -> None:
+    rows = await _read_events(session_factory, game_id)
+    stored = _stored_events_from_rows(rows)
+    log = replay_event_log(stored, rules_snapshot=rules_snapshot)
+    typed_events = [EventAdapter.validate_python(event.body) for event in log.events]
+    final = replay_events(typed_events, rules_snapshot=rules_snapshot)
+    assert final.terminal_result == "TOWN"
+    assert log.events[-1].event_hash == rows[-1].event_hash
+
+
+async def _assert_fast_cadence_and_rehydration(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    rules_snapshot: GameRulesSnapshot,
+) -> None:
+    profile = cadence_profile(CASUAL_FAST_CADENCE_ID)
+    async with session_factory() as session:
+        runtime = await runtime_repo.get(session, game_id)
+    assert runtime is not None
+    assert runtime.deadline_at is not None
+    assert rules_snapshot.cadence_id == CASUAL_FAST_CADENCE_ID
+
+    rehydrated = await rehydrate_active_human_games(session_factory)
+    match = next(item for item in rehydrated if item.game_id == game_id)
+    assert match.phase == runtime.phase
+    assert match.deadline_at is not None
+    assert match.deadline_at.replace(tzinfo=None) == runtime.deadline_at.replace(tzinfo=None)
+    assert match.event_log.head_hash
+    timing = profile.timing_for(
+        match.state.current_phase.kind,
+        round_number=match.state.current_phase.round,
+    )
+    remaining = (runtime.deadline_at - runtime.updated_at).total_seconds()
+    assert remaining == pytest.approx(timing.deadline_seconds, abs=0.25)
+
+
+async def _assert_personal_stats_only(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    humans: Sequence[_JoinedHuman],
+    ruleset_id: str,
+) -> None:
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(HumanPlayerStats).where(
+                        HumanPlayerStats.principal_id.in_([human.principal_id for human in humans])
+                    )
+                )
+            ).scalars()
+        )
+    assert {row.principal_id for row in rows} == {human.principal_id for human in humans}
+    assert {row.ruleset_id for row in rows} == {ruleset_id}
+    assert all(row.games == 1 for row in rows)
+    assert await _count_rating_rows(session_factory) == (0, 0, 0, 0)
 
 
 async def _assert_terminal_and_replay(
@@ -764,6 +992,106 @@ async def _assert_reveal(
     assert all(seat["model"] is not None for seat in ai_reveals)
     assert all(seat["model"]["model_name"] == "zai-glm-4.7" for seat in ai_reveals)
     return reveal_seats
+
+
+@pytest.mark.asyncio
+async def test_custom_rules_cadence_and_segregation_end_to_end(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_host = await _new_guest(client)
+    before_counts = await _lobby_game_event_counts(session_factory)
+    invalid = await client.post(
+        "/lobbies",
+        json={
+            "custom_role_counts": {Role.MAFIA_GOON.value: 4, Role.VILLAGER.value: 3},
+            "human_seat_count": 2,
+            "cadence_preset": CASUAL_FAST_CADENCE_ID,
+        },
+        cookies={HUMAN_SESSION_COOKIE: invalid_host},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["validation_errors"] == ["invalid_faction_ratio"]
+    assert await _lobby_game_event_counts(session_factory) == before_counts
+
+    game_id, humans, seats = await _launch_lobby(
+        client,
+        session_factory,
+        human_count=2,
+        lobby_body={
+            "custom_role_counts": _custom_tracker_watcher_counts(),
+            "human_seat_count": 2,
+            "cadence_preset": CASUAL_FAST_CADENCE_ID,
+        },
+    )
+    rules_snapshot, rules_snapshot_hash = await _rules_snapshot_for_game(
+        session_factory,
+        game_id,
+    )
+    assert f"custom:{rules_snapshot_hash}" == rules_snapshot.RULESET_ID
+    assert rules_snapshot.cadence_id == CASUAL_FAST_CADENCE_ID
+    assert {Role.TRACKER, Role.WATCHER}.issubset(rules_snapshot.ROLE_COUNTS)
+
+    script, nar_plan = _custom_tracker_watcher_script_from_seats(seats, rules_snapshot)
+    cadence_rehydrated = False
+
+    async def assert_runtime_started() -> None:
+        nonlocal cadence_rehydrated
+        await _assert_fast_cadence_and_rehydration(
+            session_factory,
+            game_id=game_id,
+            rules_snapshot=rules_snapshot,
+        )
+        cadence_rehydrated = True
+
+    await _mark_live(session_factory, game_id)
+    await _run_human_lane_game(
+        client,
+        session_factory,
+        game_id=game_id,
+        humans=humans,
+        script=script,
+        after_runtime_started=assert_runtime_started,
+    )
+    assert cadence_rehydrated
+
+    auth = await _spectator_auth(session_factory, label="us339-custom-rules")
+    await _assert_terminal_and_replay(client, session_factory, game_id=game_id, auth=auth)
+    await _assert_custom_nar_effects(session_factory, game_id=game_id, plan=nar_plan)
+    await _assert_sidecar_chat_only(
+        session_factory,
+        game_id=game_id,
+        expected_texts_by_seat={
+            human.public_player_id: f"{human.public_player_id} is checking the table."
+            for human in humans
+        },
+    )
+    await _assert_live_frames_anonymous(session_factory, game_id)
+    await _assert_personal_stats_only(
+        session_factory,
+        humans=humans,
+        ruleset_id=rules_snapshot.RULESET_ID,
+    )
+
+    def fail_live_ruleset_resolution(ruleset_id: str) -> object:
+        raise AssertionError(f"live ruleset resolution disabled for {ruleset_id}")
+
+    monkeypatch.setattr("padrino.core.rulesets.get_ruleset", fail_live_ruleset_resolution)
+    monkeypatch.setattr("padrino.runner.game_runner.get_ruleset", fail_live_ruleset_resolution)
+    await _assert_custom_replay_without_live_ruleset(
+        session_factory,
+        game_id=game_id,
+        rules_snapshot=rules_snapshot,
+    )
+
+    await _assert_reveal(
+        client,
+        session_factory,
+        game_id=game_id,
+        auth=auth,
+        human_seats=[human.public_player_id for human in humans],
+    )
 
 
 @pytest.mark.asyncio

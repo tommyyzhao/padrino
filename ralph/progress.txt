@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Custom-rules end-to-end proof (US-339): derive the scripted action plan only
+  after launch from the materialized `GameSeat` roles and the archived
+  `GameRulesSnapshot`. Use active Tracker/Watcher actions and assert both their
+  submitted events and `TRACK_RESULT` / `WATCH_RESULT` feedback, while keeping
+  their test kill target distinct from those role holders. Rehydrate from the
+  persisted runtime during the first active phase and replay from the archived
+  snapshot after monkeypatching live ruleset resolution to fail.
 - Casual cadence profiles (US-338): keep phase/round timing in pure
   `core/cadence.py`; snapshots store only the profile id. New explicit casual
   lobbies default to `casual_standard_v1`, while legacy `ruleset_id` requests
@@ -6486,3 +6493,22 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3149 passed / 51 skipped /
   10 deselected. Frontend gates not run; no frontend files changed.
+
+## 2026-07-11 PDT - US-339
+- Added a default-suite full-spine custom-game regression: it creates a
+  two-human custom Tracker/Watcher deck through the real lobby routes, runs it
+  to a Town terminal result, and proves both advanced submitted actions reach
+  their private NAR feedback.
+- The regression validates fast-cadence persistence and mid-phase rehydration,
+  snapshot hash identity and replay without live ruleset lookup, sidecar-only
+  chat/live anonymity, personal casual stat writes, and zero human/scientific
+  rating writes. It also rejects a malformed deck before any Lobby/Game/Event
+  row is created.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `tests/conftest.py`,
+  `tests/integration/test_human_game_e2e.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused US-339 regression passed three consecutive runs;
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration" --cache-clear` completed with an empty
+  regenerated failure cache. Frontend gates not run; no frontend files changed.

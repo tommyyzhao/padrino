@@ -286,7 +286,7 @@
         "Malformed custom deck is rejected before Lobby/Game/Event rows are written."
       ],
       "notes": "Default-suite deterministic integration test.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-340",
