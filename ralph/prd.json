@@ -181,7 +181,7 @@
         "No snapshot contains timestamps, credentials, funding balances, provider routing, or player identity."
       ],
       "notes": "Likely files: db models/migration/repositories and migration-head tests.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-335",

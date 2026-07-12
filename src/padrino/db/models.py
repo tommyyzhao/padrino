@@ -225,6 +225,15 @@ class GauntletRosterSlot(Base):
 class Game(Base):
     __tablename__ = "games"
     __table_args__ = (
+        CheckConstraint(
+            "(rules_snapshot_json IS NULL AND rules_snapshot_hash IS NULL) "
+            "OR (rules_snapshot_json IS NOT NULL AND rules_snapshot_hash IS NOT NULL)",
+            name="ck_games_rules_snapshot_pair",
+        ),
+        CheckConstraint(
+            "rules_snapshot_hash IS NULL OR length(rules_snapshot_hash) = 64",
+            name="ck_games_rules_snapshot_hash_len",
+        ),
         Index("ix_games_pair_id", "pair_id"),
         Index("ix_games_status_lease_expires_at", "status", "lease_expires_at"),
         Index(
@@ -274,6 +283,10 @@ class Game(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     ranked_source_ip_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    rules_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    rules_snapshot_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class GameSeat(Base):
@@ -1593,6 +1606,17 @@ class Lobby(Base):
     """
 
     __tablename__ = "lobbies"
+    __table_args__ = (
+        CheckConstraint(
+            "(rules_snapshot_json IS NULL AND rules_snapshot_hash IS NULL) "
+            "OR (rules_snapshot_json IS NOT NULL AND rules_snapshot_hash IS NOT NULL)",
+            name="ck_lobbies_rules_snapshot_pair",
+        ),
+        CheckConstraint(
+            "rules_snapshot_hash IS NULL OR length(rules_snapshot_hash) = 64",
+            name="ck_lobbies_rules_snapshot_hash_len",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ruleset_id: Mapped[str] = mapped_column(String, nullable=False)
@@ -1626,6 +1650,10 @@ class Lobby(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
     )
+    rules_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    rules_snapshot_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class LobbyMember(Base):

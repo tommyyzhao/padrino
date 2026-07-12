@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Rules snapshot persistence (US-334): keep persisted lobby/game rules snapshots
+  as nullable `rules_snapshot_json` + `rules_snapshot_hash` pairs so legacy rows
+  can remain null. Derive registered built-in pairs through
+  `db/rules_snapshots.py`, validate explicit pairs by hashing the canonical JSON
+  body, and use `JSON(none_as_null=True)` for these columns so Python `None`
+  writes SQL NULL instead of JSON `"null"`. Launch should copy the lobby's
+  stored pair into `games.create` rather than recomputing in the launch shell.
 - Game rules snapshots (US-333): keep `GameRulesSnapshot` in
   `core/rulesets/snapshot.py` as the pure, frozen adapter between registered
   ruleset modules and future persisted custom decks. `snapshot_from_ruleset`
@@ -6261,4 +6268,45 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   -> 91 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3064 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-334
+- Added migration `0065` after `0064` to add nullable
+  `rules_snapshot_json` / `rules_snapshot_hash` pairs to `lobbies` and `games`
+  with pair-presence and hash-length checks, plus downgrade coverage.
+- Added `padrino.db.rules_snapshots` to derive canonical built-in snapshot
+  pairs from `GameRulesSnapshot`, validate explicit body/hash agreement, reject
+  forbidden persisted keys, and guard lobby snapshot mutation after launch.
+- Wired `lobbies.create_lobby` and `games.create` to persist canonical built-in
+  snapshots by default, while preserving legacy/custom nullable rows when a
+  ruleset id cannot be resolved and no archived snapshot is supplied. Lobby
+  launch now copies the lobby's stored pair into the materialized game.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/lobby_launch.py`,
+  `src/padrino/db/models.py`,
+  `src/padrino/db/migrations/versions/0065_rules_snapshots.py`,
+  `src/padrino/db/repositories/games.py`,
+  `src/padrino/db/repositories/lobbies.py`,
+  `src/padrino/db/rules_snapshots.py`,
+  `tests/api/test_lobby_launch.py`,
+  `tests/db/test_dialect_portability.py`,
+  `tests/db/test_migration_0055_llm_call_pricing_basis.py`,
+  `tests/db/test_migration_0056_ranked_write_audit.py`,
+  `tests/db/test_migration_0057_human_rating_quarantine.py`,
+  `tests/db/test_migration_0058_oauth_identity_email_verified.py`,
+  `tests/db/test_migration_0059_principal_ranked_handle.py`,
+  `tests/db/test_migration_0060_ranked_ban.py`,
+  `tests/db/test_migration_0061_ranked_game_exclusions.py`,
+  `tests/db/test_migration_0062_human_consent_content_hash.py`,
+  `tests/db/test_migration_0063_ranked_game_signals.py`,
+  `tests/db/test_migration_0064_ranked_flags.py`,
+  `tests/db/test_migration_0065_rules_snapshots.py`,
+  `tests/db/test_rules_snapshot_persistence.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first
+  `uv run pytest tests/db/test_migration_0065_rules_snapshots.py tests/db/test_rules_snapshot_persistence.py tests/api/test_lobby_launch.py::test_launch_materializes_game_and_seats -q`
+  failed on the missing snapshot persistence helper; focused GREEN plus
+  dialect JSON checks -> 13 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3076 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

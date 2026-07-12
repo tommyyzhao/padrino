@@ -16,6 +16,7 @@ from padrino.db.game_status import (
     is_terminal_game_status,
 )
 from padrino.db.models import Game, GameSeat
+from padrino.db.rules_snapshots import RulesSnapshotJson, resolve_rules_snapshot_pair
 
 
 def _aware(dt: datetime) -> datetime:
@@ -32,7 +33,14 @@ async def create(
     gauntlet_id: uuid.UUID | None = None,
     pair_id: uuid.UUID | None = None,
     pair_leg: int | None = None,
+    rules_snapshot_json: RulesSnapshotJson | None = None,
+    rules_snapshot_hash: str | None = None,
 ) -> Game:
+    snapshot_json, snapshot_hash = resolve_rules_snapshot_pair(
+        ruleset_id=ruleset_id,
+        rules_snapshot_json=rules_snapshot_json,
+        rules_snapshot_hash=rules_snapshot_hash,
+    )
     obj = Game(
         gauntlet_id=gauntlet_id,
         pair_id=pair_id,
@@ -40,6 +48,8 @@ async def create(
         ruleset_id=ruleset_id,
         game_seed=game_seed,
         status=status,
+        rules_snapshot_json=snapshot_json,
+        rules_snapshot_hash=snapshot_hash,
     )
     session.add(obj)
     await session.flush()

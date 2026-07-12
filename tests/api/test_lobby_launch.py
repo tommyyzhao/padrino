@@ -21,6 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.api.app import create_app
 from padrino.api.human_auth import HUMAN_SESSION_COOKIE
 from padrino.core.enums import LobbySeatKind, LobbyStatus, SeatKind
+from padrino.core.rulesets import mini7_v1
+from padrino.core.rulesets.snapshot import (
+    canonical_rules_dict,
+    canonical_rules_hash,
+    snapshot_from_ruleset,
+)
 from padrino.core.seating import seat_permutation
 from padrino.db.models import (
     AgentBuild,
@@ -167,6 +173,11 @@ async def test_launch_materializes_game_and_seats(
         assert game.gauntlet_id is None  # gauntlet-less => benchmark lane never claims it
         assert game.ruleset_id == "mini7_v1"
         assert game.identity_mode == "ANONYMOUS"
+        expected_snapshot = snapshot_from_ruleset(mini7_v1)
+        assert lobby.rules_snapshot_json == canonical_rules_dict(expected_snapshot)
+        assert lobby.rules_snapshot_hash == canonical_rules_hash(expected_snapshot)
+        assert game.rules_snapshot_json == lobby.rules_snapshot_json
+        assert game.rules_snapshot_hash == lobby.rules_snapshot_hash
 
         seats = list(
             (

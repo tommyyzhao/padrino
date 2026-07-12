@@ -54,7 +54,8 @@ def test_0055_chains_after_0054_and_later_revisions_stay_linear() -> None:
     cfg = _alembic_config()
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["0064"]
+    assert script.get_heads() == ["0065"]
+    assert script.get_revision("0065").down_revision == "0064"
     assert script.get_revision("0055").down_revision == "0054"
     assert script.get_revision("0056").down_revision == "0055"
     assert script.get_revision("0057").down_revision == "0056"

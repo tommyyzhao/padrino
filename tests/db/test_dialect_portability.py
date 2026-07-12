@@ -32,6 +32,7 @@ from padrino.db.models import (
     GauntletRosterSlot,
     League,
     LlmCall,
+    Lobby,
     ModelConfig,
     ModelProvider,
     PlacementRating,
@@ -63,9 +64,11 @@ _JSON_COLUMNS: list[tuple[type[Base], str]] = [
     (AgentBuild, "inference_params"),
     (CampaignPairing, "roster_json"),
     (Game, "terminal_result"),
+    (Game, "rules_snapshot_json"),
     (GameEvent, "payload"),
     (LlmCall, "request_json"),
     (LlmCall, "parsed_response"),
+    (Lobby, "rules_snapshot_json"),
     (ApiKey, "scopes"),
 ]
 

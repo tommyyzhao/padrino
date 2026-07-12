@@ -28,6 +28,12 @@ from padrino.core.lobby.seating import (
     release_member_seat as plan_release_member_seat,
 )
 from padrino.db.models import Lobby, LobbyMember, LobbySeat, Principal
+from padrino.db.rules_snapshots import (
+    RulesSnapshotJson,
+    ensure_lobby_rules_snapshot_mutable,
+    resolve_rules_snapshot_pair,
+    validate_rules_snapshot_pair,
+)
 
 
 async def create_lobby(
@@ -42,6 +48,8 @@ async def create_lobby(
     host_principal_id: uuid.UUID,
     league_id: uuid.UUID,
     now: datetime,
+    rules_snapshot_json: RulesSnapshotJson | None = None,
+    rules_snapshot_hash: str | None = None,
 ) -> Lobby:
     """Create an OPEN, CASUAL lobby owned by ``host_principal_id``.
 
@@ -50,6 +58,11 @@ async def create_lobby(
     references a scientific league. ``invite_token`` is an opaque shareable
     address minted in the api shell (US-148); ``secrets`` never lives here.
     """
+    snapshot_json, snapshot_hash = resolve_rules_snapshot_pair(
+        ruleset_id=ruleset_id,
+        rules_snapshot_json=rules_snapshot_json,
+        rules_snapshot_hash=rules_snapshot_hash,
+    )
     obj = Lobby(
         ruleset_id=ruleset_id,
         identity_mode=identity_mode,
@@ -61,6 +74,8 @@ async def create_lobby(
         league_id=league_id,
         created_at=now,
         updated_at=now,
+        rules_snapshot_json=snapshot_json,
+        rules_snapshot_hash=snapshot_hash,
     )
     session.add(obj)
     await session.flush()
@@ -92,6 +107,28 @@ async def touch_lobby(session: AsyncSession, *, lobby_id: uuid.UUID, now: dateti
     if lobby is None:
         return
     lobby.updated_at = now
+
+
+async def update_rules_snapshot(
+    session: AsyncSession,
+    *,
+    lobby_id: uuid.UUID,
+    rules_snapshot_json: RulesSnapshotJson | None,
+    rules_snapshot_hash: str | None,
+) -> Lobby | None:
+    """Replace a pre-launch lobby rules snapshot after validating the hash pair."""
+    lobby = await session.get(Lobby, lobby_id)
+    if lobby is None:
+        return None
+    ensure_lobby_rules_snapshot_mutable(lobby.status)
+    snapshot_json, snapshot_hash = validate_rules_snapshot_pair(
+        rules_snapshot_json=rules_snapshot_json,
+        rules_snapshot_hash=rules_snapshot_hash,
+    )
+    lobby.rules_snapshot_json = snapshot_json
+    lobby.rules_snapshot_hash = snapshot_hash
+    await session.flush()
+    return lobby
 
 
 async def add_member(
@@ -311,4 +348,5 @@ __all__ = [
     "set_member_ready",
     "touch_lobby",
     "touch_member_presence",
+    "update_rules_snapshot",
 ]

@@ -201,6 +201,8 @@ async def launch_lobby(
         ruleset_id=lobby.ruleset_id,
         game_seed=game_seed,
         status="CREATED",
+        rules_snapshot_json=lobby.rules_snapshot_json,
+        rules_snapshot_hash=lobby.rules_snapshot_hash,
     )
     game.identity_mode = lobby.identity_mode
     game.ranked_source_ip_hash = source_ip_hash
