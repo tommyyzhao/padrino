@@ -309,6 +309,143 @@ test.describe('lobby UI (US-154)', () => {
     await expectIdentityBlind(page.getByTestId('lobby-roster'));
   });
 
+  test('keeps the host waiting room live, casual, and safely launch-gated', async ({ page }) => {
+    const isApi = (route: import('@playwright/test').Route) => {
+      const type = route.request().resourceType();
+      return type === 'fetch' || type === 'xhr';
+    };
+    let streamConnections = 0;
+    let transferred = false;
+
+    const hostSummary = () => ({
+      ...lobbySummary(),
+      member_count: 2,
+      ai_roster: [
+        { canonical_slug: 'openai/fast-oracle', count: 2 },
+        { canonical_slug: 'acme/quiet-witness', count: 3 }
+      ]
+    });
+    const hostRoster = () => ({
+      id: LOBBY_ID,
+      status: 'OPEN',
+      member_count: 2,
+      composition: { human_count: 2, ai_count: 5, total: 7 },
+      launch_readiness: {
+        allowed: false,
+        reasons: ['not_ready_member']
+      },
+      members: [
+        {
+          member_id: 'host-member-safe',
+          display_label: 'Host Friend',
+          is_self: true,
+          host: !transferred,
+          ready: true,
+          present: true
+        },
+        {
+          member_id: 'friend-member-safe',
+          display_label: 'Friend',
+          is_self: false,
+          host: transferred,
+          ready: false,
+          present: true
+        }
+      ]
+    });
+
+    await page.route('**/human/me', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ principal_id: HOST_PRINCIPAL, kind: 'guest', display_name: 'Host Friend' })
+      });
+    });
+    await page.route('**/human/consent', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ consented: true, required_versions: {} })
+      });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/funding-preflight`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          funded: true,
+          allowed: true,
+          funding_source: 'PLATFORM',
+          reason: 'ok',
+          reasons: [],
+          reservation_micros: 120000,
+          expected_total_micros: 120000,
+          funding_quote_hash: 'q'.repeat(64),
+          estimate_hash: 'e'.repeat(64),
+          model_hash: 'm'.repeat(64),
+          catalog_hash: 'c'.repeat(64),
+          rules_hash: 'r'.repeat(64),
+          funding_hash: 'f'.repeat(64),
+          byok_max_estimate_micros: null
+        })
+      });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/transfer/friend-member-safe`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      transferred = true;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(hostRoster()) });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/leave`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(hostSummary()) });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/heartbeat`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(hostRoster()) });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}/roster`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(hostRoster()) });
+    });
+    await page.route(`**/lobbies/${LOBBY_ID}`, async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(hostSummary()) });
+    });
+    // Register after the broad lobby route: Playwright evaluates the most
+    // recently registered matching route first, so the EventSource handshake
+    // must win over the summary fixture.
+    await page.route(`**/lobbies/${LOBBY_ID}/stream`, async (route) => {
+      streamConnections += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: `data: ${JSON.stringify({ type: 'lobby_state', ...hostRoster() })}\n\n`
+      });
+    });
+
+    await page.goto(`/lobby/${LOBBY_ID}?funding_quote_hash=${'q'.repeat(64)}&funding_source=platform`);
+
+    await expect.poll(() => streamConnections).toBeGreaterThan(0);
+    await expect(page.getByTestId('lobby-casual-notice')).toContainText(/casual only/i);
+    await expect(page.getByTestId('lobby-ai-roster')).toContainText('openai/fast-oracle');
+    await expect(page.getByTestId('lobby-ai-roster')).toContainText('× 2');
+    await expect(page.getByTestId('lobby-ai-roster')).not.toContainText(/public seat|seat 1|seat 2/i);
+
+    // The server readiness projection, not a client-side member count, blocks
+    // the host before a not-ready friend can advance the funded table.
+    await expect(page.getByTestId('lobby-readiness-reasons')).toContainText(/ready up/i);
+    await expect(page.getByTestId('lobby-start')).toBeDisabled();
+
+    await expect(page.getByTestId('lobby-transfer-friend-member-safe')).toBeVisible();
+    await expect(page.getByTestId('lobby-kick-friend-member-safe')).toBeVisible();
+    await page.getByTestId('lobby-transfer-friend-member-safe').click();
+    await expect(page.getByTestId('lobby-start')).toHaveCount(0);
+    await expect(page.getByTestId('lobby-leave')).toBeVisible();
+  });
+
   test('builds a custom casual table with a validated deck, duplicate model slots, and a bound quote', async ({
     page
   }) => {
@@ -416,6 +553,7 @@ test.describe('lobby UI (US-154)', () => {
           status: 'OPEN',
           member_count: 1,
           composition: { human_count: 1, ai_count: 6, total: 7 },
+          launch_readiness: { allowed: true, reasons: [] },
           members: [{ member_id: 'host-member', display_label: 'Host', is_self: true, host: true, ready: true, present: true }]
         })
       });

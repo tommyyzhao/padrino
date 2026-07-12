@@ -25,9 +25,11 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.lobby_presence import roster_view
+from padrino.api.lobby_readiness import evaluate_lobby_rows
 from padrino.core.composition import composition_summary
 from padrino.core.enums import LobbyStatus
 from padrino.db.repositories import lobbies as lobbies_repo
+from padrino.db.rules_snapshots import runtime_ruleset_from_pair
 
 LOBBY_STATE_FRAME = "lobby_state"
 
@@ -80,12 +82,29 @@ async def _build_state_frame(
         now=now,
         stale_seconds=stale_seconds,
     )
+    ruleset = runtime_ruleset_from_pair(
+        ruleset_id=lobby.ruleset_id,
+        rules_snapshot_json=lobby.rules_snapshot_json,
+        rules_snapshot_hash=lobby.rules_snapshot_hash,
+    )
+    readiness = evaluate_lobby_rows(
+        members=members,
+        seats=seats,
+        expected_player_count=ruleset.PLAYER_COUNT,
+        available_ai_build_count=None,
+        now=now,
+        stale_seconds=stale_seconds,
+    )
     return {
         "type": LOBBY_STATE_FRAME,
         "lobby_id": str(lobby.id),
         "status": lobby.status,
         "composition": dict(composition),
         "members": [m.as_dict() for m in roster],
+        "launch_readiness": {
+            "allowed": readiness.allowed,
+            "reasons": [reason.value for reason in readiness.reasons],
+        },
     }
 
 

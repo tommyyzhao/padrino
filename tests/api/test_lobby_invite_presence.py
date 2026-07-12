@@ -278,6 +278,54 @@ async def test_guest_joins_via_invite_link(
 
 
 @pytest.mark.asyncio
+async def test_waiting_room_projection_has_safe_ai_cards_and_launch_reasons(
+    client: AsyncClient, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The waiting room gets named model cards and public readiness tokens only."""
+    host = await _guest_token(client)
+    lobby = await _create_lobby(client, host)
+    lobby_id = uuid.UUID(lobby["id"])
+
+    # This is intentionally richer than the browser projection.  The route must
+    # retain only the model slug/count and must never disclose frozen routing,
+    # ownership, or catalog identifiers alongside the card.
+    async with session_factory() as session, session.begin():
+        seat = await session.scalar(
+            select(LobbySeat).where(
+                LobbySeat.lobby_id == lobby_id,
+                LobbySeat.seat_index == 1,
+            )
+        )
+        assert seat is not None
+        seat.model_selection = {
+            "canonical_slug": "openai/waiting-room-model",
+            "catalog_snapshot_id": str(uuid.uuid4()),
+            "catalog_entry_id": str(uuid.uuid4()),
+            "funding_owner_ref": "principal:must-not-reach-browser",
+            "routing_preferences": {"order": ["provider-a"]},
+        }
+
+    summary = await client.get(f"/lobbies/{lobby['id']}", cookies={HUMAN_SESSION_COOKIE: host})
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["ai_roster"] == [
+        {"canonical_slug": "openai/waiting-room-model", "count": 1}
+    ]
+    rendered = summary.text
+    assert "funding_owner_ref" not in rendered
+    assert "catalog_snapshot_id" not in rendered
+    assert "provider-a" not in rendered
+
+    roster = await client.get(
+        f"/lobbies/{lobby['id']}/roster", cookies={HUMAN_SESSION_COOKIE: host}
+    )
+    assert roster.status_code == 200, roster.text
+    assert roster.json()["launch_readiness"] == {
+        "allowed": False,
+        "reasons": ["not_ready_member"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_join_unknown_invite_token_404(client: AsyncClient) -> None:
     friend = await _guest_token(client)
     resp = await client.post(
@@ -784,6 +832,10 @@ async def test_lobby_state_stream_identity_blind(
     assert snapshot["type"] == "lobby_state"
     assert snapshot["status"] == LobbyStatus.OPEN.value
     assert snapshot["composition"] == {"human_count": 1, "ai_count": 6, "total": 7}
+    assert snapshot["launch_readiness"] == {
+        "allowed": False,
+        "reasons": ["not_ready_member"],
+    }
     # Identity-blind: roster carries no per-seat human/AI map, no principal ids.
     forbidden = {"seat_kind", "principal_id", "agent_build_id", "is_human", "seats"}
     blob = json.dumps(frames)

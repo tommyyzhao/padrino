@@ -276,6 +276,24 @@ describe('PadrinoClient human-session play channels', () => {
     });
   });
 
+  it('drives waiting-room member controls and builds its SSE URL', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+
+    await client.leaveLobby('l1');
+    await client.kickLobbyMember('l1', 'm1');
+    await client.transferLobbyHost('l1', 'm2');
+
+    const paths = fetchImpl.mock.calls.map((call) => new URL(call[0]).pathname);
+    expect(paths).toEqual([
+      '/lobbies/l1/leave',
+      '/lobbies/l1/kick/m1',
+      '/lobbies/l1/transfer/m2'
+    ]);
+    const stream = new URL(client.lobbyStateUrl('l1'));
+    expect(stream.pathname).toBe('/lobbies/l1/stream');
+  });
+
   it('reads safe funding state and binds a quote before funded launch', async () => {
     const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
     const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });

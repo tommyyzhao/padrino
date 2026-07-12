@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Event-driven custom waiting rooms (US-368): treat the member-scoped SSE
+  snapshot as the source of truth for display labels, self/host/presence/ready
+  facts, and server-derived readiness tokens; use an occasional heartbeat only
+  for presence and an event-triggered read to reconcile stale eviction.  Project
+  AI selections as canonical-slug/count cards only—never slot indices, frozen
+  routing/catalog JSON, funding-owner facts, or future public identities. A
+  host may launch only after the server readiness decision and an independently
+  recomputed quote hash both remain current.
 - Quote-bound custom table builders (US-367): keep the editable browser state
   separate from a draft lobby, and create/update that lobby only when the host
   requests a server quote. Every deck, cadence, roster, or funding mutation
@@ -7506,3 +7514,29 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   mypy src tests`; `uv run pytest -m "not integration"` -> 3424 selected /
   12 deselected. Browser verification on a local dev server confirmed the
   rendered builder, no framework overlay, and no console errors.
+
+## 2026-07-12T09:13 PDT - US-368
+- Reworked the casual waiting room around its member-scoped SSE state: display
+  labels, self/host/presence/ready facts, share/copy invitation, leave, remove,
+  and host-transfer controls now update without a roster polling loop. A
+  heartbeat preserves presence, while a state event triggers stale-member
+  reconciliation.
+- Added safe, count-aggregated pre-game AI model cards plus server readiness
+  tokens. The browser never receives seat indexes, frozen routing/catalog JSON,
+  funding-owner references, or future public-seat bindings. Launch remains
+  disabled until all server readiness reasons clear and the host's recomputed
+  funding/model quote still matches the confirmed hash.
+- Marked each custom room explicitly casual-only and kept ranked controls absent.
+  Added API/client/Playwright coverage for secret-safe model projection, SSE
+  state, host controls, quote gating, and existing custom-table launch flow.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/{lobby_state.py,routes/lobbies.py}`,
+  `tests/api/test_lobby_invite_presence.py`,
+  `web/dashboard/src/{lib/api/{client,types}.ts,routes/lobby/[id]/+page.svelte}`,
+  `web/dashboard/{src/lib/api/client.test.ts,tests/e2e/lobby.spec.ts}`,
+  `ralph/prd.json`, and `ralph/progress.txt`.
+- Gates (all GREEN): `pnpm -C web/dashboard lint`; `pnpm -C web/dashboard
+  check`; full Playwright -> 64 tests (visual opt-ins skipped by suite) on
+  isolated ports 5183/8133; `uv run ruff check .`; `uv run ruff format --check
+  .`; `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 3425
+  selected / 12 deselected.

@@ -60,7 +60,7 @@ from padrino.core.rulesets.snapshot import (
     canonical_rules_hash,
     snapshot_from_ruleset,
 )
-from padrino.db.models import Lobby
+from padrino.db.models import Lobby, LobbyMember, LobbySeat
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.rules_snapshots import runtime_ruleset_from_pair
@@ -223,6 +223,13 @@ class RulesSummary(BaseModel):
     validation_errors: list[str] = Field(default_factory=list)
 
 
+class LobbyAiRosterCard(BaseModel):
+    """One pre-game AI model card, deliberately detached from a seat identity."""
+
+    canonical_slug: str
+    count: int
+
+
 class LobbySummary(BaseModel):
     """Member-scoped view of a lobby: config + counts-only composition."""
 
@@ -242,6 +249,9 @@ class LobbySummary(BaseModel):
     game_id: uuid.UUID | None
     member_count: int
     composition: CompositionSummary
+    #: A named pre-game model roster without seat indexes, builds, or routing
+    #: metadata.  In-game public identities remain seeded and undisclosed.
+    ai_roster: list[LobbyAiRosterCard] = Field(default_factory=list)
 
 
 def _ruleset_or_422(ruleset_id: str) -> Ruleset:
@@ -772,6 +782,13 @@ class RosterMember(BaseModel):
     present: bool
 
 
+class LobbyLaunchReadiness(BaseModel):
+    """Safe, server-derived reasons that a custom table cannot begin yet."""
+
+    allowed: bool
+    reasons: list[str]
+
+
 class LobbyRoster(BaseModel):
     """A member-scoped roster + counts-only composition (US-148)."""
 
@@ -780,6 +797,7 @@ class LobbyRoster(BaseModel):
     member_count: int
     composition: CompositionSummary
     members: list[RosterMember]
+    launch_readiness: LobbyLaunchReadiness
 
 
 class ReadyUpdate(BaseModel):
@@ -1382,6 +1400,7 @@ async def _summary(session: AsyncSession, *, lobby_id: uuid.UUID) -> LobbySummar
         game_id=lobby.game_id,
         member_count=len(members),
         composition=composition,
+        ai_roster=_ai_roster_cards(seats),
     )
 
 
@@ -1402,6 +1421,12 @@ async def _roster(
         now=now,
         stale_seconds=_stale_seconds(),
     )
+    readiness = _launch_readiness(
+        lobby=lobby,
+        members=members,
+        seats=seats,
+        now=now,
+    )
     return LobbyRoster(
         id=lobby.id,
         status=lobby.status,
@@ -1418,12 +1443,65 @@ async def _roster(
             )
             for v in views
         ],
+        launch_readiness=readiness,
+    )
+
+
+def _ai_roster_cards(seats: list[LobbySeat]) -> list[LobbyAiRosterCard]:
+    """Project frozen selections as named cards without disclosing seat bindings.
+
+    ``model_selection`` also contains immutable catalog, prompt, routing, and
+    funding-owner facts.  The waiting room needs only the selected canonical
+    model label and its multiplicity; malformed legacy rows are omitted rather
+    than forwarding arbitrary JSON into a browser response.
+    """
+    counts: dict[str, int] = {}
+    for seat in seats:
+        if seat.seat_kind != LobbySeatKind.AI.value or not isinstance(seat.model_selection, dict):
+            continue
+        raw_slug = seat.model_selection.get("canonical_slug")
+        if not isinstance(raw_slug, str):
+            continue
+        slug = raw_slug.strip().lower()
+        if not slug or len(slug) > 512:
+            continue
+        counts[slug] = counts.get(slug, 0) + 1
+    return [
+        LobbyAiRosterCard(canonical_slug=slug, count=count)
+        for slug, count in sorted(counts.items())
+    ]
+
+
+def _launch_readiness(
+    *,
+    lobby: Lobby,
+    members: list[LobbyMember],
+    seats: list[LobbySeat],
+    now: datetime,
+) -> LobbyLaunchReadiness:
+    """Return the lock-stage readiness facts without exposing seat topology."""
+    decision = evaluate_lobby_rows(
+        members=members,
+        seats=seats,
+        expected_player_count=_runtime_ruleset_for_lobby(lobby).PLAYER_COUNT,
+        # AI model builds are materialized only at launch.  The pre-launch
+        # readiness contract therefore checks humans/roster topology here while
+        # the frozen quote checks the selected AI roster separately.
+        available_ai_build_count=None,
+        now=now,
+        stale_seconds=_stale_seconds(),
+    )
+    return LobbyLaunchReadiness(
+        allowed=decision.allowed,
+        reasons=[reason.value for reason in decision.reasons],
     )
 
 
 __all__ = [
     "LaunchResponse",
+    "LobbyAiRosterCard",
     "LobbyCreate",
+    "LobbyLaunchReadiness",
     "LobbyRoster",
     "LobbySummary",
     "ReadyUpdate",

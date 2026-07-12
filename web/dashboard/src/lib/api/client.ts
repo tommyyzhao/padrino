@@ -476,6 +476,29 @@ export class PadrinoClient {
     return this.mutate('POST', `/lobbies/${encodeURIComponent(lobbyId)}/heartbeat`);
   }
 
+  leaveLobby(lobbyId: string): Promise<LobbySummary> {
+    return this.mutate('POST', `/lobbies/${encodeURIComponent(lobbyId)}/leave`);
+  }
+
+  kickLobbyMember(lobbyId: string, memberId: string): Promise<LobbySummary> {
+    return this.mutate(
+      'POST',
+      `/lobbies/${encodeURIComponent(lobbyId)}/kick/${encodeURIComponent(memberId)}`
+    );
+  }
+
+  transferLobbyHost(lobbyId: string, memberId: string): Promise<LobbyRoster> {
+    return this.mutate(
+      'POST',
+      `/lobbies/${encodeURIComponent(lobbyId)}/transfer/${encodeURIComponent(memberId)}`
+    );
+  }
+
+  /** Absolute cookie-authenticated SSE endpoint for the waiting-room state. */
+  lobbyStateUrl(lobbyId: string): string {
+    return this.buildUrl(`/lobbies/${encodeURIComponent(lobbyId)}/stream`);
+  }
+
   lockLobby(lobbyId: string): Promise<LobbySummary> {
     return this.mutate('POST', `/lobbies/${encodeURIComponent(lobbyId)}/lock`);
   }

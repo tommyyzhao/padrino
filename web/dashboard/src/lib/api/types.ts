@@ -513,6 +513,8 @@ export interface LobbySummary {
   game_id: string | null;
   member_count: number;
   composition: CompositionSummary;
+  /** Named pre-game model cards, intentionally not mapped to public seats. */
+  ai_roster?: Array<{ canonical_slug: string; count: number }>;
 }
 
 /** A safe summary of a frozen rules snapshot for a custom-lobby member. */
@@ -574,6 +576,13 @@ export interface LobbyRoster {
   member_count: number;
   composition: CompositionSummary;
   members: RosterMember[];
+  launch_readiness?: LobbyLaunchReadiness;
+}
+
+/** Safe server reasons for why a custom table cannot advance to launch. */
+export interface LobbyLaunchReadiness {
+  allowed: boolean;
+  reasons: string[];
 }
 
 /** Result of a launch handoff: the materialized game and lobby status (US-149). */

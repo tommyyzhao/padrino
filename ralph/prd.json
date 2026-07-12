@@ -898,7 +898,7 @@
         "Ranked controls are absent; custom room is clearly casual."
       ],
       "notes": "Frontend story with multi-browser Playwright contexts.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-369",
