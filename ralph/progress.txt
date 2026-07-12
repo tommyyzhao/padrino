@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Per-principal BYOK runtime assembly (US-356): retain a selected host's
+  encrypted credential only in the impure adapter-construction boundary, and
+  bind all frozen BYOK AI seats to that one plaintext value in memory. Persist
+  only `LlmCall.funding_source=BYOK_OWNER` plus the safe credential UUID in
+  its private routing audit; never put either key material or ownership facts
+  in events. Validate active host ownership before launch, then convert a
+  revoked/unavailable or provider-failed admitted game into a terminal failed
+  no-contest rather than silently falling back to a platform key. Exclude BYOK
+  rows from all promotional spend/breaker sums.
 - Player-owned OpenRouter connection (US-355): isolate the user-key PKCE flow
   from account identity OAuth. Keep the exact deployment callback URL out of
   browser input, sign state with the principal and human-session UUID, persist
@@ -7095,3 +7104,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv
   run pytest -m "not integration"` -> 3309 passed / 51 skipped / 12 deselected.
   Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-12T04:32 PDT - US-356
+- Added an impure BYOK runtime binding that resolves only the launched custom
+  lobby host's active OpenRouter envelope while constructing AI adapters. It
+  validates the frozen owner reference, binds all BYOK AI seats to one
+  in-memory key, and never queries an invitee's credential.
+- Human-lane persistence now stamps BYOK calls with `BYOK_OWNER` and records
+  only the provider credential UUID in the private LLM-call routing audit.
+  Promotional spend, lobby accrual, and breaker calculations exclude those
+  rows. Raw keys remain absent from events, request/response persistence, and
+  adapter value objects.
+- A revoked credential prevents launch. A post-launch revocation or BYOK
+  provider failure is persisted as `provider_failure_no_contest` without
+  deployment-key fallback; the failed call audit is retained when a provider
+  response was received.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/openrouter/byok_runtime.py`,
+  `src/padrino/{api/lobby_launch.py,gauntlets/heterogeneous.py,llm/{adapter,litellm_adapter}.py,runner/{game_runner,human_lane}.py,economics/human_cost_governance.py,db/repositories/llm_calls.py}`,
+  `tests/openrouter/test_byok_runtime.py`,
+  `tests/api/test_lobby_model_selection.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused BYOK/adapter/persistence/economics/lobby slice ->
+  99 passed; `uv run ruff check .`; `uv run ruff format --check .`; `uv run
+  mypy src tests`; `uv run pytest -m "not integration"`. Frontend gates not
+  run; story did not touch `web/dashboard`.

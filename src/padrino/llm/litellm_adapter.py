@@ -110,16 +110,27 @@ class LiteLlmAdapter:
         routing_policy: RoutingPolicy,
         agent_build: AgentBuild,
         timeout_s: float,
-        auth_secret_ref: str,
+        auth_secret_ref: str | None = None,
+        api_key: str | None = None,
         api_base: str | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         system_prompts_by_role: Mapping[Role, str] | None = None,
         retry_policy: RetryPolicy | None = None,
         sleeper: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
-        # Resolve credentials once at construction so a misconfigured provider
-        # fails loudly at boot instead of silently 401-ing on first call.
-        self._auth_secret = resolve_secret(auth_secret_ref)
+        # Resolve deployment references once at construction so a misconfigured
+        # provider fails loudly at boot instead of silently 401-ing on first
+        # call. Player-owned BYOK values arrive as ``api_key`` only from the
+        # encrypted credential boundary and remain in this impure object.
+        if (auth_secret_ref is None) == (api_key is None):
+            raise ValueError("exactly one adapter credential source is required")
+        if api_key is not None:
+            if not api_key:
+                raise ValueError("adapter API key must not be empty")
+            self._auth_secret = api_key
+        else:
+            assert auth_secret_ref is not None
+            self._auth_secret = resolve_secret(auth_secret_ref)
         self._api_base = api_base
         self._policy = routing_policy
         self._build = agent_build

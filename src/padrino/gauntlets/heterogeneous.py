@@ -39,6 +39,7 @@ def build_heterogeneous_adapter(
     settings: Settings,
     timeout_s: float | None = None,
     system_prompts_by_role: Mapping[Role, str] | None = None,
+    auth_secrets_by_seat: Mapping[str, str] | None = None,
 ) -> SeatMultiplexAdapter:
     """Build a per-seat multiplex adapter from a seat -> ``AgentBuild`` mapping.
 
@@ -59,10 +60,11 @@ def build_heterogeneous_adapter(
     adapters: dict[str, LlmAdapter] = {}
     for seat, build in agent_build_assignments.items():
         is_openrouter = build.provider.casefold() == "openrouter"
-        auth_secret_ref = build.auth_secret_ref
-        if auth_secret_ref is None and is_openrouter:
+        runtime_secret = None if auth_secrets_by_seat is None else auth_secrets_by_seat.get(seat)
+        auth_secret_ref = None if runtime_secret is not None else build.auth_secret_ref
+        if runtime_secret is None and auth_secret_ref is None and is_openrouter:
             auth_secret_ref = settings.padrino_openrouter_inference_key_ref
-        if auth_secret_ref is None:
+        if runtime_secret is None and auth_secret_ref is None:
             raise ValueError(
                 f"seat {seat!r}: provider {build.provider!r} credential configuration is missing"
             )
@@ -91,6 +93,7 @@ def build_heterogeneous_adapter(
                 agent_build=build,
                 timeout_s=resolved_timeout,
                 auth_secret_ref=auth_secret_ref,
+                api_key=runtime_secret,
                 api_base=api_base,
                 system_prompts_by_role=prompts,
             )

@@ -47,7 +47,7 @@ from padrino.core.engine.actions import Action
 from padrino.core.engine.event_log import EventLog, StoredEvent
 from padrino.core.engine.hashing import compute_event_hash
 from padrino.core.engine.state import GameState, Seat
-from padrino.core.enums import ActionType, LeagueKind, SeatKind
+from padrino.core.enums import ActionType, FundingSource, LeagueKind, SeatKind
 from padrino.core.observations import Observation, Ruleset, format_phase_id
 from padrino.core.rulesets.snapshot import GameRulesSnapshot
 from padrino.db.game_status import (
@@ -72,13 +72,25 @@ from padrino.db.rules_snapshots import runtime_rules_snapshot_from_pair
 from padrino.economics.human_cost_governance import global_breaker_open, human_eligible_pool
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
-from padrino.llm.adapter import AdapterResult, LlmAdapter
+from padrino.llm.adapter import AdapterResult, LlmAdapter, ProviderNoContestError
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
 from padrino.llm.human_adapter import HumanAdapter, PullAction
 from padrino.llm.multiplex import SeatMultiplexAdapter
 from padrino.observability.events import EVENT_HUMAN_LANE_WORKER_HEARTBEAT
+from padrino.openrouter.byok_runtime import (
+    ByokProviderFailureAdapter,
+    ByokRuntimeBindings,
+    ByokRuntimeError,
+    resolve_byok_runtime_bindings,
+)
 from padrino.runner.disconnect_takeover import apply_takeover, build_takeover_event
-from padrino.runner.game_runner import GameConfig, GamePersistence, GameResume, drive_game_loop
+from padrino.runner.game_runner import (
+    GameConfig,
+    GamePersistence,
+    GameResume,
+    LlmCallAttribution,
+    drive_game_loop,
+)
 from padrino.runner.human_chat_observation import HumanChatHydratingAdapter
 from padrino.runner.human_chat_release import release_held_chat_for_phase
 from padrino.runner.human_durability import RehydratedHumanGame, rehydrate_active_human_games
@@ -110,6 +122,14 @@ AiAdapterFactory = Callable[[Mapping[str, LlmAgentBuild]], LlmAdapter]
 HumanGameExecutor = Callable[[GameConfig, GamePersistence, LlmAdapter], Awaitable[None]]
 HumanChatRelease = Callable[[str, float, EventLog, Sequence[StoredEvent]], Awaitable[None]]
 BeforeTakeoverRevalidate = Callable[[], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class HumanLaneRuntime:
+    """The in-memory adapter plus non-secret durable call attribution."""
+
+    adapter: SeatMultiplexAdapter
+    llm_call_attributions: Mapping[str, LlmCallAttribution]
 
 
 def _utcnow() -> datetime:
@@ -144,14 +164,26 @@ async def _mark_human_game_failed(
     game_id: uuid.UUID,
     exc: BaseException,
 ) -> None:
+    if isinstance(exc, (ByokRuntimeError, ProviderNoContestError)):
+        is_byok_no_contest = True
+        reason = exc.reason
+    else:
+        is_byok_no_contest = False
+        reason = type(exc).__name__
     _logger.error(
         "human_lane.game.failed",
         game_id=str(game_id),
-        error_type=type(exc).__name__,
-        error=str(exc),
+        error_type=reason,
+        error="provider_failure_no_contest" if is_byok_no_contest else str(exc),
     )
     async with session_factory() as session, session.begin():
-        await games_repo.mark_failed(session, game_id, completed_at=_utcnow())
+        await games_repo.mark_failed(
+            session,
+            game_id,
+            completed_at=_utcnow(),
+            last_error="provider_failure_no_contest" if is_byok_no_contest else str(exc),
+            last_error_kind=reason,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,6 +718,24 @@ async def build_human_lane_adapter(
     ``agent_build_id`` materialized at lobby launch and are projected into the
     same heterogeneous LiteLLM adapter path used by model-vs-model games.
     """
+    runtime = await build_human_lane_runtime(
+        session_factory,
+        game_id=game_id,
+        settings=settings,
+        ai_adapter_factory=ai_adapter_factory,
+    )
+    return runtime.adapter
+
+
+async def build_human_lane_runtime(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    game_id: uuid.UUID,
+    settings: Settings,
+    ai_adapter_factory: AiAdapterFactory | None = None,
+) -> HumanLaneRuntime:
+    """Build an adapter and retain only safe per-call BYOK attribution."""
+    bindings: ByokRuntimeBindings | None = None
     async with session_factory() as session:
         rows = list(
             (
@@ -698,6 +748,14 @@ async def build_human_lane_adapter(
         )
         if not rows:
             raise ValueError(f"human-lane game {game_id} has no seats")
+
+        lobby_id = await session.scalar(select(Lobby.id).where(Lobby.game_id == game_id).limit(1))
+        if lobby_id is not None:
+            bindings = await resolve_byok_runtime_bindings(
+                session,
+                game_id=game_id,
+                settings=settings,
+            )
 
         ai_assignments: dict[str, LlmAgentBuild] = {}
         for seat in rows:
@@ -716,8 +774,17 @@ async def build_human_lane_adapter(
         ai_adapter = (
             ai_adapter_factory(ai_assignments)
             if ai_adapter_factory is not None
-            else build_heterogeneous_adapter(ai_assignments, settings=settings)
+            else build_heterogeneous_adapter(
+                ai_assignments,
+                settings=settings,
+                auth_secrets_by_seat=(None if bindings is None else bindings.secrets_by_seat()),
+            )
         )
+        if bindings is not None:
+            ai_adapter = ByokProviderFailureAdapter(
+                ai_adapter,
+                byok_public_player_ids=bindings.public_player_ids,
+            )
         ai_adapter = HumanChatHydratingAdapter(
             inner=ai_adapter,
             session_factory=session_factory,
@@ -739,7 +806,19 @@ async def build_human_lane_adapter(
         elif ai_adapter is not None:
             adapters[seat.public_player_id] = ai_adapter
 
-    return SeatMultiplexAdapter(adapters)
+    attributions: dict[str, LlmCallAttribution] = {}
+    if bindings is not None:
+        attributions = {
+            seat: LlmCallAttribution(
+                funding_source=FundingSource.BYOK_OWNER,
+                credential_id=credential_id,
+            )
+            for seat, credential_id in bindings.credential_ids_by_seat().items()
+        }
+    return HumanLaneRuntime(
+        adapter=SeatMultiplexAdapter(adapters),
+        llm_call_attributions=attributions,
+    )
 
 
 async def _run_human_tick_responses(
@@ -1189,15 +1268,22 @@ async def _run_one_human_game(
             )
             return
 
+        llm_call_attributions: Mapping[str, LlmCallAttribution] = {}
         if adapter_factory is not None:
             adapter = adapter_factory()
         elif build_production_adapter:
-            adapter = await build_human_lane_adapter(
-                session_factory,
-                game_id=game_id,
-                settings=settings,
-                ai_adapter_factory=ai_adapter_factory,
-            )
+            try:
+                runtime = await build_human_lane_runtime(
+                    session_factory,
+                    game_id=game_id,
+                    settings=settings,
+                    ai_adapter_factory=ai_adapter_factory,
+                )
+            except ByokRuntimeError as exc:
+                await _mark_human_game_failed(session_factory, game_id=game_id, exc=exc)
+                return
+            adapter = runtime.adapter
+            llm_call_attributions = runtime.llm_call_attributions
         else:
             adapter = _InjectedExecutorAdapter()
         config = GameConfig(
@@ -1214,6 +1300,7 @@ async def _run_one_human_game(
             session_factory=session_factory,
             game_id=game_id,
             agent_builds={},
+            llm_call_attributions=llm_call_attributions,
             league_id=claimed.league_id,
             ranked=claimed.ranked,
             resume=resume,
@@ -1222,6 +1309,8 @@ async def _run_one_human_game(
         structlog.contextvars.bind_contextvars(human_lane_game_id=str(game_id))
         try:
             await game_executor(config, persistence, adapter)
+        except ProviderNoContestError as exc:
+            await _mark_human_game_failed(session_factory, game_id=game_id, exc=exc)
         finally:
             structlog.contextvars.unbind_contextvars("human_lane_game_id")
 
@@ -1397,6 +1486,7 @@ __all__ = [
     "HumanGameExecutor",
     "HumanLaneAdmission",
     "build_human_lane_adapter",
+    "build_human_lane_runtime",
     "default_human_lane_worker_id",
     "human_lane_admission",
     "list_human_lane_games",

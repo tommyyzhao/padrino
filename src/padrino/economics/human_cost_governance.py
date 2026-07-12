@@ -222,6 +222,7 @@ async def _principal_inference_usd_today(
     stmt = (
         select(func.coalesce(func.sum(LlmCall.cost_usd), 0.0))
         .where(LlmCall.game_id.in_(seat_games))
+        .where(LlmCall.funding_source != FundingSource.BYOK_OWNER.value)
         .where(LlmCall.created_at >= today_start)
         .where(LlmCall.created_at < tomorrow_start)
     )
@@ -238,8 +239,10 @@ async def global_human_lane_spend_usd(session: AsyncSession) -> float:
     human_games = (
         select(GameSeat.game_id).where(GameSeat.seat_kind.in_(_HUMAN_LANE_SEAT_KINDS)).distinct()
     ).subquery()
-    stmt = select(func.coalesce(func.sum(LlmCall.cost_usd), 0.0)).where(
-        LlmCall.game_id.in_(select(human_games.c.game_id))
+    stmt = (
+        select(func.coalesce(func.sum(LlmCall.cost_usd), 0.0))
+        .where(LlmCall.game_id.in_(select(human_games.c.game_id)))
+        .where(LlmCall.funding_source != FundingSource.BYOK_OWNER.value)
     )
     value = (await session.execute(stmt)).scalar_one()
     return float(value) if value is not None else 0.0
@@ -249,8 +252,10 @@ async def lobby_accrued_usd(session: AsyncSession, lobby: Lobby) -> float:
     """Return inference $ accrued by the game a lobby launched (0 before launch)."""
     if lobby.game_id is None:
         return 0.0
-    stmt = select(func.coalesce(func.sum(LlmCall.cost_usd), 0.0)).where(
-        LlmCall.game_id == lobby.game_id
+    stmt = (
+        select(func.coalesce(func.sum(LlmCall.cost_usd), 0.0))
+        .where(LlmCall.game_id == lobby.game_id)
+        .where(LlmCall.funding_source != FundingSource.BYOK_OWNER.value)
     )
     value = (await session.execute(stmt)).scalar_one()
     return float(value) if value is not None else 0.0

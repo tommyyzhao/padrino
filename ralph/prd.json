@@ -637,7 +637,7 @@
         "Every BYOK LlmCall is stamped funding_source=BYOK_OWNER and excluded from promotional ledger charges."
       ],
       "notes": "Credential owner reference is frozen in lobby runtime snapshot.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-357",

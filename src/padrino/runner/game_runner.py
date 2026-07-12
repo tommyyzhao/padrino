@@ -49,7 +49,15 @@ from padrino.core.engine.resolvers.night import resolve_night
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.engine.state import GameState, Phase, Seat
 from padrino.core.engine.win_conditions import REASON_MAX_DAYS_REACHED, check_win
-from padrino.core.enums import ActionType, Faction, LeagueKind, PhaseKind, RatingContextKind, Role
+from padrino.core.enums import (
+    ActionType,
+    Faction,
+    FundingSource,
+    LeagueKind,
+    PhaseKind,
+    RatingContextKind,
+    Role,
+)
 from padrino.core.observations import Observation, format_phase_id
 from padrino.core.rulesets import Ruleset as CoreRuleset
 from padrino.core.rulesets import get_ruleset, mini7_v1
@@ -67,7 +75,7 @@ from padrino.economics.human_cost_governance import (
     fallback_price_table_version,
     price_turn_usd,
 )
-from padrino.llm.adapter import AdapterResult, LlmAdapter
+from padrino.llm.adapter import AdapterResult, LlmAdapter, ProviderNoContestError
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
     EVENT_GAME_STARTED,
@@ -163,6 +171,14 @@ class GameResume:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmCallAttribution:
+    """Safe durable attribution for one runtime seat's provider calls."""
+
+    funding_source: FundingSource = FundingSource.PLATFORM
+    credential_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class GamePersistence:
     """Optional persistence target for :func:`run_game`.
 
@@ -193,6 +209,7 @@ class GamePersistence:
     session_factory: async_sessionmaker[AsyncSession]
     game_id: uuid.UUID
     agent_builds: Mapping[str, uuid.UUID] = field(default_factory=dict)
+    llm_call_attributions: Mapping[str, LlmCallAttribution] = field(default_factory=dict)
     league_id: uuid.UUID | None = None
     ranked: bool = False
     resume: GameResume | None = None
@@ -263,7 +280,13 @@ class _RecordingAdapter:
         self._persistence = persistence
 
     async def complete(self, observation: Observation) -> AdapterResult:
-        result = await self._inner.complete(observation)
+        try:
+            result = await self._inner.complete(observation)
+        except ProviderNoContestError as exc:
+            self._sink.append(exc.result)
+            if self._persistence is not None:
+                await _persist_llm_call(self._persistence, observation, exc.result)
+            raise
         self._sink.append(result)
         if self._persistence is not None:
             await _persist_llm_call(self._persistence, observation, result)
@@ -812,6 +835,15 @@ async def _persist_llm_call(
     failure = result.failure
     pricing = _pricing_stamp(persistence, result)
     openrouter_audit = result.openrouter_audit
+    attribution = persistence.llm_call_attributions.get(observation.you.player_id)
+    funding_source = (
+        attribution.funding_source.value
+        if attribution is not None
+        else FundingSource.PLATFORM.value
+    )
+    routing_metadata = (
+        dict(openrouter_audit.routing_metadata) if openrouter_audit is not None else {}
+    )
     async with _persistence_transaction(persistence) as session:
         await llm_calls_repo.record_call(
             session,
@@ -833,6 +865,8 @@ async def _persist_llm_call(
             cost_usd=pricing.cost_usd,
             price_basis=pricing.price_basis,
             price_table_version=pricing.price_table_version,
+            funding_source=funding_source,
+            provider_credential_id=(attribution.credential_id if attribution is not None else None),
             provider_response_id=result.provider_response_id,
             openrouter_requested_model_slug=(
                 openrouter_audit.requested_model_slug if openrouter_audit is not None else None
@@ -849,9 +883,7 @@ async def _persist_llm_call(
             openrouter_generation_id=(
                 openrouter_audit.generation_id if openrouter_audit is not None else None
             ),
-            openrouter_routing_metadata=(
-                openrouter_audit.routing_metadata if openrouter_audit is not None else None
-            ),
+            openrouter_routing_metadata=routing_metadata or None,
             openrouter_catalog_snapshot_id=(
                 openrouter_audit.catalog_snapshot_id if openrouter_audit is not None else None
             ),

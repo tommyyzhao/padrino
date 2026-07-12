@@ -23,6 +23,7 @@ from padrino.db.models import (
     ModelConfig,
     ModelProvider,
     PromptVersion,
+    ProviderCredential,
 )
 from padrino.db.repositories.model_catalog_snapshots import (
     CatalogEntryInput,
@@ -117,6 +118,12 @@ def _duplicate_model_selections(slug: str) -> list[dict[str, object]]:
             "funding_source": "platform",
         }
         for index in range(1, 7)
+    ]
+
+
+def _duplicate_byok_model_selections(slug: str) -> list[dict[str, object]]:
+    return [
+        {**selection, "funding_source": "byok"} for selection in _duplicate_model_selections(slug)
     ]
 
 
@@ -301,3 +308,54 @@ async def test_unavailable_catalog_choice_fails_before_lobby_lock(
     assert response.json()["detail"] == "model_unavailable_before_lock"
     async with session_factory() as session:
         assert list((await session.execute(select(Lobby))).scalars()) == []
+
+
+@pytest.mark.asyncio
+async def test_revoked_host_byok_credential_denies_lobby_launch(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed_openrouter_selection_inputs(
+        session_factory,
+        content_hash="f" * 64,
+        entries=[_entry("openai/byok-revoked")],
+    )
+    token = await _guest_token(client)
+    host = await client.get("/human/me", cookies={HUMAN_SESSION_COOKIE: token})
+    assert host.status_code == 200
+    host_principal_id = uuid.UUID(host.json()["principal_id"])
+    async with session_factory() as session, session.begin():
+        credential = ProviderCredential(
+            principal_id=host_principal_id,
+            provider="openrouter",
+            ciphertext=b"encrypted-placeholder",
+            nonce=b"nonce-placeholder",
+            key_version="v1",
+            display_suffix="oked",
+            label="private",
+        )
+        session.add(credential)
+        await session.flush()
+        credential.revoked_at = NOW
+        credential.ciphertext = None
+        credential.nonce = None
+
+    create = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "human_seat_count": 1,
+            "ai_model_selections": _duplicate_byok_model_selections("openai/byok-revoked"),
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert create.status_code == 201, create.text
+    lobby_id = uuid.UUID(create.json()["id"])
+    await _ready_and_lock(client, lobby_id=lobby_id, token=token)
+
+    launch = await client.post(
+        f"/lobbies/{lobby_id}/launch",
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert launch.status_code == 409
+    assert launch.json()["detail"] == "byok_credential_unavailable"

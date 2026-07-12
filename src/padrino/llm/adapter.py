@@ -166,6 +166,22 @@ class AdapterResult(BaseModel):
     failure: LlmCallFailed | None = None
 
 
+class ProviderNoContestError(RuntimeError):
+    """Abort a funded game after a persisted provider failure.
+
+    ``result`` remains in impure memory only until the recording layer stores
+    the normal call audit.  The exception text is a stable safe reason token,
+    never a provider diagnostic or credential value.
+    """
+
+    __slots__ = ("reason", "result")
+
+    def __init__(self, *, reason: str, result: AdapterResult) -> None:
+        self.reason = reason
+        self.result = result
+        super().__init__(reason)
+
+
 class SameModelHost(BaseModel):
     """One alternate host that serves the SAME model identity as the primary.
 
@@ -249,6 +265,7 @@ __all__ = [
     "OpenRouterMaxPrice",
     "OpenRouterProviderPreferences",
     "OpenRouterRequestPolicy",
+    "ProviderNoContestError",
     "RoutingPolicy",
     "SameModelHost",
 ]

@@ -182,7 +182,6 @@ def _routing_metadata(
         is_byok = _value(usage, "is_byok")
     if isinstance(is_byok, bool):
         result["is_byok"] = is_byok
-
     attempts = _normalized_attempts(metadata.get("attempts"))
     if attempts:
         result["attempts"] = attempts

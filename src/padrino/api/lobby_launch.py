@@ -57,6 +57,10 @@ from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.rules_snapshots import runtime_ruleset_from_pair
+from padrino.openrouter.byok_runtime import (
+    ByokRuntimeError,
+    validate_byok_lobby_credentials_for_lobby,
+)
 from padrino.openrouter.lobby_model_selection import (
     LobbyModelSelectionError,
     materialize_frozen_lobby_model_selection,
@@ -162,6 +166,13 @@ async def launch_lobby(
             )
         except (LobbyModelSelectionError, ValueError) as exc:
             raise LobbyNotLaunchableError(str(exc) or "frozen_model_unavailable") from exc
+    # A frozen BYOK selection is usable only while its host-owned envelope is
+    # active. This is a lifecycle check, not a decryption: the raw key is read
+    # exclusively later while constructing the per-seat AI adapters.
+    try:
+        await validate_byok_lobby_credentials_for_lobby(session, lobby_id=lobby.id)
+    except ByokRuntimeError as exc:
+        raise LobbyNotLaunchableError(exc.reason) from exc
 
     league = await leagues_repo.get(session, lobby.league_id)
     human_seat_count = sum(1 for seat in seats if seat.seat_kind == LobbySeatKind.HUMAN.value)

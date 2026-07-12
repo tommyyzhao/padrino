@@ -39,6 +39,8 @@ async def record_call(
     cost_usd: float | None = None,
     price_basis: str | None = None,
     price_table_version: str | None = None,
+    funding_source: str = "PLATFORM",
+    provider_credential_id: uuid.UUID | None = None,
     provider_response_id: str | None = None,
     openrouter_requested_model_slug: str | None = None,
     openrouter_actual_model: str | None = None,
@@ -50,6 +52,13 @@ async def record_call(
     openrouter_routing_policy_hash: str | None = None,
 ) -> LlmCall:
     """Insert one llm_call row and return the persisted ORM object."""
+    routing_metadata = (
+        sanitize_openrouter_routing_metadata(openrouter_routing_metadata)
+        if openrouter_routing_metadata is not None
+        else {}
+    )
+    if provider_credential_id is not None:
+        routing_metadata["credential_id"] = str(provider_credential_id)
     obj = LlmCall(
         game_id=game_id,
         event_id=event_id,
@@ -70,17 +79,14 @@ async def record_call(
         cost_usd=cost_usd,
         price_basis=price_basis,
         price_table_version=price_table_version,
+        funding_source=funding_source,
         provider_response_id=provider_response_id,
         openrouter_requested_model_slug=openrouter_requested_model_slug,
         openrouter_actual_model=openrouter_actual_model,
         openrouter_actual_provider=openrouter_actual_provider,
         openrouter_actual_endpoint=openrouter_actual_endpoint,
         openrouter_generation_id=openrouter_generation_id,
-        openrouter_routing_metadata=(
-            sanitize_openrouter_routing_metadata(openrouter_routing_metadata)
-            if openrouter_routing_metadata is not None
-            else None
-        ),
+        openrouter_routing_metadata=routing_metadata or None,
         openrouter_catalog_snapshot_id=openrouter_catalog_snapshot_id,
         openrouter_routing_policy_hash=openrouter_routing_policy_hash,
     )
