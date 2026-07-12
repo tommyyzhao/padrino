@@ -7,6 +7,7 @@ import type {
   ConsentStatus,
   CursorPage,
   EndgameReveal,
+  FundingPreflightResponse,
   GameDetailResponse,
   GameListEntry,
   GauntletListEntry,
@@ -20,6 +21,8 @@ import type {
   LegalDocumentsResponse,
   LobbyRoster,
   LobbySummary,
+  OpenRouterConnectionStatus,
+  PromotionalWallet,
   PublicCompositionResponse,
   PublicEventsResponse,
   PublicGameAnalyticsResponse,
@@ -408,13 +411,39 @@ export class PadrinoClient {
     return this.mutate('POST', '/human/match', undefined, options);
   }
 
+  /** Promotional-credit facts for the current player, expressed only in integer micros. */
+  getWallet(): Promise<PromotionalWallet> {
+    return this.request('/human/wallet');
+  }
+
+  /** Safe connection status; this never returns an OpenRouter credential or balance. */
+  getOpenRouterConnectionStatus(): Promise<OpenRouterConnectionStatus> {
+    return this.request('/human/openrouter/connect');
+  }
+
   // ---- lobby (US-147/148/149)
 
   createLobby(body: {
-    ruleset_id: string;
+    ruleset_id?: string;
+    built_in_ruleset_id?: string;
+    cadence_preset?: string;
+    human_seat_count?: number;
     identity_mode?: string;
     theme_pack_id?: string | null;
     prepick_agent_build_ids?: string[];
+    ai_model_selections?: Array<{
+      seat_index: number;
+      model_slug: string;
+      inference_params?: Record<string, unknown>;
+      routing_preferences?: Record<string, unknown> | null;
+      funding_source?: 'platform' | 'byok';
+    }>;
+    autofill_policy?: {
+      funding_source: 'platform' | 'byok';
+      max_total_price_micros_per_million?: number | null;
+      inference_params?: Record<string, unknown>;
+      routing_preferences?: Record<string, unknown> | null;
+    } | null;
     ranked?: boolean;
     integrity_acknowledged?: boolean;
   }): Promise<LobbySummary> {
@@ -447,6 +476,24 @@ export class PadrinoClient {
 
   launchLobby(lobbyId: string): Promise<LaunchResponse> {
     return this.mutate('POST', `/lobbies/${encodeURIComponent(lobbyId)}/launch`);
+  }
+
+  fundingPreflight(
+    lobbyId: string,
+    body: { byok_max_estimate_micros?: number | null } = {}
+  ): Promise<FundingPreflightResponse> {
+    return this.mutate(
+      'POST',
+      `/lobbies/${encodeURIComponent(lobbyId)}/funding-preflight`,
+      body
+    );
+  }
+
+  launchFundedLobby(
+    lobbyId: string,
+    body: { funding_quote_hash: string; byok_max_estimate_micros?: number | null }
+  ): Promise<LaunchResponse> {
+    return this.mutate('POST', `/lobbies/${encodeURIComponent(lobbyId)}/launch`, body);
   }
 
   /**

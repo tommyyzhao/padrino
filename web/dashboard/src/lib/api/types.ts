@@ -497,6 +497,48 @@ export interface LaunchResponse {
   created: boolean;
 }
 
+/** A secret-free, integer-micro promotional-credit balance. */
+export interface PromotionalWallet {
+  granted_micros: number;
+  available_micros: number;
+  reserved_micros: number;
+  spent_micros: number;
+  completion_subsidy_micros: number;
+  recent_entries: Array<{
+    entry_type: string;
+    amount_micros: number;
+    reason: string;
+    created_at: string;
+  }>;
+}
+
+/** Safe lifecycle metadata for the current player's OpenRouter connection. */
+export interface OpenRouterConnectionStatus {
+  connected: boolean;
+  label: string | null;
+  display_suffix: string | null;
+  validated_at: string | null;
+  credit_capability: string | null;
+}
+
+/** A frozen custom-lobby funding quote, safe to render without credential facts. */
+export interface FundingPreflightResponse {
+  funded: boolean;
+  allowed: boolean;
+  funding_source: string | null;
+  reason: string;
+  reasons: string[];
+  reservation_micros: number | null;
+  expected_total_micros: number | null;
+  funding_quote_hash: string | null;
+  estimate_hash: string | null;
+  model_hash: string | null;
+  catalog_hash: string | null;
+  rules_hash: string | null;
+  funding_hash: string | null;
+  byok_max_estimate_micros: number | null;
+}
+
 /** Result of a solo instant-match handoff (US-278): route to the new game. */
 export interface HumanMatchResponse {
   game_id: string;

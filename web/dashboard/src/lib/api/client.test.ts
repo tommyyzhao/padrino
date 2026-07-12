@@ -276,6 +276,37 @@ describe('PadrinoClient human-session play channels', () => {
     });
   });
 
+  it('reads safe funding state and binds a quote before funded launch', async () => {
+    const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
+    const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });
+
+    await client.getWallet();
+    await client.getOpenRouterConnectionStatus();
+    await client.fundingPreflight('l1', { byok_max_estimate_micros: 5_000_000 });
+    await client.launchFundedLobby('l1', {
+      funding_quote_hash: 'a'.repeat(64),
+      byok_max_estimate_micros: 5_000_000
+    });
+
+    const paths = fetchImpl.mock.calls.map((call) => new URL(call[0]).pathname);
+    expect(paths).toEqual([
+      '/human/wallet',
+      '/human/openrouter/connect',
+      '/lobbies/l1/funding-preflight',
+      '/lobbies/l1/launch'
+    ]);
+    expect(JSON.parse((fetchImpl.mock.calls[2][1] as RequestInit).body as string)).toEqual({
+      byok_max_estimate_micros: 5_000_000
+    });
+    expect(JSON.parse((fetchImpl.mock.calls[3][1] as RequestInit).body as string)).toEqual({
+      funding_quote_hash: 'a'.repeat(64),
+      byok_max_estimate_micros: 5_000_000
+    });
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect((init as RequestInit).credentials).toBe('include');
+    }
+  });
+
   it('mints a guest and gates human stats by ruleset', async () => {
     const fetchImpl = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({})));
     const client = new PadrinoClient({ baseUrl: 'http://api', humanSession: true, fetchImpl });

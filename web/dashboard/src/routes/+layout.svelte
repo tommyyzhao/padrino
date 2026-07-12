@@ -31,14 +31,14 @@
         <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/">Home</a>
         <a
           class="padrino-button padrino-button--primary inline-flex min-h-9 items-center justify-center px-3 py-1.5 text-sm"
-          href="/#play-vs-ai"
+          href="/#game-mode-home"
           data-testid="nav-play-vs-ai"
         >
-          Play vs AI
+          Quick Play
         </a>
         <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/ladder">Ladder</a>
         <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/leaderboard" data-testid="nav-leaderboard">Leaderboard</a>
-        <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/lobby" data-testid="nav-lobby">Play with friends</a>
+        <a class="font-medium text-muted-foreground hover:text-foreground hover:underline" href="/lobby" data-testid="nav-lobby">Custom Lobby</a>
       </nav>
     </div>
   </header>

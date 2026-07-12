@@ -36,7 +36,7 @@
     <section class="rounded-md border border-border p-3" data-testid="how-to-play-day">
       <h2 class="text-sm font-semibold">Day discussion + vote</h2>
       <p class="mt-2 text-sm text-muted-foreground">
-        During the day discussion, everyone talks publicly. Then living players vote. A unique
+        During the day discussion, everyone talks in public chat. Then living players vote. A unique
         top vote can eliminate one player; ties or abstains can spare the table.
       </p>
     </section>

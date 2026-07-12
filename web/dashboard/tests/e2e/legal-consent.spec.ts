@@ -1,8 +1,6 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 
 const HOW_TO_PLAY_DISMISSED_KEY = 'padrino:how-to-play-dismissed:v1';
-const SOLO_GAME_ID = 'ffff0005-0005-0005-0005-ffffffffffff';
-
 const LEGAL_DOCS = {
   TOS: {
     kind: 'TOS',
@@ -134,6 +132,7 @@ test.describe('US-309 legal and consent UI', () => {
     await routeLegalDocuments(page);
 
     let consentPostBody: unknown = null;
+    let consented = false;
 
     await page.route('**/human/me', async (route) => {
       if (!isApi(route)) return route.continue();
@@ -148,6 +147,7 @@ test.describe('US-309 legal and consent UI', () => {
       if (!isApi(route)) return route.continue();
       if (route.request().method() === 'POST') {
         consentPostBody = route.request().postDataJSON();
+        consented = true;
         await route.fulfill({
           status: 201,
           contentType: 'application/json',
@@ -162,18 +162,39 @@ test.describe('US-309 legal and consent UI', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          consented: false,
+          consented,
           required_versions: { TOS: 'tos-v2', PRIVACY: 'privacy-v2', AGE_GATE: 'age-v2' }
         })
       });
     });
 
-    await page.route('**/human/match', async (route) => {
+    await page.route('**/human/wallet', async (route) => {
       if (!isApi(route)) return route.continue();
       await route.fulfill({
-        status: 201,
+        status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ game_id: SOLO_GAME_ID })
+        body: JSON.stringify({
+          granted_micros: 5_000_000,
+          available_micros: 5_000_000,
+          reserved_micros: 0,
+          spent_micros: 0,
+          completion_subsidy_micros: 0,
+          recent_entries: []
+        })
+      });
+    });
+    await page.route('**/human/openrouter/connect', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          connected: false,
+          label: null,
+          display_suffix: null,
+          validated_at: null,
+          credit_capability: null
+        })
       });
     });
 
@@ -184,7 +205,7 @@ test.describe('US-309 legal and consent UI', () => {
     await expect(page.getByTestId('home-consent-privacy-link')).toHaveAttribute('href', '/privacy');
 
     await page.getByTestId('home-consent-accept').click();
-    await expect(page).toHaveURL(new RegExp(`/play/${SOLO_GAME_ID}$`), { timeout: 15_000 });
+    await expect(page.getByTestId('quick-play-funding')).toBeVisible({ timeout: 15_000 });
     expect(consentPostBody).toEqual({
       content_hashes: {
         TOS: LEGAL_DOCS.TOS.content_hash,

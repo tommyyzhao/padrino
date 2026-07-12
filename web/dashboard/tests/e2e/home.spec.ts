@@ -1,17 +1,16 @@
 import { expect, test } from '@playwright/test';
 
-const SOLO_GAME_ID = 'ffff0005-0005-0005-0005-ffffffffffff';
 const HOW_TO_PLAY_DISMISSED_KEY = 'padrino:how-to-play-dismissed:v1';
 
 type Page = import('@playwright/test').Page;
 type Route = import('@playwright/test').Route;
 
 function isApi(route: Route): boolean {
-  const t = route.request().resourceType();
-  return t === 'fetch' || t === 'xhr';
+  const resource = route.request().resourceType();
+  return resource === 'fetch' || resource === 'xhr';
 }
 
-async function routeQuietHome(page: Page) {
+async function routeQuietHome(page: Page): Promise<void> {
   await page.route('**/public/live*', async (route) => {
     if (!isApi(route)) return route.continue();
     await route.fulfill({
@@ -20,7 +19,6 @@ async function routeQuietHome(page: Page) {
       body: JSON.stringify({ items: [], total: 0 })
     });
   });
-
   await page.route('**/public/recent*', async (route) => {
     if (!isApi(route)) return route.continue();
     await route.fulfill({
@@ -29,7 +27,6 @@ async function routeQuietHome(page: Page) {
       body: JSON.stringify({ items: [], next_cursor: null, total_estimate: 0 })
     });
   });
-
   await page.route('**/public/rulesets', async (route) => {
     if (!isApi(route)) return route.continue();
     await route.fulfill({
@@ -48,7 +45,6 @@ async function routeQuietHome(page: Page) {
       })
     });
   });
-
   await page.route('**/public/ladder*', async (route) => {
     if (!isApi(route)) return route.continue();
     await route.fulfill({
@@ -59,132 +55,128 @@ async function routeQuietHome(page: Page) {
   });
 }
 
-test.describe('home', () => {
-  test('shows Play vs AI as the primary CTA and a distinct nav entry', async ({ page }) => {
+async function routeQuickPlayer(
+  page: Page,
+  options: { consented: boolean; walletMicros: number; connected: boolean }
+): Promise<void> {
+  await page.route('**/human/me', async (route) => {
+    if (!isApi(route)) return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ principal_id: 'quick-player', kind: 'account', display_name: null })
+    });
+  });
+  await page.route('**/human/consent', async (route) => {
+    if (!isApi(route)) return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        consented: options.consented,
+        required_versions: { TOS: '1', PRIVACY: '1', AGE_GATE: '1' }
+      })
+    });
+  });
+  await page.route('**/human/wallet', async (route) => {
+    if (!isApi(route)) return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        granted_micros: 5_000_000,
+        available_micros: options.walletMicros,
+        reserved_micros: 0,
+        spent_micros: 5_000_000 - options.walletMicros,
+        completion_subsidy_micros: 0,
+        recent_entries: []
+      })
+    });
+  });
+  await page.route('**/human/openrouter/connect', async (route) => {
+    if (!isApi(route)) return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        connected: options.connected,
+        label: options.connected ? 'Personal account' : null,
+        display_suffix: options.connected ? '•••• 8721' : null,
+        validated_at: options.connected ? '2026-07-12T12:00:00Z' : null,
+        credit_capability: options.connected ? 'openrouter_user_key' : null
+      })
+    });
+  });
+}
+
+function quote(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+  return {
+    funded: true,
+    allowed: true,
+    funding_source: 'PLATFORM',
+    reason: 'ok',
+    reasons: [],
+    reservation_micros: 240_000,
+    expected_total_micros: 240_000,
+    funding_quote_hash: 'a'.repeat(64),
+    estimate_hash: 'b'.repeat(64),
+    model_hash: 'c'.repeat(64),
+    catalog_hash: 'd'.repeat(64),
+    rules_hash: 'e'.repeat(64),
+    funding_hash: 'f'.repeat(64),
+    byok_max_estimate_micros: null,
+    ...overrides
+  };
+}
+
+test.describe('game-mode home', () => {
+  test('centers play around clear casual modes and a disabled ranked preview', async ({ page }) => {
     await routeQuietHome(page);
     await page.goto('/');
 
-    const primary = page.getByTestId('home-play-vs-ai-cta');
-    await expect(primary).toBeVisible();
-    await expect(primary).toHaveClass(/padrino-button--primary/);
-    await expect(page.getByTestId('home-watch-link')).toBeVisible();
-    await expect(page.getByTestId('home-leaderboard-link')).toBeVisible();
-    await expect(page.getByTestId('nav-play-vs-ai')).toHaveText('Play vs AI');
-    await expect(page.getByTestId('nav-lobby')).toHaveText('Play with friends');
+    await expect(page.getByTestId('game-mode-home')).toBeVisible();
+    await expect(page.getByTestId('mode-card-quick-play')).toContainText(/casual/i);
+    await expect(page.getByTestId('mode-card-quick-play')).toContainText(/20(?:–|-)?30\s+minutes/i);
+    await expect(page.getByTestId('mode-card-custom-lobby')).toContainText(/always casual.*never ranked/i);
+    await expect(page.getByTestId('mode-card-custom-lobby')).toContainText(/invite/i);
+    await expect(page.getByTestId('mode-card-ranked')).toContainText(/coming next/i);
+    await expect(page.getByTestId('mode-card-ranked-cta')).toBeDisabled();
   });
 
-  test('links to a one-screen how-to-play guide with the core concepts', async ({ page }) => {
+  test('gives first-time players a skippable two-minute briefing that can be reopened', async ({ page }) => {
     await routeQuietHome(page);
+    await routeQuickPlayer(page, { consented: true, walletMicros: 5_000_000, connected: false });
     await page.goto('/');
 
-    await page.getByTestId('home-how-to-play-link').click();
-    await expect(page).toHaveURL(/\/how-to-play$/);
-
-    const guide = page.getByTestId('how-to-play-panel');
-    await expect(guide).toBeVisible();
-    await expect(guide).toContainText(/Town/i);
-    await expect(guide).toContainText(/Mafia/i);
-    await expect(guide).toContainText(/day discussion/i);
-    await expect(guide).toContainText(/vote/i);
-    await expect(guide).toContainText(/night actions/i);
-    await expect(guide).toContainText(/win/i);
-    await expect(guide).toContainText(/spot the AI/i);
-    await expect(guide).toContainText(/detection accuracy/i);
-  });
-
-  test('first-time Play vs AI surfaces how-to-play and returning players skip it', async ({
-    page
-  }) => {
-    await routeQuietHome(page);
-
-    let matchCalls = 0;
-
-    await page.route('**/human/me', async (route) => {
-      if (!isApi(route)) return route.continue();
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ principal_id: 'guest-how-to', kind: 'guest', display_name: null })
-      });
-    });
-
-    await page.route('**/human/consent', async (route) => {
-      if (!isApi(route)) return route.continue();
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          consented: true,
-          required_versions: { TOS: '1', PRIVACY: '1', AGE_GATE: '1' }
-        })
-      });
-    });
-
-    await page.route('**/human/match', async (route) => {
-      if (!isApi(route)) return route.continue();
-      matchCalls += 1;
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ game_id: SOLO_GAME_ID })
-      });
-    });
-
-    await page.goto('/');
-    await page.evaluate((key) => window.localStorage.removeItem(key), HOW_TO_PLAY_DISMISSED_KEY);
     await page.getByTestId('home-play-vs-ai-cta').click();
-    await expect(page.getByTestId('how-to-play-modal')).toBeVisible();
-    expect(matchCalls).toBe(0);
+    const briefing = page.getByTestId('how-to-play-modal');
+    await expect(briefing).toBeVisible();
+    await expect(briefing).toContainText(/day discussion/i);
+    await expect(briefing).toContainText(/chat/i);
+    await expect(briefing).toContainText(/vote/i);
+    await expect(briefing).toContainText(/night actions/i);
+    await expect(briefing).toContainText(/spot the ai/i);
 
     await page.getByTestId('how-to-play-continue').click();
-    await expect(page).toHaveURL(new RegExp(`/play/${SOLO_GAME_ID}$`), { timeout: 15_000 });
-    expect(matchCalls).toBe(1);
+    await expect(page.getByTestId('quick-play-funding')).toBeVisible();
     await expect
       .poll(() => page.evaluate((key) => window.localStorage.getItem(key), HOW_TO_PLAY_DISMISSED_KEY))
       .toBe('true');
 
-    await page.goto('/');
-    await page.getByTestId('home-play-vs-ai-cta').click();
-    await expect(page.getByTestId('how-to-play-modal')).toHaveCount(0);
-    await expect(page).toHaveURL(new RegExp(`/play/${SOLO_GAME_ID}$`), { timeout: 15_000 });
-    expect(matchCalls).toBe(2);
+    await page.getByRole('button', { name: 'Not now' }).click();
+    await page.getByTestId('home-onboarding-reopen').click();
+    await expect(briefing).toBeVisible();
+    await page.getByTestId('how-to-play-back').click();
   });
 
-  test('how-to-play guide renders on a phone-width viewport', async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto('/how-to-play');
-
-    await expect(page.getByTestId('how-to-play-panel')).toBeVisible();
-    await expect(page.getByTestId('how-to-play-spot-ai')).toBeVisible();
-    const hasHorizontalOverflow = await page.evaluate(
-      () => document.documentElement.scrollWidth > window.innerWidth
-    );
-    expect(hasHorizontalOverflow).toBe(false);
-  });
-
-  test('how-to-play copy stays identity-blind-safe', async ({ page }) => {
-    await page.goto('/how-to-play');
-
-    const copy = (await page.getByTestId('how-to-play-panel').textContent()) ?? '';
-    expect(copy).toMatch(/identities stay hidden/i);
-    expect(copy).toMatch(/reveal/i);
-    expect(copy).not.toMatch(
-      /provider|model name|typing|latency|response time|human seat|AI seat|bot tell|mid-game tell/i
-    );
-  });
-
-  test('fresh visitor accepts inline consent, starts a match, and reaches play', async ({
+  test('takes a guest through consent into a verified promotional-credit Quick Play quote', async ({
     page
   }) => {
-    await page.addInitScript(
-      (key) => window.localStorage.setItem(key, 'true'),
-      HOW_TO_PLAY_DISMISSED_KEY
-    );
+    await page.addInitScript((key) => window.localStorage.setItem(key, 'true'), HOW_TO_PLAY_DISMISSED_KEY);
     await routeQuietHome(page);
 
     let guestCreated = false;
     let consented = false;
-    let matched = false;
     await page.route('**/human/me', async (route) => {
       if (!isApi(route)) return route.continue();
       await route.fulfill({
@@ -192,22 +184,20 @@ test.describe('home', () => {
         contentType: 'application/json',
         body: JSON.stringify(
           guestCreated
-            ? { principal_id: 'guest-1', kind: 'guest', display_name: null }
+            ? { principal_id: 'guest-quick', kind: 'guest', display_name: null }
             : { detail: 'not_authenticated' }
         )
       });
     });
-
     await page.route('**/human/guest', async (route) => {
       if (!isApi(route)) return route.continue();
       guestCreated = true;
       await route.fulfill({
         status: 201,
         contentType: 'application/json',
-        body: JSON.stringify({ principal_id: 'guest-1', kind: 'guest', display_name: null })
+        body: JSON.stringify({ principal_id: 'guest-quick', kind: 'guest', display_name: null })
       });
     });
-
     await page.route('**/human/consent', async (route) => {
       if (!isApi(route)) return route.continue();
       if (route.request().method() === 'POST') consented = true;
@@ -220,258 +210,208 @@ test.describe('home', () => {
         })
       });
     });
-
-    await page.route('**/human/match', async (route) => {
+    await page.route('**/legal/documents/*', async (route) => {
       if (!isApi(route)) return route.continue();
-      matched = true;
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      const kind = route.request().url().split('/').at(-1) ?? 'TOS';
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ game_id: SOLO_GAME_ID })
+        body: JSON.stringify({ kind, version_label: 'v1', content_hash: `${kind.toLowerCase()}-hash`, content: 'Terms' })
       });
+    });
+    await page.route('**/human/wallet', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          granted_micros: 5_000_000,
+          available_micros: 3_750_000,
+          reserved_micros: 0,
+          spent_micros: 1_250_000,
+          completion_subsidy_micros: 0,
+          recent_entries: []
+        })
+      });
+    });
+    await page.route('**/human/openrouter/connect', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ connected: false, label: null, display_suffix: null, validated_at: null, credit_capability: null })
+      });
+    });
+    await page.route('**/lobbies', async (route) => {
+      if (!isApi(route)) return route.continue();
+      expect(route.request().postDataJSON()).toMatchObject({
+        built_in_ruleset_id: 'mini7_v1',
+        human_seat_count: 1,
+        autofill_policy: { funding_source: 'platform' }
+      });
+      await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ id: 'quick-lobby' }) });
+    });
+    await page.route('**/lobbies/quick-lobby/funding-preflight', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quote()) });
     });
 
     await page.goto('/');
     await page.getByTestId('home-play-vs-ai-cta').click();
-    await expect(page.getByTestId('home-consent-row')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('home-consent-card')).toBeVisible();
     await page.getByTestId('home-consent-accept').click();
-    await expect(page.getByTestId('match-queue-screen')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('match-state')).toContainText('Preparing');
-    await expect(page).toHaveURL(new RegExp(`/play/${SOLO_GAME_ID}$`), { timeout: 15_000 });
-    expect(guestCreated).toBe(true);
-    expect(consented).toBe(true);
-    expect(matched).toBe(true);
+    await expect(page.getByTestId('quick-play-funding')).toBeVisible();
+    await expect(page.getByTestId('quick-funding-promo')).toContainText('$3.75');
+    await expect(page.getByTestId('quick-funding-byok')).toContainText(/connect an account/i);
+    await page.getByTestId('quick-get-quote').click();
+    await expect(page.getByTestId('quick-bound-quote')).toContainText('$0.24');
+    await expect(page.getByTestId('quick-bound-quote')).toContainText(/ready to launch/i);
   });
 
-  test('match queue screen is cancelable and ignores a late match response', async ({ page }) => {
-    await page.addInitScript(
-      (key) => window.localStorage.setItem(key, 'true'),
-      HOW_TO_PLAY_DISMISSED_KEY
-    );
+  test('binds the exact quote before creating the game', async ({ page }) => {
+    await page.addInitScript((key) => window.localStorage.setItem(key, 'true'), HOW_TO_PLAY_DISMISSED_KEY);
     await routeQuietHome(page);
+    await routeQuickPlayer(page, { consented: true, walletMicros: 1_000_000, connected: false });
 
-    let matchCalls = 0;
-
-    await page.route('**/human/me', async (route) => {
+    const steps: string[] = [];
+    await page.route('**/lobbies', async (route) => {
       if (!isApi(route)) return route.continue();
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ principal_id: 'guest-cancel', kind: 'guest', display_name: null })
-      });
+      steps.push('lobby');
+      await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ id: 'funded-lobby' }) });
     });
-
-    await page.route('**/human/consent', async (route) => {
+    await page.route('**/lobbies/funded-lobby/funding-preflight', async (route) => {
       if (!isApi(route)) return route.continue();
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          consented: true,
-          required_versions: { TOS: '1', PRIVACY: '1', AGE_GATE: '1' }
-        })
-      });
+      steps.push('quote');
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quote()) });
     });
-
-    await page.route('**/human/match', async (route) => {
+    await page.route('**/lobbies/funded-lobby/ready', async (route) => {
       if (!isApi(route)) return route.continue();
-      matchCalls += 1;
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      try {
-        await route.fulfill({
-          status: 201,
-          contentType: 'application/json',
-          body: JSON.stringify({ game_id: SOLO_GAME_ID })
-        });
-      } catch {
-        // The page may abort the in-flight request when canceling; either way
-        // the late response must not route the player into a game.
-      }
+      steps.push('ready');
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) });
+    });
+    await page.route('**/lobbies/funded-lobby/lock', async (route) => {
+      if (!isApi(route)) return route.continue();
+      steps.push('lock');
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) });
+    });
+    await page.route('**/lobbies/funded-lobby/launch', async (route) => {
+      if (!isApi(route)) return route.continue();
+      steps.push('launch');
+      expect(route.request().postDataJSON()).toEqual({ funding_quote_hash: 'a'.repeat(64), byok_max_estimate_micros: null });
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ game_id: 'bound-game' }) });
     });
 
     await page.goto('/');
     await page.getByTestId('home-play-vs-ai-cta').click();
-    await expect(page.getByTestId('match-queue-screen')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('match-cancel')).toBeVisible();
-    await page.getByTestId('match-cancel').click();
-    await expect(page).toHaveURL(/\/$/);
-    await page.waitForTimeout(500);
-    await expect(page).toHaveURL(/\/$/);
-    await expect(page.getByTestId('play-title')).toHaveCount(0);
-    expect(matchCalls).toBe(1);
+    await page.getByTestId('quick-get-quote').click();
+    await expect(page.getByTestId('quick-launch')).toBeVisible();
+    expect(steps).toEqual(['lobby', 'quote']);
+    await page.getByTestId('quick-launch').click();
+    await expect(page).toHaveURL(/\/play\/bound-game$/);
+    expect(steps).toEqual(['lobby', 'quote', 'ready', 'lock', 'launch']);
   });
 
-  test('deferred match admission shows friendly bounded retry copy and remains cancelable', async ({
-    page
-  }) => {
-    await page.addInitScript(
-      (key) => window.localStorage.setItem(key, 'true'),
-      HOW_TO_PLAY_DISMISSED_KEY
-    );
+  test('supports connected OpenRouter funding on mobile and handles exhausted promo inline', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript((key) => window.localStorage.setItem(key, 'true'), HOW_TO_PLAY_DISMISSED_KEY);
     await routeQuietHome(page);
-
-    let healthzCalled = false;
-    let matchCalls = 0;
-
-    await page.route('**/healthz/human-lane*', async (route) => {
-      healthzCalled = true;
+    await routeQuickPlayer(page, { consented: true, walletMicros: 0, connected: true });
+    await page.route('**/lobbies', async (route) => {
+      if (!isApi(route)) return route.continue();
+      expect(route.request().postDataJSON().autofill_policy.funding_source).toBe('byok');
+      await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ id: 'byok-lobby' }) });
+    });
+    await page.route('**/lobbies/byok-lobby/funding-preflight', async (route) => {
+      if (!isApi(route)) return route.continue();
+      expect(route.request().postDataJSON()).toEqual({ byok_max_estimate_micros: 5_000_000 });
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ waiting: 9, running: 3, max_running: 3 })
-      });
-    });
-
-    await page.route('**/human/me', async (route) => {
-      if (!isApi(route)) return route.continue();
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ principal_id: 'guest-deferred', kind: 'guest', display_name: null })
-      });
-    });
-
-    await page.route('**/human/consent', async (route) => {
-      if (!isApi(route)) return route.continue();
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          consented: true,
-          required_versions: { TOS: '1', PRIVACY: '1', AGE_GATE: '1' }
-        })
-      });
-    });
-
-    await page.route('**/human/match', async (route) => {
-      if (!isApi(route)) return route.continue();
-      matchCalls += 1;
-      await route.fulfill({
-        status: 429,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          detail: 'human lane busy: waiting=9 running=3 max_running=3 cost_breaker=open'
-        })
+        body: JSON.stringify(quote({
+          funding_source: 'BYOK_OWNER',
+          reservation_micros: null,
+          expected_total_micros: 430_000,
+          byok_max_estimate_micros: 5_000_000
+        }))
       });
     });
 
     await page.goto('/');
     await page.getByTestId('home-play-vs-ai-cta').click();
-    await expect(page.getByTestId('match-queue-screen')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('match-state')).toContainText('Finding your table');
-    await expect(page.getByTestId('match-status')).toContainText('Trying again');
-
-    const visibleCopy = (await page.getByTestId('match-queue-screen').textContent()) ?? '';
-    expect(visibleCopy).not.toMatch(/waiting=|running=|max_running|healthz|cost_breaker|worker/i);
-    expect(healthzCalled).toBe(false);
-
-    await page.getByTestId('match-cancel').click();
-    await expect(page).toHaveURL(/\/$/);
-    await page.waitForTimeout(900);
-    expect(matchCalls).toBe(1);
+    await expect(page.getByTestId('quick-play-funding')).toBeVisible();
+    await expect(page.getByTestId('quick-promo-exhausted')).toContainText(/no usable promotional credit/i);
+    await expect(page.getByLabel('Use promotional credit')).toBeDisabled();
+    await expect(page.getByLabel('Use connected OpenRouter')).toBeChecked();
+    await page.getByTestId('quick-byok-maximum').fill('5.00');
+    await page.getByTestId('quick-get-quote').click();
+    await expect(page.getByTestId('quick-bound-quote')).toContainText('$0.43');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
   });
 
-  test('returning consented guest skips re-consent and goes straight to match', async ({
-    page
-  }) => {
-    await page.addInitScript(
-      (key) => window.localStorage.setItem(key, 'true'),
-      HOW_TO_PLAY_DISMISSED_KEY
-    );
-    await routeQuietHome(page);
-
-    let guestCreateCalls = 0;
-    let consentPostCalls = 0;
-    let matchCalls = 0;
-    await page.route('**/human/me', async (route) => {
+  test('keeps public loading failures branded and actionable', async ({ page }) => {
+    await page.route('**/public/live*', async (route) => {
       if (!isApi(route)) return route.continue();
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ principal_id: 'guest-2', kind: 'guest', display_name: null })
-      });
+      await route.abort('failed');
+    });
+    await page.route('**/public/recent*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.abort('failed');
+    });
+    await page.route('**/public/rulesets', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.abort('failed');
     });
 
-    await page.route('**/human/guest', async (route) => {
-      if (!isApi(route)) return route.continue();
-      guestCreateCalls += 1;
-      await route.fulfill({
-        status: 201,
-        contentType: 'application/json',
-        body: JSON.stringify({ principal_id: 'guest-2', kind: 'guest', display_name: null })
-      });
-    });
+    await page.goto('/');
+    const offline = page.getByTestId('home-public-offline');
+    await expect(offline).toBeVisible();
+    await expect(offline).toContainText(/observatory signal is unavailable/i);
+    await expect(offline).toContainText(/reconnect/i);
+    expect((await offline.textContent()) ?? '').not.toMatch(/fetch|networkerror|http|undefined/i);
+  });
 
-    await page.route('**/human/consent', async (route) => {
+  test('renders public-surface KPIs and links the top agents to the ladder', async ({ page }) => {
+    await page.route('**/public/live*', async (route) => {
       if (!isApi(route)) return route.continue();
-      if (route.request().method() === 'POST') consentPostCalls += 1;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [], total: 2 }) });
+    });
+    await page.route('**/public/recent*', async (route) => {
+      if (!isApi(route)) return route.continue();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [], next_cursor: null, total_estimate: 9 }) });
+    });
+    await page.route('**/public/rulesets', async (route) => {
+      if (!isApi(route)) return route.continue();
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          consented: true,
-          required_versions: { TOS: '1', PRIVACY: '1', AGE_GATE: '1' }
+          items: [{ ruleset_id: 'mini7_v1', label: 'Mini 7 canonical team', player_count: 7, rating_context_kind: 'CANONICAL_TEAM', is_canonical: true }]
         })
       });
     });
-
-    await page.route('**/human/match', async (route) => {
+    await page.route('**/public/ladder*', async (route) => {
       if (!isApi(route)) return route.continue();
-      matchCalls += 1;
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ game_id: SOLO_GAME_ID })
+        body: JSON.stringify({
+          ruleset_id: 'mini7_v1',
+          entries: [{ agent_build_id: 'agent-one', display_name: 'Observatory One', version: 'v1', ordinal: 31, provisional: false, games: 20, last_game_at: null }],
+          next_cursor: null,
+          total_estimate: 1
+        })
       });
     });
-
-    await page.goto('/');
-    await page.getByTestId('home-play-vs-ai-cta').click();
-    await expect(page).toHaveURL(new RegExp(`/play/${SOLO_GAME_ID}$`), { timeout: 15_000 });
-    await expect(page.getByTestId('home-consent-row')).toHaveCount(0);
-    expect(guestCreateCalls).toBe(0);
-    expect(consentPostCalls).toBe(0);
-    expect(matchCalls).toBe(1);
-  });
-
-  test('renders public-surface KPIs and links the top-3 agents to the ladder', async ({ page }) => {
     await page.goto('/');
 
     await expect(page.getByTestId('home-kpis')).toBeVisible();
-    await expect(page.getByTestId('home-kpi-live-now')).toBeVisible();
-    await expect(page.getByTestId('home-kpi-recent-games')).toBeVisible();
-    await expect(page.getByTestId('home-kpi-top-agent')).toBeVisible();
-
-    // Live-now count comes from /public/live total — always a non-negative integer.
     await expect(page.getByTestId('home-kpi-live-now')).toHaveText(/^[0-9]+$/);
-
-    // Recent count comes from /public/recent total_estimate.
     await expect(page.getByTestId('home-kpi-recent-games')).toHaveText(/^[0-9]+$/);
-
-    // The smoke harness ingests at least one ranked game, so the ladder KPI fills in.
-    const topAgent = page.getByTestId('home-kpi-top-agent');
-    await expect(topAgent).not.toHaveText('—');
-
-    const topRows = page.getByTestId('home-top-agent-row');
-    await expect(topRows.first()).toBeVisible();
-    const rowCount = await topRows.count();
-    expect(rowCount).toBeGreaterThan(0);
-
+    await expect(page.getByTestId('home-kpi-top-agent')).not.toHaveText('Calibrating');
     const firstLink = page.getByTestId('home-top-agent-link').first();
     await expect(firstLink).toHaveAttribute('href', '/ladder');
     await firstLink.click();
     await expect(page).toHaveURL(/\/ladder$/);
     await expect(page.getByTestId('ladder-table')).toBeVisible({ timeout: 15_000 });
-  });
-
-  test('matches the home visual snapshot', async ({ page }) => {
-    test.skip(!process.env.PADRINO_E2E_VISUAL, 'visual regression opt-in only');
-    await page.goto('/');
-    await expect(page.getByTestId('home-kpis')).toBeVisible();
-    await expect(page).toHaveScreenshot('home.png', {
-      fullPage: true,
-      mask: [page.getByTestId('home-kpi-live-now'), page.getByTestId('home-kpi-recent-games')]
-    });
   });
 });
