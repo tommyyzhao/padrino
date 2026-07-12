@@ -201,7 +201,7 @@
         "Table/property tests cover every currently implemented role and pairwise interaction-sensitive deck."
       ],
       "notes": "Arbitrary executable/user-authored roles remain out of scope.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-336",

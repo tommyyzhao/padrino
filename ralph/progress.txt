@@ -3,6 +3,13 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Custom role deck validation (US-335): keep custom deck support in a pure
+  declarative ruleset module (`core/rulesets/custom_deck.py`) that returns
+  stable `CustomRoleDeckReason` tokens plus a `GameRulesSnapshot` on success.
+  Sort custom snapshot role metadata by `Role.value`, derive UI capabilities
+  from the same role definitions used by validation, and keep gated/variance
+  roles unavailable until their explicit gate flips. Treat custom decks as
+  non-canonical even when they use the canonical team win template.
 - Rules snapshot persistence (US-334): keep persisted lobby/game rules snapshots
   as nullable `rules_snapshot_json` + `rules_snapshot_hash` pairs so legacy rows
   can remain null. Derive registered built-in pairs through
@@ -6309,4 +6316,29 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   dialect JSON checks -> 13 passed. Backend gates: `uv run ruff check .`;
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3076 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-335
+- Added pure custom role-deck validation for 7-15 seat casual decks with stable
+  reason tokens, dynamic UI capability rows, duplicate ordinary role support,
+  uniqueness caps for special roles, and gated Mayor/Framer/Commuter/Mason
+  availability.
+- Successful validation now emits a non-canonical `GameRulesSnapshot` with
+  role metadata sorted by `Role.value`, hash-stable custom rules JSON, and
+  team, Serial Killer placement, or Jester solo-rate win templates derived from
+  the declared role/faction definitions.
+- Added table and property coverage for every `Role` enum member, invalid
+  faction/win-condition shapes, unsupported raw role ids, pairwise NAR-sensitive
+  decks, and custom snapshot hash determinism across input ordering.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/rulesets/custom_deck.py`,
+  `tests/core/rulesets/test_custom_deck.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first
+  `uv run pytest tests/core/rulesets/test_custom_deck.py` failed on missing
+  `padrino.core.rulesets.custom_deck`; focused GREEN
+  `uv run pytest tests/core/rulesets/test_custom_deck.py tests/core/rulesets/test_snapshot.py tests/core/test_legal_actions.py`
+  -> 145 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3113 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
