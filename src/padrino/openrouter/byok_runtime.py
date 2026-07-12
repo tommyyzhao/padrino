@@ -187,6 +187,13 @@ def _byok_public_player_ids(
     game_seats: Sequence[GameSeat],
 ) -> tuple[str, ...]:
     """Validate one host-funded BYOK table and return its public AI seat ids."""
+    # Pre-US-348 lobbies and focused mock-human-lane fixtures retain legacy
+    # AgentBuild seating without model-selection snapshots.  They cannot be
+    # BYOK tables, so leave their platform/mock adapter path untouched rather
+    # than treating their absent snapshot as malformed BYOK state.  Once any
+    # selection exists below, the full table must validate fail-closed.
+    if not any(seat.model_selection is not None for seat in lobby_seats):
+        return ()
     lobby_by_index = {seat.seat_index: seat for seat in lobby_seats}
     if len(lobby_by_index) != len(lobby_seats):
         raise ByokRuntimeError("byok_lobby_snapshot_invalid")

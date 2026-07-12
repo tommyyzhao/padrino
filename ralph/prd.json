@@ -657,7 +657,7 @@
         "Repository tests prove ledger conservation and idempotent retry semantics."
       ],
       "notes": "Use Numeric only for legacy cost rows; new monetary authority is integer micros.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-358",

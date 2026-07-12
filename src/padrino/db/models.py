@@ -6,7 +6,8 @@ Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``game_events``, ``llm_calls``,
 OpenRouter catalog snapshots / entries / compatibility-probe evidence,
 ``rating_contexts``, ``ratings``, ``rating_events``, the ranked human-lane
-siblings ``human_rating`` / ``human_rating_event``, the
+siblings ``human_rating`` / ``human_rating_event``, promotional-credit and
+operator-completion-reserve ledgers, the
 non-canonical context sibling rating tables, generic budget reservation slots,
 and the browser-human identity layer ``principals`` / ``human_sessions`` (Wave
 9, US-127), human-lane cost admission slots, and ranked anti-cheat telemetry /
@@ -1589,6 +1590,196 @@ class OpenRouterPkceFlow(Base):
         )
 
 
+class PromotionalCreditReservation(Base):
+    """Mutable allocation state backed by append-only promotional-credit entries.
+
+    The reservation is deliberately separate from the wallet ledger: it records
+    how one accepted game quote is progressing, while holds, charges, and
+    releases remain immutable ledger movements.  Every monetary field is an
+    integer count of USD micros; no floating-point balance lives in this table.
+    """
+
+    __tablename__ = "promotional_credit_reservations"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_promotional_credit_reservations_idempotency_key",
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE', 'SETTLED', 'CANCELLED')",
+            name="ck_promotional_credit_reservations_status",
+        ),
+        CheckConstraint(
+            "reserved_micros >= 0 AND consumed_micros >= 0 AND released_micros >= 0",
+            name="ck_promotional_credit_reservations_non_negative_micros",
+        ),
+        CheckConstraint(
+            "consumed_micros + released_micros <= reserved_micros",
+            name="ck_promotional_credit_reservations_accounted_micros",
+        ),
+        CheckConstraint(
+            "length(estimate_hash) = 64",
+            name="ck_promotional_credit_reservations_estimate_hash_len",
+        ),
+        CheckConstraint(
+            "length(catalog_hash) = 64",
+            name="ck_promotional_credit_reservations_catalog_hash_len",
+        ),
+        CheckConstraint(
+            "length(rules_hash) = 64",
+            name="ck_promotional_credit_reservations_rules_hash_len",
+        ),
+        Index(
+            "uq_promotional_credit_reservations_active_game",
+            "game_id",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE' AND game_id IS NOT NULL"),
+            postgresql_where=text("status = 'ACTIVE' AND game_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_promotional_credit_reservations_active_lobby",
+            "lobby_id",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE' AND lobby_id IS NOT NULL"),
+            postgresql_where=text("status = 'ACTIVE' AND lobby_id IS NOT NULL"),
+        ),
+        Index("ix_promotional_credit_reservations_principal_status", "principal_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="RESTRICT"), nullable=False
+    )
+    lobby_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("lobbies.id", ondelete="RESTRICT"), nullable=True
+    )
+    game_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="RESTRICT"), nullable=True
+    )
+    estimate_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    catalog_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rules_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    reserved_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    consumed_micros: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    released_micros: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="ACTIVE")
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PromotionalCreditLedgerEntry(Base):
+    """One immutable debit or credit in a principal's promotional wallet.
+
+    A signed ``amount_micros`` avoids a floating-point or mutable balance
+    column.  The database fixes the permitted sign for each operational entry
+    type, so a malformed grant or release cannot accidentally debit a player.
+    """
+
+    __tablename__ = "promotional_credit_ledger_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_promotional_credit_ledger_entries_idempotency_key",
+        ),
+        CheckConstraint(
+            "entry_type IN ('GRANT', 'RESERVATION', 'CHARGE', 'RELEASE', 'ADJUSTMENT')",
+            name="ck_promotional_credit_ledger_entries_type",
+        ),
+        CheckConstraint(
+            "(entry_type IN ('GRANT', 'RELEASE') AND amount_micros > 0) "
+            "OR (entry_type IN ('RESERVATION', 'CHARGE') AND amount_micros < 0) "
+            "OR (entry_type = 'ADJUSTMENT' AND amount_micros != 0)",
+            name="ck_promotional_credit_ledger_entries_amount_sign",
+        ),
+        Index(
+            "uq_promotional_credit_ledger_entries_promo_grant_principal",
+            "principal_id",
+            unique=True,
+            sqlite_where=text("entry_type = 'GRANT'"),
+            postgresql_where=text("entry_type = 'GRANT'"),
+        ),
+        Index(
+            "ix_promotional_credit_ledger_entries_principal_created_at",
+            "principal_id",
+            "created_at",
+        ),
+        Index("ix_promotional_credit_ledger_entries_reservation_id", "reservation_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("principals.id", ondelete="RESTRICT"), nullable=False
+    )
+    reservation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("promotional_credit_reservations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    game_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="RESTRICT"), nullable=True
+    )
+    entry_type: Mapped[str] = mapped_column(String, nullable=False)
+    amount_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OperatorCompletionReserveLedgerEntry(Base):
+    """Separate operator-owned settlement entries for frozen-model estimate misses.
+
+    This ledger intentionally has no principal or credential reference.  A
+    completion charge carries only the affected game, canonical model slug, and
+    estimate-miss magnitude, allowing operational accounting without exposing
+    player identity on any public surface.
+    """
+
+    __tablename__ = "operator_completion_reserve_ledger_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_operator_completion_reserve_ledger_entries_idempotency_key",
+        ),
+        CheckConstraint(
+            "entry_type IN ('ALLOCATION', 'CHARGE', 'ADJUSTMENT')",
+            name="ck_operator_completion_reserve_ledger_entries_type",
+        ),
+        CheckConstraint(
+            "(entry_type = 'ALLOCATION' AND amount_micros > 0) "
+            "OR (entry_type = 'CHARGE' AND amount_micros < 0) "
+            "OR (entry_type = 'ADJUSTMENT' AND amount_micros != 0)",
+            name="ck_operator_completion_reserve_ledger_entries_amount_sign",
+        ),
+        CheckConstraint(
+            "estimate_miss_micros >= 0",
+            name="ck_operator_completion_reserve_ledger_entries_non_negative_miss",
+        ),
+        CheckConstraint(
+            "entry_type != 'CHARGE' OR "
+            "(game_id IS NOT NULL AND model_slug IS NOT NULL AND estimate_miss_micros > 0)",
+            name="ck_operator_completion_reserve_ledger_entries_charge_attribution",
+        ),
+        Index(
+            "ix_operator_completion_reserve_ledger_entries_game_id",
+            "game_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    game_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("games.id", ondelete="RESTRICT"), nullable=True
+    )
+    entry_type: Mapped[str] = mapped_column(String, nullable=False)
+    amount_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    estimate_miss_micros: Mapped[int] = mapped_column(Integer, nullable=False)
+    model_slug: Mapped[str | None] = mapped_column(String, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class OAuthIdentity(Base):
     """A provider account linked to an account :class:`Principal` (US-129).
 
@@ -2081,9 +2272,12 @@ __all__ = [
     "OAuthConsumedFlow",
     "OAuthIdentity",
     "OpenRouterPkceFlow",
+    "OperatorCompletionReserveLedgerEntry",
     "PlacementRating",
     "PlacementRatingEvent",
     "Principal",
+    "PromotionalCreditLedgerEntry",
+    "PromotionalCreditReservation",
     "PromptVersion",
     "ProviderCredential",
     "RankedBan",

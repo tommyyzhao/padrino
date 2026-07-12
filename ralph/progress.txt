@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Promotional-credit accounting (US-357): keep monetary authority in append-only
+  signed integer-micro ledger entries whose allowed sign is fixed by an entry
+  type check; derive wallet availability with `SUM(amount_micros)`, never a
+  mutable balance field. Keep the game quote's mutable consumed/released state
+  in a separate reservation row, bind it to estimate/catalog/rules hashes, and
+  make every ledger/reservation/reserve write idempotent by returning an exact
+  matching retry while refusing a key reused for different facts. Partial
+  unique indexes enforce one promotional grant per principal and one active
+  reservation per game; the operator completion-reserve ledger carries game,
+  canonical model, and estimate-miss attribution but no principal reference.
 - Per-principal BYOK runtime assembly (US-356): retain a selected host's
   encrypted credential only in the impure adapter-construction boundary, and
   bind all frozen BYOK AI seats to that one plaintext value in memory. Persist
@@ -7129,3 +7139,32 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   99 passed; `uv run ruff check .`; `uv run ruff format --check .`; `uv run
   mypy src tests`; `uv run pytest -m "not integration"`. Frontend gates not
   run; story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-357
+- Added linear migration 0072 with three integer-micro accounting tables:
+  append-only promotional credit movements, game-scoped quote reservations,
+  and an operator-only completion-reserve ledger. Database checks enforce
+  permitted debit/credit signs, non-negative reservation accounting, hash
+  lengths, charge attribution, idempotency uniqueness, one promotional grant,
+  and one active reservation per game/lobby.
+- Added idempotent repository writes that return an exact retry, reject
+  conflicting key reuse, and derive granted/available/reserved/spent wallet
+  totals from durable rows. The new tests prove conservation, duplicate and
+  invalid-write guards, SQLite migration round trips, and completion-reserve
+  separation from player identity.
+- Repaired the BYOK adapter boundary exposed by the full gate: a legacy/mock
+  lobby with no frozen model-selection snapshots is not a malformed BYOK table;
+  any table with selections still validates fail-closed as before.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/db/models.py`,
+  `src/padrino/db/repositories/promotional_credit_ledger.py`,
+  `src/padrino/db/migrations/versions/0072_promotional_credit_ledger.py`,
+  `src/padrino/openrouter/byok_runtime.py`, migration-chain tests, and
+  `tests/db/test_promotional_credit_ledger.py`, plus `ralph/prd.json` and
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED first failed on missing ledger models; focused
+  GREEN -> 5 passed; migration slice -> 17 passed / 2 skipped; BYOK + human
+  mock-lane regression slice -> 4 passed; `uv run ruff check .`; `uv run ruff
+  format --check .`; `uv run mypy src tests`; `uv run pytest -m "not
+  integration"` -> 3320 passed / 51 skipped / 12 deselected. Frontend gates
+  not run; story did not touch `web/dashboard`.

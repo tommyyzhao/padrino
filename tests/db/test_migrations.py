@@ -53,6 +53,9 @@ EXPECTED_TABLES = {
     "ranked_flags",
     "provider_credentials",
     "openrouter_pkce_flows",
+    "promotional_credit_ledger_entries",
+    "promotional_credit_reservations",
+    "operator_completion_reserve_ledger_entries",
 }
 
 
