@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     padrino_openrouter_default_zdr: bool = True
     padrino_openrouter_timeout_seconds: float = Field(default=45.0, gt=0)
     padrino_openrouter_catalog_sync_interval_seconds: int = Field(default=3600, gt=0)
+    # Compatibility probes are an operator-only management-plane activity. The
+    # deterministic fake suite remains no-spend; any live run must additionally
+    # name a lower-or-equal explicit spend cap at the trigger boundary.
+    padrino_openrouter_probe_trigger_rate_limit_per_minute: int = Field(default=5, gt=0)
+    padrino_openrouter_probe_operator_cost_cap_micros: int = Field(default=50_000, ge=0)
 
     @field_validator(
         "padrino_openrouter_inference_key_ref",

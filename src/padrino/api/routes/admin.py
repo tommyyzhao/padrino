@@ -12,6 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -186,6 +187,29 @@ class CatalogSyncResponse(_StrictModel):
     fetched_at: str | None
 
 
+class CompatibilityProbeRequest(_StrictModel):
+    """Operator-owned input for one bounded OpenRouter compatibility probe."""
+
+    catalog_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_slug: str = Field(pattern=r"^[a-z0-9][a-z0-9._/-]*$")
+    live: bool = False
+    spend_cap_micros: int | None = Field(default=None, gt=0)
+
+
+class CompatibilityProbeResponse(_StrictModel):
+    """Credential-free summary of a persisted probe row."""
+
+    catalog_content_hash: str
+    canonical_slug: str
+    created: bool
+    observed_at: str
+    status: str
+    suite_version: str
+    tokens_used: int
+    latency_ms: int
+    cost_micros: int
+
+
 def _ranked_ban_response(row: RankedBan) -> RankedBanResponse:
     return RankedBanResponse(
         id=row.id,
@@ -231,6 +255,81 @@ async def sync_openrouter_model_catalog(
         content_hash=summary.content_hash,
         fetched_at=summary.fetched_at,
     )
+
+
+@router.post(
+    "/admin/openrouter/probes/run",
+    response_model=CompatibilityProbeResponse,
+)
+async def run_openrouter_compatibility_probe(
+    body: CompatibilityProbeRequest,
+    ctx: ApiKeyContext = Depends(require_admin),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+) -> CompatibilityProbeResponse:
+    """Run the no-spend fake probe or an explicitly capped live probe."""
+    from padrino.openrouter.compatibility_probe import (
+        CompatibilityProbeError,
+        CompatibilityProbeRunner,
+        DeterministicFakeProbeTransport,
+        HttpxOpenRouterProbeTransport,
+        OpenRouterProbeTransport,
+        ProbeRunMode,
+    )
+    from padrino.settings import get_settings
+
+    settings = get_settings()
+    mode = ProbeRunMode.LIVE if body.live else ProbeRunMode.FAKE
+    trigger_key = str(ctx.id) if ctx.id is not None else "synthetic-admin"
+    client: httpx.AsyncClient | None = None
+    transport: OpenRouterProbeTransport
+    if mode is ProbeRunMode.LIVE:
+        if settings.padrino_openrouter_inference_key_ref is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="probe_live_unavailable"
+            )
+        try:
+            api_key = resolve_secret(settings.padrino_openrouter_inference_key_ref)
+        except SecretResolutionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="probe_live_unavailable",
+            ) from exc
+        client = httpx.AsyncClient(timeout=settings.padrino_openrouter_timeout_seconds)
+        transport = HttpxOpenRouterProbeTransport(
+            client=client,
+            base_url=settings.padrino_openrouter_base_url,
+            api_key=api_key,
+        )
+    else:
+        transport = DeterministicFakeProbeTransport()
+    try:
+        runner = CompatibilityProbeRunner(
+            session_factory=session_factory,
+            transport=transport,
+            now=lambda: datetime.now(UTC),
+            trigger_rate_limit_per_minute=(
+                settings.padrino_openrouter_probe_trigger_rate_limit_per_minute
+            ),
+            operator_cost_cap_micros=settings.padrino_openrouter_probe_operator_cost_cap_micros,
+        )
+        result = await runner.run(
+            catalog_content_hash=body.catalog_content_hash,
+            canonical_slug=body.canonical_slug,
+            mode=mode,
+            trigger_key=trigger_key,
+            spend_cap_micros=body.spend_cap_micros,
+        )
+    except CompatibilityProbeError as exc:
+        status_code = (
+            status.HTTP_429_TOO_MANY_REQUESTS
+            if str(exc) == "probe_trigger_rate_limited"
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    finally:
+        if client is not None:
+            await client.aclose()
+    return CompatibilityProbeResponse.model_validate(result.operator_summary())
 
 
 @router.post(

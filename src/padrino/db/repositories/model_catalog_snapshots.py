@@ -8,18 +8,20 @@ the resulting content-addressed snapshot.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from padrino.db.models import CatalogSnapshot, ModelCatalogEntry
+from padrino.db.models import CatalogSnapshot, ModelCatalogEntry, ModelProbeEvidence
 
 _CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_SLUG = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
@@ -36,10 +38,29 @@ _FORBIDDEN_METADATA_KEYS = frozenset(
         "user_id",
     }
 )
+_FORBIDDEN_PROBE_EVIDENCE_KEYS = _FORBIDDEN_METADATA_KEYS | frozenset(
+    {
+        "auth",
+        "credential",
+        "credentials",
+        "error_message",
+        "raw_request",
+        "raw_response",
+        "request_body",
+        "response_body",
+        "secret",
+        "secrets",
+    }
+)
+_MAX_PROBE_EVIDENCE_BYTES = 256_000
 
 
 class CatalogSnapshotPersistenceError(ValueError):
     """Raised when normalized catalog data violates persistence invariants."""
+
+
+class ProbeEvidencePersistenceError(ValueError):
+    """Raised when compatibility-probe evidence violates storage invariants."""
 
 
 class CatalogEntryInput(BaseModel):
@@ -117,6 +138,18 @@ def _assert_safe_metadata(value: object) -> None:
     elif isinstance(value, (list, tuple)):
         for nested in value:
             _assert_safe_metadata(nested)
+
+
+def _assert_safe_probe_evidence(value: object) -> None:
+    """Reject raw transport/credential fields before append-only persistence."""
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if _normalized_key(key) in _FORBIDDEN_PROBE_EVIDENCE_KEYS:
+                raise ProbeEvidencePersistenceError("probe_evidence_forbidden_key")
+            _assert_safe_probe_evidence(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            _assert_safe_probe_evidence(nested)
 
 
 def _validate_snapshot_input(
@@ -225,9 +258,106 @@ async def get_latest_complete_snapshot(session: AsyncSession) -> CatalogSnapshot
     )
 
 
+async def get_probe_evidence_by_key(
+    session: AsyncSession,
+    *,
+    catalog_snapshot_id: UUID,
+    model_catalog_entry_id: UUID,
+    prompt_hash: str,
+    schema_hash: str,
+    probe_suite_version: str,
+) -> ModelProbeEvidence | None:
+    """Return the immutable evidence row for one idempotent probe identity."""
+    return cast(
+        ModelProbeEvidence | None,
+        await session.scalar(
+            select(ModelProbeEvidence).where(
+                ModelProbeEvidence.catalog_snapshot_id == catalog_snapshot_id,
+                ModelProbeEvidence.model_catalog_entry_id == model_catalog_entry_id,
+                ModelProbeEvidence.prompt_hash == prompt_hash,
+                ModelProbeEvidence.schema_hash == schema_hash,
+                ModelProbeEvidence.probe_suite_version == probe_suite_version,
+            )
+        ),
+    )
+
+
+async def create_or_get_probe_evidence(
+    session: AsyncSession,
+    *,
+    catalog_snapshot_id: UUID,
+    model_catalog_entry_id: UUID,
+    prompt_hash: str,
+    schema_hash: str,
+    probe_suite_version: str,
+    status: str,
+    evidence: Mapping[str, Any],
+    observed_at: datetime,
+) -> tuple[ModelProbeEvidence, bool]:
+    """Append one sanitized probe result or return its immutable predecessor.
+
+    The model-pair foreign key binds evidence to an exact immutable catalog row.
+    The uniqueness key is also the external-call idempotency identity: a retry
+    must reuse the prior result instead of replacing or mutating history.
+    """
+    if not _CONTENT_HASH.fullmatch(prompt_hash) or not _CONTENT_HASH.fullmatch(schema_hash):
+        raise ProbeEvidencePersistenceError("probe_evidence_hash_invalid")
+    if not probe_suite_version.strip() or not status.strip():
+        raise ProbeEvidencePersistenceError("probe_evidence_identity_invalid")
+    _assert_safe_probe_evidence(evidence)
+    try:
+        encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    except (TypeError, ValueError) as exc:
+        raise ProbeEvidencePersistenceError("probe_evidence_json_invalid") from exc
+    if len(encoded.encode("utf-8")) > _MAX_PROBE_EVIDENCE_BYTES:
+        raise ProbeEvidencePersistenceError("probe_evidence_too_large")
+
+    existing = await get_probe_evidence_by_key(
+        session,
+        catalog_snapshot_id=catalog_snapshot_id,
+        model_catalog_entry_id=model_catalog_entry_id,
+        prompt_hash=prompt_hash,
+        schema_hash=schema_hash,
+        probe_suite_version=probe_suite_version,
+    )
+    if existing is not None:
+        return existing, False
+
+    row = ModelProbeEvidence(
+        catalog_snapshot_id=catalog_snapshot_id,
+        model_catalog_entry_id=model_catalog_entry_id,
+        prompt_hash=prompt_hash,
+        schema_hash=schema_hash,
+        probe_suite_version=probe_suite_version,
+        status=status,
+        evidence=json.loads(encoded),
+        observed_at=observed_at,
+    )
+    try:
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
+    except IntegrityError:
+        existing = await get_probe_evidence_by_key(
+            session,
+            catalog_snapshot_id=catalog_snapshot_id,
+            model_catalog_entry_id=model_catalog_entry_id,
+            prompt_hash=prompt_hash,
+            schema_hash=schema_hash,
+            probe_suite_version=probe_suite_version,
+        )
+        if existing is None:
+            raise
+        return existing, False
+    return row, True
+
+
 __all__ = [
     "CatalogEntryInput",
     "CatalogSnapshotPersistenceError",
+    "ProbeEvidencePersistenceError",
     "create_or_get_completed_snapshot",
+    "create_or_get_probe_evidence",
     "get_latest_complete_snapshot",
+    "get_probe_evidence_by_key",
 ]

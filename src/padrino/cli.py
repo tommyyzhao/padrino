@@ -31,6 +31,7 @@ import json
 import signal
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +154,93 @@ def catalog_sync(
     typer.echo(json.dumps(result.operator_summary().model_dump(mode="json"), sort_keys=True))
     if result.state is CatalogSyncState.UNAVAILABLE:
         raise typer.Exit(code=1)
+
+
+@catalog_app.command("probe")
+def catalog_probe(
+    catalog_content_hash: str = typer.Option(..., "--catalog-content-hash"),
+    canonical_slug: str = typer.Option(..., "--model"),
+    db_url: str | None = typer.Option(
+        None,
+        "--db-url",
+        envvar="PADRINO_DB_URL",
+        help="SQLAlchemy async URL. Falls back to PADRINO_DB_URL / Settings default.",
+    ),
+    live: bool = typer.Option(
+        False, "--live", help="Use OpenRouter instead of the deterministic fake."
+    ),
+    spend_cap_micros: int | None = typer.Option(
+        None,
+        "--spend-cap-micros",
+        help="Required explicit hard cap for a live probe.",
+    ),
+) -> None:
+    """Run a rate-limited, append-only compatibility probe for one catalog model."""
+    import httpx
+
+    from padrino.db.base import create_engine, create_session_factory
+    from padrino.llm.secrets import SecretResolutionError, resolve_secret
+    from padrino.openrouter.compatibility_probe import (
+        CompatibilityProbeError,
+        CompatibilityProbeRunner,
+        DeterministicFakeProbeTransport,
+        HttpxOpenRouterProbeTransport,
+        OpenRouterProbeTransport,
+        ProbeRunMode,
+    )
+    from padrino.settings import get_settings
+
+    settings = get_settings()
+    resolved_url = db_url if db_url is not None else settings.padrino_db_url
+
+    async def _run() -> Any:
+        engine = create_engine(resolved_url)
+        client: httpx.AsyncClient | None = None
+        try:
+            mode = ProbeRunMode.LIVE if live else ProbeRunMode.FAKE
+            transport: OpenRouterProbeTransport
+            if mode is ProbeRunMode.LIVE:
+                if settings.padrino_openrouter_inference_key_ref is None:
+                    raise CompatibilityProbeError("probe_live_unavailable")
+                try:
+                    api_key = resolve_secret(settings.padrino_openrouter_inference_key_ref)
+                except SecretResolutionError as exc:
+                    raise CompatibilityProbeError("probe_live_unavailable") from exc
+                client = httpx.AsyncClient(timeout=settings.padrino_openrouter_timeout_seconds)
+                transport = HttpxOpenRouterProbeTransport(
+                    client=client,
+                    base_url=settings.padrino_openrouter_base_url,
+                    api_key=api_key,
+                )
+            else:
+                transport = DeterministicFakeProbeTransport()
+            runner = CompatibilityProbeRunner(
+                session_factory=create_session_factory(engine),
+                transport=transport,
+                now=lambda: datetime.now(UTC),
+                trigger_rate_limit_per_minute=(
+                    settings.padrino_openrouter_probe_trigger_rate_limit_per_minute
+                ),
+                operator_cost_cap_micros=settings.padrino_openrouter_probe_operator_cost_cap_micros,
+            )
+            return await runner.run(
+                catalog_content_hash=catalog_content_hash,
+                canonical_slug=canonical_slug,
+                mode=mode,
+                trigger_key="catalog-probe-cli",
+                spend_cap_micros=spend_cap_micros,
+            )
+        finally:
+            if client is not None:
+                await client.aclose()
+            await engine.dispose()
+
+    try:
+        result = asyncio.run(_run())
+    except CompatibilityProbeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result.operator_summary(), sort_keys=True))
 
 
 @app.command("ranked-audit")
