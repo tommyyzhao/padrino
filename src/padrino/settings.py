@@ -77,6 +77,11 @@ class Settings(BaseSettings):
         exclude=True,
     )
     padrino_openrouter_connect_flow_ttl_seconds: int = Field(default=600, gt=0, le=3600)
+    # Retention runs only when the existing guarded executor is enabled.  PKCE
+    # binding hashes are short-lived, while revoked legacy envelopes get a
+    # longer safety window before a defensive second erasure pass.
+    padrino_openrouter_pkce_flow_retention_ttl_days: int = Field(default=1, ge=0)
+    padrino_openrouter_revoked_credential_retention_ttl_days: int = Field(default=30, ge=0)
     # Compatibility probes are an operator-only management-plane activity. The
     # deterministic fake suite remains no-spend; any live run must additionally
     # name a lower-or-equal explicit spend cap at the trigger boundary.

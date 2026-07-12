@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import func, update
+from sqlalchemy import delete, func, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -108,7 +108,22 @@ async def try_consume_openrouter_pkce_flow(
     return bool(result.rowcount)
 
 
+async def delete_openrouter_pkce_flows_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+) -> int:
+    """Erase all short-lived OpenRouter PKCE bindings for a deleted principal."""
+    result = await session.execute(
+        delete(OpenRouterPkceFlow).where(OpenRouterPkceFlow.principal_id == principal_id)
+    )
+    await session.flush()
+    assert isinstance(result, CursorResult)
+    return result.rowcount or 0
+
+
 __all__ = [
+    "delete_openrouter_pkce_flows_for_principal",
     "revoke_and_erase_for_principal",
     "revoke_and_erase_provider_credential",
     "try_consume_openrouter_pkce_flow",

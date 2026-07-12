@@ -12,17 +12,25 @@ liveness plus coarse queue counts.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.auth import _get_auth_settings
 from padrino.api.deps import get_session
+from padrino.db.models import (
+    OperatorCompletionReserveLedgerEntry,
+    PromotionalCreditLedgerEntry,
+    PromotionalCreditReservation,
+)
 from padrino.db.repositories import gauntlets as gauntlets_repo
+from padrino.db.repositories import model_catalog_snapshots as catalog_snapshots_repo
 from padrino.db.repositories import scheduler_heartbeats as scheduler_heartbeats_repo
+from padrino.openrouter.credentials import credential_encryption_available
 from padrino.runner.human_lane import list_human_lane_games
 
 router = APIRouter()
@@ -56,6 +64,49 @@ class OpenRouterFundingHealthResponse(BaseModel):
     inference_available: bool
     encryption_available: bool
     upstream_allowlist_enabled: bool
+
+
+class OpenRouterCatalogHealthResponse(BaseModel):
+    """Safe persisted-catalog freshness facts for operational monitoring."""
+
+    content_hash: str | None
+    fetched_at: datetime | None
+    state: str
+    is_stale: bool
+
+
+class OpenRouterManagementHealthResponse(BaseModel):
+    """Capability booleans for the separately scoped management integration."""
+
+    configured: bool
+    available: bool
+    mode: str
+
+
+class PromotionalCreditOperationsHealthResponse(BaseModel):
+    """Aggregate user-credit exposure, never a per-principal wallet projection."""
+
+    liability_micros: int
+    active_reservation_micros: int
+    active_reservation_count: int
+
+
+class CompletionReserveOperationsHealthResponse(BaseModel):
+    """Aggregate operator completion-reserve facts without model or player attribution."""
+
+    global_cap_micros: int
+    charged_micros: int
+    remaining_micros: int
+
+
+class OpenRouterOperationsHealthResponse(BaseModel):
+    """Secret-free aggregate OpenRouter readiness and funding status."""
+
+    catalog: OpenRouterCatalogHealthResponse
+    encryption_ready: bool
+    management: OpenRouterManagementHealthResponse
+    promotional_credit: PromotionalCreditOperationsHealthResponse
+    completion_reserve: CompletionReserveOperationsHealthResponse
 
 
 def _heartbeat_liveness_status(
@@ -150,11 +201,95 @@ async def healthz_openrouter_funding(request: Request) -> OpenRouterFundingHealt
     )
 
 
+@router.get("/healthz/openrouter-operations", response_model=OpenRouterOperationsHealthResponse)
+async def healthz_openrouter_operations(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> OpenRouterOperationsHealthResponse:
+    """Report aggregate OpenRouter operations facts without PII or secrets."""
+    settings = _get_auth_settings(request)
+    from padrino.openrouter.platform_subkeys import platform_subkey_health
+
+    snapshot = await catalog_snapshots_repo.get_latest_complete_snapshot(session)
+    now = datetime.now(UTC)
+    if snapshot is None:
+        catalog = OpenRouterCatalogHealthResponse(
+            content_hash=None,
+            fetched_at=None,
+            state="unavailable",
+            is_stale=True,
+        )
+    else:
+        fetched_at = (
+            snapshot.fetched_at.replace(tzinfo=UTC)
+            if snapshot.fetched_at.tzinfo is None
+            else snapshot.fetched_at.astimezone(UTC)
+        )
+        is_stale = now > fetched_at + timedelta(
+            seconds=settings.padrino_openrouter_catalog_sync_interval_seconds
+        )
+        catalog = OpenRouterCatalogHealthResponse(
+            content_hash=snapshot.content_hash,
+            fetched_at=fetched_at,
+            state="stale" if is_stale else "current",
+            is_stale=is_stale,
+        )
+    liability = await session.scalar(
+        select(func.coalesce(func.sum(PromotionalCreditLedgerEntry.amount_micros), 0))
+    )
+    active_reservation_micros = await session.scalar(
+        select(
+            func.coalesce(
+                func.sum(
+                    PromotionalCreditReservation.reserved_micros
+                    - PromotionalCreditReservation.consumed_micros
+                    - PromotionalCreditReservation.released_micros
+                ),
+                0,
+            )
+        ).where(PromotionalCreditReservation.status == "ACTIVE")
+    )
+    active_reservation_count = await session.scalar(
+        select(func.count())
+        .select_from(PromotionalCreditReservation)
+        .where(PromotionalCreditReservation.status == "ACTIVE")
+    )
+    charged_micros = await session.scalar(
+        select(
+            func.coalesce(func.sum(-OperatorCompletionReserveLedgerEntry.amount_micros), 0)
+        ).where(OperatorCompletionReserveLedgerEntry.entry_type == "CHARGE")
+    )
+    global_cap = settings.padrino_openrouter_completion_reserve_global_micros
+    charged = int(charged_micros or 0)
+    funding = platform_subkey_health(settings)
+    return OpenRouterOperationsHealthResponse(
+        catalog=catalog,
+        encryption_ready=credential_encryption_available(settings),
+        management=OpenRouterManagementHealthResponse(
+            configured=funding.management_configured,
+            available=funding.management_available,
+            mode=funding.mode,
+        ),
+        promotional_credit=PromotionalCreditOperationsHealthResponse(
+            liability_micros=int(liability or 0),
+            active_reservation_micros=int(active_reservation_micros or 0),
+            active_reservation_count=int(active_reservation_count or 0),
+        ),
+        completion_reserve=CompletionReserveOperationsHealthResponse(
+            global_cap_micros=global_cap,
+            charged_micros=charged,
+            remaining_micros=max(0, global_cap - charged),
+        ),
+    )
+
+
 __all__ = [
     "HEARTBEAT_DOWN_THRESHOLD_S",
     "PENDING_DEGRADED_THRESHOLD_S",
     "HumanLaneHealthResponse",
+    "OpenRouterCatalogHealthResponse",
     "OpenRouterFundingHealthResponse",
+    "OpenRouterOperationsHealthResponse",
     "SchedulerHealthResponse",
     "router",
 ]

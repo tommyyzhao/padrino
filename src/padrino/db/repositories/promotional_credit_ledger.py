@@ -390,6 +390,56 @@ async def create_or_get_credit_reservation(
     return row, True
 
 
+async def cancel_cancellable_reservations_for_principal(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    now: datetime,
+) -> int:
+    """Release only pre-launch promotional holds during account deletion.
+
+    A launched game has a frozen model/routing contract and must settle through
+    its terminal path.  A reservation with no materialized game is cancellable:
+    return its unused held micros through the immutable ledger, then freeze its
+    mutable row as ``CANCELLED``.  Retried deletion is idempotent because only
+    ACTIVE pre-launch rows are selected under a row lock.
+    """
+    rows = list(
+        (
+            await session.execute(
+                select(PromotionalCreditReservation)
+                .where(
+                    PromotionalCreditReservation.principal_id == principal_id,
+                    PromotionalCreditReservation.status == "ACTIVE",
+                    PromotionalCreditReservation.game_id.is_(None),
+                )
+                .with_for_update()
+            )
+        ).scalars()
+    )
+    for row in rows:
+        remaining = row.reserved_micros - row.consumed_micros - row.released_micros
+        if remaining > 0:
+            await append_credit_entry(
+                session,
+                principal_id=principal_id,
+                reservation_id=row.id,
+                game_id=None,
+                entry_type=CreditLedgerEntryType.RELEASE,
+                amount_micros=remaining,
+                idempotency_key=f"account-delete-reservation:{row.id}:release",
+                reason="account_deletion_release",
+                now=now,
+            )
+            row.released_micros += remaining
+        row.status = "CANCELLED"
+        row.terminal_at = now
+        row.updated_at = now
+    if rows:
+        await session.flush()
+    return len(rows)
+
+
 async def append_completion_reserve_entry(
     session: AsyncSession,
     *,
@@ -597,6 +647,7 @@ __all__ = [
     "LedgerInputError",
     "append_completion_reserve_entry",
     "append_credit_entry",
+    "cancel_cancellable_reservations_for_principal",
     "create_or_get_credit_reservation",
     "get_completion_subsidy_micros",
     "get_credit_totals",

@@ -254,6 +254,8 @@ def test_openrouter_settings_are_safe_and_complete(monkeypatch: pytest.MonkeyPat
     assert settings.padrino_openrouter_connect_callback_url is None
     assert settings.padrino_openrouter_connect_state_signing_key is None
     assert settings.padrino_openrouter_connect_flow_ttl_seconds == 600
+    assert settings.padrino_openrouter_pkce_flow_retention_ttl_days == 1
+    assert settings.padrino_openrouter_revoked_credential_retention_ttl_days == 30
 
 
 def test_openrouter_key_settings_require_opaque_secret_references() -> None:

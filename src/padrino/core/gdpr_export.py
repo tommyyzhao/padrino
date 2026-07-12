@@ -105,6 +105,28 @@ class HumanRatingEventExportInput(_FrozenModel):
     created_at: Any
 
 
+class OpenRouterConnectionExportInput(_FrozenModel):
+    """Safe connection lifecycle metadata for a self-export."""
+
+    id: uuid.UUID
+    provider: str
+    label: str | None
+    display_suffix: str
+    created_at: Any
+    last_validated_at: Any | None
+    revoked_at: Any | None
+
+
+class WalletLedgerExportInput(_FrozenModel):
+    """One immutable, secret-free promotional-wallet fact for self-export."""
+
+    id: uuid.UUID
+    entry_type: str
+    amount_micros: int
+    reason: str
+    created_at: Any
+
+
 class PrincipalExport(_FrozenModel):
     """Self profile included in the authenticated export."""
 
@@ -188,6 +210,26 @@ class HumanRatingEventExport(_FrozenModel):
     created_at: Any
 
 
+class OpenRouterConnectionExport(_FrozenModel):
+    """Connection metadata without envelope or management-plane material."""
+
+    provider: str
+    label: str | None
+    display_suffix: str
+    created_at: Any
+    last_validated_at: Any | None
+    revoked_at: Any | None
+
+
+class WalletLedgerExport(_FrozenModel):
+    """An immutable promotional-wallet entry without internal linkage keys."""
+
+    entry_type: str
+    amount_micros: int
+    reason: str
+    created_at: Any
+
+
 class HumanDataExportBundle(_FrozenModel):
     """Deterministic authenticated export of one principal's human data."""
 
@@ -198,6 +240,8 @@ class HumanDataExportBundle(_FrozenModel):
     chat_messages: tuple[ChatExport, ...]
     human_ratings: tuple[HumanRatingExport, ...]
     human_rating_events: tuple[HumanRatingEventExport, ...]
+    openrouter_connections: tuple[OpenRouterConnectionExport, ...] = ()
+    wallet_ledger_entries: tuple[WalletLedgerExport, ...] = ()
 
 
 def assemble_human_data_export(
@@ -209,6 +253,9 @@ def assemble_human_data_export(
     human_ratings: list[HumanRatingExportInput] | tuple[HumanRatingExportInput, ...],
     human_rating_events: list[HumanRatingEventExportInput]
     | tuple[HumanRatingEventExportInput, ...],
+    openrouter_connections: list[OpenRouterConnectionExportInput]
+    | tuple[OpenRouterConnectionExportInput, ...] = (),
+    wallet_ledger_entries: list[WalletLedgerExportInput] | tuple[WalletLedgerExportInput, ...] = (),
 ) -> HumanDataExportBundle:
     """Return a deterministic self-export bundle from already-scoped rows."""
 
@@ -229,6 +276,14 @@ def assemble_human_data_export(
         human_ratings=tuple(_rating(row) for row in sorted(human_ratings, key=_rating_key)),
         human_rating_events=tuple(
             _rating_event(row) for row in sorted(human_rating_events, key=_rating_event_key)
+        ),
+        openrouter_connections=tuple(
+            _openrouter_connection(row)
+            for row in sorted(openrouter_connections, key=_openrouter_connection_key)
+        ),
+        wallet_ledger_entries=tuple(
+            _wallet_ledger_entry(row)
+            for row in sorted(wallet_ledger_entries, key=_wallet_ledger_entry_key)
         ),
     )
 
@@ -303,6 +358,28 @@ def _rating_event(row: HumanRatingEventExportInput) -> HumanRatingEventExport:
     )
 
 
+def _openrouter_connection(
+    row: OpenRouterConnectionExportInput,
+) -> OpenRouterConnectionExport:
+    return OpenRouterConnectionExport(
+        provider=row.provider,
+        label=row.label,
+        display_suffix=row.display_suffix,
+        created_at=row.created_at,
+        last_validated_at=row.last_validated_at,
+        revoked_at=row.revoked_at,
+    )
+
+
+def _wallet_ledger_entry(row: WalletLedgerExportInput) -> WalletLedgerExport:
+    return WalletLedgerExport(
+        entry_type=row.entry_type,
+        amount_micros=row.amount_micros,
+        reason=row.reason,
+        created_at=row.created_at,
+    )
+
+
 def _dt_key(value: Any | None) -> str:
     if value is None:
         return ""
@@ -338,6 +415,14 @@ def _rating_event_key(row: HumanRatingEventExportInput) -> tuple[str, str, str, 
     )
 
 
+def _openrouter_connection_key(row: OpenRouterConnectionExportInput) -> tuple[str, str, str]:
+    return (row.provider, _dt_key(row.created_at), str(row.id))
+
+
+def _wallet_ledger_entry_key(row: WalletLedgerExportInput) -> tuple[str, str]:
+    return (_dt_key(row.created_at), str(row.id))
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "ChatExport",
@@ -349,9 +434,13 @@ __all__ = [
     "HumanRatingEventExportInput",
     "HumanRatingExport",
     "HumanRatingExportInput",
+    "OpenRouterConnectionExport",
+    "OpenRouterConnectionExportInput",
     "PrincipalExport",
     "PrincipalExportInput",
     "SessionExport",
     "SessionExportInput",
+    "WalletLedgerExport",
+    "WalletLedgerExportInput",
     "assemble_human_data_export",
 ]

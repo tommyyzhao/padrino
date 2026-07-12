@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.db.models import (
@@ -43,7 +44,9 @@ from padrino.db.models import (
     HumanConsent,
     HumanSession,
     LlmCall,
+    OpenRouterPkceFlow,
     Principal,
+    ProviderCredential,
     RatingEvent,
 )
 from padrino.db.repositories import human_chat as human_chat_repo
@@ -54,9 +57,12 @@ from padrino.db.retention import (
     HumanConsentRetentionInfo,
     HumanPiiRetentionPlan,
     HumanPiiRetentionPolicy,
+    OpenRouterPkceFlowRetentionInfo,
     RetentionPlan,
     RetentionPolicy,
+    RevokedCredentialRetentionInfo,
     plan_human_pii_retention,
+    plan_openrouter_credential_retention,
     plan_retention,
 )
 from padrino.settings import Settings
@@ -78,6 +84,8 @@ class RetentionExecutionResult:
     human_chat_messages_redacted: int = 0
     human_consent_ip_hashes_nulled: int = 0
     guest_principals_anonymized: int = 0
+    openrouter_pkce_flows_deleted: int = 0
+    revoked_credential_envelopes_erased: int = 0
 
 
 async def _load_candidates(session: AsyncSession) -> list[GameRetentionInfo]:
@@ -187,6 +195,41 @@ async def _load_human_pii_candidates(
         await _load_human_chat_candidates(session),
         await _load_human_consent_candidates(session),
         await _load_guest_principal_candidates(session),
+    )
+
+
+async def _load_openrouter_credential_candidates(
+    session: AsyncSession,
+) -> tuple[list[OpenRouterPkceFlowRetentionInfo], list[RevokedCredentialRetentionInfo]]:
+    """Project OpenRouter rows without loading credential-envelope bytes."""
+    flow_rows = (
+        await session.execute(select(OpenRouterPkceFlow.id, OpenRouterPkceFlow.expires_at))
+    ).all()
+    credential_rows = (
+        await session.execute(
+            select(
+                ProviderCredential.id,
+                ProviderCredential.revoked_at,
+                ProviderCredential.ciphertext.is_not(None),
+                ProviderCredential.nonce.is_not(None),
+            ).where(ProviderCredential.revoked_at.is_not(None))
+        )
+    ).all()
+    return (
+        [
+            OpenRouterPkceFlowRetentionInfo(id=row.id, expires_at=row.expires_at)
+            for row in flow_rows
+        ],
+        [
+            RevokedCredentialRetentionInfo(
+                id=row.id,
+                revoked_at=row.revoked_at,
+                ciphertext_present=bool(row[2]),
+                nonce_present=bool(row[3]),
+            )
+            for row in credential_rows
+            if row.revoked_at is not None
+        ],
     )
 
 
@@ -312,6 +355,40 @@ async def _anonymize_guest_principals(
     return len(rows), redacted_chat_total
 
 
+async def _delete_openrouter_pkce_flows(
+    session: AsyncSession,
+    flow_ids: list[uuid.UUID],
+) -> int:
+    """Delete planned expired connection bindings and return rows actually removed."""
+    if not flow_ids:
+        return 0
+    result = await session.execute(
+        delete(OpenRouterPkceFlow).where(OpenRouterPkceFlow.id.in_(flow_ids))
+    )
+    assert isinstance(result, CursorResult)
+    return int(result.rowcount or 0)
+
+
+async def _erase_revoked_credential_envelopes(
+    session: AsyncSession,
+    credential_ids: list[uuid.UUID],
+) -> int:
+    """Erase stale legacy envelope bytes only from already-revoked credentials."""
+    if not credential_ids:
+        return 0
+    result = await session.execute(
+        update(ProviderCredential)
+        .where(
+            ProviderCredential.id.in_(credential_ids),
+            ProviderCredential.revoked_at.is_not(None),
+            (ProviderCredential.ciphertext.is_not(None) | ProviderCredential.nonce.is_not(None)),
+        )
+        .values(ciphertext=None, nonce=None)
+    )
+    assert isinstance(result, CursorResult)
+    return int(result.rowcount or 0)
+
+
 async def run_retention_executor(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -349,6 +426,10 @@ async def run_retention_executor(
         chat_candidates, consent_candidates, guest_candidates = await _load_human_pii_candidates(
             session
         )
+        (
+            flow_candidates,
+            revoked_credential_candidates,
+        ) = await _load_openrouter_credential_candidates(session)
 
     plan: RetentionPlan = plan_retention(candidates, policy, now=now, dry_run=dry_run)
     human_plan: HumanPiiRetentionPlan = plan_human_pii_retention(
@@ -359,6 +440,15 @@ async def run_retention_executor(
         now=now,
         dry_run=dry_run,
     )
+    openrouter_plan = plan_openrouter_credential_retention(
+        flows=flow_candidates,
+        revoked_credentials=revoked_credential_candidates,
+        flow_retention_ttl_days=settings.padrino_openrouter_pkce_flow_retention_ttl_days,
+        revoked_credential_retention_ttl_days=(
+            settings.padrino_openrouter_revoked_credential_retention_ttl_days
+        ),
+        now=now,
+    )
 
     if dry_run:
         _logger.info(
@@ -368,6 +458,8 @@ async def run_retention_executor(
             human_chat_messages_to_redact=len(human_plan.chat_messages_to_redact),
             human_consent_ip_hashes_to_null=len(human_plan.consent_ip_hashes_to_null),
             guest_principals_to_anonymize=len(human_plan.guest_principals_to_anonymize),
+            openrouter_pkce_flows_to_delete=len(openrouter_plan.pkce_flows_to_delete),
+            revoked_credential_envelopes_to_erase=len(openrouter_plan.revoked_credentials_to_erase),
         )
         return RetentionExecutionResult(
             dry_run=True,
@@ -395,6 +487,14 @@ async def run_retention_executor(
             now=now,
         )
         redacted_total += guest_chat_redacted_total
+        deleted_flow_total = await _delete_openrouter_pkce_flows(
+            session,
+            openrouter_plan.pkce_flows_to_delete,
+        )
+        erased_credential_total = await _erase_revoked_credential_envelopes(
+            session,
+            openrouter_plan.revoked_credentials_to_erase,
+        )
 
     _logger.info(
         "retention.applied",
@@ -403,6 +503,8 @@ async def run_retention_executor(
         human_chat_messages_redacted=redacted_total,
         human_consent_ip_hashes_nulled=nulled_total,
         guest_principals_anonymized=anonymized_total,
+        openrouter_pkce_flows_deleted=deleted_flow_total,
+        revoked_credential_envelopes_erased=erased_credential_total,
     )
     return RetentionExecutionResult(
         dry_run=False,
@@ -411,6 +513,8 @@ async def run_retention_executor(
         human_chat_messages_redacted=redacted_total,
         human_consent_ip_hashes_nulled=nulled_total,
         guest_principals_anonymized=anonymized_total,
+        openrouter_pkce_flows_deleted=deleted_flow_total,
+        revoked_credential_envelopes_erased=erased_credential_total,
     )
 
 

@@ -32,6 +32,9 @@ async def test_legal_documents_index_serves_hash_bound_tos_and_privacy() -> None
         assert "no cash prizes" in body
         assert "openrouter" in body
         assert "encrypted" in body
+    privacy = documents["PRIVACY"]["body"].lower()
+    assert "self-export" in privacy
+    assert "configured retention ttls" in privacy
     assert documents["RANKED"]["version_label"] != documents["TOS"]["version_label"]
     assert "persistent rating" in documents["RANKED"]["body"].lower()
 

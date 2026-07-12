@@ -785,7 +785,7 @@
         "A sentinel secret test scans logs, events, replay/export JSON, API reads, analytics, and frontend fixtures for absence."
       ],
       "notes": "Coordinate legal document content hashes so users re-consent when required.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-364",

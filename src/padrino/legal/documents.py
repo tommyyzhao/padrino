@@ -95,6 +95,15 @@ version, safe display label/suffix, and connection lifecycle timestamps. The
 raw credential is not stored in browser storage, events, replays, exports,
 analytics, or logs. Disconnect and account deletion erase the local envelope;
 Padrino may also attempt upstream key revocation when OpenRouter supports it.
+
+For promotional-credit play, Padrino retains an append-only integer-micro
+ledger of grants, holds, charges, releases, and bounded operator completion
+subsidies. Account deletion removes connection material and cancellable
+pre-launch holds while preserving pseudonymized required charge and replay
+audit records. You may request a self-export containing safe connection
+metadata and wallet ledger facts; it never includes credential envelopes,
+nonces, management handles, or authorization errors. Expired connection-flow
+bindings and revoked legacy envelopes are removed on configured retention TTLs.
 """
 
 _AGE_GATE_BODY = """\

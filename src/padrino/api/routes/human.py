@@ -90,8 +90,10 @@ from padrino.core.gdpr_export import (
     HumanDataExportBundle,
     HumanRatingEventExportInput,
     HumanRatingExportInput,
+    OpenRouterConnectionExportInput,
     PrincipalExportInput,
     SessionExportInput,
+    WalletLedgerExportInput,
     assemble_human_data_export,
 )
 from padrino.core.reveal import EndgameReveal
@@ -109,6 +111,7 @@ from padrino.db.models import (
     HumanTuringGuess,
     OpenRouterPkceFlow,
     Principal,
+    PromotionalCreditLedgerEntry,
     ProviderCredential,
 )
 from padrino.db.repositories import human_chat as human_chat_repo
@@ -119,6 +122,8 @@ from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
+from padrino.db.repositories import openrouter_platform_subkeys as platform_subkeys_repo
+from padrino.db.repositories import promotional_credit_ledger as promotional_credit_ledger_repo
 from padrino.db.repositories import provider_credentials as provider_credentials_repo
 from padrino.economics.human_cost_governance import (
     ACTION_CREATE,
@@ -1287,6 +1292,33 @@ async def get_me_export(
                 principal_id=ctx.principal_id,
             )
         ],
+        openrouter_connections=[
+            _openrouter_connection_export_input(row)
+            for row in (
+                await session.execute(
+                    select(ProviderCredential)
+                    .where(ProviderCredential.principal_id == ctx.principal_id)
+                    .order_by(
+                        ProviderCredential.provider,
+                        ProviderCredential.created_at,
+                        ProviderCredential.id,
+                    )
+                )
+            ).scalars()
+        ],
+        wallet_ledger_entries=[
+            _wallet_ledger_export_input(row)
+            for row in (
+                await session.execute(
+                    select(PromotionalCreditLedgerEntry)
+                    .where(PromotionalCreditLedgerEntry.principal_id == ctx.principal_id)
+                    .order_by(
+                        PromotionalCreditLedgerEntry.created_at,
+                        PromotionalCreditLedgerEntry.id,
+                    )
+                )
+            ).scalars()
+        ],
     )
 
 
@@ -1311,6 +1343,20 @@ async def post_me_delete(
         principal_id=ctx.principal_id,
         anonymized_token=anonymized_token,
         tombstoned_at=now,
+    )
+    await promotional_credit_ledger_repo.cancel_cancellable_reservations_for_principal(
+        session,
+        principal_id=ctx.principal_id,
+        now=now,
+    )
+    await platform_subkeys_repo.revoke_and_erase_for_principal(
+        session,
+        principal_id=ctx.principal_id,
+        revoked_at=now,
+    )
+    await provider_credentials_repo.delete_openrouter_pkce_flows_for_principal(
+        session,
+        principal_id=ctx.principal_id,
     )
     deleted = await principals_repo.anonymize_principal_for_delete(
         session,
@@ -1427,6 +1473,34 @@ def _human_rating_event_export_input(row: HumanRatingEvent) -> HumanRatingEventE
         before_sigma=row.before_sigma,
         after_mu=row.after_mu,
         after_sigma=row.after_sigma,
+        created_at=row.created_at,
+    )
+
+
+def _openrouter_connection_export_input(
+    row: ProviderCredential,
+) -> OpenRouterConnectionExportInput:
+    """Return safe connection lifecycle fields without envelope/key metadata."""
+    return OpenRouterConnectionExportInput(
+        id=row.id,
+        provider=row.provider,
+        label=row.label,
+        display_suffix=row.display_suffix,
+        created_at=row.created_at,
+        last_validated_at=row.last_validated_at,
+        revoked_at=row.revoked_at,
+    )
+
+
+def _wallet_ledger_export_input(
+    row: PromotionalCreditLedgerEntry,
+) -> WalletLedgerExportInput:
+    """Return immutable accounting facts without internal linkage/idempotency keys."""
+    return WalletLedgerExportInput(
+        id=row.id,
+        entry_type=row.entry_type,
+        amount_micros=row.amount_micros,
+        reason=row.reason,
         created_at=row.created_at,
     )
 

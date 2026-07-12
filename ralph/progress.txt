@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Credential/credit GDPR lifecycle (US-363): model player-owned credentials
+  and platform subkeys as local envelope lifecycles: self-exports project only
+  display/lifecycle and immutable integer-micro ledger facts, while deletion
+  clears envelopes, revokes subkeys, deletes PKCE bindings, and releases only
+  pre-launch holds. Keep required settled charges, game rows, and event hashes
+  intact. Retention must project only presence booleans for revoked envelope
+  bytes, use strict injected-TTL cutoffs, and make destructive counts
+  idempotent. Operational health must aggregate catalog, capabilities, and
+  integer-micro exposure without joining or emitting principal/model/key data.
 - Call-bound settlement (US-362): mint a charge idempotency key only from the
   persisted `LlmCall` UUID, convert every player-funded portion of a hold into
   paired immutable `CHARGE` / conversion-`RELEASE` entries, and link the
@@ -7332,3 +7341,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run
   pytest -m "not integration"` (3428 collected, 12 deselected). Frontend gates
   not run; story did not touch `web/dashboard`.
+
+## 2026-07-12T06:45 PDT - US-363
+- Extended authenticated human exports with deterministic, safe OpenRouter
+  connection lifecycle metadata and append-only integer-micro wallet facts;
+  envelope bytes, nonce, key version, management handles, PKCE digests, and
+  idempotency keys remain server-only.
+- Account deletion now cancels only pre-launch promotional holds through a
+  paired immutable release, locally revokes and erases provider/subkey
+  envelopes, removes PKCE bindings, and retains settled charge/replay audit.
+  Retention now applies configured strict TTLs to expired connection bindings
+  and any legacy revoked envelope bytes, with dry-run/applied count coverage.
+- Added secret-free OpenRouter operations health with catalog freshness,
+  encryption/management capability, aggregate promo liability/reservations,
+  and completion-reserve consumption. Updated the Privacy notice, changing its
+  content hash so existing consent checks require re-consent.
+- Added sentinel coverage across logs, event/replay/export JSON, API reads,
+  analytics, and dashboard test fixtures.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/{api/routes/{health,human}.py,core/gdpr_export.py,db/{retention,retention_executor}.py,db/repositories/{provider_credentials,openrouter_platform_subkeys,promotional_credit_ledger}.py,legal/documents.py,settings.py}`, `tests/{api/test_openrouter_gdpr_operations.py,db/test_openrouter_credential_retention.py,api/test_legal_documents_route.py,test_settings.py}`, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused GDPR/retention/export/delete/health/settings/legal
+  slice -> 42 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` -> 3423 passed
+  / 12 deselected. Frontend gates not run; story did not modify the dashboard.

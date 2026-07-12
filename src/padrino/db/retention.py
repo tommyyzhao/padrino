@@ -89,6 +89,24 @@ class GuestPrincipalRetentionInfo:
     idle_since: datetime | None
 
 
+@dataclass(frozen=True)
+class OpenRouterPkceFlowRetentionInfo:
+    """One short-lived OpenRouter connection flow eligible for deletion."""
+
+    id: uuid.UUID
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class RevokedCredentialRetentionInfo:
+    """One revoked credential whose legacy envelope bytes may still need erasure."""
+
+    id: uuid.UUID
+    revoked_at: datetime
+    ciphertext_present: bool
+    nonce_present: bool
+
+
 @dataclass
 class RetentionPlan:
     """Output of ``plan_retention``: the set of changes a guarded job should apply.
@@ -109,6 +127,8 @@ class HumanPiiRetentionPlan:
     chat_messages_to_redact: list[uuid.UUID] = field(default_factory=list)
     consent_ip_hashes_to_null: list[uuid.UUID] = field(default_factory=list)
     guest_principals_to_anonymize: list[uuid.UUID] = field(default_factory=list)
+    pkce_flows_to_delete: list[uuid.UUID] = field(default_factory=list)
+    revoked_credentials_to_erase: list[uuid.UUID] = field(default_factory=list)
     dry_run: bool = True
 
 
@@ -216,4 +236,32 @@ def plan_human_pii_retention(
         consent_ip_hashes_to_null=consent_ip_hashes_to_null,
         guest_principals_to_anonymize=guest_principals_to_anonymize,
         dry_run=dry_run,
+    )
+
+
+def plan_openrouter_credential_retention(
+    *,
+    flows: Sequence[OpenRouterPkceFlowRetentionInfo],
+    revoked_credentials: Sequence[RevokedCredentialRetentionInfo],
+    flow_retention_ttl_days: int,
+    revoked_credential_retention_ttl_days: int,
+    now: datetime,
+) -> HumanPiiRetentionPlan:
+    """Plan bounded cleanup of expired PKCE bindings and revoked envelopes.
+
+    Both cutoffs are strict: values exactly at their configured retention
+    boundary remain available for the full TTL.  Only an unexpected legacy
+    envelope on an already-revoked row is selected for erasure.
+    """
+    now = _aware(now)
+    flow_cutoff = now - timedelta(days=flow_retention_ttl_days)
+    credential_cutoff = now - timedelta(days=revoked_credential_retention_ttl_days)
+    return HumanPiiRetentionPlan(
+        pkce_flows_to_delete=[row.id for row in flows if _aware(row.expires_at) < flow_cutoff],
+        revoked_credentials_to_erase=[
+            row.id
+            for row in revoked_credentials
+            if (row.ciphertext_present or row.nonce_present)
+            and _aware(row.revoked_at) < credential_cutoff
+        ],
     )
