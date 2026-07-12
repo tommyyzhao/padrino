@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.db.models import LlmCall
+from padrino.openrouter.routing_metadata import sanitize_openrouter_routing_metadata
 
 
 async def record_call(
@@ -39,6 +40,14 @@ async def record_call(
     price_basis: str | None = None,
     price_table_version: str | None = None,
     provider_response_id: str | None = None,
+    openrouter_requested_model_slug: str | None = None,
+    openrouter_actual_model: str | None = None,
+    openrouter_actual_provider: str | None = None,
+    openrouter_actual_endpoint: str | None = None,
+    openrouter_generation_id: str | None = None,
+    openrouter_routing_metadata: dict[str, object] | None = None,
+    openrouter_catalog_snapshot_id: uuid.UUID | None = None,
+    openrouter_routing_policy_hash: str | None = None,
 ) -> LlmCall:
     """Insert one llm_call row and return the persisted ORM object."""
     obj = LlmCall(
@@ -62,6 +71,18 @@ async def record_call(
         price_basis=price_basis,
         price_table_version=price_table_version,
         provider_response_id=provider_response_id,
+        openrouter_requested_model_slug=openrouter_requested_model_slug,
+        openrouter_actual_model=openrouter_actual_model,
+        openrouter_actual_provider=openrouter_actual_provider,
+        openrouter_actual_endpoint=openrouter_actual_endpoint,
+        openrouter_generation_id=openrouter_generation_id,
+        openrouter_routing_metadata=(
+            sanitize_openrouter_routing_metadata(openrouter_routing_metadata)
+            if openrouter_routing_metadata is not None
+            else None
+        ),
+        openrouter_catalog_snapshot_id=openrouter_catalog_snapshot_id,
+        openrouter_routing_policy_hash=openrouter_routing_policy_hash,
     )
     session.add(obj)
     await session.flush()

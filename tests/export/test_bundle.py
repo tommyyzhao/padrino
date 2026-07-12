@@ -13,6 +13,7 @@ from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
 from padrino.core.rulesets import mini7_v1
+from padrino.db.models import LlmCall
 from padrino.db.repositories import (
     agent_builds as agent_builds_repo,
 )
@@ -167,6 +168,47 @@ async def test_export_game_round_trip_is_byte_identical(
     rendered = bundle_a.model_dump_json()
     assert _SECRET_AUTH_REF not in rendered
     assert "auth_secret_ref" not in rendered
+
+
+async def test_export_excludes_private_openrouter_routing_audit_and_human_key_material(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    game_id = await _seed_and_run_game(session_factory, hash_prefix="us349-export")
+    human_key_sentinel = "sha256:human-openrouter-key-must-not-export"
+    async with session_factory() as session, session.begin():
+        session.add(
+            LlmCall(
+                game_id=game_id,
+                public_player_id="P01",
+                phase="DAY_1_VOTE",
+                request_json={"prompt": "retained under raw-payload policy only"},
+                request_prompt_hash="e" * 64,
+                raw_response="raw provider response",
+                status="ok",
+                openrouter_requested_model_slug="openai/gpt-4o-mini",
+                openrouter_actual_model="openai/gpt-4o-mini-2024-07-18",
+                openrouter_actual_provider="OpenAI",
+                openrouter_generation_id="gen-private-audit",
+                openrouter_routing_metadata={
+                    "strategy": "auto",
+                    "attempt": 1,
+                    "key_hash": human_key_sentinel,
+                },
+                openrouter_routing_policy_hash="f" * 64,
+            )
+        )
+
+    async with session_factory() as session:
+        bundle = await export_game(session, game_id)
+
+    rendered = bundle.model_dump_json()
+    for forbidden in (
+        human_key_sentinel,
+        "gen-private-audit",
+        "openrouter_routing_metadata",
+        "raw provider response",
+    ):
+        assert forbidden not in rendered
 
 
 # --------------------------------------------------------------------------- #

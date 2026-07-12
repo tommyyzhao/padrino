@@ -172,6 +172,7 @@ async def project_agent_build(session: AsyncSession, agent_build_id: uuid.UUID) 
         adapter_version=ab.adapter_version,
         base_url=provider.base_url,
         auth_secret_ref=provider.auth_secret_ref,
+        catalog_snapshot_id=ab.catalog_snapshot_id,
     )
 
 

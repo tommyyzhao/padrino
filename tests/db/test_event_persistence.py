@@ -17,11 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.core.engine.role_assignment import assign_roles
 from padrino.core.enums import Faction, Role
+from padrino.core.observations import Observation
 from padrino.core.rulesets import mini7_v1
 from padrino.db.repositories import events as events_repo
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
+from padrino.llm.adapter import AdapterResult
 from padrino.llm.mock import DeterministicMockAdapter
+from padrino.openrouter.routing_metadata import OpenRouterCallAudit
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
 from tests.conftest import (
     make_mafia_win_script,
@@ -30,6 +33,18 @@ from tests.conftest import (
 )
 
 _GAME_SEED = "seed-persistence-001"
+
+
+class _OpenRouterAuditAdapter:
+    """Attach an already-sanitized OpenRouter audit record to scripted turns."""
+
+    def __init__(self, inner: DeterministicMockAdapter, audit: OpenRouterCallAudit) -> None:
+        self._inner = inner
+        self._audit = audit
+
+    async def complete(self, observation: Observation) -> AdapterResult:
+        result = await self._inner.complete(observation)
+        return result.model_copy(update={"openrouter_audit": self._audit})
 
 
 async def _seed_game_row(
@@ -159,9 +174,51 @@ async def test_llm_calls_persisted_per_adapter_call(
         assert row.request_prompt_hash  # non-empty hash
         assert row.status == "ok"
         assert row.agent_build_id is None  # no build mapping passed
+        assert row.openrouter_requested_model_slug is None
+        assert row.openrouter_actual_model is None
+        assert row.openrouter_routing_metadata is None
         # parsed_response is the JSON dump of AgentResponse
         assert isinstance(row.parsed_response, dict)
         assert "action" in row.parsed_response
+
+
+async def test_runner_persists_openrouter_audit_outside_the_event_hash_chain(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    mafia, town, _, _ = _split_factions()
+    script = make_mafia_win_script(mafia_ids=mafia, town_ids=town)
+    audit = OpenRouterCallAudit(
+        requested_model_slug="openai/gpt-4o-mini",
+        actual_model="openai/gpt-4o-mini-2024-07-18",
+        actual_provider="OpenAI",
+        actual_endpoint="https://provider.example/v1/chat",
+        generation_id="gen-runner-audit",
+        routing_metadata={"strategy": "auto", "attempt": 1, "is_byok": False},
+        routing_policy_hash="a" * 64,
+    )
+    adapter = _OpenRouterAuditAdapter(DeterministicMockAdapter(script), audit)
+    game_db_id = await _seed_game_row(session_factory, _GAME_SEED)
+    persistence = GamePersistence(session_factory=session_factory, game_id=game_db_id)
+
+    outcome = await run_game(
+        GameConfig(game_id="G-PERSIST-OPENROUTER", game_seed=_GAME_SEED, timeout_s=1.0),
+        adapter,
+        ranked=False,
+        persistence=persistence,
+    )
+
+    async with session_factory() as session:
+        rows = await llm_calls_repo.list_for_game(session, game_db_id)
+
+    assert len(rows) == len(outcome.llm_calls)
+    assert all(row.openrouter_requested_model_slug == "openai/gpt-4o-mini" for row in rows)
+    assert all(row.openrouter_actual_provider == "OpenAI" for row in rows)
+    assert all(row.openrouter_generation_id == "gen-runner-audit" for row in rows)
+    assert all(
+        row.openrouter_routing_metadata == {"strategy": "auto", "attempt": 1, "is_byok": False}
+        for row in rows
+    )
+    assert all("openrouter" not in event.body["payload"] for event in outcome.event_log.events)
 
 
 async def test_run_without_persistence_does_not_touch_db(

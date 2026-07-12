@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -154,7 +155,7 @@ def _build_adapter(
     )
 
 
-def _build_openrouter_adapter() -> LiteLlmAdapter:
+def _build_openrouter_adapter(*, catalog_snapshot_id: uuid.UUID | None = None) -> LiteLlmAdapter:
     policy = RoutingPolicy(
         primary_model="meta-llama/llama-3.3-70b-instruct",
         fallback_model=None,
@@ -178,6 +179,7 @@ def _build_openrouter_adapter() -> LiteLlmAdapter:
         prompt_version="prompt_classic15_v1_001",
         inference_params={"temperature": 0.7, "top_p": 1.0},
         adapter_version="litellm-1",
+        catalog_snapshot_id=catalog_snapshot_id,
     )
     return LiteLlmAdapter(
         routing_policy=policy,
@@ -262,6 +264,41 @@ def test_openrouter_request_uses_canonical_slug_headers_and_provider_preferences
             "zdr": True,
         }
     }
+
+
+def test_openrouter_response_attaches_safe_router_audit_to_adapter_result() -> None:
+    snapshot_id = uuid.uuid4()
+    response = _fake_completion(content=_valid_response_json(Action(type=ActionType.ABSTAIN)))
+    response.model = "openai/gpt-4o-mini-2024-07-18"
+    response._response_headers = {"x-generation-id": "gen-router-audit"}
+    response.openrouter_metadata = {
+        "strategy": "auto",
+        "attempt": 1,
+        "endpoints": {
+            "available": [
+                {
+                    "provider": "OpenAI",
+                    "model": "openai/gpt-4o-mini-2024-07-18",
+                    "endpoint": "https://provider.example/v1/chat?key=not-archived",
+                    "selected": True,
+                }
+            ]
+        },
+    }
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
+        result = asyncio.run(
+            _build_openrouter_adapter(catalog_snapshot_id=snapshot_id).complete(obs)
+        )
+
+    assert result.openrouter_audit is not None
+    assert result.openrouter_audit.requested_model_slug == "meta-llama/llama-3.3-70b-instruct"
+    assert result.openrouter_audit.actual_model == "openai/gpt-4o-mini-2024-07-18"
+    assert result.openrouter_audit.actual_provider == "OpenAI"
+    assert result.openrouter_audit.actual_endpoint == "https://provider.example/v1/chat"
+    assert result.openrouter_audit.generation_id == "gen-router-audit"
+    assert result.openrouter_audit.catalog_snapshot_id == snapshot_id
 
 
 def test_openrouter_provider_failure_redacts_resolved_key_from_result_and_log(

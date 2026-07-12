@@ -24,6 +24,7 @@ This module sits in the impure ``llm`` layer; pure-core code never imports it.
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
@@ -32,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from padrino.core.agents.contract import AgentResponse, ResponseError
 from padrino.core.observations import Observation
 from padrino.llm.retry import LlmCallFailed
+from padrino.openrouter.routing_metadata import OpenRouterCallAudit
 
 AdapterStatus = Literal[
     "ok",
@@ -158,6 +160,7 @@ class AdapterResult(BaseModel):
     cost_usd: float | None = None
     model_id: str | None = None
     provider_response_id: str | None = None
+    openrouter_audit: OpenRouterCallAudit | None = None
     status: AdapterStatus = "ok"
     error: str | None = None
     failure: LlmCallFailed | None = None
@@ -222,6 +225,7 @@ class AgentBuild(BaseModel):
     adapter_version: str
     base_url: str | None = None
     auth_secret_ref: str | None = Field(default=None, exclude=True, repr=False)
+    catalog_snapshot_id: uuid.UUID | None = None
 
 
 @runtime_checkable

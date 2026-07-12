@@ -566,6 +566,21 @@ class LlmCall(Base):
     funding_source: Mapped[str] = mapped_column(
         String, nullable=False, default="PLATFORM", server_default="PLATFORM"
     )
+    # OpenRouter's optional router metadata stays out of core events. Every
+    # field remains nullable so legacy and non-OpenRouter call rows retain
+    # their exact shape and semantics.
+    openrouter_requested_model_slug: Mapped[str | None] = mapped_column(String, nullable=True)
+    openrouter_actual_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    openrouter_actual_provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    openrouter_actual_endpoint: Mapped[str | None] = mapped_column(String, nullable=True)
+    openrouter_generation_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    openrouter_routing_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    openrouter_catalog_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("model_catalog_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    openrouter_routing_policy_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

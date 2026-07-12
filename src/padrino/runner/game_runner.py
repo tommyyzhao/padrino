@@ -811,6 +811,7 @@ async def _persist_llm_call(
     request_json = observation.model_dump(mode="json")
     failure = result.failure
     pricing = _pricing_stamp(persistence, result)
+    openrouter_audit = result.openrouter_audit
     async with _persistence_transaction(persistence) as session:
         await llm_calls_repo.record_call(
             session,
@@ -833,6 +834,30 @@ async def _persist_llm_call(
             price_basis=pricing.price_basis,
             price_table_version=pricing.price_table_version,
             provider_response_id=result.provider_response_id,
+            openrouter_requested_model_slug=(
+                openrouter_audit.requested_model_slug if openrouter_audit is not None else None
+            ),
+            openrouter_actual_model=(
+                openrouter_audit.actual_model if openrouter_audit is not None else None
+            ),
+            openrouter_actual_provider=(
+                openrouter_audit.actual_provider if openrouter_audit is not None else None
+            ),
+            openrouter_actual_endpoint=(
+                openrouter_audit.actual_endpoint if openrouter_audit is not None else None
+            ),
+            openrouter_generation_id=(
+                openrouter_audit.generation_id if openrouter_audit is not None else None
+            ),
+            openrouter_routing_metadata=(
+                openrouter_audit.routing_metadata if openrouter_audit is not None else None
+            ),
+            openrouter_catalog_snapshot_id=(
+                openrouter_audit.catalog_snapshot_id if openrouter_audit is not None else None
+            ),
+            openrouter_routing_policy_hash=(
+                openrouter_audit.routing_policy_hash if openrouter_audit is not None else None
+            ),
         )
 
 

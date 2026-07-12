@@ -55,6 +55,7 @@ from padrino.llm.retry import (
 )
 from padrino.llm.secrets import resolve_secret
 from padrino.observability.metrics import record_llm_call
+from padrino.openrouter.routing_metadata import OpenRouterCallAudit, extract_openrouter_call_audit
 
 _logger = structlog.get_logger("padrino.llm")
 
@@ -306,6 +307,7 @@ class LiteLlmAdapter:
                 status="provider_error",
                 error=f"{exc.error_kind}: {error_message}",
                 failure=failure,
+                openrouter_audit=self._openrouter_audit(None),
             )
         except Exception as exc:
             latency_ms = _elapsed_ms(start)
@@ -327,6 +329,7 @@ class LiteLlmAdapter:
                 model_id=model_id,
                 status="provider_error",
                 error=f"{error_kind}: {error_message}",
+                openrouter_audit=self._openrouter_audit(None),
             )
 
         latency_ms = _elapsed_ms(start)
@@ -351,6 +354,19 @@ class LiteLlmAdapter:
             model_id=model_id,
             provider_response_id=_extract_response_id(response),
             status=status,
+            openrouter_audit=self._openrouter_audit(response),
+        )
+
+    def _openrouter_audit(self, response: object | None) -> OpenRouterCallAudit | None:
+        """Return the safe OpenRouter audit snapshot, if this adapter uses it."""
+        openrouter = self._policy.openrouter
+        if openrouter is None:
+            return None
+        return extract_openrouter_call_audit(
+            response,
+            requested_model_slug=self._policy.primary_model,
+            provider_preferences=openrouter.provider.as_request_dict(),
+            catalog_snapshot_id=self._build.catalog_snapshot_id,
         )
 
 
