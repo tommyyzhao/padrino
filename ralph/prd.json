@@ -306,7 +306,7 @@
         "Tests register a synthetic OpenAI-compatible provider and complete a stubbed heterogeneous call."
       ],
       "notes": "Security prerequisite for OpenRouter.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-341",

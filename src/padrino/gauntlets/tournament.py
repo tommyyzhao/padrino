@@ -170,6 +170,8 @@ async def project_agent_build(session: AsyncSession, agent_build_id: uuid.UUID) 
         prompt_version=pv.version,
         inference_params=inference,
         adapter_version=ab.adapter_version,
+        base_url=provider.base_url,
+        auth_secret_ref=provider.auth_secret_ref,
     )
 
 

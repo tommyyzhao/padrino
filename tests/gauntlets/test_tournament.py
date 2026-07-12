@@ -249,6 +249,12 @@ async def test_project_agent_build_flattens_chain(tmp_path: Path) -> None:
         assert build.provider == "mockprov"
         assert build.model_id == "mock/model-P01"
         assert build.prompt_version == CANONICAL_VERSION
+        assert build.base_url is None
+        assert build.auth_secret_ref == "env:MOCK_KEY"
+        # The projection transports only an opaque reference; the value that
+        # reference resolves to must never be serialized with the runtime build.
+        assert "auth_secret_ref" not in build.model_dump()
+        assert "MOCK_KEY" not in build.model_dump_json()
         # model_config defaults flow into inference_params.
         assert build.inference_params["temperature"] == pytest.approx(mini7_v1.TEMPERATURE)
         assert build.inference_params["top_p"] == pytest.approx(mini7_v1.TOP_P)

@@ -113,6 +113,19 @@ async def test_create_model_provider(client: AsyncClient) -> None:
     assert "auth_secret_ref" not in provider
 
 
+async def test_list_model_providers_does_not_expose_secret_references(
+    client: AsyncClient,
+) -> None:
+    await _create_provider(client)
+
+    response = await client.get("/model-providers")
+
+    assert response.status_code == 200, response.text
+    rendered = response.text
+    assert "auth_secret_ref" not in rendered
+    assert "env:CEREBRAS_API_KEY" not in rendered
+
+
 async def test_create_model_config_roundtrip(client: AsyncClient) -> None:
     provider = await _create_provider(client)
     config = await _create_model_config(client, str(provider["id"]))

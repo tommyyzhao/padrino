@@ -3,6 +3,12 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Generic provider runtime assembly (US-340): project `ModelProvider.name`,
+  `base_url`, and the opaque `auth_secret_ref` into the impure `AgentBuild`
+  value. Mark `auth_secret_ref` `exclude=True` / `repr=False`, resolve it only
+  inside adapter construction, and translate `SecretResolutionError` to a
+  redacted provider-configuration error. Adapter assembly must consume those
+  persisted fields directly rather than maintaining a provider-name map.
 - Custom-rules end-to-end proof (US-339): derive the scripted action plan only
   after launch from the materialized `GameSeat` roles and the archived
   `GameRulesSnapshot`. Use active Tracker/Watcher actions and assert both their
@@ -6512,3 +6518,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration" --cache-clear` completed with an empty
   regenerated failure cache. Frontend gates not run; no frontend files changed.
+
+## 2026-07-11 PDT - US-340
+- Projected persisted `ModelProvider` name, base URL, and opaque credential
+  reference through the impure `AgentBuild` runtime value. The credential
+  reference is excluded from Pydantic serialization/repr and is never resolved
+  during database projection.
+- Removed the four-provider adapter map: heterogeneous assembly now honors
+  every persisted provider configuration, eagerly validates its reference, and
+  reports missing, unknown-scheme, or insecure references without disclosing
+  the reference, path, or raw secret.
+- Added synthetic OpenAI-compatible adapter-call coverage plus provider-list
+  redaction coverage, and updated the optional real heterogeneous gauntlet to
+  assemble adapters through persisted projections.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/llm/adapter.py`,
+  `src/padrino/gauntlets/heterogeneous.py`,
+  `src/padrino/gauntlets/tournament.py`, `tests/gauntlets/test_heterogeneous.py`,
+  `tests/gauntlets/test_tournament.py`, `tests/api/test_admin_routes.py`,
+  `tests/integration/test_heterogeneous_gauntlet.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/gauntlets/test_heterogeneous.py tests/gauntlets/test_tournament.py::test_project_agent_build_flattens_chain -q`
+  -> 4 failures before implementation; focused GREEN
+  `uv run pytest tests/gauntlets/test_heterogeneous.py tests/gauntlets/test_tournament.py tests/api/test_admin_routes.py -q`
+  -> 24 passed; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
+  3153 passed / 51 skipped / 10 deselected. Frontend gates not run; story did
+  not touch `web/dashboard`.

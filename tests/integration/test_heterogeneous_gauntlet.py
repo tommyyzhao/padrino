@@ -46,11 +46,10 @@ from padrino.gauntlets.completion import finalize_gauntlet_if_done
 from padrino.gauntlets.evaluation import evaluate_gauntlet
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.scheduler import create_gauntlet, derive_game_seed
-from padrino.gauntlets.tournament import run_tournament_from_roster
+from padrino.gauntlets.tournament import project_agent_build, run_tournament_from_roster
 from padrino.llm.adapter import AdapterResult, AdapterStatus, AgentBuild
 from padrino.llm.prompts import (
     CANONICAL_RESPONSE_SCHEMA,
-    CANONICAL_VERSION,
     iter_canonical_prompts,
 )
 from padrino.ratings.openskill_service import INITIAL_MU, INITIAL_SIGMA
@@ -70,8 +69,8 @@ _FAILURE_STATUSES: frozenset[AdapterStatus] = frozenset(
 )
 _REQUIRED_KEYS = ("CEREBRAS_API_KEY", "DEEPINFRA_API_KEY", "XIAOMI_API_KEY")
 
-# (provider, litellm_model_id, display_name). The provider string must match
-# a key in ``padrino.gauntlets.heterogeneous.provider_endpoints``.
+# (provider, litellm_model_id, display_name). The provider configuration is
+# projected from its persisted ModelProvider row at adapter assembly time.
 _GLM = ("cerebras", "cerebras/zai-glm-4.7", "Cerebras GLM-4.7")
 _DEEPSEEK = ("deepinfra", "deepinfra/deepseek-ai/DeepSeek-V4-Flash", "DeepInfra DeepSeek-V4-Flash")
 _GEMMA = ("deepinfra", "deepinfra/google/gemma-4-26B-A4B-it", "DeepInfra Gemma-4-26B-A4B-it")
@@ -183,22 +182,15 @@ async def test_heterogeneous_gauntlet_runs(
 
         league_id, prompt_version_id, ab_by_model = await _seed_heterogeneous_admin(session_factory)
 
-        # seat -> DB agent_build id (for ranking attribution) and seat -> llm
-        # AgentBuild value object (for adapter construction).
+        # seat -> DB agent_build id (for ranking attribution) and its projected
+        # persisted provider runtime configuration (for adapter construction).
         agent_builds_by_seat: dict[str, uuid.UUID] = {}
         agent_build_assignments: dict[str, AgentBuild] = {}
-        for seat, (provider_name, litellm_model_id, _display) in _ROSTER.items():
-            agent_builds_by_seat[seat] = ab_by_model[litellm_model_id]
-            agent_build_assignments[seat] = AgentBuild(
-                provider=provider_name,
-                model_id=litellm_model_id,
-                prompt_version=CANONICAL_VERSION,
-                inference_params={
-                    "temperature": settings.padrino_temperature,
-                    "top_p": settings.padrino_top_p,
-                },
-                adapter_version=_HET_ADAPTER_VERSION,
-            )
+        async with session_factory() as session:
+            for seat, (_provider_name, litellm_model_id, _display) in _ROSTER.items():
+                build_id = ab_by_model[litellm_model_id]
+                agent_builds_by_seat[seat] = build_id
+                agent_build_assignments[seat] = await project_agent_build(session, build_id)
 
         roster = [agent_builds_by_seat[f"P{i + 1:02d}"] for i in range(mini7_v1.PLAYER_COUNT)]
         gauntlet_seed = "integration-heterogeneous-001"

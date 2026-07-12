@@ -100,7 +100,9 @@ class AgentBuild(BaseModel):
     Decoupled from :class:`padrino.db.models.AgentBuild` (the SQLAlchemy row) so
     the LLM layer never imports from the DB layer. Adapters consume this object
     to pick the provider/model and inject inference parameters; the ORM row is
-    flattened into this shape at the seam where the runner is configured.
+    flattened into this shape at the seam where the runner is configured. The
+    provider credential remains an opaque reference: its resolved value never
+    enters this model and ``auth_secret_ref`` is excluded from serialization.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -110,6 +112,8 @@ class AgentBuild(BaseModel):
     prompt_version: str
     inference_params: dict[str, Any] = Field(default_factory=dict)
     adapter_version: str
+    base_url: str | None = None
+    auth_secret_ref: str | None = Field(default=None, exclude=True, repr=False)
 
 
 @runtime_checkable
