@@ -8,12 +8,14 @@ identity. That is the seam that turns the gauntlet into a head-to-head
 benchmark: the leaderboard's per-model rating deltas then reflect
 competition between models rather than self-play variance.
 
-Each seat gets a single-host :class:`RoutingPolicy` — no different-model
-fallback and no same-model alternate host. A heterogeneous gauntlet measures
-the model assigned to each seat, so silently routing a failed Cerebras call
-to Z.AI (the US-079 same-model fallback) would muddy attribution. The
-same-model fallback MECHANISM stays available for single-model runs; it is
-simply not engaged here.
+Each non-OpenRouter seat gets a single-host :class:`RoutingPolicy` — no
+different-model fallback and no same-model alternate host. An OpenRouter seat
+also keeps one canonical requested model, while its explicit provider policy
+may permit router fallback within that selected model. A heterogeneous
+gauntlet measures the model assigned to each seat, so silently routing a
+failed Cerebras call to Z.AI (the US-079 same-model fallback) would muddy
+attribution. The same-model fallback MECHANISM stays available for
+single-model runs; it is simply not engaged here.
 
 Lives in the impure ``gauntlets`` layer; pure-core never imports it.
 """
@@ -54,22 +56,42 @@ def build_heterogeneous_adapter(
         if system_prompts_by_role is not None
         else canonical_prompts_by_role()
     )
-    resolved_timeout = (
-        timeout_s if timeout_s is not None else float(settings.padrino_llm_timeout_seconds)
-    )
     adapters: dict[str, LlmAdapter] = {}
     for seat, build in agent_build_assignments.items():
-        if build.auth_secret_ref is None:
+        is_openrouter = build.provider.casefold() == "openrouter"
+        auth_secret_ref = build.auth_secret_ref
+        if auth_secret_ref is None and is_openrouter:
+            auth_secret_ref = settings.padrino_openrouter_inference_key_ref
+        if auth_secret_ref is None:
             raise ValueError(
                 f"seat {seat!r}: provider {build.provider!r} credential configuration is missing"
             )
+        resolved_timeout = (
+            timeout_s
+            if timeout_s is not None
+            else (
+                settings.padrino_openrouter_timeout_seconds
+                if is_openrouter
+                else float(settings.padrino_llm_timeout_seconds)
+            )
+        )
+        routing_policy = (
+            settings.build_openrouter_routing_policy(build.model_id)
+            if is_openrouter
+            else RoutingPolicy(primary_model=build.model_id, fallback_model=None)
+        )
+        api_base = (
+            build.base_url
+            if build.base_url is not None
+            else (settings.padrino_openrouter_base_url if is_openrouter else None)
+        )
         try:
             adapters[seat] = LiteLlmAdapter(
-                routing_policy=RoutingPolicy(primary_model=build.model_id, fallback_model=None),
+                routing_policy=routing_policy,
                 agent_build=build,
                 timeout_s=resolved_timeout,
-                auth_secret_ref=build.auth_secret_ref,
-                api_base=build.base_url,
+                auth_secret_ref=auth_secret_ref,
+                api_base=api_base,
                 system_prompts_by_role=prompts,
             )
         except SecretResolutionError:

@@ -28,6 +28,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Final
 
 import litellm
+import structlog
 
 from padrino.core.agents.contract import (
     AgentResponse,
@@ -54,6 +55,8 @@ from padrino.llm.retry import (
 )
 from padrino.llm.secrets import resolve_secret
 from padrino.observability.metrics import record_llm_call
+
+_logger = structlog.get_logger("padrino.llm")
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are a player in a hidden-role social-deduction game. "
@@ -118,6 +121,8 @@ class LiteLlmAdapter:
         self._api_base = api_base
         self._policy = routing_policy
         self._build = agent_build
+        if routing_policy.openrouter is not None and api_base is None:
+            raise ValueError("OpenRouter adapters require an explicit api_base")
         # Resolve each same-model host's credential at construction too, so a
         # misconfigured Z.AI key surfaces at boot rather than only when the
         # primary host happens to fail. The resolved value is cached alongside
@@ -150,7 +155,11 @@ class LiteLlmAdapter:
             observation,
             self._policy.primary_model,
             api_base=self._api_base,
-            auth_secret=self._auth_secret if self._api_base is not None else None,
+            auth_secret=(
+                self._auth_secret
+                if self._api_base is not None or self._policy.openrouter is not None
+                else None
+            ),
         )
         attempts.append(primary)
 
@@ -197,7 +206,12 @@ class LiteLlmAdapter:
             self.last_attempts = tuple(attempts)
             return _with_coerced_response(failed, observation)
 
-        fallback = await self._call_model(observation, self._policy.fallback_model)
+        fallback = await self._call_model(
+            observation,
+            self._policy.fallback_model,
+            api_base=self._api_base if self._policy.openrouter is not None else None,
+            auth_secret=self._auth_secret if self._policy.openrouter is not None else None,
+        )
         if fallback.error is None:
             promoted = fallback.model_copy(update={"status": "fallback_ok"})
             attempts.append(promoted)
@@ -246,6 +260,12 @@ class LiteLlmAdapter:
             kwargs["api_base"] = api_base
         if auth_secret is not None:
             kwargs["api_key"] = auth_secret
+        if self._policy.openrouter is not None:
+            kwargs["custom_llm_provider"] = "openrouter"
+            kwargs["extra_headers"] = self._policy.openrouter.request_headers()
+            kwargs["extra_body"] = {
+                "provider": self._policy.openrouter.provider.as_request_dict(),
+            }
         start = time.monotonic()
         # Deterministic jitter seed: bind to the observation contents so a
         # replay of the same observation produces an identical backoff schedule.
@@ -263,37 +283,50 @@ class LiteLlmAdapter:
             )
         except RetryExhausted as exc:
             latency_ms = _elapsed_ms(start)
+            error_message = _redact_error_message(exc.error_message, auth_secret)
             failure = LlmCallFailed(
                 error_kind=exc.error_kind,
-                error_message=exc.error_message,
+                error_message=error_message,
                 attempts=exc.attempts,
+            )
+            _log_provider_failure(
+                model_id=model_id,
+                error_kind=exc.error_kind,
+                error_message=error_message,
             )
             record_llm_call(model_id=model_id, status="provider_error", latency_ms=latency_ms)
             return AdapterResult(
                 raw_response="",
                 parsed_response=ResponseError(
                     reason="SCHEMA_VIOLATION",
-                    details=f"{exc.error_kind}: {exc.error_message}",
+                    details=f"{exc.error_kind}: {error_message}",
                 ),
                 latency_ms=latency_ms,
                 model_id=model_id,
                 status="provider_error",
-                error=f"{exc.error_kind}: {exc.error_message}",
+                error=f"{exc.error_kind}: {error_message}",
                 failure=failure,
             )
         except Exception as exc:
             latency_ms = _elapsed_ms(start)
+            error_kind = type(exc).__name__
+            error_message = _redact_error_message(str(exc), auth_secret)
+            _log_provider_failure(
+                model_id=model_id,
+                error_kind=error_kind,
+                error_message=error_message,
+            )
             record_llm_call(model_id=model_id, status="provider_error", latency_ms=latency_ms)
             return AdapterResult(
                 raw_response="",
                 parsed_response=ResponseError(
                     reason="SCHEMA_VIOLATION",
-                    details=f"{type(exc).__name__}: {exc}",
+                    details=f"{error_kind}: {error_message}",
                 ),
                 latency_ms=latency_ms,
                 model_id=model_id,
                 status="provider_error",
-                error=f"{type(exc).__name__}: {exc}",
+                error=f"{error_kind}: {error_message}",
             )
 
         latency_ms = _elapsed_ms(start)
@@ -323,6 +356,23 @@ class LiteLlmAdapter:
 
 def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
+
+
+def _redact_error_message(message: str, secret: str | None) -> str:
+    """Remove the resolved credential from provider-originated diagnostics."""
+    if secret is None or not secret:
+        return message
+    return message.replace(secret, "[redacted]")
+
+
+def _log_provider_failure(*, model_id: str, error_kind: str, error_message: str) -> None:
+    """Emit a redacted provider failure without request/credential fields."""
+    _logger.warning(
+        "llm.provider_failure",
+        model_id=model_id,
+        error_kind=error_kind,
+        error_message=error_message,
+    )
 
 
 def _extract_text(response: Any) -> str:

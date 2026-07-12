@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 from starlette.requests import Request
 
 from padrino.api.routes.lobbies import ranked_human_rating_enabled_from_request
@@ -213,6 +214,67 @@ def test_env_none_disables_oauth_max_token_age(monkeypatch: pytest.MonkeyPatch) 
 def test_env_override_xiaomi_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XIAOMI_BASE_URL", "https://xiaomi.example.test/v1")
     assert _fresh().xiaomi_base_url == "https://xiaomi.example.test/v1"
+
+
+# ---------------------------------------------------------------------------
+# US-341: OpenRouter deployment configuration
+# ---------------------------------------------------------------------------
+
+
+def test_openrouter_settings_are_safe_and_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "PADRINO_OPENROUTER_INFERENCE_KEY_REF",
+        "PADRINO_OPENROUTER_MANAGEMENT_KEY_REF",
+        "PADRINO_OPENROUTER_BASE_URL",
+        "PADRINO_OPENROUTER_APP_URL",
+        "PADRINO_OPENROUTER_APP_TITLE",
+        "PADRINO_OPENROUTER_DEFAULT_ZDR",
+        "PADRINO_OPENROUTER_TIMEOUT_SECONDS",
+        "PADRINO_OPENROUTER_CATALOG_SYNC_INTERVAL_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = _fresh()
+
+    assert settings.padrino_openrouter_inference_key_ref is None
+    assert settings.padrino_openrouter_management_key_ref is None
+    assert settings.padrino_openrouter_base_url == "https://openrouter.ai/api/v1"
+    assert settings.padrino_openrouter_app_url == "https://github.com/tommyyzhao/padrino"
+    assert settings.padrino_openrouter_app_title == "Padrino"
+    assert settings.padrino_openrouter_default_zdr is True
+    assert settings.padrino_openrouter_timeout_seconds == 45.0
+    assert settings.padrino_openrouter_catalog_sync_interval_seconds == 3600
+
+
+def test_openrouter_key_settings_require_opaque_secret_references() -> None:
+    with pytest.raises(ValidationError, match="opaque secret reference"):
+        Settings(
+            _env_file=None,
+            padrino_openrouter_inference_key_ref="sk-live-secret-must-not-be-configured-here",
+        )
+    with pytest.raises(ValidationError, match="opaque secret reference"):
+        Settings(
+            _env_file=None,
+            padrino_openrouter_management_key_ref="sk-live-secret-must-not-be-configured-here",
+        )
+
+
+def test_openrouter_routing_policy_uses_human_safe_casual_defaults() -> None:
+    settings = Settings(
+        _env_file=None,
+        padrino_openrouter_app_url="https://padrino.example.test",
+        padrino_openrouter_app_title="Padrino Test",
+    )
+
+    routing = settings.build_openrouter_routing_policy("meta-llama/llama-3.3-70b-instruct")
+
+    assert routing.primary_model == "meta-llama/llama-3.3-70b-instruct"
+    assert routing.fallback_model is None
+    assert routing.openrouter is not None
+    assert routing.openrouter.app_url == "https://padrino.example.test"
+    assert routing.openrouter.app_title == "Padrino Test"
+    assert routing.openrouter.provider.allow_fallbacks is True
+    assert routing.openrouter.provider.zdr is True
 
 
 # ---------------------------------------------------------------------------

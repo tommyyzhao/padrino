@@ -17,6 +17,9 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
+from pydantic import ValidationError
+from structlog.testing import LogCapture
 
 from padrino.core.agents.contract import AgentResponse, ResponseError
 from padrino.core.engine.actions import Action
@@ -29,6 +32,9 @@ from padrino.llm.adapter import (
     AdapterResult,
     AgentBuild,
     LlmAdapter,
+    OpenRouterMaxPrice,
+    OpenRouterProviderPreferences,
+    OpenRouterRequestPolicy,
     RoutingPolicy,
     SameModelHost,
 )
@@ -148,6 +154,40 @@ def _build_adapter(
     )
 
 
+def _build_openrouter_adapter() -> LiteLlmAdapter:
+    policy = RoutingPolicy(
+        primary_model="meta-llama/llama-3.3-70b-instruct",
+        fallback_model=None,
+        openrouter=OpenRouterRequestPolicy(
+            app_url="https://padrino.example.test",
+            app_title="Padrino Test",
+            provider=OpenRouterProviderPreferences(
+                sort="latency",
+                order=("provider-a", "provider-b"),
+                only=("provider-a", "provider-b"),
+                allow_fallbacks=True,
+                require_parameters=True,
+                max_price=OpenRouterMaxPrice(prompt=1.25, completion=2.5, request=0.01),
+                zdr=True,
+            ),
+        ),
+    )
+    build = AgentBuild(
+        provider="openrouter",
+        model_id="meta-llama/llama-3.3-70b-instruct",
+        prompt_version="prompt_classic15_v1_001",
+        inference_params={"temperature": 0.7, "top_p": 1.0},
+        adapter_version="litellm-1",
+    )
+    return LiteLlmAdapter(
+        routing_policy=policy,
+        agent_build=build,
+        timeout_s=45.0,
+        auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
+        api_base="https://openrouter.ai/api/v1",
+    )
+
+
 def test_litellm_adapter_satisfies_protocol() -> None:
     adapter = _build_adapter()
     assert isinstance(adapter, LlmAdapter)
@@ -190,6 +230,81 @@ def test_primary_api_base_forwards_endpoint_and_cached_secret() -> None:
     call_kwargs = mock_acomp.call_args.kwargs
     assert call_kwargs["api_base"] == "https://token-plan-sgp.xiaomimimo.com/v1"
     assert call_kwargs["api_key"] == "test-key-value"
+
+
+def test_openrouter_request_uses_canonical_slug_headers_and_provider_preferences() -> None:
+    response = _fake_completion(content=_valid_response_json(Action(type=ActionType.ABSTAIN)))
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)) as mock_acomp:
+        adapter = _build_openrouter_adapter()
+        result = asyncio.run(adapter.complete(obs))
+
+    assert result.status == "ok"
+    kwargs = mock_acomp.call_args.kwargs
+    assert kwargs["model"] == "meta-llama/llama-3.3-70b-instruct"
+    assert kwargs["custom_llm_provider"] == "openrouter"
+    assert kwargs["api_base"] == "https://openrouter.ai/api/v1"
+    assert kwargs["api_key"] == "test-key-value"
+    assert kwargs["extra_headers"] == {
+        "HTTP-Referer": "https://padrino.example.test",
+        "X-OpenRouter-Title": "Padrino Test",
+        "X-OpenRouter-Metadata": "enabled",
+    }
+    assert kwargs["extra_body"] == {
+        "provider": {
+            "sort": "latency",
+            "order": ["provider-a", "provider-b"],
+            "only": ["provider-a", "provider-b"],
+            "allow_fallbacks": True,
+            "require_parameters": True,
+            "max_price": {"prompt": 1.25, "completion": 2.5, "request": 0.01},
+            "zdr": True,
+        }
+    }
+
+
+def test_openrouter_provider_failure_redacts_resolved_key_from_result_and_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "openrouter-test-key-that-must-never-appear"
+    monkeypatch.setenv(_AUTH_SECRET_ENV, sentinel)
+    capture = LogCapture()
+    original_config = structlog.get_config()
+    structlog.reset_defaults()
+    structlog.configure(processors=[capture], cache_logger_on_first_use=False)
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    try:
+        with patch(
+            ACOMPLETION_PATH,
+            new=AsyncMock(side_effect=RuntimeError(f"Authorization: Bearer {sentinel}")),
+        ):
+            result = asyncio.run(_build_openrouter_adapter().complete(obs))
+    finally:
+        structlog.reset_defaults()
+        structlog.configure(**original_config)
+
+    rendered = f"{result.error}\n{result.parsed_response}\n{capture.entries}"
+    assert result.status == "primary_failed"
+    assert sentinel not in rendered
+    assert "[redacted]" in rendered
+
+
+def test_openrouter_policy_rejects_invalid_routing_values_and_noncanonical_models() -> None:
+    with pytest.raises(ValidationError, match="provider slugs must not contain duplicates"):
+        OpenRouterProviderPreferences(order=("provider-a", "provider-a"))
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        OpenRouterMaxPrice(prompt=-0.01)
+    with pytest.raises(ValidationError, match="canonical provider/model slug"):
+        RoutingPolicy(
+            primary_model="not-a-canonical-slug",
+            fallback_model=None,
+            openrouter=OpenRouterRequestPolicy(
+                app_url="https://padrino.example.test",
+                app_title="Padrino Test",
+            ),
+        )
 
 
 def test_success_path_records_single_attempt() -> None:

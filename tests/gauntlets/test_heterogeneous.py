@@ -117,6 +117,40 @@ def test_any_configured_openai_compatible_provider_is_accepted(
     assert adapter._api_base == "https://synthetic.example/v1"
 
 
+def test_openrouter_build_uses_platform_settings_without_a_raw_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PADRINO_OPENROUTER_INFERENCE_KEY", "platform-router-secret")
+    settings = Settings(
+        _env_file=None,
+        padrino_openrouter_inference_key_ref="env:PADRINO_OPENROUTER_INFERENCE_KEY",
+        padrino_openrouter_base_url="https://router.example.test/v1",
+        padrino_openrouter_app_url="https://padrino.example.test",
+        padrino_openrouter_app_title="Padrino Test",
+        padrino_openrouter_timeout_seconds=12.5,
+    )
+    mux = build_heterogeneous_adapter(
+        {
+            "P01": _build(
+                "openrouter",
+                "meta-llama/llama-3.3-70b-instruct",
+            )
+        },
+        settings=settings,
+    )
+
+    adapter = mux._adapters["P01"]
+    assert isinstance(adapter, LiteLlmAdapter)
+    assert adapter._api_base == "https://router.example.test/v1"
+    assert adapter._timeout_s == 12.5
+    assert adapter._auth_secret == "platform-router-secret"
+    assert adapter._policy.openrouter is not None
+    assert adapter._policy.openrouter.app_url == "https://padrino.example.test"
+    assert adapter._policy.openrouter.app_title == "Padrino Test"
+    assert adapter._policy.openrouter.provider.allow_fallbacks is True
+    assert adapter._policy.openrouter.provider.zdr is True
+
+
 def test_missing_secret_reference_fails_before_game_start() -> None:
     assignments = {
         "P01": _build(

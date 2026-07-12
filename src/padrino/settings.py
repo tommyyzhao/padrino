@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import functools
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from padrino.legal.documents import DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS
 
 if TYPE_CHECKING:
-    from padrino.llm.adapter import RoutingPolicy
+    from padrino.llm.adapter import OpenRouterProviderPreferences, RoutingPolicy
 
 
 class Settings(BaseSettings):
@@ -44,6 +45,49 @@ class Settings(BaseSettings):
     padrino_llm_timeout_seconds: int = 45
     padrino_temperature: float = 0.7
     padrino_top_p: float = 1.0
+
+    # OpenRouter deployment configuration (US-341). Key references remain
+    # opaque deployment pointers; the raw values are resolved only inside the
+    # impure provider shell. The management reference is intentionally
+    # separate so it can never be reused for inference completions.
+    padrino_openrouter_inference_key_ref: str | None = None
+    padrino_openrouter_management_key_ref: str | None = None
+    padrino_openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    padrino_openrouter_app_url: str = "https://github.com/tommyyzhao/padrino"
+    padrino_openrouter_app_title: str = "Padrino"
+    padrino_openrouter_default_zdr: bool = True
+    padrino_openrouter_timeout_seconds: float = Field(default=45.0, gt=0)
+    padrino_openrouter_catalog_sync_interval_seconds: int = Field(default=3600, gt=0)
+
+    @field_validator(
+        "padrino_openrouter_inference_key_ref",
+        "padrino_openrouter_management_key_ref",
+    )
+    @classmethod
+    def _validate_openrouter_secret_reference(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized.startswith(("env:", "file:")):
+            raise ValueError("OpenRouter keys must be configured as opaque secret references")
+        return normalized
+
+    @field_validator("padrino_openrouter_base_url", "padrino_openrouter_app_url")
+    @classmethod
+    def _validate_openrouter_https_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("OpenRouter URLs must use HTTPS")
+        return normalized
+
+    @field_validator("padrino_openrouter_app_title")
+    @classmethod
+    def _validate_openrouter_app_title(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("OpenRouter app title must not be blank")
+        return normalized
 
     # Model routing
     padrino_primary_model: str = "cerebras/zai-glm-4.7"
@@ -461,6 +505,39 @@ class Settings(BaseSettings):
             primary_model=primary,
             fallback_model=fallback,
             same_model_hosts=same_model_hosts,
+        )
+
+    def build_openrouter_routing_policy(
+        self,
+        canonical_model_slug: str,
+        *,
+        provider_preferences: OpenRouterProviderPreferences | None = None,
+    ) -> RoutingPolicy:
+        """Build a single-model OpenRouter policy with human-safe defaults.
+
+        Casual play keeps OpenRouter's provider fallback enabled, but only
+        within the selected canonical model. Future scientific/ranked callers
+        can pass explicit preferences with ``allow_fallbacks=False`` and a
+        stricter ZDR/parameter policy without changing the generic adapter.
+        """
+        from padrino.llm.adapter import (
+            OpenRouterProviderPreferences,
+            OpenRouterRequestPolicy,
+            RoutingPolicy,
+        )
+
+        preferences = provider_preferences or OpenRouterProviderPreferences(
+            allow_fallbacks=True,
+            zdr=self.padrino_openrouter_default_zdr,
+        )
+        return RoutingPolicy(
+            primary_model=canonical_model_slug,
+            fallback_model=None,
+            openrouter=OpenRouterRequestPolicy(
+                app_url=self.padrino_openrouter_app_url,
+                app_title=self.padrino_openrouter_app_title,
+                provider=preferences,
+            ),
         )
 
 
