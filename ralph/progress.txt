@@ -3,6 +3,17 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Player selector catalog reads (US-344): serve `/human/models` from exactly
+  one immutable COMPLETE catalog snapshot. A cursor must encode the snapshot
+  content hash plus the last `canonical_slug`, then keep reading that snapshot
+  even after a newer one publishes; this is the keyset-stability boundary for a
+  selector. Project an allow-list only (slug, display/pricing/context/
+  capabilities, derived qualification/privacy/availability/freshness), never
+  ORM UUIDs, raw source metadata, provider configuration, or secret references.
+  Absent availability/qualification evidence is `unknown`/`unverified` and
+  platform-ineligible by construction; a stale snapshot or expired model stays
+  explicitly ineligible. Optional human-session reads bypass the anonymous
+  scraper bucket but return byte-identical public model facts.
 - OpenRouter catalog synchronization (US-343): keep the Models API client in
   the impure `openrouter.catalog_sync` seam. Validate every source model before
   deriving the text-only play projection, use the content hash for database
@@ -6648,3 +6659,31 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"`. Frontend gates
   not run; story did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-344
+- Added `GET /human/models`, a selector-safe immutable-catalog reader with
+  canonical-slug keyset pagination bound to the original catalog content hash;
+  a later sync cannot reorder, duplicate, or skip a page in progress.
+- Added combined name/slug, provider, max token-price, context,
+  structured-output, qualification-tier, privacy, and availability filtering.
+  Responses expose only canonical player-facing facts plus per-entry/top-level
+  catalog freshness, and never expose entry/snapshot UUIDs, raw metadata,
+  provider configuration, or secret references.
+- Unknown source availability, stale catalog data, and expired/deprecated
+  models are explicit and platform-ineligible; all currently unprobed entries
+  begin as `unverified` with an evidence-missing reason. Anonymous requests use
+  the shared IP-derived rate-limit bucket, while valid human sessions receive
+  the same response shape and facts without account metadata.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/api/app.py`,
+  `src/padrino/api/routes/model_catalog.py`,
+  `tests/api/test_human_model_catalog.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest
+  tests/api/test_human_model_catalog.py -q` first failed with the missing
+  route/module; focused GREEN -> 5 passed. Related `tests/openrouter/
+  test_catalog_sync.py`, `tests/api/test_guest_quickplay.py`, and
+  `tests/api/test_public_surface_only.py` -> 41 passed. Backend gates:
+  `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"`. Frontend gates not run; story did not
+  touch `web/dashboard`.

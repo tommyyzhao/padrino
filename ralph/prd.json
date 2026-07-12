@@ -387,7 +387,7 @@
         "Tests cover combined filters, pagination stability, escaping, stale catalog, and no-secret full JSON."
       ],
       "notes": "Catalog can be public later; human-scoped first limits abuse.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-345",

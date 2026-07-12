@@ -34,6 +34,7 @@ from padrino.api.routes.ingest import router as ingest_router
 from padrino.api.routes.leagues import router as leagues_router
 from padrino.api.routes.legal import router as legal_router
 from padrino.api.routes.lobbies import router as lobbies_router
+from padrino.api.routes.model_catalog import router as model_catalog_router
 from padrino.api.routes.public import router as public_router
 from padrino.api.routes.scheduled_gauntlets import router as scheduled_gauntlets_router
 from padrino.api.routes.sprites import router as sprites_router
@@ -213,6 +214,9 @@ def create_app(
     # dependency and must be reachable even under auth_required=True and the
     # public-surface-only deployment (humans play from the public site).
     app.include_router(human_router)
+    # Model selection has browser-human-aware abuse controls but no account/key
+    # metadata in its response, so it remains available on the public surface.
+    app.include_router(model_catalog_router)
     # Private friend lobbies (US-147) are human-identity-scoped (no API scope),
     # so they mount alongside the human router and are reachable under
     # auth_required=True and the public-surface-only deployment.
