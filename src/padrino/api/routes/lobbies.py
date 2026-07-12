@@ -418,7 +418,7 @@ def _ai_seat_count(*, player_count: int, human_seat_capacity: int) -> int:
 
 
 def _ensure_casual_create(body: LobbyCreate | LobbyConfigUpdate) -> None:
-    if body.ranked is not None or body.integrity_acknowledged is not None:
+    if body.ranked is True or body.integrity_acknowledged is True:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="ranked_lobbies_deprecated",
@@ -637,11 +637,25 @@ async def update_lobby_configuration(
         legacy_alias=False,
     )
     ai_seats = _ai_seat_count(player_count=player_count, human_seat_capacity=human_seat_capacity)
-    prepicks = body.prepick_agent_build_ids if body.prepick_agent_build_ids is not None else []
+    if body.prepick_agent_build_ids is not None:
+        prepicks = body.prepick_agent_build_ids
+    else:
+        existing_seats = await lobbies_repo.list_seats(session, lobby_id)
+        prepicks = [
+            seat.agent_build_id
+            for seat in sorted(existing_seats, key=lambda seat: seat.seat_index)
+            if seat.agent_build_id is not None
+        ]
+    legacy_prepick_slots = (
+        body.prepick_agent_build_ids is None
+        and existing_capacity == player_count
+        and bool(prepicks)
+    )
+    prepick_limit = player_count - 1 if legacy_prepick_slots else ai_seats
     await _validate_prepicks(
         session,
         prepick_agent_build_ids=prepicks,
-        ai_seat_count=ai_seats,
+        ai_seat_count=prepick_limit,
     )
     host_member = next(member for member in members if member.is_host)
     updated = await lobbies_repo.update_configuration(
@@ -664,7 +678,7 @@ async def update_lobby_configuration(
             human_seat_capacity=human_seat_capacity,
             host_member_id=host_member.id,
             prepick_agent_build_ids=prepicks,
-            legacy_prepick_slots=False,
+            legacy_prepick_slots=legacy_prepick_slots,
         ),
     )
     summary = await _summary(session, lobby_id=lobby_id)

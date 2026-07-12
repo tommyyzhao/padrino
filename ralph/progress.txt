@@ -6411,9 +6411,10 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
 - Added `0066` with nullable `lobbies.human_seat_capacity`, wired joins through
   capacity-aware pure seating, and kept legacy `ruleset_id` behavior compatible
   for existing clients/tests.
-- Deprecated the ranked checkbox on `/lobbies`: `ranked` and old
-  `integrity_acknowledged` request fields now fail before league/lobby writes;
-  ranked route tests were updated to assert the hidden path is closed.
+- Deprecated the ranked checkbox on `/lobbies`: `ranked=true` and a truthy old
+  `integrity_acknowledged` field fail before league/lobby writes, while explicit
+  false values remain compatible with clients that still serialize unchecked
+  booleans; ranked route tests assert the hidden ranked path is closed.
 - Added host-only `PATCH /lobbies/{id}/configuration` with structural freeze
   after first non-host join, theme-only cosmetic edits while OPEN, and full
   freeze once LOCKED.
@@ -6433,3 +6434,15 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff format --check .`; `uv run mypy src tests`;
   `uv run pytest -m "not integration"` -> 3128 passed / 51 skipped /
   10 deselected. Frontend gates not run; story did not touch `web/dashboard`.
+
+## 2026-07-11 PDT - US-337 post-commit audit correction
+- Accepted explicitly false deprecated ranked/integrity booleans as casual while
+  preserving fail-closed rejection for truthy values.
+- Preserved existing AI prepicks when the host edits an unrelated structural
+  field; legacy full-capacity lobbies retain their original prepick slot policy.
+- Files changed: `src/padrino/api/routes/lobbies.py`,
+  `tests/api/test_lobby_create.py`, `ralph/progress.txt`.
+- Gates (all GREEN): two focused regressions failed before the correction and
+  passed after it; `uv run ruff check .`; `uv run ruff format --check .`;
+  `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
+  3130 passed / 51 skipped / 10 deselected.

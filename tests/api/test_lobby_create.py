@@ -288,6 +288,68 @@ async def test_create_lobby_rejects_ranked_and_unknown_fields(client: AsyncClien
 
 
 @pytest.mark.asyncio
+async def test_create_lobby_accepts_explicit_false_ranked_fields_as_casual(
+    client: AsyncClient,
+) -> None:
+    token = await _guest_token(client)
+
+    response = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "ranked": False,
+            "integrity_acknowledged": False,
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["ranked"] is False
+    assert response.json()["integrity_acknowledged"] is False
+
+
+@pytest.mark.asyncio
+async def test_configuration_update_preserves_existing_prepick_models(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        build = await _make_agent_build(session)
+        build_id = build.id
+    token = await _guest_token(client)
+    created = await client.post(
+        "/lobbies",
+        json={
+            "built_in_ruleset_id": "mini7_v1",
+            "human_seat_count": 2,
+            "prepick_agent_build_ids": [str(build_id)],
+        },
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+    assert created.status_code == 201, created.text
+    lobby_id = uuid.UUID(created.json()["id"])
+
+    changed = await client.patch(
+        f"/lobbies/{lobby_id}/configuration",
+        json={"identity_mode": "TRANSPARENT"},
+        cookies={HUMAN_SESSION_COOKIE: token},
+    )
+
+    assert changed.status_code == 200, changed.text
+    async with session_factory() as session:
+        seats = list(
+            (
+                await session.execute(
+                    select(LobbySeat)
+                    .where(LobbySeat.lobby_id == lobby_id)
+                    .order_by(LobbySeat.seat_index)
+                )
+            ).scalars()
+        )
+    assert [seat.agent_build_id for seat in seats if seat.agent_build_id is not None] == [build_id]
+
+
+@pytest.mark.asyncio
 async def test_update_lobby_configuration_freezes_after_join_and_lock(
     client: AsyncClient,
 ) -> None:
