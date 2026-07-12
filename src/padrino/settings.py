@@ -58,6 +58,18 @@ class Settings(BaseSettings):
     padrino_openrouter_default_zdr: bool = True
     padrino_openrouter_timeout_seconds: float = Field(default=45.0, gt=0)
     padrino_openrouter_catalog_sync_interval_seconds: int = Field(default=3600, gt=0)
+    # Player-owned OpenRouter connection configuration (US-355). This is
+    # intentionally separate from account sign-in OAuth: the fixed callback
+    # receives only a short-lived code that exchanges into a user-controlled
+    # inference key, never an identity-provider token. Both values are absent
+    # by default so deployments without BYOK capability continue to boot.
+    padrino_openrouter_connect_callback_url: str | None = None
+    padrino_openrouter_connect_state_signing_key: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        exclude=True,
+    )
+    padrino_openrouter_connect_flow_ttl_seconds: int = Field(default=600, gt=0, le=3600)
     # Compatibility probes are an operator-only management-plane activity. The
     # deterministic fake suite remains no-spend; any live run must additionally
     # name a lower-or-equal explicit spend cap at the trigger boundary.
@@ -96,6 +108,17 @@ class Settings(BaseSettings):
         parsed = urlsplit(normalized)
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("OpenRouter URLs must use HTTPS")
+        return normalized
+
+    @field_validator("padrino_openrouter_connect_callback_url")
+    @classmethod
+    def _validate_openrouter_connect_callback_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        parsed = urlsplit(normalized)
+        if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
+            raise ValueError("OpenRouter connection callback URL must be an exact HTTPS URL")
         return normalized
 
     @field_validator("padrino_openrouter_app_title")
@@ -245,8 +268,8 @@ class Settings(BaseSettings):
     # document a human must accept before sending any action or chat. A consent
     # is "current" only when its stored ``document_version`` equals the value
     # here, so bumping any of these re-prompts every human on their next action.
-    padrino_consent_tos_version: str = "2026-06-18"
-    padrino_consent_privacy_version: str = "2026-06-18"
+    padrino_consent_tos_version: str = "2026-07-12"
+    padrino_consent_privacy_version: str = "2026-07-12"
     padrino_consent_age_gate_version: str = "2026-06-18"
 
     # Optional OAuth sign-in, ONE provider (US-129). All fields default to None

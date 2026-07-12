@@ -15,7 +15,7 @@ DOCUMENT_KIND_PRIVACY = "PRIVACY"
 DOCUMENT_KIND_AGE_GATE = "AGE_GATE"
 DOCUMENT_KIND_RANKED = "RANKED"
 DEFAULT_RANKED_CHAT_RETENTION_TTL_DAYS = 365
-_BASE_VERSION_LABEL = "2026-06-18"
+_BASE_VERSION_LABEL = "2026-07-12"
 _RANKED_VERSION_LABEL = "2026-06-27"
 
 
@@ -35,7 +35,7 @@ class LegalDocument:
 
 _TOS_BODY = """\
 Padrino Terms & Conditions
-Version: 2026-06-18
+Version: 2026-07-12
 
 Padrino is an MVP social-deduction game and benchmark experience. By playing,
 you agree to use the service casually, respectfully, and only for lawful
@@ -55,11 +55,17 @@ Padrino may moderate or restrict access to protect the game, other players, and
 the integrity of ranked human ELO experiments. Ranked mode, if enabled, is for
 human-vs-AI Mafia skill measurement and remains separate from the scientific
 benchmark.
+
+If you choose to connect an OpenRouter account for your own private-game
+inference, Padrino receives a short-lived authorization code and stores the
+resulting user-controlled API credential only as an encrypted server-side
+envelope. The credential is never shown back to your browser and may be
+disconnected or deleted from Padrino.
 """
 
 _PRIVACY_BODY = """\
 Padrino Privacy Policy
-Version: 2026-06-18
+Version: 2026-07-12
 
 Padrino stores the minimum data needed to operate human games: guest or account
 principal records, consent history, lobby membership, gameplay actions, chat
@@ -81,6 +87,14 @@ Human free-text chat is stored outside the deterministic game-event hash chain
 so later redaction or erasure can remove personal text without changing replay
 evidence. Raw IP addresses are not stored by the consent system; only hashes are
 kept when an IP-derived signal is needed.
+
+When you voluntarily connect OpenRouter for private-game inference, Padrino
+temporarily processes the authorization code and user-controlled API key to
+validate it, then stores only an encrypted credential envelope, nonce, key
+version, safe display label/suffix, and connection lifecycle timestamps. The
+raw credential is not stored in browser storage, events, replays, exports,
+analytics, or logs. Disconnect and account deletion erase the local envelope;
+Padrino may also attempt upstream key revocation when OpenRouter supports it.
 """
 
 _AGE_GATE_BODY = """\

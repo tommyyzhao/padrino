@@ -45,9 +45,42 @@ async def revoke_and_erase_for_principal(
     return result.rowcount or 0
 
 
+async def revoke_and_erase_provider_credential(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    provider: str,
+    revoked_at: datetime,
+) -> int:
+    """Revoke one provider connection while preserving other future providers.
+
+    Local erasure is deliberately idempotent.  A connection route may call it
+    after an optional upstream revocation attempt, but upstream failure must
+    never retain a locally usable plaintext envelope.
+    """
+    result = await session.execute(
+        update(ProviderCredential)
+        .where(
+            ProviderCredential.principal_id == principal_id,
+            ProviderCredential.provider == provider,
+            ProviderCredential.revoked_at.is_(None),
+        )
+        .values(
+            ciphertext=None,
+            nonce=None,
+            revoked_at=revoked_at,
+            updated_at=revoked_at,
+        )
+    )
+    await session.flush()
+    assert isinstance(result, CursorResult)
+    return result.rowcount or 0
+
+
 async def try_consume_openrouter_pkce_flow(
     session: AsyncSession,
     *,
+    principal_id: uuid.UUID,
     state_hash: str,
     verifier_binding_hash: str,
     consumed_at: datetime,
@@ -62,6 +95,7 @@ async def try_consume_openrouter_pkce_flow(
     result = await session.execute(
         update(OpenRouterPkceFlow)
         .where(
+            OpenRouterPkceFlow.principal_id == principal_id,
             OpenRouterPkceFlow.state_hash == state_hash,
             OpenRouterPkceFlow.verifier_binding_hash == verifier_binding_hash,
             OpenRouterPkceFlow.consumed_at.is_(None),
@@ -74,4 +108,8 @@ async def try_consume_openrouter_pkce_flow(
     return bool(result.rowcount)
 
 
-__all__ = ["revoke_and_erase_for_principal", "try_consume_openrouter_pkce_flow"]
+__all__ = [
+    "revoke_and_erase_for_principal",
+    "revoke_and_erase_provider_credential",
+    "try_consume_openrouter_pkce_flow",
+]

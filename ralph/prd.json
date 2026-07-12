@@ -616,7 +616,7 @@
         "Terms/privacy and consent registry are updated if credential storage changes disclosed processing."
       ],
       "notes": "Do not reuse general account OAuth access tokens.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-356",

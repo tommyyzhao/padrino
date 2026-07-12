@@ -3,6 +3,16 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Player-owned OpenRouter connection (US-355): isolate the user-key PKCE flow
+  from account identity OAuth. Keep the exact deployment callback URL out of
+  browser input, sign state with the principal and human-session UUID, persist
+  only state/verifier-binding SHA-256 digests, and durably consume that claim
+  before any provider exchange. The verifier remains in a short-lived
+  HTTP-only cookie; the raw key exists only long enough to validate and encrypt
+  it into the principal-bound AES-GCM envelope. Status projections expose only
+  connection state, safe label/suffix, validation time, and a non-financial
+  capability token. Disconnect must erase locally even if the optional
+  management-key-backed upstream deletion fails.
 - Credential-envelope rotation (US-354): parse the optional deployment key
   ring only at the OpenRouter connect/BYOK capability boundary, keeping normal
   mock and platform-funded boot usable when it is absent or invalid. Use a
@@ -7059,3 +7069,29 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   format --check .`; `uv run mypy src tests`; `uv run pytest -m "not
   integration"` -> 3355 passed / 12 deselected. Frontend gates not run; story
   did not touch `web/dashboard`.
+
+## 2026-07-12 PDT - US-355
+- Added a distinct server-side OpenRouter PKCE connection flow: S256 verifier,
+  fixed HTTPS callback, signed principal/session-bound state, persisted hashes,
+  and a durable consume-before-exchange callback claim. It never reuses the
+  account identity OAuth path or its tokens.
+- The callback uses a MockTransport-covered HTTPS client to exchange and
+  validate the user-controlled key, then encrypts it into the existing
+  principal-bound envelope before the credential write can commit. Connection
+  status is limited to connected state, safe label/suffix, validation time, and
+  a non-financial capability token. Disconnect erases the local envelope and
+  performs best-effort management-key-backed upstream deletion when available.
+- Updated the Terms and Privacy registry/hash-bound consent authority to
+  disclose optional encrypted OpenRouter credential processing and local/upstream
+  revocation behavior. No runtime dependencies or migrations were added.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/openrouter/connection.py`,
+  `src/padrino/api/routes/human.py`, `src/padrino/db/repositories/provider_credentials.py`,
+  `src/padrino/settings.py`, `src/padrino/legal/documents.py`, API/settings/
+  credential/migration tests, `ralph/prd.json`, `ralph/progress.txt`.
+- Gates (all GREEN): focused RED `uv run pytest
+  tests/api/test_openrouter_connection.py -q` failed on the missing connection
+  module; focused GREEN/related slice -> 48 passed. Backend gates: `uv run
+  ruff check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv
+  run pytest -m "not integration"` -> 3309 passed / 51 skipped / 12 deselected.
+  Frontend gates not run; story did not touch `web/dashboard`.

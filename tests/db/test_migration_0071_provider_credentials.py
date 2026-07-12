@@ -308,6 +308,7 @@ async def test_pkce_flow_consumption_is_atomic_under_concurrent_callbacks(tmp_pa
             assert (
                 await provider_credentials.try_consume_openrouter_pkce_flow(
                     session,
+                    principal_id=principal.id,
                     state_hash="s" * 64,
                     verifier_binding_hash="w" * 64,
                     consumed_at=_NOW,
@@ -322,6 +323,7 @@ async def test_pkce_flow_consumption_is_atomic_under_concurrent_callbacks(tmp_pa
             async with session_factory() as session, session.begin():
                 return await provider_credentials.try_consume_openrouter_pkce_flow(
                     session,
+                    principal_id=principal.id,
                     state_hash="s" * 64,
                     verifier_binding_hash="v" * 64,
                     consumed_at=_NOW,

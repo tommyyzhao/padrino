@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from starlette.requests import Request
 
 from padrino.api.routes.lobbies import ranked_human_rating_enabled_from_request
@@ -235,6 +235,9 @@ def test_openrouter_settings_are_safe_and_complete(monkeypatch: pytest.MonkeyPat
         "PADRINO_OPENROUTER_DEFAULT_ZDR",
         "PADRINO_OPENROUTER_TIMEOUT_SECONDS",
         "PADRINO_OPENROUTER_CATALOG_SYNC_INTERVAL_SECONDS",
+        "PADRINO_OPENROUTER_CONNECT_CALLBACK_URL",
+        "PADRINO_OPENROUTER_CONNECT_STATE_SIGNING_KEY",
+        "PADRINO_OPENROUTER_CONNECT_FLOW_TTL_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -248,6 +251,9 @@ def test_openrouter_settings_are_safe_and_complete(monkeypatch: pytest.MonkeyPat
     assert settings.padrino_openrouter_default_zdr is True
     assert settings.padrino_openrouter_timeout_seconds == 45.0
     assert settings.padrino_openrouter_catalog_sync_interval_seconds == 3600
+    assert settings.padrino_openrouter_connect_callback_url is None
+    assert settings.padrino_openrouter_connect_state_signing_key is None
+    assert settings.padrino_openrouter_connect_flow_ttl_seconds == 600
 
 
 def test_openrouter_key_settings_require_opaque_secret_references() -> None:
@@ -260,6 +266,29 @@ def test_openrouter_key_settings_require_opaque_secret_references() -> None:
         Settings(
             _env_file=None,
             padrino_openrouter_management_key_ref="sk-live-secret-must-not-be-configured-here",
+        )
+
+
+def test_openrouter_connection_settings_require_https_callback_and_redact_state_key() -> None:
+    state_key = "openrouter-connect-state-key-must-not-be-serialized"
+    settings = Settings(
+        _env_file=None,
+        padrino_openrouter_connect_callback_url=(
+            "https://padrino.example.test/human/openrouter/connect/callback"
+        ),
+        padrino_openrouter_connect_state_signing_key=SecretStr(state_key),
+    )
+    assert settings.padrino_openrouter_connect_state_signing_key is not None
+    assert settings.padrino_openrouter_connect_state_signing_key.get_secret_value() == state_key
+    assert state_key not in repr(settings)
+    assert state_key not in settings.model_dump_json()
+
+    with pytest.raises(ValidationError, match="exact HTTPS URL"):
+        Settings(
+            _env_file=None,
+            padrino_openrouter_connect_callback_url=(
+                "http://padrino.example.test/human/openrouter/connect/callback"
+            ),
         )
 
 

@@ -22,10 +22,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.api.auth import _get_auth_settings, _get_rate_limiter
@@ -105,7 +107,9 @@ from padrino.db.models import (
     HumanRatingEvent,
     HumanSession,
     HumanTuringGuess,
+    OpenRouterPkceFlow,
     Principal,
+    ProviderCredential,
 )
 from padrino.db.repositories import human_chat as human_chat_repo
 from padrino.db.repositories import human_consents as human_consents_repo
@@ -115,6 +119,7 @@ from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import lobbies as lobbies_repo
 from padrino.db.repositories import oauth_consumed_flows as oauth_flows_repo
 from padrino.db.repositories import oauth_identities as oauth_repo
+from padrino.db.repositories import provider_credentials as provider_credentials_repo
 from padrino.economics.human_cost_governance import (
     ACTION_CREATE,
     ACTION_LAUNCH,
@@ -124,6 +129,24 @@ from padrino.economics.human_cost_governance import (
     release_admission_for_lobby,
     release_inference_reservations_for_lobby,
     rollback_admission_decision,
+)
+from padrino.openrouter.connection import (
+    OPENROUTER_PKCE_VERIFIER_COOKIE,
+    OpenRouterConnectionClient,
+    OpenRouterConnectionConfig,
+    OpenRouterConnectionError,
+    hash_state,
+    hash_verifier_binding,
+    resolve_openrouter_connection_config,
+    start_openrouter_connection,
+    validate_openrouter_connection_state,
+)
+from padrino.openrouter.credentials import (
+    CredentialAuthenticationError,
+    CredentialEncryptionUnavailable,
+    CredentialEnvelopeService,
+    credential_encryption_available,
+    credential_key_ring_from_settings,
 )
 from padrino.settings import Settings
 
@@ -135,6 +158,7 @@ _OAUTH_FLOW_TTL_SECONDS = 600
 _OAUTH_FLOW_PRUNE_SAMPLE_MODULUS = 16
 _SOLO_MATCH_RULESET_ID = "mini7_v1"
 _ADMISSION_DENIED_STATUS = status.HTTP_429_TOO_MANY_REQUESTS
+_OPENROUTER_PROVIDER = "openrouter"
 
 
 class GuestSummary(BaseModel):
@@ -164,6 +188,16 @@ class ConsentStatus(BaseModel):
 
     consented: bool
     required_versions: dict[str, str]
+
+
+class OpenRouterConnectionStatus(BaseModel):
+    """Safe lifecycle status for the caller's OpenRouter connection."""
+
+    connected: bool
+    label: str | None
+    display_suffix: str | None
+    validated_at: datetime | None
+    credit_capability: str | None
 
 
 class MatchResponse(BaseModel):
@@ -1219,6 +1253,333 @@ def _human_rating_event_export_input(row: HumanRatingEvent) -> HumanRatingEventE
     )
 
 
+def _openrouter_connection_status(
+    credential: ProviderCredential | None,
+) -> OpenRouterConnectionStatus:
+    """Project one credential to the deliberately narrow browser status view."""
+    if credential is None:
+        return OpenRouterConnectionStatus(
+            connected=False,
+            label=None,
+            display_suffix=None,
+            validated_at=None,
+            credit_capability=None,
+        )
+    validated_at = credential.last_validated_at
+    if validated_at is not None:
+        validated_at = (
+            validated_at.replace(tzinfo=UTC)
+            if validated_at.tzinfo is None
+            else validated_at.astimezone(UTC)
+        )
+    return OpenRouterConnectionStatus(
+        connected=True,
+        label=credential.label,
+        display_suffix=credential.display_suffix,
+        validated_at=validated_at,
+        # This represents a safe funding capability, not a balance, credit
+        # limit, or any other account-financial data.
+        credit_capability="openrouter_user_key",
+    )
+
+
+async def _active_openrouter_credential(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    lock: bool = False,
+) -> ProviderCredential | None:
+    """Fetch the caller's active OpenRouter envelope, optionally under lock."""
+    statement = select(ProviderCredential).where(
+        ProviderCredential.principal_id == principal_id,
+        ProviderCredential.provider == _OPENROUTER_PROVIDER,
+        ProviderCredential.revoked_at.is_(None),
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return (await session.execute(statement)).scalar_one_or_none()
+
+
+def _openrouter_connection_config_or_503(request: Request) -> OpenRouterConnectionConfig:
+    """Require complete connection configuration and encryption capability."""
+    settings = _get_auth_settings(request)
+    config = resolve_openrouter_connection_config(settings)
+    if config is None or not credential_encryption_available(settings):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="openrouter_connection_unavailable",
+        )
+    return config
+
+
+def _openrouter_connection_http_client(
+    request: Request,
+    *,
+    config: OpenRouterConnectionConfig,
+) -> httpx.AsyncClient:
+    """Create the HTTPS client, with an app-state MockTransport seam for tests."""
+    factory: Any = getattr(request.app.state, "openrouter_connection_http_client_factory", None)
+    if callable(factory):
+        client = factory(timeout=config.timeout_seconds)
+        if isinstance(client, httpx.AsyncClient):
+            return client
+        raise RuntimeError("invalid OpenRouter connection HTTP client factory")
+    return httpx.AsyncClient(timeout=config.timeout_seconds)
+
+
+def _set_openrouter_pkce_verifier_cookie(
+    response: Response,
+    *,
+    verifier: str,
+    config: OpenRouterConnectionConfig,
+    settings: Settings,
+) -> None:
+    """Keep the PKCE verifier browser-only and short-lived in an HTTP-only cookie."""
+    response.set_cookie(
+        key=OPENROUTER_PKCE_VERIFIER_COOKIE,
+        value=verifier,
+        max_age=config.flow_ttl_seconds,
+        httponly=True,
+        secure=settings.padrino_human_session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+async def _consume_openrouter_pkce_flow_durably(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    state: str,
+    verifier: str,
+    consumed_at: datetime,
+) -> bool:
+    """Claim a PKCE row before a remote key exchange can begin.
+
+    Committing this claim before any provider call preserves single-use
+    semantics if the later exchange, encryption, or credential write fails.
+    Keeping it on the request session also avoids SQLite's cross-connection
+    read/write lock upgrade during the browser callback.
+    """
+    await session.commit()
+    claimed = await provider_credentials_repo.try_consume_openrouter_pkce_flow(
+        session,
+        principal_id=principal_id,
+        state_hash=hash_state(state),
+        verifier_binding_hash=hash_verifier_binding(state, verifier),
+        consumed_at=consumed_at,
+    )
+    await session.commit()
+    return claimed
+
+
+@router.get("/human/openrouter/connect", response_model=OpenRouterConnectionStatus)
+async def get_openrouter_connection_status(
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> OpenRouterConnectionStatus:
+    """Return only safe connection lifecycle metadata for the current human."""
+    credential = await _active_openrouter_credential(session, principal_id=ctx.principal_id)
+    return _openrouter_connection_status(credential)
+
+
+@router.get("/human/openrouter/connect/start")
+async def start_openrouter_connect(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> RedirectResponse:
+    """Begin a fixed-callback, signed-state S256 OpenRouter PKCE flow."""
+    config = _openrouter_connection_config_or_503(request)
+    settings = _get_auth_settings(request)
+    await enforce_consent(session, subject_principal_id=ctx.principal_id, settings=settings)
+    started = start_openrouter_connection(
+        config,
+        principal_id=ctx.principal_id,
+        session_id=ctx.session_id,
+    )
+    session.add(
+        OpenRouterPkceFlow(
+            principal_id=ctx.principal_id,
+            state_hash=started.state_hash,
+            verifier_binding_hash=started.verifier_binding_hash,
+            expires_at=datetime.now(UTC) + timedelta(seconds=config.flow_ttl_seconds),
+        )
+    )
+    await session.flush()
+    response = RedirectResponse(
+        url=started.authorization_url,
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    )
+    _set_openrouter_pkce_verifier_cookie(
+        response,
+        verifier=started.code_verifier,
+        config=config,
+        settings=settings,
+    )
+    return response
+
+
+@router.get(
+    "/human/openrouter/connect/callback",
+    response_model=OpenRouterConnectionStatus,
+)
+async def complete_openrouter_connect(
+    request: Request,
+    response: Response,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+    code: str | None = None,
+    state: str | None = None,
+) -> OpenRouterConnectionStatus:
+    """Claim, exchange, validate, and encrypt one user-controlled OpenRouter key."""
+    config = _openrouter_connection_config_or_503(request)
+    if code is None or state is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="openrouter_connection_state_missing",
+        )
+    verifier = request.cookies.get(OPENROUTER_PKCE_VERIFIER_COOKIE)
+    if verifier is None or not verifier.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="openrouter_connection_state_missing",
+        )
+    try:
+        validate_openrouter_connection_state(
+            config,
+            state=state,
+            principal_id=ctx.principal_id,
+            session_id=ctx.session_id,
+        )
+    except OpenRouterConnectionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="openrouter_connection_state_invalid",
+        ) from exc
+
+    now = datetime.now(UTC)
+    claimed = await _consume_openrouter_pkce_flow_durably(
+        session,
+        principal_id=ctx.principal_id,
+        state=state,
+        verifier=verifier,
+        consumed_at=now,
+    )
+    if not claimed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="openrouter_connection_replayed",
+        )
+
+    try:
+        envelope_service = CredentialEnvelopeService(
+            credential_key_ring_from_settings(_get_auth_settings(request))
+        )
+    except CredentialEncryptionUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="openrouter_connection_unavailable",
+        ) from exc
+
+    client = _openrouter_connection_http_client(request, config=config)
+    validated = None
+    api_key: str | None = None
+    try:
+        validated = await OpenRouterConnectionClient(
+            client=client, config=config
+        ).exchange_and_validate(
+            code=code,
+            code_verifier=verifier,
+        )
+        api_key = validated.api_key
+        credential = ProviderCredential(
+            id=uuid.uuid4(),
+            principal_id=ctx.principal_id,
+            provider=_OPENROUTER_PROVIDER,
+            ciphertext=b"pending",
+            nonce=b"pending",
+            key_version=envelope_service.key_ring.active_version,
+            display_suffix=validated.display_suffix,
+            label=validated.label,
+            last_validated_at=now,
+        )
+        envelope = envelope_service.encrypt(
+            api_key,
+            principal_id=credential.principal_id,
+            provider=credential.provider,
+            credential_id=credential.id,
+        )
+        credential.ciphertext = envelope.ciphertext
+        credential.nonce = envelope.nonce
+        session.add(credential)
+        await session.flush()
+    except OpenRouterConnectionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="openrouter_connection_exchange_failed",
+        ) from exc
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="openrouter_connection_store_failed",
+        ) from exc
+    finally:
+        if api_key is not None:
+            del api_key
+        if validated is not None:
+            del validated
+        await client.aclose()
+
+    response.delete_cookie(OPENROUTER_PKCE_VERIFIER_COOKIE, path="/")
+    return _openrouter_connection_status(credential)
+
+
+@router.post("/human/openrouter/connect/disconnect", status_code=status.HTTP_204_NO_CONTENT)
+async def disconnect_openrouter_connect(
+    request: Request,
+    ctx: HumanPrincipalContext = Depends(require_human),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Erase the local envelope and opportunistically revoke the upstream key."""
+    credential = await _active_openrouter_credential(
+        session,
+        principal_id=ctx.principal_id,
+        lock=True,
+    )
+    if credential is not None:
+        config = resolve_openrouter_connection_config(_get_auth_settings(request))
+        if config is not None:
+            client = _openrouter_connection_http_client(request, config=config)
+            api_key: str | None = None
+            try:
+                envelope_service = CredentialEnvelopeService(
+                    credential_key_ring_from_settings(_get_auth_settings(request))
+                )
+                api_key = envelope_service.decrypt_provider_credential(credential)
+                await OpenRouterConnectionClient(client=client, config=config).best_effort_revoke(
+                    api_key=api_key
+                )
+            except (
+                CredentialAuthenticationError,
+                CredentialEncryptionUnavailable,
+                OpenRouterConnectionError,
+            ):
+                pass
+            finally:
+                if api_key is not None:
+                    del api_key
+                await client.aclose()
+        await provider_credentials_repo.revoke_and_erase_provider_credential(
+            session,
+            principal_id=ctx.principal_id,
+            provider=_OPENROUTER_PROVIDER,
+            revoked_at=datetime.now(UTC),
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 def _set_oauth_flow_cookie(response: Response, key: str, value: str, *, secure: bool) -> None:
     response.set_cookie(
         key=key,
@@ -1447,6 +1808,7 @@ __all__ = [
     "ConsentStatus",
     "DisplayNameUpdate",
     "GuestSummary",
+    "OpenRouterConnectionStatus",
     "TuringGuessResult",
     "TuringGuessSubmission",
     "get_human_game_reveal",
