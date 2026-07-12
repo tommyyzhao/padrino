@@ -3,6 +3,14 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Game rules snapshots (US-333): keep `GameRulesSnapshot` in
+  `core/rulesets/snapshot.py` as the pure, frozen adapter between registered
+  ruleset modules and future persisted custom decks. `snapshot_from_ruleset`
+  preserves module role-count insertion order for `assign_roles` parity, while
+  `canonical_rules_dict/json/hash` sort role-derived rows for hash stability and
+  omit the non-addressable `ruleset_id` so `custom_ruleset_id` can be derived as
+  `custom:<sha256>`. Store inference defaults as strings if they must enter the
+  snapshot; canonical rules JSON must stay float-free.
 - Real multi-human E2E production path (US-332): launch lobbies through the real
   HTTP invite/ready/lock/launch routes, then run `_run_one_human_game` with the
   default human-lane executor and an injected scripted AI adapter factory.
@@ -6228,3 +6236,29 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   `uv run ruff check .`; `uv run ruff format --check .`;
   `uv run mypy src tests`; `uv run pytest -m "not integration"` ->
   3042 passed / 51 skipped / 10 deselected.
+
+## 2026-07-11 PDT - US-333
+- Added the pure frozen `GameRulesSnapshot` contract with canonical JSON/hash
+  helpers, hash-derived `custom:<hash>` ids, built-in ruleset projection,
+  integer/string-only canonical payloads, and fail-closed validation for role,
+  action, win-condition, role-metadata, role-count, and cadence mismatches.
+- Preserved built-in behavior by exposing uppercase ruleset-compatible
+  properties/methods and proving `assign_roles`, `next_phase`, `check_win`,
+  module constants, role families, and faction lookups remain equivalent for
+  every `get_ruleset` result.
+- Added canonical byte-stability and pure-core firewall coverage for the new
+  type; the pinned `mini7_v1` snapshot hash is
+  `f41cf3a33fcb576d5c3ec037190d76ff0f830365c55c36827cdd6a5b7ce79d45`.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/rulesets/snapshot.py`,
+  `tests/core/rulesets/test_snapshot.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused RED
+  `uv run pytest tests/core/rulesets/test_snapshot.py -q` first failed on
+  missing `padrino.core.rulesets.snapshot`; focused GREEN same command ->
+  19 passed. Related GREEN
+  `uv run pytest tests/core/rulesets/test_snapshot.py tests/core/test_purity.py -q`
+  -> 91 passed. Backend gates: `uv run ruff check .`;
+  `uv run ruff format --check .`; `uv run mypy src tests`;
+  `uv run pytest -m "not integration"` -> 3064 passed / 51 skipped /
+  10 deselected. Frontend gates not run; story did not touch `web/dashboard`.

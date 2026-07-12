@@ -161,7 +161,7 @@
         "Pure-core firewall and canonical byte-stability tests cover the new type."
       ],
       "notes": "Do not make core query a DB registry. Likely files: core/rulesets/snapshot.py.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-334",
