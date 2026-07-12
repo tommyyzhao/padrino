@@ -556,7 +556,7 @@
         "Custom host is payer for every AI seat; ranked/scientific funding modes remain server-owned and are not selectable here."
       ],
       "notes": "Core policy only; persistence follows.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-353",

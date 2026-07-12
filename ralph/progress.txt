@@ -3,6 +3,15 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Funding policy (US-352): keep player-selectable funding in a pure core seam
+  over only resolved account, host, credential, model, and integer-micro facts.
+  Return one source/payer decision for the entire custom table; platform
+  admission must reserve against player promotional funds alone, while BYOK
+  must not inspect that balance. Settle an admitted platform call by consuming
+  at most the held reservation and then an explicitly operator-owned bounded
+  completion reserve, leaving any excess visibly unfunded rather than ever
+  overdrawing the player. Ranked/scientific lanes remain server-owned and
+  cannot flow through the custom selector.
 - OpenRouter adapter contracts (US-351): pass the model id of each concrete
   attempt into the safe routing-audit extractor—never stamp an OpenRouter
   different-model fallback as the primary request. Prefer LiteLLM's hidden
@@ -6962,3 +6971,23 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   uv run ruff format --check .; uv run mypy src tests; uv run pytest -m
   "not integration" -> 3270 passed / 51 skipped / 12 deselected. Frontend
   gates not run; story did not touch web/dashboard.
+
+## 2026-07-12 PDT - US-352
+- Added a pure, fail-closed funding seam for one-time promotional grants,
+  custom platform/BYOK admission, host-owned active-credential validation,
+  and platform-call completion-reserve allocation. It uses only frozen facts
+  and integer USD micros; no credential value, persistence, provider, or clock
+  enters the core.
+- Promotional grants are exactly 5_000_000 micros for verified, non-deleted
+  accounts only. Custom funding selects one payer/source for all AI seats:
+  platform reserves only available promo credit, while BYOK bypasses promo and
+  operator-reserve facts entirely. Ranked, scientific, and sponsor-pool
+  selections are refused by this casual policy.
+- Thread URL: n/a (local Codex iteration).
+- Files changed: `src/padrino/core/funding_policy.py`,
+  `tests/core/test_funding_policy.py`, `ralph/prd.json`,
+  `ralph/progress.txt`.
+- Gates (all GREEN): focused funding-policy suite -> 20 passed; `uv run ruff
+  check .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run
+  pytest -m "not integration"` -> 3344 selected passed. Frontend gates not run;
+  story did not touch `web/dashboard`.
