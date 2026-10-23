@@ -1869,7 +1869,7 @@ class OperatorCompletionReserveLedgerEntry(Base):
         CheckConstraint(
             "entry_type != 'CHARGE' OR "
             "(game_id IS NOT NULL AND model_slug IS NOT NULL AND estimate_miss_micros > 0)",
-            name="ck_operator_completion_reserve_ledger_entries_charge_attribution",
+            name="ck_operator_completion_reserve_ledger_entries_charge_attrib",
         ),
         Index(
             "ix_operator_completion_reserve_ledger_entries_game_id",

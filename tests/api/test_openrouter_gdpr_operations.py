@@ -34,7 +34,7 @@ from padrino.db.models import (
 from padrino.db.repositories import human_principals as principals_repo
 from padrino.settings import Settings
 
-_NOW = datetime(2026, 7, 12, 23, 0, tzinfo=UTC)
+_NOW = datetime.now(UTC)  # real clock: API checks sessions/staleness against it
 _SENTINEL = "sk-or-us363-sentinel-must-never-leave-private-storage"
 _UPSTREAM_HASH = "a" * 64
 _REQUEST_HASH = "b" * 64

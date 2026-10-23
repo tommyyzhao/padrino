@@ -26,7 +26,7 @@ from padrino.db.repositories import human_principals as principals_repo
 from padrino.openrouter.connection import OPENROUTER_PKCE_VERIFIER_COOKIE
 from padrino.settings import Settings
 
-_NOW = datetime(2026, 7, 12, 21, 30, tzinfo=UTC)
+_NOW = datetime.now(UTC)  # real clock: API checks sessions/staleness against it
 _OPENROUTER_ORIGIN = "https://openrouter.example.test"
 _OPENROUTER_BASE_URL = f"{_OPENROUTER_ORIGIN}/api/v1"
 _CALLBACK_URL = "https://padrino.example.test/human/openrouter/connect/callback"

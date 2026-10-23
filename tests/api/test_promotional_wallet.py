@@ -33,7 +33,7 @@ from padrino.db.repositories import (
 )
 from padrino.settings import Settings
 
-_NOW = datetime(2026, 7, 12, 22, 0, tzinfo=UTC)
+_NOW = datetime.now(UTC)  # real clock: API checks sessions/staleness against it
 
 
 def _settings(*, banned_principals: str = "", wallet_limit: int = 20) -> Settings:
@@ -133,6 +133,8 @@ async def test_wallet_projects_integer_totals_and_safe_recent_entries(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     token, principal = await _session_for(session_factory)
+    # ledger rows must sort after the API-created GRANT (real clock)
+    entries_at = datetime.now(UTC) + timedelta(minutes=1)
     _set_session(client, token)
     granted = await client.post("/human/wallet/grant")
     assert granted.status_code == 201
@@ -156,7 +158,7 @@ async def test_wallet_projects_integer_totals_and_safe_recent_entries(
             rules_hash="c" * 64,
             reserved_micros=1_000_000,
             idempotency_key="wallet:reservation",
-            now=_NOW,
+            now=entries_at,
         )
         for offset_seconds, (entry_type, amount, key, reason) in enumerate(
             (
@@ -175,7 +177,7 @@ async def test_wallet_projects_integer_totals_and_safe_recent_entries(
                 amount_micros=amount,
                 idempotency_key=key,
                 reason=reason,
-                now=_NOW + timedelta(seconds=offset_seconds),
+                now=entries_at + timedelta(seconds=offset_seconds),
             )
         reservation.consumed_micros = 50_000
         reservation.released_micros = 20_000
@@ -188,7 +190,7 @@ async def test_wallet_projects_integer_totals_and_safe_recent_entries(
             model_slug="openai/example",
             idempotency_key="wallet:completion",
             reason="estimate_miss",
-            now=_NOW,
+            now=entries_at,
         )
 
     response = await client.get("/human/wallet")
