@@ -2,6 +2,7 @@
   import '../app.css';
   import { padrino } from '$lib/clientStore.svelte';
   import { onMount } from 'svelte';
+  import { page } from '$app/stores';
 
   interface Props {
     children?: import('svelte').Snippet;
@@ -12,9 +13,15 @@
   onMount(() => {
     padrino.init();
   });
+
+  // US-411: recording layout hides site chrome on spectator pages.
+  const recording = $derived(
+    $page.url.pathname.startsWith('/watch/') && $page.url.searchParams.get('record') === '1'
+  );
 </script>
 
 <div class="padrino-shell min-h-screen">
+  {#if !recording}
   <header class="border-b border-border bg-card/90 backdrop-blur">
     <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:py-4">
       <a href="/" class="group flex min-w-0 items-center gap-2.5" aria-label="Padrino home">
@@ -43,10 +50,13 @@
       </nav>
     </div>
   </header>
+  {/if}
   <main class="mx-auto max-w-6xl px-4 py-6 sm:py-8">
     {@render children?.()}
   </main>
+  {#if !recording}
   <footer class="mt-8 border-t border-border py-5 text-center text-xs text-muted-foreground">
     Padrino · deterministic social deduction · API <code>{padrino.baseUrl}</code>
   </footer>
+  {/if}
 </div>

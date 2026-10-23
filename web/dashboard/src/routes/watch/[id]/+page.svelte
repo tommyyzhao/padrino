@@ -3,6 +3,7 @@
   import { onMount, onDestroy } from 'svelte';
   import Card from '$lib/components/Card.svelte';
   import { padrino } from '$lib/clientStore.svelte';
+  import { dwellMs, phaseCueFor, speechFor, type SpeechItem } from '$lib/narration';
 
   interface PublicFrame {
     schema_version: string;
@@ -46,6 +47,27 @@
   let error = $state<string | null>(null);
 
   let sse: EventSource | null = null;
+
+  // US-411: ?tail=1 live-tails, ?narrated=1 drives pacing client-side, ?record=1 clean layout.
+  const params = $derived($page.url.searchParams);
+  const tail = $derived(params.get('tail') === '1');
+  const narrated = $derived(params.get('narrated') === '1');
+  const record = $derived(params.get('record') === '1');
+
+  let started = $state(false);
+  let paused = $state(false);
+  let muted = $state(false);
+  let caption = $state<SpeechItem | null>(null);
+  let speakingSeat = $state<string | null>(null);
+  let receivedTerminal = false;
+  let alive = true;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let audio: HTMLAudioElement | null = null;
+  // Narration buffer: dedup by sequence, presented strictly in order.
+  const seen = new Set<number>();
+  let pending: PublicFrame[] = [];
+  let lastReceived: number | null = null;
+  let presentedPhase: string | null = null;
 
   function asString(value: unknown): string | null {
     return typeof value === 'string' ? value : null;
@@ -122,7 +144,11 @@
 
   function connect(): void {
     if (!gameId) return;
-    const url = `${padrino.baseUrl}/public/games/${encodeURIComponent(gameId)}/live`;
+    const url = padrino.client.liveWatchUrl(gameId, {
+      tail,
+      speed: narrated ? 100 : undefined,
+      after: narrated ? lastReceived : undefined
+    });
     sse = new EventSource(url);
 
     sse.onopen = () => {
@@ -133,8 +159,20 @@
     sse.onmessage = (evt: MessageEvent) => {
       try {
         const frame = JSON.parse(evt.data as string) as PublicFrame;
+        if (!narrated) {
+          frameCount += 1;
+          processFrame(frame);
+          return;
+        }
+        if (seen.has(frame.sequence)) return;
+        seen.add(frame.sequence);
         frameCount += 1;
-        processFrame(frame);
+        lastReceived = Math.max(lastReceived ?? 0, frame.sequence);
+        pending = [...pending, frame].sort((a, b) => a.sequence - b.sequence);
+        if (frame.event_type === 'GameTerminated') {
+          receivedTerminal = true;
+          sse?.close();
+        }
       } catch {
         // ignore malformed frames
       }
@@ -142,6 +180,12 @@
 
     sse.onerror = () => {
       connected = false;
+      if (narrated) {
+        // Resume manually with after=<last received> so nothing is duplicated or lost.
+        sse?.close();
+        if (!receivedTerminal && alive) reconnectTimer = setTimeout(connect, 1000);
+        return;
+      }
       // EventSource gives up permanently (readyState CLOSED) when the server
       // keeps refusing — e.g. the game flipped LIVE→RECENT mid-watch and the
       // live endpoint now 404s. Surface that instead of showing "Connecting…"
@@ -154,16 +198,96 @@
 
   function reconnect(): void {
     sse?.close();
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     error = null;
     connect();
   }
 
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  // Dwell counts down only while not paused.
+  async function dwell(ms: number): Promise<void> {
+    for (let left = ms; left > 0 && alive; ) {
+      await sleep(50);
+      if (!paused) left -= 50;
+    }
+  }
+
+  // Resolves true only when the clip ends; any error / rejected play() => false (caller dwells).
+  function playAudio(url: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const a = new Audio(url);
+      audio = a;
+      a.muted = muted;
+      a.onended = () => resolve(true);
+      a.onerror = () => resolve(false);
+      try {
+        void Promise.resolve(a.play()).catch(() => resolve(false));
+      } catch {
+        resolve(false);
+      }
+    });
+  }
+
+  async function speak(item: SpeechItem): Promise<void> {
+    caption = item;
+    speakingSeat = item.speaker;
+    let ok = false;
+    if (!muted && gameId) {
+      ok = await playAudio(padrino.client.speechUrl(gameId, item.sequence, item.cue));
+      audio = null;
+    }
+    if (!ok && alive) await dwell(dwellMs(item.text));
+    speakingSeat = null;
+  }
+
+  async function present(frame: PublicFrame): Promise<void> {
+    const phaseCue = phaseCueFor(frame, presentedPhase);
+    presentedPhase = frame.phase;
+    if (phaseCue) await speak(phaseCue);
+    if (!alive) return;
+    const terminal = frame.event_type === 'GameTerminated';
+    if (!terminal) processFrame(frame);
+    const cue = speechFor(frame);
+    if (cue) await speak(cue);
+    // Result only once the presentation reaches the terminal frame.
+    if (alive && terminal) processFrame(frame);
+  }
+
+  async function presentLoop(): Promise<void> {
+    while (alive) {
+      const frame = started && !paused ? pending[0] : undefined;
+      if (!frame) {
+        await sleep(50);
+        continue;
+      }
+      pending = pending.slice(1);
+      await present(frame);
+    }
+  }
+
+  function togglePause(): void {
+    paused = !paused;
+    if (paused) audio?.pause();
+    else audio?.play().catch(() => audio?.dispatchEvent(new Event('error')));
+  }
+
+  function toggleMute(): void {
+    muted = !muted;
+    if (audio) audio.muted = muted;
+  }
+
   onMount(() => {
     connect();
+    if (narrated) void presentLoop();
   });
 
   onDestroy(() => {
+    alive = false;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     sse?.close();
+    audio?.pause();
+    audio?.dispatchEvent(new Event('error'));
   });
 
   const voteTally = $derived(
@@ -182,12 +306,15 @@
     Object.entries(playerAlive).map(([id, alive]) => ({ id, alive }))
   );
 
+  const shownChat = $derived(record ? chatEntries.slice(-6) : chatEntries);
   const aliveCount = $derived(seats.filter((s) => s.alive).length);
 </script>
 
-<div class="mb-4">
-  <a class="text-sm underline" href="/">← Home</a>
-</div>
+{#if !record}
+  <div class="mb-4">
+    <a class="text-sm underline" href="/">← Home</a>
+  </div>
+{/if}
 
 <div class="mb-2 flex items-center gap-3">
   <h1 class="text-xl font-semibold" data-testid="watch-title">Live Match</h1>
@@ -242,7 +369,52 @@
   </div>
 {/if}
 
-<div class="grid gap-3 sm:grid-cols-[180px_1fr]" data-testid="watch-shell">
+{#if narrated}
+  <section
+    class={'mb-4 rounded-md border border-border bg-card ' + (record ? 'p-8 text-center' : 'p-4')}
+    data-testid="watch-narration"
+  >
+    <div class="mb-2 flex justify-center gap-3 text-xs">
+      {#if !started}
+        <button
+          class="padrino-button padrino-button--primary px-4 py-2"
+          data-testid="watch-start-narration"
+          onclick={() => (started = true)}
+        >
+          Start narration
+        </button>
+      {:else}
+        <button class="underline" data-testid="watch-pause" aria-pressed={paused} onclick={togglePause}>
+          {paused ? 'Resume' : 'Pause'}
+        </button>
+      {/if}
+      <button class="underline" data-testid="watch-mute" aria-pressed={muted} onclick={toggleMute}>
+        {muted ? 'Unmute' : 'Mute'}
+      </button>
+    </div>
+    <div
+      class="min-h-24"
+      aria-live="polite"
+      data-testid="watch-caption"
+      data-speaker={caption?.speaker ?? ''}
+    >
+      {#if caption}
+        <p class="text-sm font-semibold text-muted-foreground" data-testid="watch-caption-speaker">
+          {caption.speaker ? caption.speaker.slice(0, 8) : 'Narrator'}
+        </p>
+        <p class={record ? 'text-4xl leading-tight' : 'text-xl'} data-testid="watch-caption-text">
+          {caption.text}
+        </p>
+      {/if}
+    </div>
+  </section>
+{/if}
+
+<div
+  class={record ? 'grid gap-3' : 'grid gap-3 sm:grid-cols-[180px_1fr]'}
+  data-testid="watch-shell"
+  data-record={String(record)}
+>
   <div class="flex flex-col gap-3">
     <Card>
       <h2 class="mb-2 text-sm font-semibold">Phase</h2>
@@ -259,7 +431,10 @@
       {#if seats.length === 0}
         <p class="text-xs text-muted-foreground" data-testid="watch-seats-empty">Waiting…</p>
       {:else}
-        <ul class="flex flex-col gap-1" data-testid="watch-seat-grid">
+        <ul
+          class={record ? 'grid grid-cols-4 gap-2' : 'flex flex-col gap-1'}
+          data-testid="watch-seat-grid"
+        >
           {#each seats as seat (seat.id)}
             <li
               class={'flex items-center gap-2 rounded px-1 py-0.5 text-xs ' +
@@ -267,6 +442,8 @@
               data-testid="watch-seat-row"
               data-player-id={seat.id}
               data-alive={String(seat.alive)}
+              data-speaking={String(seat.id === speakingSeat)}
+              style={seat.id === speakingSeat ? 'outline: 2px solid currentColor; outline-offset: 2px;' : ''}
             >
               <span class={seat.alive ? 'text-emerald-500' : 'text-muted-foreground'}>
                 {seat.alive ? '●' : '○'}
@@ -325,7 +502,7 @@
       </p>
     {:else}
       <ol class="flex flex-col gap-2" data-testid="watch-chat-feed">
-        {#each chatEntries as entry (entry.sequence)}
+        {#each shownChat as entry (entry.sequence)}
           <li class="text-xs" data-testid="watch-chat-entry">
             <span class="font-mono text-muted-foreground">[{entry.phase}]</span>
             <span class="mx-1 font-semibold">{entry.actor.slice(0, 8)}</span>

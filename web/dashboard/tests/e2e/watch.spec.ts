@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { expectIdentityBlind, ROLE_AND_FACTION_TOKENS } from './helpers/identityBlind';
 
 // US-091: consumer live-viewer page.
@@ -173,5 +173,222 @@ test.describe('watch', () => {
 
     // Status badge shows Ended
     await expect(page.getByTestId('watch-status')).toHaveText('Ended');
+  });
+});
+
+// US-411: narrated live watch + record mode. Audio is stubbed; tests end clips by hand.
+const NARR_ID = '33333333-4444-5555-6666-cccccccccccc';
+const P1 = 'P01';
+const P2 = 'P02';
+
+const NARR_FRAMES = [
+  mkFrame(1, 'PhaseStarted', 'DAY_1', null, {}),
+  mkFrame(2, 'PublicMessageSubmitted', 'DAY_1', P1, { text: 'First line.' }),
+  mkFrame(3, 'PublicMessageSubmitted', 'DAY_1', P2, { text: 'Second line.' }),
+  mkFrame(4, 'PlayerEliminated', 'DAY_1', null, { public_player_id: P2, cause: 'DAY_VOTE' }),
+  mkFrame(5, 'GameTerminated', 'END', null, { winner: 'TOWN', reason: 'all_mafia_eliminated' })
+];
+
+async function stubAudio(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __audio: HTMLMediaElement[]; __ended: Set<HTMLMediaElement> };
+    w.__audio = [];
+    w.__ended = new Set();
+    // No network: the stub keeps the URL on a data attribute instead of loading it.
+    (window as unknown as { Audio: unknown }).Audio = function (url: string) {
+      const el = document.createElement('audio');
+      el.dataset.url = url;
+      return el;
+    };
+    HTMLMediaElement.prototype.play = function (this: HTMLMediaElement) {
+      w.__audio.push(this);
+      return Promise.resolve();
+    };
+  });
+}
+
+/** Wait for a not-yet-finished clip, then finish it with `ended` or `error`. */
+async function finishClip(page: Page, kind: 'ended' | 'error' = 'ended'): Promise<void> {
+  await page.waitForFunction(() => {
+    const w = window as unknown as { __audio: HTMLMediaElement[]; __ended: Set<HTMLMediaElement> };
+    return w.__audio.some((a) => !w.__ended.has(a));
+  });
+  await page.evaluate((k) => {
+    const w = window as unknown as { __audio: HTMLMediaElement[]; __ended: Set<HTMLMediaElement> };
+    const a = w.__audio.find((x) => !w.__ended.has(x))!;
+    w.__ended.add(a);
+    a.dispatchEvent(new Event(k));
+  }, kind);
+}
+
+async function mockLive(
+  page: Page,
+  handler: (url: URL, n: number) => Record<string, unknown>[] | null
+): Promise<URL[]> {
+  const urls: URL[] = [];
+  await page.route(`**/public/games/${NARR_ID}/live*`, async (route) => {
+    const url = new URL(route.request().url());
+    urls.push(url);
+    const frames = handler(url, urls.length);
+    if (frames === null) return route.abort('failed');
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: buildSseBody(frames)
+    });
+  });
+  return urls;
+}
+
+const caption = (page: Page) => page.getByTestId('watch-caption-text');
+
+test.describe('watch narrated (US-411)', () => {
+  test('forwards tail and narrated params to the SSE URL; default stays plain', async ({ page }) => {
+    const urls = await mockLive(page, (_u, n) => (n === 1 ? NARR_FRAMES.slice(0, 2) : null));
+    await page.goto(`/watch/${NARR_ID}?tail=1&narrated=1`);
+    await expect.poll(() => urls.length).toBeGreaterThan(0);
+    expect(urls[0].searchParams.get('tail')).toBe('true');
+    expect(urls[0].searchParams.get('speed')).toBe('100');
+    expect(urls[0].searchParams.has('after')).toBe(false);
+  });
+
+  test('non-narrated mode unchanged: no params, no narration UI, immediate chat', async ({
+    page
+  }) => {
+    const urls = await mockLive(page, (_u, n) => (n === 1 ? NARR_FRAMES.slice(0, 3) : null));
+    await page.goto(`/watch/${NARR_ID}`);
+    await expect(page.getByTestId('watch-chat-entry')).toHaveCount(2, { timeout: 15_000 });
+    expect(urls[0].searchParams.has('tail')).toBe(false);
+    expect(urls[0].searchParams.has('speed')).toBe(false);
+    await expect(page.getByTestId('watch-narration')).toHaveCount(0);
+    await expect(page.getByTestId('watch-start-narration')).toHaveCount(0);
+  });
+
+  test('audio blocks the next caption until ended; result waits for presentation', async ({
+    page
+  }) => {
+    await stubAudio(page);
+    await mockLive(page, (_u, n) => (n === 1 ? NARR_FRAMES : null));
+    await page.goto(`/watch/${NARR_ID}?narrated=1`);
+    // Nothing presented before the user gesture.
+    await expect(page.getByTestId('watch-start-narration')).toBeVisible();
+    await page.waitForTimeout(500);
+    await expect(caption(page)).toHaveCount(0);
+    await page.getByTestId('watch-start-narration').click();
+
+    await expect(caption(page)).toHaveText('Day 1'); // phase cue first
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (window as unknown as { __audio: HTMLElement[] }).__audio[0].dataset.url
+        )
+      )
+      .toMatch(/\/public\/games\/.+\/speech\/1\?cue=phase$/);
+    await finishClip(page);
+    await expect(caption(page)).toHaveText('First line.');
+    await expect(page.getByTestId('watch-caption-speaker')).toHaveText(P1);
+    await expect(
+      page.locator(`[data-testid="watch-seat-row"][data-player-id="${P1}"]`)
+    ).toHaveAttribute('data-speaking', 'true');
+    // Long audio: nothing advances.
+    await page.waitForTimeout(800);
+    await expect(caption(page)).toHaveText('First line.');
+    await expect(page.getByTestId('watch-chat-entry')).toHaveCount(1);
+
+    await finishClip(page);
+    await expect(caption(page)).toHaveText('Second line.');
+    await finishClip(page);
+    await expect(caption(page)).toHaveText(`${P2} was eliminated.`);
+    // Terminal frame received but not yet presented.
+    await expect(page.getByTestId('watch-outcome-banner')).toHaveCount(0);
+    await expect(page.getByTestId('watch-status')).not.toHaveText('Ended');
+    await finishClip(page);
+    await expect(caption(page)).toHaveText('End'); // phase cue before the result line
+    await expect(page.getByTestId('watch-outcome-banner')).toHaveCount(0);
+    await finishClip(page);
+    await expect(caption(page)).toContainText('Winner: TOWN');
+    await expect(page.getByTestId('watch-outcome-banner')).toHaveCount(0);
+    await finishClip(page);
+    await expect(page.getByTestId('watch-outcome-banner')).toBeVisible();
+    await expect(page.getByTestId('watch-winner')).toHaveText('TOWN');
+  });
+
+  test('audio error / 404 falls back to caption dwell and the queue continues', async ({ page }) => {
+    await stubAudio(page);
+    await mockLive(page, (_u, n) => (n === 1 ? NARR_FRAMES : null));
+    await page.goto(`/watch/${NARR_ID}?narrated=1`);
+    await page.getByTestId('watch-start-narration').click();
+    await expect(caption(page)).toHaveText('Day 1');
+    await finishClip(page, 'error'); // dwell ~1.4s then moves on
+    await expect(caption(page)).toHaveText('First line.');
+    await finishClip(page, 'error');
+    await expect(caption(page)).toHaveText('Second line.', { timeout: 10_000 });
+  });
+
+  test('rejected play() falls back to dwell without losing frames', async ({ page }) => {
+    await page.addInitScript(() => {
+      HTMLMediaElement.prototype.play = () => Promise.reject(new Error('NotAllowedError'));
+    });
+    await mockLive(page, (_u, n) => (n === 1 ? NARR_FRAMES.slice(0, 3) : null));
+    await page.goto(`/watch/${NARR_ID}?narrated=1`);
+    await page.getByTestId('watch-start-narration').click();
+    await expect(caption(page)).toHaveText('First line.', { timeout: 10_000 });
+    await expect(caption(page)).toHaveText('Second line.', { timeout: 10_000 });
+    await expect(page.getByTestId('watch-chat-entry')).toHaveCount(2);
+  });
+
+  test('mute keeps captions and dwell timing without audio', async ({ page }) => {
+    await stubAudio(page);
+    await mockLive(page, (_u, n) => (n === 1 ? NARR_FRAMES.slice(0, 3) : null));
+    await page.goto(`/watch/${NARR_ID}?narrated=1`);
+    await page.getByTestId('watch-mute').click();
+    await page.getByTestId('watch-start-narration').click();
+    await expect(caption(page)).toHaveText('Second line.', { timeout: 15_000 });
+    const played = await page.evaluate(
+      () => (window as unknown as { __audio: unknown[] }).__audio.length
+    );
+    expect(played).toBe(0);
+  });
+
+  test('reconnect resumes with after=<last> and shows no duplicate or lost lines', async ({
+    page
+  }) => {
+    await stubAudio(page);
+    const urls = await mockLive(page, (u, n) => {
+      if (n === 1) return NARR_FRAMES.slice(0, 3);
+      if (n === 2) {
+        expect(u.searchParams.get('after')).toBe('3');
+        return NARR_FRAMES.slice(2); // overlaps seq 3 on purpose
+      }
+      return null;
+    });
+    await page.goto(`/watch/${NARR_ID}?narrated=1`);
+    await page.getByTestId('watch-start-narration').click();
+    await expect.poll(() => urls.length, { timeout: 15_000 }).toBeGreaterThan(1);
+    expect(urls[1].searchParams.get('after')).toBe('3');
+    for (const line of ['Day 1', 'First line.', 'Second line.', `${P2} was eliminated.`]) {
+      await expect(caption(page)).toHaveText(line);
+      await finishClip(page);
+    }
+    await expect(page.getByTestId('watch-chat-entry')).toHaveCount(2);
+    await expect(caption(page)).toHaveText('End');
+  });
+
+  test('record layout hides chrome and shows a live-region caption', async ({ page }) => {
+    await stubAudio(page);
+    await mockLive(page, (_u, n) => (n === 1 ? NARR_FRAMES.slice(0, 3) : null));
+    await page.goto(`/watch/${NARR_ID}?narrated=1&record=1`);
+    await expect(page.locator('header')).toHaveCount(0);
+    await expect(page.locator('footer')).toHaveCount(0);
+    await page.getByTestId('watch-start-narration').click();
+    await expect(caption(page)).toBeVisible();
+    await expect(page.getByTestId('watch-caption')).toHaveAttribute('aria-live', 'polite');
+    await expect(page.getByTestId('watch-shell')).toHaveAttribute('data-record', 'true');
+  });
+
+  test('chrome stays without record=1', async ({ page }) => {
+    await mockLive(page, () => null);
+    await page.goto(`/watch/${NARR_ID}`);
+    await expect(page.locator('header')).toHaveCount(1);
   });
 });
