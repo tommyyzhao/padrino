@@ -537,6 +537,29 @@ export class PadrinoClient {
     });
   }
 
+  /**
+   * Spectator watch-page live URL (US-411). Unlike {@link liveTailUrl}, `tail` is
+   * opt-in so a default watch keeps the paced stream. `speed` divides server pacing.
+   */
+  liveWatchUrl(
+    gameId: string,
+    opts: { after?: number | null; tail?: boolean; speed?: number } = {}
+  ): string {
+    return this.buildUrl(`/public/games/${encodeURIComponent(gameId)}/live`, {
+      tail: opts.tail ? 'true' : undefined,
+      speed: opts.speed,
+      after: opts.after ?? undefined
+    });
+  }
+
+  /** Narration audio URL for one public frame (US-411); 404 when TTS is disabled. */
+  speechUrl(gameId: string, sequence: number, cue: 'chat' | 'phase'): string {
+    return this.buildUrl(
+      `/public/games/${encodeURIComponent(gameId)}/speech/${sequence}`,
+      { cue }
+    );
+  }
+
   /** Build the absolute URL of the caller's per-seat observation SSE stream (US-136). */
   seatObservationUrl(gameId: string): string {
     return this.buildUrl(`/human/games/${encodeURIComponent(gameId)}/observation/stream`);
