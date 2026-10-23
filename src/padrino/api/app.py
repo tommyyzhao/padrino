@@ -37,6 +37,7 @@ from padrino.api.routes.lobbies import router as lobbies_router
 from padrino.api.routes.model_catalog import router as model_catalog_router
 from padrino.api.routes.public import router as public_router
 from padrino.api.routes.scheduled_gauntlets import router as scheduled_gauntlets_router
+from padrino.api.routes.speech import router as speech_router
 from padrino.api.routes.sprites import router as sprites_router
 from padrino.observability.metrics import (
     CONTENT_TYPE_LATEST,
@@ -207,6 +208,8 @@ def create_app(
         app.include_router(scheduled_gauntlets_router)
     app.include_router(health_router)
     app.include_router(public_router)
+    # Loopback-only, default-off TTS for public frames (US-409).
+    app.include_router(speech_router)
     # Product-authored legal documents are public and hash-bound, so consent UI
     # can fetch the exact text before a human accepts it.
     app.include_router(legal_router)

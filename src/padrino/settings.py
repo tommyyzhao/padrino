@@ -509,6 +509,13 @@ class Settings(BaseSettings):
     # per client IP. Excess connections are rejected with 429.
     padrino_sse_max_connections_per_ip: int = 5
 
+    # Local text-to-speech for public game frames (US-409). ``None`` (default)
+    # disables the ``/public/games/{id}/speech/{sequence}`` endpoint entirely.
+    padrino_tts_provider: Literal["say", "gcp", "elevenlabs"] | None = None
+    padrino_tts_cache_dir: str = "~/.cache/padrino/tts"
+    padrino_tts_elevenlabs_key_ref: str = "env:ELEVENLABS_API_KEY"
+    padrino_tts_gcp_project: str | None = None
+
     # Live-tail SSE (US-133). When ``?tail=true`` the live endpoint streams the
     # committed prefix then keeps polling the still-growing event log for newly
     # committed PUBLIC events, emitting keep-alive heartbeats while idle. Each
