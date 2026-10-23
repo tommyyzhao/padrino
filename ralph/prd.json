@@ -941,6 +941,81 @@
         "Deterministic UI tests use synthetic frames and Playwright asserts no duplicate/lost chat/vote across reconnect."
       ],
       "notes": "Frontend-only presentation over existing committed events.",
+      "passes": true
+    },
+    {
+      "id": "US-408",
+      "wave": 15,
+      "epic": "E-SHOWCASE",
+      "priority": 45,
+      "dependencies": [],
+      "title": "Local AI showcase runner via 9router",
+      "description": "One CLI command runs an anonymous, unranked all-AI game through a local OpenAI-compatible gateway and publishes it for localhost watching while it runs.",
+      "acceptanceCriteria": [
+        "`padrino showcase` takes exactly PLAYER_COUNT provider/model slugs and seeds provider/model/prompt/build rows idempotently.",
+        "Game is ANONYMOUS and unranked; zero Rating/RatingEvent rows.",
+        "Game is LIVE + broadcastable before the first inference and the tail watch URL is printed first; completion marks RECENT; failure marks FAILED and hidden.",
+        "Only local SQLite is accepted because moderation is skipped; credentials are references only."
+      ],
+      "notes": "Moderation bypass is local-only by construction (SQLite guard).",
+      "passes": true
+    },
+    {
+      "id": "US-409",
+      "wave": 15,
+      "epic": "E-SHOWCASE",
+      "priority": 45,
+      "dependencies": [
+        "US-408"
+      ],
+      "title": "Local text-to-speech for public game frames",
+      "description": "Default-off, loopback-only speech endpoint for committed public frames with deterministic seat voices and an on-disk cache.",
+      "acceptanceCriteria": [
+        "GET /public/games/{id}/speech/{seq}?cue=chat|phase returns audio only for broadcastable games and public speakable frames; text and voice are server-derived.",
+        "Seat voice depends only on seat number; narrator templates for phase, elimination and result.",
+        "Providers: macOS say (default when enabled), GCP REST, ElevenLabs REST; no retries; sanitized 502.",
+        "Content-hash cache with atomic writes and per-key single-flight."
+      ],
+      "notes": "GCP needs the Text-to-Speech API enabled on the quota project; ElevenLabs needs ELEVENLABS_API_KEY.",
+      "passes": true
+    },
+    {
+      "id": "US-411",
+      "wave": 15,
+      "epic": "E-SHOWCASE",
+      "priority": 45,
+      "dependencies": [
+        "US-408",
+        "US-409"
+      ],
+      "title": "Narrated live watch and record mode",
+      "description": "The spectator watch page live-tails, narrates frames sequentially with captions and speaker highlight, and offers a chrome-free recording layout.",
+      "acceptanceCriteria": [
+        "?tail=1 live-tails; ?narrated=1 presents frames strictly in order and waits for audio end (caption dwell fallback); ?record=1 hides site chrome.",
+        "Reconnect resumes after the last received sequence with no duplicate or lost lines.",
+        "Terminal result appears only when presentation reaches it; captions mirror the spoken templates."
+      ],
+      "notes": "",
+      "passes": true
+    },
+    {
+      "id": "US-410",
+      "wave": 15,
+      "epic": "E-SHOWCASE",
+      "priority": 45,
+      "dependencies": [
+        "US-408",
+        "US-411"
+      ],
+      "title": "Showcase recording polish from first real 9router game",
+      "description": "Fix the gaps observed in the first real showcase recording so every seat is visible and audible.",
+      "acceptanceCriteria": [
+        "Watch page shows all PLAYER_COUNT seats from the first frame (not only seats that have acted), so the alive count is truthful before anyone speaks.",
+        "`padrino showcase` preflights every distinct slug with one tiny bounded call before creating the game and refuses (non-zero exit, slug named, no key) when a model errors or exceeds the per-call timeout.",
+        "Showcase prompts keep public chat in English unless configured otherwise.",
+        "Deterministic tests only; no real LLM/TTS calls in the default run."
+      ],
+      "notes": "Observed: gemini/gemini-3.8-flash timed out on every call (45s) leaving P01 silent; watch page showed '4 alive' in a 7-seat game; one seat answered in Chinese.",
       "passes": false
     },
     {

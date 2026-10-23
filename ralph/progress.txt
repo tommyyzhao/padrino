@@ -3,6 +3,8 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Narration templates live twice (US-409/411): `phase_text`/`select_utterance` in
+  `api/routes/speech.py` speak; `lib/narration.ts` captions. Change both together.
 - Identity-safe play tables (US-369): compose the live public reducer with the
   caller's own alive/dead observation roster so every table seat renders without
   reaching for controller/model data. Keep the player's role, faction, and legal
@@ -7570,3 +7572,28 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   ports 5176/18123 -> 62 passed / 4 visual opt-ins skipped; `uv run ruff check
   .`; `uv run ruff format --check .`; `uv run mypy src tests`; `uv run pytest
   -m "not integration"` -> 3425 selected / 12 deselected.
+
+## 2026-10-22 PDT - US-370
+- Finished the play-table game-feel layer: committed-sequence motion keys,
+  phase atmosphere, opt-in sound with persisted mute, reduced-motion/data
+  overrides, and a caption line for every cue. Playwright covers reconnect
+  overlap with no duplicate/lost chat or vote.
+- Gate fix landed first (38d2cf9): July-dated session fixtures expired against
+  the real clock (401s) and a 64-char Postgres constraint name broke every
+  Postgres test. Added `tests/db/test_identifier_length.py`.
+
+## 2026-10-22 PDT - US-408 / US-409 / US-411 (showcase lane)
+- `padrino showcase <7 slugs>` runs an anonymous, unranked all-AI game through
+  9router (`openai/<slug>` + `api_base`), LIVE before inference, local SQLite
+  only (moderation skipped). Key via `env:NINEROUTER_API_KEY`.
+- `GET /public/games/{id}/speech/{seq}?cue=chat|phase`: default-off
+  (`PADRINO_TTS_PROVIDER=say|gcp|elevenlabs`), loopback-only, server-derived
+  text, seat-number voices, sha256 disk cache.
+- `/watch/{id}?tail=1&narrated=1&record=1`: sequential narration queue,
+  captions, speaker highlight, chrome-free layout.
+- Real smoke (game 38461be8, 6/7 models answering): live tail, say audio and
+  record layout verified in a 1920x1080 browser. Findings queued as US-410.
+- Local run recipe: API needs `PADRINO_PUBLIC_LEADERBOARD_ANONYMOUS=true`
+  (else /public 401s), `PADRINO_TTS_PROVIDER=say`, CORS for the dashboard
+  origin, same `--db-url` as the runner; dashboard needs
+  `VITE_PADRINO_API_BASE_URL`.
