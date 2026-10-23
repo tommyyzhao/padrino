@@ -274,6 +274,40 @@ def ranked_audit(
     typer.echo(json.dumps(asyncio.run(_run()), indent=2, sort_keys=True))
 
 
+@app.command("showcase")
+def showcase(
+    models: list[str] = typer.Argument(
+        ...,
+        metavar="MODEL [MODEL ...]",
+        help="Seven 9router slugs in seat order; duplicates allowed.",
+    ),
+    db_url: str = typer.Option(
+        "sqlite+aiosqlite:///./padrino-showcase.db",
+        "--db-url",
+        help="Local SQLite async URL; use the same DB for padrino serve.",
+    ),
+    base_url: str = typer.Option(
+        "http://127.0.0.1:20128/v1", "--base-url", help="9router OpenAI-compatible endpoint."
+    ),
+    seed: str | None = typer.Option(
+        None, "--seed", help="Replay seed; defaults to a fresh UUID string."
+    ),
+    key_ref: str = typer.Option(
+        "env:NINEROUTER_API_KEY", "--key-ref", help="Bearer credential reference, never a raw key."
+    ),
+) -> None:
+    """Run one anonymous, unranked AI showcase for localhost viewing."""
+    from padrino.showcase import ShowcaseError, run_showcase
+
+    try:
+        asyncio.run(
+            run_showcase(models, db_url=db_url, base_url=base_url, seed=seed, key_ref=key_ref)
+        )
+    except ShowcaseError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from None
+
+
 @app.command("demo-gauntlet")
 def demo_gauntlet(
     seed: str = typer.Option("demo-seed-001", "--seed", help="Gauntlet seed."),
