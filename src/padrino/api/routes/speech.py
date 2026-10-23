@@ -118,14 +118,14 @@ def select_utterance(frame: dict[str, Any], cue: str) -> tuple[str, str, bool] |
     """Return ``(text, voice_kind, is_narrator)`` or None; voice_kind is the seat id."""
     etype = frame["event_type"]
     payload = frame["payload"]
+    if cue == "phase":
+        return phase_text(frame["phase"]), "", True
     if etype == "PlayerEliminated":
         who = _seat_label(payload.get("public_player_id") or frame.get("actor_player_id"))
         return f"{who} has been eliminated.", "", True
     if etype == "GameTerminated":
         winner = str(payload.get("winner", ""))[:40]
         return f"The game is over. {winner} wins.", "", True
-    if cue == "phase":
-        return phase_text(frame["phase"]), "", True
     if etype == "PublicMessageSubmitted":
         text = payload.get("text")
         if isinstance(text, str) and text.strip():

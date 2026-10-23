@@ -208,13 +208,15 @@ async def test_narrator_templates(
     session_factory: async_sessionmaker[AsyncSession], client: AsyncClient, calls: Calls
 ) -> None:
     gid = await _seed(session_factory, STD)
-    for seq, cue in ((2, "chat"), (3, "chat"), (1, "phase")):
+    # cue=phase on an elimination frame announces the phase, not the elimination
+    for seq, cue in ((2, "chat"), (3, "chat"), (1, "phase"), (2, "phase")):
         assert (await client.get(f"/public/games/{gid}/speech/{seq}?cue={cue}")).status_code == 200
     narr = speech.SAY_NARRATOR_VOICE
     assert calls.calls == [
         ("say", narr, "P05 has been eliminated."),
         ("say", narr, "The game is over. TOWN wins."),
         ("say", narr, "Day 1 begins."),
+        ("say", narr, "Day 1, voting begins."),
     ]
     assert speech.phase_text("DAY_1_DISCUSSION_ROUND_1") == "Day 1 begins."
     assert speech.phase_text("NIGHT_2_ACTIONS") == "Night 2 falls."

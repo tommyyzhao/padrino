@@ -276,7 +276,7 @@ test.describe('watch narrated (US-411)', () => {
     await expect(caption(page)).toHaveCount(0);
     await page.getByTestId('watch-start-narration').click();
 
-    await expect(caption(page)).toHaveText('Day 1'); // phase cue first
+    await expect(caption(page)).toHaveText('Day 1 begins.'); // phase cue first
     await expect
       .poll(() =>
         page.evaluate(() =>
@@ -298,15 +298,13 @@ test.describe('watch narrated (US-411)', () => {
     await finishClip(page);
     await expect(caption(page)).toHaveText('Second line.');
     await finishClip(page);
-    await expect(caption(page)).toHaveText(`${P2} was eliminated.`);
+    await expect(caption(page)).toHaveText(`${P2} has been eliminated.`);
     // Terminal frame received but not yet presented.
     await expect(page.getByTestId('watch-outcome-banner')).toHaveCount(0);
     await expect(page.getByTestId('watch-status')).not.toHaveText('Ended');
     await finishClip(page);
-    await expect(caption(page)).toHaveText('End'); // phase cue before the result line
-    await expect(page.getByTestId('watch-outcome-banner')).toHaveCount(0);
-    await finishClip(page);
-    await expect(caption(page)).toContainText('Winner: TOWN');
+    await expect(caption(page)).toContainText('TOWN wins'); // no phase cue for END
+
     await expect(page.getByTestId('watch-outcome-banner')).toHaveCount(0);
     await finishClip(page);
     await expect(page.getByTestId('watch-outcome-banner')).toBeVisible();
@@ -318,7 +316,7 @@ test.describe('watch narrated (US-411)', () => {
     await mockLive(page, (_u, n) => (n === 1 ? NARR_FRAMES : null));
     await page.goto(`/watch/${NARR_ID}?narrated=1`);
     await page.getByTestId('watch-start-narration').click();
-    await expect(caption(page)).toHaveText('Day 1');
+    await expect(caption(page)).toHaveText('Day 1 begins.');
     await finishClip(page, 'error'); // dwell ~1.4s then moves on
     await expect(caption(page)).toHaveText('First line.');
     await finishClip(page, 'error');
@@ -366,12 +364,12 @@ test.describe('watch narrated (US-411)', () => {
     await page.getByTestId('watch-start-narration').click();
     await expect.poll(() => urls.length, { timeout: 15_000 }).toBeGreaterThan(1);
     expect(urls[1].searchParams.get('after')).toBe('3');
-    for (const line of ['Day 1', 'First line.', 'Second line.', `${P2} was eliminated.`]) {
+    for (const line of ['Day 1 begins.', 'First line.', 'Second line.', `${P2} has been eliminated.`]) {
       await expect(caption(page)).toHaveText(line);
       await finishClip(page);
     }
     await expect(page.getByTestId('watch-chat-entry')).toHaveCount(2);
-    await expect(caption(page)).toHaveText('End');
+    await expect(caption(page)).toContainText('TOWN wins');
   });
 
   test('record layout hides chrome and shows a live-region caption', async ({ page }) => {
