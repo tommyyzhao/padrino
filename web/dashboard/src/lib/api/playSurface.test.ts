@@ -11,7 +11,9 @@ import {
   isVotePhase,
   mergeTableSeats,
   nightActionType,
+  phaseAtmosphere,
   seatPseudonym,
+  shouldPlaySoundCue,
   secondsUntil,
   spriteUrl
 } from './playSurface';
@@ -51,6 +53,30 @@ describe('countdown bucketing (non-precise, no timing leak)', () => {
     expect(secondsUntil('2026-06-19T00:00:00Z', now)).toBeNull();
     expect(secondsUntil(null, now)).toBeNull();
     expect(secondsUntil('not-a-date', now)).toBeNull();
+  });
+});
+
+describe('committed phase atmosphere and optional sound', () => {
+  it('derives day, night, and terminal presentation only from server phase facts', () => {
+    expect(phaseAtmosphere('DAY_2_DISCUSSION_ROUND_1', false)).toBe('day');
+    expect(phaseAtmosphere('NIGHT_2_ACTIONS', false)).toBe('night');
+    expect(phaseAtmosphere('DAY_2_VOTE', true)).toBe('terminal');
+    expect(phaseAtmosphere('', false)).toBe('neutral');
+  });
+
+  it('keeps sound conservative unless the user opted in and device preferences allow it', () => {
+    expect(
+      shouldPlaySoundCue({ muted: true, prefersReducedMotion: false, prefersReducedData: false })
+    ).toBe(false);
+    expect(
+      shouldPlaySoundCue({ muted: false, prefersReducedMotion: true, prefersReducedData: false })
+    ).toBe(false);
+    expect(
+      shouldPlaySoundCue({ muted: false, prefersReducedMotion: false, prefersReducedData: true })
+    ).toBe(false);
+    expect(
+      shouldPlaySoundCue({ muted: false, prefersReducedMotion: false, prefersReducedData: false })
+    ).toBe(true);
   });
 });
 

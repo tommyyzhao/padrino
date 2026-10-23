@@ -30,7 +30,9 @@
     isVotePhase,
     mergeTableSeats,
     nightActionType,
+    phaseAtmosphere,
     seatPseudonym,
+    shouldPlaySoundCue,
     secondsUntil,
     spriteUrl,
     type ComposerStatus
@@ -69,12 +71,20 @@
   let helpOpen = $state(false);
   let eliminationDismissed = $state(false);
   let mobilePanel = $state<'board' | 'chat' | 'actions'>('board');
+  let soundMuted = $state(true);
+  let prefersReducedMotion = $state(false);
+  let prefersReducedData = $state(false);
+  let lastSoundMotionSequence = $state<number | null>(null);
 
   let obsSse: EventSource | null = null;
   let obsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let obsReconnectAttempt = 0;
   let observationClosed = false;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
+  let motionQuery: MediaQueryList | null = null;
+  let audioContext: AudioContext | null = null;
+
+  const SOUND_MUTED_STORAGE_KEY = 'padrino:play-sound-muted:v1';
 
   const secondsRemaining = $derived(secondsUntil(deadlineIso, nowMs));
   const bucket = $derived(countdownBucket(secondsRemaining));
@@ -96,6 +106,26 @@
   const terminal = $derived(session?.terminal ?? false);
   const winner = $derived(session?.winner ?? null);
   const connectionState = $derived(session?.connectionState ?? 'offline');
+  const atmosphere = $derived(phaseAtmosphere(phase, terminal));
+  const speakerFocus = $derived(chat.at(-1)?.public_player_id ?? null);
+  const voteMotionSequence = $derived(session?.motions.vote ?? null);
+  const eliminationMotionSequence = $derived(session?.motions.elimination ?? null);
+  const terminalMotionSequence = $derived(session?.motions.terminal ?? null);
+  const latestMotion = $derived(session?.lastMotion ?? null);
+  const cueCaption = $derived(
+    latestMotion === null
+      ? ''
+      : {
+          chat: 'Chat message released',
+          vote: 'Vote recorded',
+          elimination: 'Player eliminated',
+          phase: 'Phase changed',
+          terminal: 'Game ended'
+        }[latestMotion.kind]
+  );
+  const soundEnabled = $derived(
+    shouldPlaySoundCue({ muted: soundMuted, prefersReducedMotion, prefersReducedData })
+  );
   const selectedNightActionType = $derived(nightActionType(legal));
   const selectedNightActionLabel = $derived(
     selectedNightActionType ? actionTypeLabel(selectedNightActionType) : 'Night action'
@@ -123,6 +153,75 @@
     if (value === 'reconnecting') return 'Reconnecting';
     return 'Offline';
   }
+
+  function readSoundPreference(): boolean {
+    try {
+      return window.localStorage.getItem(SOUND_MUTED_STORAGE_KEY) !== 'false';
+    } catch {
+      return true;
+    }
+  }
+
+  function persistSoundPreference(): void {
+    try {
+      window.localStorage.setItem(SOUND_MUTED_STORAGE_KEY, String(soundMuted));
+    } catch {
+      // Storage may be unavailable in privacy-hardened browsers; keep this tab's choice.
+    }
+  }
+
+  function refreshDevicePreferences(): void {
+    prefersReducedMotion = motionQuery?.matches ?? false;
+    const navigatorWithConnection = navigator as Navigator & {
+      connection?: { saveData?: boolean };
+    };
+    prefersReducedData = navigatorWithConnection.connection?.saveData === true;
+  }
+
+  function playCommittedSound(kind: 'chat' | 'vote' | 'elimination' | 'phase' | 'terminal'): void {
+    if (!soundEnabled) return;
+    try {
+      const windowWithWebkitAudio = window as Window & { webkitAudioContext?: typeof AudioContext };
+      const AudioContextConstructor = window.AudioContext ?? windowWithWebkitAudio.webkitAudioContext;
+      if (!AudioContextConstructor) return;
+      audioContext ??= new AudioContextConstructor();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      const frequency =
+        kind === 'elimination' || kind === 'terminal' ? 220 : kind === 'vote' ? 440 : 660;
+      oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+      gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.035, audioContext.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.1);
+      oscillator.connect(gain).connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.11);
+    } catch {
+      // A browser may forbid Web Audio; visual cues remain the equivalent path.
+    }
+  }
+
+  function toggleSound(): void {
+    if (prefersReducedMotion || prefersReducedData) return;
+    soundMuted = !soundMuted;
+    persistSoundPreference();
+    if (!soundMuted) {
+      lastSoundMotionSequence = latestMotion?.sequence ?? null;
+      playCommittedSound('chat');
+    }
+  }
+
+  $effect(() => {
+    const motion = latestMotion;
+    if (motion === null) return;
+    if (lastSoundMotionSequence === null) {
+      lastSoundMotionSequence = motion.sequence;
+      return;
+    }
+    if (motion.sequence <= lastSoundMotionSequence) return;
+    lastSoundMotionSequence = motion.sequence;
+    playCommittedSound(motion.kind);
+  });
 
   function seatSpriteUrl(publicPlayerId: string): string {
     return spriteUrl(
@@ -297,6 +396,10 @@
   onMount(() => {
     if (!gameId) return;
     observationClosed = false;
+    soundMuted = readSoundPreference();
+    motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    refreshDevicePreferences();
+    motionQuery.addEventListener('change', refreshDevicePreferences);
     padrino.setHumanSession(true);
     session = createPlaySession({ client: padrino.client, gameId });
     session.start();
@@ -313,10 +416,12 @@
     obsSse?.close();
     if (obsReconnectTimer) clearTimeout(obsReconnectTimer);
     if (tickTimer) clearInterval(tickTimer);
+    motionQuery?.removeEventListener('change', refreshDevicePreferences);
+    if (audioContext) void audioContext.close();
   });
 </script>
 
-<section class="play-command-deck mb-4" aria-label="Table status">
+<section class="play-command-deck mb-4" aria-label="Table status" data-atmosphere={atmosphere}>
   <div class="min-w-0">
     <a class="text-sm text-muted-foreground underline" href="/">← Leave table</a>
     <p class="padrino-eyebrow mt-4">Private social-deduction table</p>
@@ -339,6 +444,36 @@
     <Button variant="outline" testid="play-help-open" onclick={() => (helpOpen = true)}>
       Rules
     </Button>
+    <button
+      class="play-sound-control"
+      type="button"
+      data-testid="play-sound-toggle"
+      data-muted={String(!soundEnabled)}
+      aria-pressed={soundEnabled}
+      aria-describedby="play-sound-description"
+      disabled={prefersReducedMotion || prefersReducedData}
+      onclick={toggleSound}
+    >
+      {#if prefersReducedMotion || prefersReducedData}
+        Sound held
+      {:else if soundEnabled}
+        Sound on
+      {:else}
+        Sound off
+      {/if}
+    </button>
+    <span class="text-xs text-muted-foreground" role="status" data-testid="play-cue-caption">
+      {cueCaption}
+    </span>
+    <span class="sr-only" id="play-sound-description" data-testid="play-sound-description">
+      {#if prefersReducedMotion || prefersReducedData}
+        Sound remains off to respect your device preference. Visual chat, vote, phase, and elimination cues stay on.
+      {:else if soundEnabled}
+        Subtle committed-event sounds are on. Visual chat, vote, phase, and elimination cues stay on.
+      {:else}
+        Sound is off. Visual chat, vote, phase, and elimination cues stay on.
+      {/if}
+    </span>
   </div>
 </section>
 
@@ -388,28 +523,35 @@
 {/if}
 
 {#if isEliminated && !eliminationDismissed}
-  <div
-    class="fixed inset-0 z-40 flex items-center justify-center bg-background/85 p-4"
-    data-testid="play-eliminated-modal"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="play-eliminated-title"
-  >
-    <div class="w-full max-w-sm rounded-md border border-border bg-card p-4 shadow-lg">
-      <h2 class="text-base font-semibold" id="play-eliminated-title">You have been eliminated</h2>
-      <p class="mt-2 text-sm text-muted-foreground">
-        You can keep watching the table, but your seat can no longer submit actions.
-      </p>
-      <Button
-        class="mt-4 min-h-11"
-        variant="outline"
-        testid="play-eliminated-dismiss"
-        onclick={() => (eliminationDismissed = true)}
+  {#key eliminationMotionSequence}
+    <div
+      class="fixed inset-0 z-40 flex items-center justify-center bg-background/85 p-4"
+      data-testid="play-eliminated-modal"
+      data-sequence={String(eliminationMotionSequence ?? '')}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="play-eliminated-title"
+    >
+      <div
+        class={`play-elimination-card w-full max-w-sm rounded-md border border-border bg-card p-4 shadow-lg ${
+          eliminationMotionSequence === null ? '' : 'play-elimination-card--motion'
+        }`}
       >
-        Continue watching
-      </Button>
+        <h2 class="text-base font-semibold" id="play-eliminated-title">You have been eliminated</h2>
+        <p class="mt-2 text-sm text-muted-foreground">
+          You can keep watching the table, but your seat can no longer submit actions.
+        </p>
+        <Button
+          class="mt-4 min-h-11"
+          variant="outline"
+          testid="play-eliminated-dismiss"
+          onclick={() => (eliminationDismissed = true)}
+        >
+          Continue watching
+        </Button>
+      </div>
     </div>
-  </div>
+  {/key}
 {/if}
 
 <p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="play-composition">
@@ -421,20 +563,19 @@
 </p>
 
 {#if phaseBanner}
-  <div
-    class={`mb-4 rounded-md border px-4 py-3 text-sm ${
-      phaseBanner.kind === 'night'
-        ? 'border-slate-300 bg-slate-50 text-slate-950'
-        : 'border-amber-300 bg-amber-50 text-slate-950'
-    }`}
-    data-testid="play-phase-banner"
-    data-phase={phaseBanner.phase}
-    data-kind={phaseBanner.kind}
-    role="status"
-  >
-    <span class="font-semibold">{phaseBanner.message}.</span>
-    <span class="ml-2 font-mono text-xs">{phaseBanner.phase}</span>
-  </div>
+  {#key phaseBanner.sequence}
+    <div
+      class={`play-phase-banner play-phase-banner--${phaseBanner.kind} mb-4 rounded-md border px-4 py-3 text-sm`}
+      data-testid="play-phase-banner"
+      data-phase={phaseBanner.phase}
+      data-kind={phaseBanner.kind}
+      data-sequence={String(phaseBanner.sequence)}
+      role="status"
+    >
+      <span class="font-semibold">{phaseBanner.message}.</span>
+      <span class="ml-2 font-mono text-xs">{phaseBanner.phase}</span>
+    </div>
+  {/key}
 {/if}
 
 {#if returnNotice}
@@ -448,24 +589,27 @@
 {/if}
 
 {#if terminal}
-  <div
-    class="mb-4 rounded-xl border border-emerald-400/50 bg-emerald-950/30 px-4 py-3 text-sm"
-    data-testid="play-terminal"
-    data-winner={String(winner ?? '')}
-  >
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <span><span class="font-semibold">Game over.</span>
-        {#if winner}Winner: <strong data-testid="play-winner">{winner}</strong>{/if}
-      </span>
-      <a
-        class="padrino-button padrino-button--outline inline-flex min-h-10 items-center px-3 py-2 text-sm"
-        href={`/play/${gameId}/reveal`}
-        data-testid="play-reveal-link"
-      >
-        Continue to reveal
-      </a>
+  {#key terminalMotionSequence}
+    <div
+      class="play-terminal-card mb-4 rounded-xl border border-emerald-400/50 bg-emerald-950/30 px-4 py-3 text-sm"
+      data-testid="play-terminal"
+      data-winner={String(winner ?? '')}
+      data-sequence={String(terminalMotionSequence ?? '')}
+    >
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <span><span class="font-semibold">Game over.</span>
+          {#if winner}Winner: <strong data-testid="play-winner">{winner}</strong>{/if}
+        </span>
+        <a
+          class="padrino-button padrino-button--outline inline-flex min-h-10 items-center px-3 py-2 text-sm"
+          href={`/play/${gameId}/reveal`}
+          data-testid="play-reveal-link"
+        >
+          Continue to reveal
+        </a>
+      </div>
     </div>
-  </div>
+  {/key}
 {/if}
 
 <div
@@ -518,7 +662,7 @@
   </button>
 </div>
 
-<div class="play-table-shell" data-testid="play-shell">
+<div class="play-table-shell" data-testid="play-shell" data-atmosphere={atmosphere}>
   <div
     class={`${mobilePanel === 'board' ? 'flex' : 'hidden'} flex-col gap-3 md:flex`}
     data-testid="play-board-panel"
@@ -540,12 +684,13 @@
             <li
               class={`play-seat-card ${seat.alive ? 'play-seat-card--alive' : 'play-seat-card--eliminated'} ${
                 isSelf ? 'play-seat-card--self' : ''
-              }`}
+              } ${speakerFocus === seat.public_player_id ? 'play-seat-card--speaker' : ''}`}
               data-testid="play-seat-row"
               data-player-id={seat.public_player_id}
               data-alive={String(seat.alive)}
               data-self={String(isSelf)}
               data-state={isSelf && !seat.alive ? 'dead-self' : seat.alive ? 'alive' : 'dead'}
+              data-speaking={String(speakerFocus === seat.public_player_id)}
             >
               <span class="play-seat-card__portrait-wrap" data-testid="play-seat-portrait">
                 <img
@@ -711,9 +856,16 @@
         {#if chat.length === 0}
           <p class="text-xs text-muted-foreground" data-testid="play-chat-empty">No chat yet.</p>
         {:else}
-          <ol class="mb-3 flex flex-col gap-2" data-testid="play-chat-feed">
+          <ol class="mb-3 flex flex-col gap-2" data-testid="play-chat-feed" aria-live="polite">
             {#each chat as line (line.sequence)}
-              <li class="text-xs" data-testid="play-chat-line">
+              <li
+                class={`play-chat-line text-xs ${
+                  speakerFocus === line.public_player_id ? 'play-chat-line--speaker' : ''
+                }`}
+                data-testid="play-chat-line"
+                data-sequence={String(line.sequence)}
+                data-speaker={String(speakerFocus === line.public_player_id)}
+              >
                 <span class="font-mono text-muted-foreground">[{line.phase}]</span>
                 {#if line.public_player_id}
                   <span class="mx-1 font-semibold">{line.public_player_id.slice(0, 8)}</span>
@@ -769,7 +921,13 @@
     {#if showVoteTally}
       <Card>
         <h2 class="mb-2 text-sm font-semibold">Vote tally</h2>
-        <div class="flex flex-col gap-3" data-testid="play-vote-tally-panel">
+        {#key voteMotionSequence}
+          <div
+            class={`play-vote-tally-panel ${voteMotionSequence === null ? '' : 'play-vote-tally-panel--motion'} flex flex-col gap-3`}
+            data-testid="play-vote-tally-panel"
+            data-motion-sequence={voteMotionSequence === null ? undefined : String(voteMotionSequence)}
+            aria-live="polite"
+          >
           <div>
             <h3 class="mb-1 text-xs font-medium text-muted-foreground">Running counts</h3>
             {#if voteTally.counts.length === 0}
@@ -818,7 +976,8 @@
               </ul>
             {/if}
           </div>
-        </div>
+          </div>
+        {/key}
       </Card>
     {/if}
 

@@ -1070,6 +1070,77 @@ test.describe('play connection reliability (US-285)', () => {
     await expectIdentityBlind(page.getByTestId('play-shell'));
   });
 
+  test('reconnect overlap neither duplicates nor loses chat and vote lines', async ({ page }) => {
+    await installControlledEventSource(page);
+    await mockStandardPlaySurface(page, { liveBatches: [] });
+    await page.goto(`/play/${GAME_ID}`);
+
+    const indicator = page.getByTestId('play-connection-indicator');
+    await expect(indicator).toHaveAttribute('data-state', 'live', { timeout: 15_000 });
+    const first = [
+      mkFrame(1, 'PhaseStarted', 'DAY_1_VOTE', null, {}),
+      mkFrame(2, 'VoteSubmitted', 'DAY_1_VOTE', SEAT_OTHER, { target: SEAT_ME, is_abstain: false }),
+      mkFrame(3, 'PublicMessageSubmitted', 'DAY_1_VOTE', SEAT_OTHER, { text: 'First line.' })
+    ];
+    for (const frame of first) await emitControlledLive(page, 0, frame);
+    await expect(page.getByTestId('play-chat-line')).toHaveCount(1, { timeout: 15_000 });
+
+    await failControlledLive(page, 0);
+    await page.waitForFunction(
+      () =>
+        (window as unknown as Window & { __padrinoLiveSources: unknown[] }).__padrinoLiveSources
+          .length >= 2
+    );
+    // Overlap replay (2, 3) then genuinely new frames (4, 5).
+    const second = [
+      ...first.slice(1),
+      mkFrame(4, 'PublicMessageSubmitted', 'DAY_1_VOTE', SEAT_THIRD, { text: 'Second line.' }),
+      mkFrame(5, 'VoteSubmitted', 'DAY_1_VOTE', SEAT_THIRD, { target: SEAT_ME, is_abstain: false })
+    ];
+    for (const frame of second) await emitControlledLive(page, 1, frame);
+
+    const lines = page.getByTestId('play-chat-line');
+    await expect(lines).toHaveCount(2, { timeout: 15_000 });
+    await expect(lines.nth(0)).toHaveAttribute('data-sequence', '3');
+    await expect(lines.nth(1)).toHaveAttribute('data-sequence', '4');
+    await expect(page.getByTestId('play-vote-voter-row')).toHaveCount(2);
+    await expect(
+      page.locator(`[data-testid="play-vote-count-row"][data-target="${SEAT_ME}"]`)
+    ).toHaveAttribute('data-count', '2');
+    await expect(page.getByTestId('play-cue-caption')).toHaveText('Vote recorded');
+  });
+
+  test('sound is off by default and the mute choice persists across reloads', async ({ page }) => {
+    await mockStandardPlaySurface(page);
+    await page.goto(`/play/${GAME_ID}`);
+
+    const toggle = page.getByTestId('play-sound-toggle');
+    await expect(toggle).toHaveText('Sound off', { timeout: 15_000 });
+    await toggle.click();
+    await expect(toggle).toHaveText('Sound on');
+
+    await page.reload();
+    await expect(page.getByTestId('play-sound-toggle')).toHaveText('Sound on', {
+      timeout: 15_000
+    });
+    await page.getByTestId('play-sound-toggle').click();
+    await page.reload();
+    await expect(page.getByTestId('play-sound-toggle')).toHaveText('Sound off', {
+      timeout: 15_000
+    });
+  });
+
+  test('reduced-motion keeps sound held while captions stay visible', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await mockStandardPlaySurface(page);
+    await page.goto(`/play/${GAME_ID}`);
+    await expect(page.getByTestId('play-sound-toggle')).toHaveText('Sound held', {
+      timeout: 15_000
+    });
+    await expect(page.getByTestId('play-sound-toggle')).toBeDisabled();
+    await expect(page.getByTestId('play-cue-caption')).toHaveText('Chat message released');
+  });
+
   test('return-after-away notice is non-leaky', async ({ page }) => {
     await mockStandardPlaySurface(page, {
       observationFrames: [

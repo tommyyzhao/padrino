@@ -37,6 +37,7 @@ describe('play-state reducer', () => {
     ]);
     expect(state.chat.map((c) => c.text)).toEqual(['hello', 'world']);
     expect(state.chat[0].public_player_id).toBe('p1');
+    expect(state.lastMotion).toEqual({ kind: 'chat', sequence: 3 });
   });
 
   it('tracks latest vote per voter and clears votes on a phase change', () => {
@@ -68,6 +69,7 @@ describe('play-state reducer', () => {
       ],
       counts: [{ target: 'p3', count: 2 }]
     });
+    expect(state.motions.vote).toBe(4);
 
     state = applyFrame(
       state,
@@ -94,6 +96,8 @@ describe('play-state reducer', () => {
     ]);
     const seat = state.seats.find((s) => s.public_player_id === 'p1');
     expect(seat?.alive).toBe(false);
+    expect(state.lastMotion).toEqual({ kind: 'elimination', sequence: 2 });
+    expect(state.motions.elimination).toBe(2);
   });
 
   it('records the terminal winner once GameTerminated is released', () => {
@@ -103,6 +107,8 @@ describe('play-state reducer', () => {
     );
     expect(state.terminal).toBe(true);
     expect(state.winner).toBe('TOWN');
+    expect(state.lastMotion).toEqual({ kind: 'terminal', sequence: 9 });
+    expect(state.motions.terminal).toBe(9);
   });
 
   it('derives phase-transition banners from PhaseStarted frames', () => {
@@ -139,6 +145,24 @@ describe('play-state reducer', () => {
       kind: 'night',
       message: 'Night falls'
     });
+    expect(state.lastMotion).toEqual({ kind: 'phase', sequence: 2 });
+  });
+
+  it('marks vote motion only for a newly committed vote, never a reconnect overlap', () => {
+    let state = applyFrame(
+      emptyPlayState(),
+      frame(7, 'VoteSubmitted', { target: 'p2', is_abstain: false }, { actor_player_id: 'p1' })
+    );
+    expect(state.lastMotion).toEqual({ kind: 'vote', sequence: 7 });
+    expect(state.motions.vote).toBe(7);
+
+    const before = state;
+    state = applyFrame(
+      state,
+      frame(7, 'VoteSubmitted', { target: 'p2', is_abstain: false }, { actor_player_id: 'p1' })
+    );
+    expect(state).toBe(before);
+    expect(state.lastMotion).toEqual({ kind: 'vote', sequence: 7 });
   });
 
   it('ignores resume-overlap frames so reconnect folding is idempotent', () => {

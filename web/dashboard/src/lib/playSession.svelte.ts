@@ -13,6 +13,8 @@ import {
   applyFrame,
   emptyPlayState,
   type BoardSeat,
+  type CommittedMotion,
+  type CommittedMotions,
   type PhaseBanner,
   type PlayState,
   type ReleasedChatLine
@@ -73,6 +75,12 @@ export function createPlaySession(opts: PlaySessionOptions) {
     },
     get terminal(): boolean {
       return state.terminal;
+    },
+    get lastMotion(): CommittedMotion | null {
+      return state.lastMotion;
+    },
+    get motions(): CommittedMotions {
+      return state.motions;
     },
     get lastSequence(): number | null {
       return state.lastSequence;

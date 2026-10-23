@@ -49,6 +49,10 @@ export interface PlayState {
   winner: string | null;
   /** Whether the terminal frame has been released. */
   terminal: boolean;
+  /** Latest committed frame which may drive a non-mechanical presentation cue. */
+  lastMotion: CommittedMotion | null;
+  /** Latest committed sequence per effect that needs a stable reconnect key. */
+  motions: CommittedMotions;
 }
 
 /** One seat's current day-vote choice. `target === null` means abstain. */
@@ -71,6 +75,25 @@ export interface PhaseBanner {
   message: string;
 }
 
+/**
+ * The newest presentation cue backed by a committed public frame.
+ *
+ * UI motion keys on this value rather than wall-clock delivery timing. A
+ * reconnect overlap leaves the reducer state untouched, so it cannot replay a
+ * vote, elimination, or chat effect.
+ */
+export interface CommittedMotion {
+  kind: 'chat' | 'vote' | 'elimination' | 'phase' | 'terminal';
+  sequence: number;
+}
+
+/** Stable presentation keys for effects that must not replay on reconnect. */
+export interface CommittedMotions {
+  vote: number | null;
+  elimination: number | null;
+  terminal: number | null;
+}
+
 /** Identity-blind current vote view: voter rows plus target counts. */
 export interface VoteTally {
   rows: VoteTallyRow[];
@@ -86,7 +109,9 @@ export function emptyPlayState(): PlayState {
     chat: [],
     phaseBanner: null,
     winner: null,
-    terminal: false
+    terminal: false,
+    lastMotion: null,
+    motions: { vote: null, elimination: null, terminal: null }
   };
 }
 
@@ -117,6 +142,8 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
   let phaseBanner = state.phaseBanner;
   let winner = state.winner;
   let terminal = state.terminal;
+  let lastMotion = state.lastMotion;
+  let motions = phaseChanged ? { ...state.motions, vote: null } : state.motions;
 
   const actor = frame.actor_player_id;
   if (actor) {
@@ -127,6 +154,7 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
     case 'PhaseStarted': {
       if (phaseChanged) {
         phaseBanner = derivePhaseBanner(state.phase, frame.phase, frame.sequence);
+        lastMotion = { kind: 'phase', sequence: frame.sequence };
       }
       break;
     }
@@ -135,6 +163,8 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
         const isAbstain = frame.payload.is_abstain === true;
         const target = asString(frame.payload.target);
         votes = { ...votes, [actor]: isAbstain ? null : target };
+        lastMotion = { kind: 'vote', sequence: frame.sequence };
+        motions = { ...motions, vote: frame.sequence };
       }
       break;
     }
@@ -145,6 +175,7 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
           ...chat,
           { sequence: frame.sequence, phase: frame.phase, public_player_id: actor, text }
         ];
+        lastMotion = { kind: 'chat', sequence: frame.sequence };
       }
       break;
     }
@@ -154,12 +185,16 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
         seats = ensureSeat(seats, eliminated).map((s) =>
           s.public_player_id === eliminated ? { ...s, alive: false } : s
         );
+        lastMotion = { kind: 'elimination', sequence: frame.sequence };
+        motions = { ...motions, elimination: frame.sequence };
       }
       break;
     }
     case 'GameTerminated': {
       terminal = true;
       winner = asString(frame.payload.winner);
+      lastMotion = { kind: 'terminal', sequence: frame.sequence };
+      motions = { ...motions, terminal: frame.sequence };
       break;
     }
     default:
@@ -174,7 +209,9 @@ export function applyFrame(state: PlayState, frame: LiveEventFrame): PlayState {
     chat,
     phaseBanner,
     winner,
-    terminal
+    terminal,
+    lastMotion,
+    motions
   };
 }
 

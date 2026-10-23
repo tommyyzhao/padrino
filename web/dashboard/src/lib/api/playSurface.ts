@@ -56,6 +56,40 @@ export function composerStatusFromChat(status: string): ComposerStatus {
 /** A coarse, non-precise "time left" bucket for the phase countdown header. */
 export type CountdownBucket = 'none' | 'plenty' | 'soon' | 'ending';
 
+/** Visual mood resolved only from the server's committed phase/terminal facts. */
+export type PhaseAtmosphere = 'neutral' | 'day' | 'night' | 'terminal';
+
+/**
+ * Return the play-table atmosphere without inspecting local mechanics or any
+ * controller/model metadata. Terminal is a committed `GameTerminated` fact.
+ */
+export function phaseAtmosphere(phase: string, terminal: boolean): PhaseAtmosphere {
+  if (terminal) return 'terminal';
+  const normalized = phase.toUpperCase();
+  if (normalized.startsWith('NIGHT_')) return 'night';
+  if (normalized.startsWith('DAY_')) return 'day';
+  return 'neutral';
+}
+
+/** Device and user facts that may permit a deliberately conservative cue. */
+export interface SoundCuePreferences {
+  muted: boolean;
+  prefersReducedMotion: boolean;
+  prefersReducedData: boolean;
+}
+
+/**
+ * Cues are opt-in: reduced-motion and reduced-data preferences always win over
+ * the persisted setting, while visual equivalents remain available.
+ */
+export function shouldPlaySoundCue(preferences: SoundCuePreferences): boolean {
+  return !(
+    preferences.muted ||
+    preferences.prefersReducedMotion ||
+    preferences.prefersReducedData
+  );
+}
+
 /**
  * Bucket the seconds remaining until the phase deadline into a COARSE label.
  *

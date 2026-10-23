@@ -636,6 +636,26 @@
     box-shadow: 0 0 0.7rem currentColor;
   }
 
+  .play-sound-control {
+    min-height: 2.25rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: 999px;
+    padding: 0.35rem 0.7rem;
+    background: hsl(var(--background) / 0.48);
+    color: hsl(var(--muted-foreground));
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.75rem;
+  }
+
+  .play-sound-control[aria-pressed="true"] {
+    border-color: hsl(var(--success) / 0.68);
+    color: hsl(149 86% 82%);
+  }
+
+  .play-sound-control:disabled {
+    cursor: not-allowed;
+  }
+
   .play-self-dossier {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
@@ -673,6 +693,22 @@
     display: flex;
     flex-direction: column;
     gap: 0.85rem;
+  }
+
+  .play-table-shell[data-atmosphere="night"] .play-table-card {
+    background:
+      radial-gradient(circle at 50% 6%, hsl(var(--violet) / 0.14), transparent 15rem),
+      hsl(229 32% 8% / 0.94);
+  }
+
+  .play-table-shell[data-atmosphere="day"] .play-table-card {
+    background:
+      radial-gradient(circle at 50% 0%, hsl(var(--ember) / 0.11), transparent 14rem),
+      hsl(var(--card) / 0.92);
+  }
+
+  .play-table-shell[data-atmosphere="terminal"] .play-table-card {
+    border-color: hsl(var(--success) / 0.42);
   }
 
   .play-table-card {
@@ -735,6 +771,11 @@
     box-shadow: 0 0 0 1px hsl(var(--primary) / 0.14), 0 0.6rem 1.6rem hsl(var(--primary) / 0.08);
   }
 
+  .play-seat-card--speaker {
+    border-color: hsl(var(--cyan) / 0.9);
+    box-shadow: 0 0 0 1px hsl(var(--cyan) / 0.2), 0 0 1.1rem hsl(var(--cyan) / 0.13);
+  }
+
   .play-seat-card__portrait-wrap {
     display: block;
     flex: 0 0 auto;
@@ -769,14 +810,48 @@
     padding-right: 0.25rem;
   }
 
-  .play-conversation-card [data-testid="play-chat-line"] {
+  .play-chat-line {
     border-left: 2px solid hsl(var(--cyan) / 0.4);
     padding: 0.35rem 0.55rem;
     background: hsl(var(--background) / 0.25);
+    animation: play-chat-enter 180ms ease-out both;
+  }
+
+  .play-chat-line--speaker {
+    border-left-color: hsl(var(--cyan));
+    background: hsl(var(--cyan) / 0.08);
   }
 
   .play-action-card {
     border-color: hsl(var(--primary) / 0.35);
+  }
+
+  .play-phase-banner {
+    animation: play-phase-enter 220ms ease-out both;
+  }
+
+  .play-phase-banner--night {
+    border-color: hsl(var(--violet) / 0.7);
+    background: hsl(232 37% 13% / 0.96);
+    color: hsl(245 100% 92%);
+  }
+
+  .play-phase-banner--day {
+    border-color: hsl(var(--ember) / 0.72);
+    background: hsl(24 41% 15% / 0.96);
+    color: hsl(44 100% 91%);
+  }
+
+  .play-vote-tally-panel--motion {
+    animation: play-vote-settle 180ms ease-out both;
+  }
+
+  .play-elimination-card--motion {
+    animation: play-elimination-enter 220ms cubic-bezier(0.18, 0.88, 0.32, 1.12) both;
+  }
+
+  .play-terminal-card {
+    animation: play-terminal-enter 260ms ease-out both;
   }
 
   .play-inspector-card details summary::marker {
@@ -825,6 +900,72 @@
   @keyframes padrino-shimmer {
     to {
       background-position: -220% 0;
+    }
+  }
+
+  @keyframes play-chat-enter {
+    from {
+      opacity: 0;
+      transform: translateY(0.35rem);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes play-phase-enter {
+    from {
+      opacity: 0;
+      transform: scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  @keyframes play-vote-settle {
+    0% {
+      transform: translateX(-0.2rem);
+    }
+    55% {
+      transform: translateX(0.12rem);
+    }
+    100% {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes play-elimination-enter {
+    from {
+      opacity: 0;
+      transform: translateY(0.75rem) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes play-terminal-enter {
+    from {
+      opacity: 0;
+      transform: translateY(-0.3rem);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @media (prefers-reduced-data: reduce) {
+    .play-chat-line,
+    .play-phase-banner,
+    .play-vote-tally-panel--motion,
+    .play-elimination-card--motion,
+    .play-terminal-card {
+      animation: none;
     }
   }
 }
