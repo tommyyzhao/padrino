@@ -417,3 +417,32 @@ async def test_unresponsive_seat_fails_the_game_naming_only_the_seat_number(
             assert not game.is_broadcastable
     finally:
         await engine.dispose()
+
+
+async def test_default_preflight_retries_transient_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One momentary 503 must not refuse a whole game; a 404 fails without retrying."""
+    from padrino import showcase
+
+    calls: dict[str, int] = {}
+
+    async def completion(**kwargs: Any) -> Any:
+        model = kwargs["model"]
+        calls[model] = calls.get(model, 0) + 1
+        if model.endswith("flaky") and calls[model] == 1:
+            raise litellm.exceptions.ServiceUnavailableError(
+                "busy", llm_provider="openai", model=model
+            )
+        if model.endswith("gone"):
+            raise litellm.exceptions.NotFoundError(
+                "no such model", llm_provider="openai", model=model
+            )
+        return object()
+
+    monkeypatch.setattr(litellm, "acompletion", completion)
+    monkeypatch.setattr(showcase, "PREFLIGHT_BACKOFF_S", 0.0)
+    base = "http://127.0.0.1:4000/v1"
+    await showcase._preflight_call("p/flaky", base_url=base, api_key="k", timeout_s=1.0)
+    assert calls["openai/p/flaky"] == 2
+    with pytest.raises(litellm.exceptions.NotFoundError):
+        await showcase._preflight_call("p/gone", base_url=base, api_key="k", timeout_s=1.0)
+    assert calls["openai/p/gone"] == 1

@@ -35,6 +35,7 @@ from padrino.llm.prompts import (
     canonical_prompts_by_role,
     iter_canonical_prompts,
 )
+from padrino.llm.retry import DEFAULT_RETRY_ON
 from padrino.llm.secrets import SecretResolutionError, resolve_secret
 from padrino.public.broadcast_index import mark_hidden, mark_live, mark_recent
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
@@ -50,6 +51,8 @@ DEFAULT_MAX_TOKENS = 16384
 # Some gateways (e.g. 9router token-saver) inject style prompts that can flip reply language.
 GATEWAY_HEADERS = {"x-9router-token-saver": "off"}
 PREFLIGHT_PROMPT = "Preflight check: reply with the single word OK."
+PREFLIGHT_ATTEMPTS = 3
+PREFLIGHT_BACKOFF_S = 5.0
 AdapterFactory = Callable[[Mapping[str, RuntimeBuild]], LlmAdapter]
 Preflight = Callable[[str], Awaitable[None]]
 
@@ -132,22 +135,32 @@ async def _preflight_call(slug: str, *, base_url: str, api_key: str, timeout_s: 
 
     Reasoning models think before output, so max_tokens matches the game build and
     empty content is not a failure; only an error or exceeding ``timeout_s`` is.
+    Transient errors (overload, 5xx, rate limit) get the game's retry classes, so one
+    momentary 503 does not refuse a whole game; permanent ones (404, auth) fail at once.
     """
-    await asyncio.wait_for(
-        litellm.acompletion(
-            model="openai/" + slug,
-            messages=[
-                {"role": "system", "content": "You are a connectivity check."},
-                {"role": "user", "content": PREFLIGHT_PROMPT},
-            ],
-            max_tokens=DEFAULT_MAX_TOKENS,
-            timeout=timeout_s,
-            api_base=base_url,
-            api_key=api_key,
-            extra_headers=GATEWAY_HEADERS,
-        ),
-        timeout_s,
-    )
+    for attempt in range(PREFLIGHT_ATTEMPTS):
+        try:
+            await asyncio.wait_for(
+                litellm.acompletion(
+                    model="openai/" + slug,
+                    messages=[
+                        {"role": "system", "content": "You are a connectivity check."},
+                        {"role": "user", "content": PREFLIGHT_PROMPT},
+                    ],
+                    max_tokens=DEFAULT_MAX_TOKENS,
+                    timeout=timeout_s,
+                    max_retries=0,
+                    api_base=base_url,
+                    api_key=api_key,
+                    extra_headers=GATEWAY_HEADERS,
+                ),
+                timeout_s,
+            )
+            return
+        except DEFAULT_RETRY_ON:
+            if attempt == PREFLIGHT_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(PREFLIGHT_BACKOFF_S * 2**attempt)
 
 
 async def _preflight(models: Sequence[str], call: Preflight) -> None:
