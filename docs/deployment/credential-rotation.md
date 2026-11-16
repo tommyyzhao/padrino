@@ -133,7 +133,7 @@ maintainer wants a clean public history before going open-source, rewrite:
 3. Force-push to every remote that mirrors the repo.
 4. Ask GitHub support to purge cached views of the affected commits.
 
-This path is **never** taken by the autonomous Ralph agent — it rewrites
+This path is **never** taken by an automated agent — it rewrites
 shared history and requires the maintainer's explicit go-ahead. The audit
 script's exit code 1 is the trigger for a human decision, not an
 automated rewrite.

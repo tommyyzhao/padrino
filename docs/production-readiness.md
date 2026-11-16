@@ -1,9 +1,35 @@
 # Padrino — Production Readiness & Gap Analysis
 
+> **Historical snapshot; see [architecture.md](./architecture.md) for the current system.**
+> The analysis below was written on 2026-05-28 and is kept unedited as a record of
+> what was found then. Several of its findings have since been fixed. Current
+> status of the main items, checked against the code on 2026-11-15:
+>
+> | Finding in the snapshot | Status now | Evidence |
+> |---|---|---|
+> | P0 #1 mid-game role/faction leak via `visibility=public` | Fixed: non-terminal games go through the spectator projection | `src/padrino/api/routes/games.py:272`, `src/padrino/core/spectator_projection.py:100` |
+> | P0 #2 no per-IP rate limiting on anonymous reads | Fixed: anonymous reads are bucketed per client IP | `src/padrino/api/routes/public.py:178` |
+> | P0 #5 unverified bundles can reach the public leaderboard | Fixed: public leaderboard queries filter on `verification_status == "verified"`. The "forgeable by a submitter" caveat still stands. | `src/padrino/ratings/public_leaderboard.py:284` |
+> | P0 #6 rating re-count idempotency | Fixed: unique constraint `uq_rating_event_scope` | `src/padrino/db/models.py:830`, migration `0015_rating_idempotency.py` |
+> | "No SSE/WS anywhere", "no live view", long-poll plan | Superseded: SSE live endpoint with live-tail mode, `/public/live`, `/public/recent`, and a `/watch/[id]` dashboard page using `EventSource` | `src/padrino/api/routes/public.py:1183`, `web/dashboard/src/routes/watch/[id]/+page.svelte` |
+> | "114 test files" | 312 test files (`git ls-files 'tests/*test_*.py' \| wc -l`) | |
+> | "CI matrix ubuntu/macos x py3.12/3.13" | ubuntu and macos on Python 3.12 only | `.github/workflows/ci.yml` |
+> | "docker-compose: postgres + bootstrap + api + scheduler + dashboard" | Also `public-api` and `human-lane`, on `edge` and `internal` networks | `docker-compose.yml` |
+> | "`PADRINO_LOG_LEVEL` ignored" | Applied at CLI start-up | `src/padrino/cli.py:50-54` |
+> | "no alerting" | Webhook notifier and Prometheus alert rules exist | `src/padrino/observability/alerts.py`, `docs/deployment/alert-rules.yml` |
+> | "`claim_oldest_pending` lacks `SKIP LOCKED`" | Uses `SKIP LOCKED` on Postgres | `src/padrino/db/repositories/gauntlets.py:129` |
+> | Provisional thresholds at `completion.py:38-40` | Same values, now at lines 52-54 | `src/padrino/gauntlets/completion.py` |
+>
+> Still open as described: the model-rollup sigma formula and absence of
+> head-to-head significance (`src/padrino/ratings/model_rollup.py`), the frozen-LLM
+> replay trust tier (no command re-drives a game from archived responses), and
+> TLS and secrets handling as operator responsibilities. Line numbers and file
+> names in the body predate later refactors and may have moved.
+
 _Last updated: 2026-05-28, after Wave 4 (US-079…US-085) merged to `main` at `c9b1856`._
 
 This document assesses Padrino against three production goals and enumerates the
-prioritized gaps to close. It is the canonical reference for planning "Wave 5".
+prioritized gaps to close. It was the planning reference for the next round of work.
 
 **The three goals**
 

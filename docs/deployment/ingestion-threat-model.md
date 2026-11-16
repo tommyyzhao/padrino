@@ -42,8 +42,10 @@ The route performs these checks, in order, before any row is written:
 4. **Payload safety guard.** `assert_bundle_payload_safe` rejects bundles
    whose event payloads contain any forbidden provenance key
    (`agent_build_id`, `model_name`, `provider`, `rating`, `api_key`, etc.).
-5. **Ruleset whitelist.** `ruleset_id` must be one of the currently
-   shipped rulesets (today: `mini7_v1`). Unknown ids return
+5. **Ruleset whitelist.** `ruleset_id` must be in `KNOWN_RULESET_IDS`
+   (`src/padrino/api/routes/ingest.py:50`), today `{mini7_v1, bench10_v1}`.
+   This is narrower than the eight rulesets the engine registers; the other
+   six are not accepted for federated ingestion. Unknown ids return
    `422 {"error": "unknown_ruleset"}`.
 6. **Hash-chain replay.** `verify_chain` replays every event envelope
    through the same hasher the runner uses (`event_type`, `sequence`,
@@ -134,11 +136,13 @@ When ingesting a bundle fails:
 1. `413` — re-export with the runner; bundles should typically be under
    1 MiB. A 10 MiB bundle indicates a misuse of the event log, not a
    legitimate game.
-2. `422 hash_chain_mismatch` — re-run `padrino-export` on the same game;
+2. `422 hash_chain_mismatch` — re-run `padrino export game` on the same game;
    do not hand-edit the JSON.
 3. `422 inconsistent_terminal` — the local game did not terminate;
    wait for `GameTerminated` before exporting.
-4. `422 unknown_ruleset` — upgrade the central node to the same Padrino
-   release as the submitter, or downgrade the submitter to match.
+4. `422 unknown_ruleset` — only `mini7_v1` and `bench10_v1` are accepted
+   (see check 5 above). Submit games from one of those rulesets, or, if
+   the central node is older than the submitter, upgrade it to the same
+   Padrino release.
 5. `429` — back off and retry per the `Retry-After` header; if persistent,
    request a higher ceiling from the operator.
