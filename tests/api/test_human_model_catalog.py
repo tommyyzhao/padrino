@@ -64,6 +64,7 @@ def _entry(
     provider_fingerprint: str | None = None,
     expires_at: datetime | None = None,
     secret_marker: str | None = None,
+    extra_metadata: dict[str, object] | None = None,
 ) -> CatalogEntryInput:
     pricing_micros: dict[str, int] = {}
     pricing_strings: dict[str, str] = {}
@@ -85,6 +86,8 @@ def _entry(
         raw_metadata["status"] = availability
     if secret_marker is not None:
         raw_metadata["auth_secret_ref"] = secret_marker
+    if extra_metadata:
+        raw_metadata.update(extra_metadata)
     return CatalogEntryInput(
         canonical_slug=slug,
         display_name=display_name or slug,
@@ -298,6 +301,12 @@ async def test_human_models_projects_safe_explorer_facts_and_filters(
                 availability="available",
                 provider_pinned=True,
                 provider_fingerprint="provider-v1",
+                # Seed before the snapshot completes: complete snapshots are immutable.
+                extra_metadata={
+                    "open_weights": True,
+                    "frontier": True,
+                    "auth_secret_ref": "never-project",
+                },
             ),
             _entry("openai/closed-lab", structured=True, availability="available"),
         ],
@@ -307,12 +316,6 @@ async def test_human_models_projects_safe_explorer_facts_and_filters(
             select(ModelCatalogEntry).where(ModelCatalogEntry.canonical_slug == "mistral/open-lab")
         )
         assert entry is not None
-        entry.raw_metadata = {
-            **entry.raw_metadata,
-            "open_weights": True,
-            "frontier": True,
-            "auth_secret_ref": "never-project",
-        }
         session.add_all(
             [
                 ModelProbeEvidence(

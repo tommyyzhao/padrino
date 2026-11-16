@@ -501,10 +501,11 @@ async def engine(
     # NullPool engine already opens a fresh connection per checkout, so isolation
     # is achieved by truncating between tests rather than rebuilding the schema.
     async with db_engine.connect() as conn:
-        # Tables are deleted children-first (reversed dependency order) so no
-        # cascade is needed.
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(sa.text(f'DELETE FROM "{table.name}";'))
+        # TRUNCATE, not DELETE: row-level append-only/immutability triggers
+        # (e.g. completed catalog snapshots, migration 0067) reject DELETE by
+        # design but do not fire on TRUNCATE.
+        names = ", ".join(f'"{t.name}"' for t in Base.metadata.sorted_tables)
+        await conn.execute(sa.text(f"TRUNCATE {names} RESTART IDENTITY CASCADE;"))
         await conn.commit()
 
     yield db_engine

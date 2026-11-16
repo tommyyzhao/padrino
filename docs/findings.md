@@ -217,4 +217,5 @@ Earlier batches (001 shakedown, 002 first attempt, and short 003/004 lineup wrap
 - **Reasoning budget.** Is 16384 output tokens enough for every reasoning model, and does a larger thinking budget change play or only latency?
 - **Invalid-output rate with the re-ask on.** Measure first-attempt and post-re-ask invalid rates separately.
 - **Style confound.** Repeat an English-rule-on versus English-rule-off comparison on a verified transparent gateway to see whether any of the first game's slang and language drift survives.
+- **One schema path for tests.** The SQLite test database is built with `create_all`, which skips the triggers that migrations add, while the Postgres job runs the real migrations. Building the SQLite test database from migrations too would surface trigger and constraint differences locally instead of only in the Postgres CI job (which is where a real lobby kick/leave race was caught).
 - **Dead-seat counterfactual.** How much does an unresponsive seat shift win rate if it plays on? The current answer, invalidate the game, avoids measuring it.

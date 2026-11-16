@@ -142,7 +142,8 @@ def test_stray_open_brace_before_object_is_skipped() -> None:
     assert extract_json_object(f"use {{ to start: {OBJ_JSON}") == OBJ_JSON
 
 
-_BOUND_S = 0.5
+# Generous for slow CI runners: the pre-fix quadratic scan took 10s+ on these inputs.
+_BOUND_S = 3.0
 
 
 @pytest.mark.parametrize(

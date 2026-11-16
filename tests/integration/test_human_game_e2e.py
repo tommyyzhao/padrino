@@ -193,6 +193,13 @@ class _JoinedHuman:
 @pytest.fixture(autouse=True)
 def _stub_provider_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CEREBRAS_API_KEY", "test-cerebras-key")
+    # A DEEPINFRA key (root conftest dummy / developer .env) would enable the real
+    # LiteLLM chat guard: a network call inside the chat POST. It makes the POST
+    # slower than the zero-delay phase release, so the held message (cleaned_text
+    # still NULL) misses its release. Moderate deterministically, offline.
+    monkeypatch.setattr(
+        "padrino.api.routes.human.build_message_guard_from_settings", lambda _s: None
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -497,13 +504,22 @@ async def _scripted_human_submitter(
     chat_text: str,
 ) -> None:
     attempted_actions: set[str] = set()
-    chat_sent = False
+    chat_phases: set[str] = set()
     while not stop.is_set():
         async with session_factory() as session:
             game = await session.get(Game, game_id)
             if game is not None and game.status == "COMPLETED":
                 return
             resolved = await resolve_current_human_state(session, game_id)
+            chat_released = (
+                await session.scalar(
+                    select(HumanChatMessage.id)
+                    .where(HumanChatMessage.game_id == game_id)
+                    .where(HumanChatMessage.public_player_id == human.public_player_id)
+                    .limit(1)
+                )
+                is not None
+            )
             if resolved is None:
                 phase = None
                 action_allowed = False
@@ -545,20 +561,29 @@ async def _scripted_human_submitter(
             assert resp.json()["public_player_id"] == human.public_player_id
             attempted_actions.add(phase)
 
-        if phase is not None and public_chat_allowed and not chat_sent:
+        # A hold is released only if its POST commits before its phase's release
+        # snapshot, and discussion phases settle in milliseconds against the mock
+        # AI: the POST can lose that race. Re-post in each later discussion phase
+        # until one message has been released.
+        if (
+            phase is not None
+            and public_chat_allowed
+            and not chat_released
+            and phase not in chat_phases
+        ):
             chat = await client.post(
                 f"/human/games/{game_id}/chat",
                 json={
                     "channel": "PUBLIC",
                     "text": chat_text,
-                    "idempotency_key": f"chat-{human.public_player_id}",
+                    "idempotency_key": f"chat-{human.public_player_id}-{phase}",
                 },
                 cookies={HUMAN_SESSION_COOKIE: human.token},
             )
             assert chat.status_code == 200, chat.text
             assert chat.json()["public_player_id"] == human.public_player_id
             assert chat.json()["status"] == "HELD"
-            chat_sent = True
+            chat_phases.add(phase)
 
         await asyncio.sleep(0.01)
 
