@@ -3,6 +3,36 @@ Started: Wed Jun 10 00:26:47 PDT 2026
 ---
 
 ## Codebase Patterns
+- Night resolution must use the PRE-submission state (b026cc1): folding ProtectSubmitted through
+  the reducer sets `last_protected_target`, which the no-repeat rule then rejects. Any new
+  submission event that mutates state must be resolved against `resolution_state` in
+  `drive_game_loop`. Assert semantic outcomes (a save prevents a death), not just golden hashes:
+  the byte-stability + NAR corpus goldens had pinned the bug.
+- Provider failures are first-class (dc8ebf5/709f73b): adapter sets `failure_reason`
+  (TIMEOUT/PROVIDER_ERROR), tick emits `ActionTimedOut` with a fixed reason + error_kind
+  vocabulary (never provider text), `TickResponses.provider_failures` feeds the seat breaker
+  (`padrino_llm_seat_failure_limit`, default 3; TRUNCATED excluded; human seats never counted).
+  `ProviderNoContestError` is POISON in the scheduler; tournaments mark_failed and continue.
+- One deadline: outer phase timeout = max(config.timeout_s, adapter budget + 2s); attempt 1
+  gets 2/3 of the remaining budget; SDK `max_retries=0` set after `inference_params`; overload
+  errors back off from 2s and honour Retry-After; recording a returned reply is uncancellable.
+- Unknown-price models record `price_basis=DEFAULT_ESTIMATE` (conservative catch-all) so spend
+  caps fail closed; never NULL cost. Reports keep reported vs estimated separate.
+- `parse_agent_response` tolerates `<think>` blocks, fences and prose via
+  `extract_json_object` (core, pure, bounded: 1 MiB raw, 64 KiB scan, 32 starts, linear think
+  strip, RecursionError caught). One re-ask on INVALID_JSON/SCHEMA_VIOLATION.
+- Postgres tests: per-test cleanup is TRUNCATE (migration-0067 immutability triggers reject
+  DELETE). The SQLite test DB is built by `create_all` and has NO migration triggers, so
+  trigger/concurrency bugs only show on `--postgres` (run locally with a throwaway initdb
+  cluster + PADRINO_TEST_DB_URL). Concurrent lobby member removal row-locks the member first.
+- Shared helpers live in `padrino.clock` (`utcnow`, `as_utc`, `canonical_json`); never import
+  it from core/. Keep module-private aliases where tests monkeypatch `_utcnow`/`_now_utc`.
+- Showcase gateway is generic: `--base-url` default http://127.0.0.1:4000/v1, key
+  `env:PADRINO_GATEWAY_API_KEY` (envvars PADRINO_GATEWAY_BASE_URL/KEY_REF); provider row "gateway";
+  preflight retries DEFAULT_RETRY_ON 3x; showcase max_tokens 16384, adapter `showcase-v3`.
+- Playwright e2e must run via `pnpm test:e2e` (rebuilds with the e2e API URL); a plain
+  `pnpm build` bakes localhost:8000 and the real-backend funnel spec fails. CI dashboard-e2e is
+  pinned to ubuntu-24.04 (Playwright 1.60 has no Chromium for Ubuntu 26).
 - Narration templates live twice (US-409/411): `phase_text`/`select_utterance` in
   `api/routes/speech.py` speak; `lib/narration.ts` captions. Change both together.
 - Identity-safe play tables (US-369): compose the live public reducer with the
@@ -7620,3 +7650,17 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   Playwright uses `vite preview` of `build/` -> run `pnpm build` after svelte
   edits or the e2e hits a stale bundle. Port 8288 is held by a local `inngest
   dev`; use another API port for e2e (global-setup smoke 401s otherwise).
+
+## 2026-11-16 PST - Publication + real-model reliability (no story ids)
+- Repo published to main (6ad7628, CI 7/7 green incl. Postgres, red since July). Docs:
+  README (benchmark first), docs/architecture.md, docs/design-decisions.md (13 ADRs),
+  docs/findings.md (11 findings + batch 005), CHANGELOG; vision docs moved to docs/prd/.
+- Real batches via local gateway: 001 (shakedown), 002 (aborted), 003/004 (lineup wrap-ups),
+  005 = 10 completed + 3 no-contest on the fixed engine (Town 7, Mafia 3). 001/002 play stats
+  invalid (no working Doctor). Lineup policy: cheapest newest model per provider.
+- Fixes: tolerant parser, loud failures + breaker, deadline math, fail-closed cost estimates,
+  Doctor-protect ordering bug, preflight retries, Postgres lobby kick/leave race, PG test cleanup.
+- Learnings: (1) 0/15 NightResolved had protected set and Mafia won 6/6 -> outcome priors catch
+  integration bugs unit tests and golden hashes miss. (2) Every real-model failure was silent
+  into a plausible game. (3) SQLite tests hid a production Postgres race. (4) A gateway in the
+  path can rewrite prompts; benchmark traffic must opt out and the proxy config is part of the run.
