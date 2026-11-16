@@ -1307,7 +1307,13 @@ async def _reconcile_lifecycle(session: AsyncSession, lobby: Lobby) -> None:
 async def _release_and_remove_member(
     session: AsyncSession, *, lobby_id: uuid.UUID, member_id: uuid.UUID, now: datetime
 ) -> None:
-    """Release one member's lobby seat and admissions before deleting the member."""
+    """Release one member's lobby seat and admissions before deleting the member.
+
+    Idempotent under concurrency: a racing kick/leave/evict that already removed
+    the member makes this a no-op instead of failing with ``member_not_seated``.
+    """
+    if not await lobbies_repo.lock_member_exists(session, member_id=member_id):
+        return
     await lobbies_repo.release_member_seat(session, lobby_id=lobby_id, member_id=member_id)
     await release_admission_for_member(session, lobby_member_id=member_id, released_at=now)
     await lobbies_repo.remove_member(session, member_id=member_id)

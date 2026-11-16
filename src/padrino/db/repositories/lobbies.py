@@ -255,6 +255,21 @@ async def touch_member_presence(
     member.last_seen_at = now
 
 
+async def lock_member_exists(session: AsyncSession, *, member_id: uuid.UUID) -> bool:
+    """Row-lock the member (``FOR UPDATE``) and report whether it still exists.
+
+    Concurrent kick/leave/evict calls serialize here on Postgres; the loser sees
+    the committed delete and returns False. SQLite ignores the lock clause.
+    """
+    locked = await session.scalar(
+        select(LobbyMember.id)
+        .where(LobbyMember.id == member_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return locked is not None
+
+
 async def remove_member(session: AsyncSession, *, member_id: uuid.UUID) -> None:
     member = await session.get(LobbyMember, member_id)
     if member is None:
@@ -424,6 +439,7 @@ __all__ = [
     "list_member_display_names",
     "list_members",
     "list_seats",
+    "lock_member_exists",
     "release_member_seat",
     "remove_member",
     "replace_seats",
