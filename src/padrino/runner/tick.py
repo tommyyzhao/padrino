@@ -10,11 +10,15 @@ call has either completed or timed out — never earlier.
 Failures are recorded into the supplied ``event_log`` in seat-order after the
 gather completes:
 
-* timeout → :class:`~padrino.core.engine.events.ActionTimedOut`
+* timeout or provider error → :class:`~padrino.core.engine.events.ActionTimedOut`
+  with ``reason`` ``TIMEOUT`` / ``PROVIDER_ERROR`` (a fixed vocabulary; provider and
+  model diagnostics stay in ``llm_calls``, never in the log)
 * parse / schema failure → :class:`~padrino.core.engine.events.OutputInvalid`
 
 For each failing seat the returned mapping carries the coerced safe-action
-response (see :mod:`padrino.core.agents.coercion`).
+response (see :mod:`padrino.core.agents.coercion`). The mapping is a
+:class:`TickResponses`, which also names the seats whose coercion was the provider's
+fault so the game loop can trip its per-seat circuit breaker.
 
 When ``ranked=True`` the observation is screened through
 :func:`~padrino.core.observation_privacy.assert_ranked_observation_safe`
@@ -43,7 +47,7 @@ from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType
 from padrino.core.observation_privacy import assert_ranked_observation_safe
 from padrino.core.observations import Ruleset, build_observation, format_phase_id
-from padrino.llm.adapter import LlmAdapter
+from padrino.llm.adapter import ERROR_TRUNCATED, LlmAdapter
 from padrino.observability.events import (
     EVENT_LLM_CALL_COMPLETED,
     EVENT_LLM_CALL_EXHAUSTED,
@@ -53,10 +57,26 @@ from padrino.observability.events import (
 from padrino.observability.metrics import record_invalid_action
 
 _REASON_TIMEOUT = "TIMEOUT"
-_REASON_LLM_EXHAUSTED = "llm_exhausted"
+_REASON_PROVIDER_ERROR = "PROVIDER_ERROR"
 _REASON_PROVIDER_UNFUNDED = "provider_unfunded"
 _REASON_ILLEGAL_ACTION = "ILLEGAL_ACTION"
 _logger = structlog.get_logger("padrino.llm")
+
+
+class TickResponses(dict[str, AgentResponse]):
+    """Seat id -> response, plus which seats were coerced because the provider failed.
+
+    ``provider_failures`` maps a seat to ``TIMEOUT`` / ``PROVIDER_ERROR`` / ``TRUNCATED``;
+    seats whose reply merely failed to parse or was illegal are not listed.
+    """
+
+    provider_failures: dict[str, str]
+
+    def __init__(
+        self, responses: Mapping[str, AgentResponse], provider_failures: Mapping[str, str]
+    ) -> None:
+        super().__init__(responses)
+        self.provider_failures = dict(provider_failures)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +84,7 @@ class _SeatOutcome:
     seat_id: str
     response: AgentResponse
     failure_event: dict[str, Any] | None
+    provider_failure: str | None = None
 
 
 async def run_tick(
@@ -76,7 +97,7 @@ async def run_tick(
     *,
     ranked: bool = False,
     private_memories: Mapping[str, str] | None = None,
-) -> dict[str, AgentResponse]:
+) -> TickResponses:
     """Dispatch one observation per eligible seat and collect coerced responses.
 
     Returns a mapping from ``public_player_id`` to the validated (or coerced)
@@ -107,13 +128,16 @@ async def run_tick(
     outcomes = await asyncio.gather(*tasks)
 
     final: dict[str, AgentResponse] = {}
+    provider_failures: dict[str, str] = {}
     for outcome in outcomes:
         if outcome.failure_event is not None:
             body = dict(outcome.failure_event)
             body["sequence"] = len(event_log.events)
             event_log.append(body)
         final[outcome.seat_id] = outcome.response
-    return final
+        if outcome.provider_failure is not None:
+            provider_failures[outcome.seat_id] = outcome.provider_failure
+    return TickResponses(final, provider_failures)
 
 
 async def _call_one_seat(
@@ -152,7 +176,12 @@ async def _call_one_seat(
                 phase_id=phase_id,
                 reason=_REASON_TIMEOUT,
                 event_type="ActionTimedOut",
-                payload={"expected_action_type": expected, "defaulted_to": defaulted},
+                payload={
+                    "expected_action_type": expected,
+                    "defaulted_to": defaulted,
+                    "reason": _REASON_TIMEOUT,
+                },
+                provider_failure=_REASON_TIMEOUT,
             )
 
         _logger.info(
@@ -162,22 +191,26 @@ async def _call_one_seat(
             latency_ms=result.latency_ms,
         )
 
-        if result.status == "exhausted":
+        if result.status == "exhausted" or result.failure_reason is not None:
             failure = result.failure
+            unfunded = result.error == _REASON_PROVIDER_UNFUNDED
             reason = (
                 _REASON_PROVIDER_UNFUNDED
-                if result.error == _REASON_PROVIDER_UNFUNDED
-                else _REASON_LLM_EXHAUSTED
+                if unfunded
+                else (result.failure_reason or _REASON_PROVIDER_ERROR)
             )
             error_kind = failure.error_kind if failure is not None else "Unknown"
-            error_message = failure.error_message if failure is not None else (result.error or "")
             attempts_made = failure.attempts if failure is not None else 0
             _logger.info(
                 EVENT_LLM_CALL_EXHAUSTED,
                 phase=phase_id,
+                reason=reason,
                 error_kind=error_kind,
                 attempts=attempts_made,
             )
+            # The payload carries only a fixed reason vocabulary and the exception class
+            # name: provider/model diagnostics (``error_message``) stay in ``llm_calls``
+            # so no log consumer can learn which model a seat runs.
             return _build_failure_outcome(
                 state=state,
                 seat=seat,
@@ -189,9 +222,9 @@ async def _call_one_seat(
                     "defaulted_to": coerce_to_safe_action(state.current_phase, reason).type.value,
                     "reason": reason,
                     "error_kind": error_kind,
-                    "error_message": error_message,
                     "attempts": attempts_made,
                 },
+                provider_failure=None if unfunded else reason,
             )
 
         parsed = result.parsed_response
@@ -206,6 +239,7 @@ async def _call_one_seat(
                     "reason": parsed.reason,
                     "validation_errors": (parsed.details,) if parsed.details else (),
                 },
+                provider_failure="TRUNCATED" if result.error == ERROR_TRUNCATED else None,
             )
 
         illegal_reason = _illegal_action_reason(state, seat, parsed.action, phase_id)
@@ -235,6 +269,7 @@ def _build_failure_outcome(
     reason: str,
     event_type: str,
     payload: dict[str, Any],
+    provider_failure: str | None = None,
 ) -> _SeatOutcome:
     response = coerce_response_failure(state.current_phase, reason)
     record_invalid_action(reason=reason)
@@ -245,7 +280,12 @@ def _build_failure_outcome(
         "actor_player_id": seat.public_player_id,
         "payload": payload,
     }
-    return _SeatOutcome(seat_id=seat.public_player_id, response=response, failure_event=body)
+    return _SeatOutcome(
+        seat_id=seat.public_player_id,
+        response=response,
+        failure_event=body,
+        provider_failure=provider_failure,
+    )
 
 
 def _expected_action_type(state: GameState, seat: Seat) -> str:
@@ -275,4 +315,4 @@ def _illegal_action_reason(
     return None
 
 
-__all__ = ["run_tick"]
+__all__ = ["TickResponses", "run_tick"]

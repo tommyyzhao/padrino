@@ -141,14 +141,18 @@ async def run_human_tick(
     start: the barrier returns within ``deadline`` and the release adds exactly
     ``release_delay``.
     """
-    responses = await run_tick(
-        state,
-        event_log,
-        eligible_seats,
-        adapter,
-        timeout_s=config.phase_deadline_seconds,
-        ruleset=ruleset,
-        ranked=ranked,
+    # Plain dict on purpose: the per-seat provider-failure breaker is a benchmark-lane
+    # guard, and a human lane must never end a game because one seat went quiet.
+    responses = dict(
+        await run_tick(
+            state,
+            event_log,
+            eligible_seats,
+            adapter,
+            timeout_s=config.phase_deadline_seconds,
+            ruleset=ruleset,
+            ranked=ranked,
+        )
     )
 
     pending = _public_messages(eligible_seats, responses, state.current_phase.kind)

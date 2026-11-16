@@ -60,6 +60,8 @@ _logger = structlog.get_logger("padrino.economics.human_cost_governance")
 
 PRICE_BASIS_PROVIDER_RESPONSE_COST: Final = "PROVIDER_RESPONSE_COST"
 PRICE_BASIS_FALLBACK_TABLE: Final = "FALLBACK_TABLE"
+# No provider cost and no listed price for the model: tokens are kept, cost is NULL.
+PRICE_BASIS_UNPRICED: Final = "unpriced"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -112,6 +114,9 @@ def price_turn_usd(
     provider returned no cost), falls back to the configured per-1K token-price
     table, looking up ``model`` and finally the ``default`` entry. Missing token
     counts coerce to zero (an unpriceable turn costs zero rather than crashing).
+
+    This is an ESTIMATE (budget reservation, admission). Recorded actual cost must not use
+    the ``default`` entry: see :func:`has_listed_price` and ``PRICE_BASIS_UNPRICED``.
     """
     if response_cost is not None:
         return float(response_cost)
@@ -121,6 +126,11 @@ def price_turn_usd(
     in_tok = input_tokens or 0
     out_tok = output_tokens or 0
     return (in_tok / 1000.0) * in_price + (out_tok / 1000.0) * out_price
+
+
+def has_listed_price(settings: Settings, model: str) -> bool:
+    """Whether ``model`` has its own fallback-table entry (the ``default`` catch-all is not one)."""
+    return model != "default" and model in settings.padrino_human_fallback_token_price_per_1k
 
 
 def fallback_price_table_version(settings: Settings) -> str:
@@ -758,6 +768,7 @@ __all__ = [
     "bind_admission_slots",
     "global_breaker_open",
     "global_human_lane_spend_usd",
+    "has_listed_price",
     "human_eligible_pool",
     "lobby_accrued_usd",
     "lobby_breaker_open",

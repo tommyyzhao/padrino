@@ -125,9 +125,8 @@ async def test_primary_alone_serves_when_healthy(_require_keys: None) -> None:
         f"raw={result.raw_response[:200]!r} error={result.error!r}"
     )
     assert isinstance(result.parsed_response, AgentResponse)
-    # last_attempts records ONE row: the successful primary attempt. The
-    # Z.AI host should never have been called.
-    assert len(adapter.last_attempts) == 1
+    # No earlier attempts: the primary succeeded and the Z.AI host was never called.
+    assert result.attempts == ()
 
 
 @pytest.mark.integration
@@ -159,8 +158,7 @@ async def test_cerebras_429_routes_to_zai_glm47(_require_keys: None) -> None:
         f"error={result.error!r}"
     )
     assert isinstance(result.parsed_response, AgentResponse)
-    # last_attempts: primary attempt(s) (demoted to primary_failed) + the
-    # successful same-model attempt.
-    assert adapter.last_attempts[-1].status == "same_model_fallback_ok"
-    primary_attempts = [a for a in adapter.last_attempts if a.status == "primary_failed"]
+    # attempts: failed primary attempt(s) (the last demoted to primary_failed), then the
+    # successful same-model result itself.
+    primary_attempts = [a for a in result.attempts if a.status == "primary_failed"]
     assert primary_attempts, "expected at least one primary_failed attempt to be recorded"

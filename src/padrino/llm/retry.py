@@ -7,9 +7,8 @@ sleeping in real wall-clock and replay produces an identical attempt history.
 
 On exhaustion the helper raises :class:`RetryExhausted` carrying the last
 provider error and the number of attempts taken. The adapter translates that
-into an :class:`AdapterResult` with ``status='exhausted'`` and a
-:class:`LlmCallFailed` summary; ``tick.py`` then emits a single
-``ActionTimedOut`` event with ``reason='llm_exhausted'``.
+into an :class:`AdapterResult` carrying a :class:`LlmCallFailed` summary and a
+``failure_reason``; ``tick.py`` then emits a single ``ActionTimedOut`` event.
 
 Impure module — lives in the ``llm`` layer and never touches the DB, network,
 wall-clock, or stdlib ``random``. Pure-core code does not import it.
@@ -24,8 +23,11 @@ from typing import Final, TypeVar
 import structlog
 from litellm.exceptions import (
     APIConnectionError,
+    BadGatewayError,
     InternalServerError,
     RateLimitError,
+    ServiceUnavailableError,
+    Timeout,
 )
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -38,6 +40,9 @@ DEFAULT_RETRY_ON: Final[tuple[type[BaseException], ...]] = (
     RateLimitError,
     APIConnectionError,
     InternalServerError,
+    ServiceUnavailableError,
+    BadGatewayError,
+    Timeout,
     TimeoutError,
 )
 
@@ -104,7 +109,8 @@ def default_retry_policy() -> RetryPolicy:
     """Return the canonical Padrino retry policy.
 
     Three attempts (one initial + two retries), 0.5s base delay, capped at 16s,
-    retrying on rate-limits, connection errors, 5xx, and asyncio timeouts.
+    retrying on rate-limits, connection errors, 5xx/502/503, and provider or asyncio
+    timeouts. 4xx client errors (auth, not-found, bad request) are never retried.
     """
     return RetryPolicy(
         max_attempts=3,

@@ -1,21 +1,22 @@
 """LiteLLM-backed :class:`LlmAdapter` with primary/fallback routing.
 
-`LiteLlmAdapter` issues a single :func:`litellm.acompletion` call against the
-:attr:`RoutingPolicy.primary_model`. If that call raises (network error, rate
-limit, timeout, etc.), the adapter iterates
+`LiteLlmAdapter` issues a :func:`litellm.acompletion` call against the
+:attr:`RoutingPolicy.primary_model`, retrying transient errors. If the call still
+fails (network error, rate limit, timeout, etc.), the adapter iterates
 :attr:`RoutingPolicy.same_model_hosts` (US-079) — alternate provider endpoints
 serving the SAME upstream weights — before falling through to a configured
 :attr:`RoutingPolicy.fallback_model` (different model). The final
-:class:`AdapterResult` returned to the caller carries the synthesized routing
-status (``ok``, ``same_model_fallback_ok``, ``fallback_ok``, ``primary_failed``,
-``both_failed``); per-call attempt records are exposed on
-:attr:`LiteLlmAdapter.last_attempts` for the recording layer to mirror as
-separate ``llm_calls`` rows.
+:class:`AdapterResult` returned to the caller carries the routing status (``ok``,
+``same_model_fallback_ok``, ``fallback_ok``, or ``exhausted`` when every target
+failed) and every provider attempt in :attr:`AdapterResult.attempts` for the
+recording layer to mirror as separate ``llm_calls`` rows. Provider failures carry a
+``failure_reason`` (``TIMEOUT`` / ``PROVIDER_ERROR``) the runner turns into a failure
+event.
 
-Parse failures (invalid JSON, schema violations) are NOT retried — they are not
-provider-side errors, and the runner already coerces them to a safe action via
-:func:`padrino.core.agents.coercion.coerce_response_failure`. Only call-site
-exceptions trigger fallback.
+Parse failures (invalid JSON, schema violations) never trigger fallback — they are not
+provider-side errors. They get ``padrino_llm_reask_invalid`` re-asks on the same
+target; if still unusable the runner coerces them to a safe action via
+:func:`padrino.core.agents.coercion.coerce_response_failure`.
 
 Impure module: lives in the ``llm`` layer and is never imported by pure-core.
 """
@@ -26,14 +27,17 @@ import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Final
 
 import litellm
 import structlog
+from litellm.exceptions import Timeout as LiteLlmTimeout
 
 from padrino.core.agents.contract import (
     AgentResponse,
     ResponseError,
+    _strip_think,
     parse_agent_response,
 )
 from padrino.core.engine.actions import Action
@@ -41,6 +45,7 @@ from padrino.core.engine.rng import SeededRng
 from padrino.core.enums import ActionType, Role
 from padrino.core.observations import Observation
 from padrino.llm.adapter import (
+    ERROR_TRUNCATED,
     AdapterResult,
     AdapterStatus,
     AgentBuild,
@@ -49,7 +54,6 @@ from padrino.llm.adapter import (
 )
 from padrino.llm.retry import (
     LlmCallFailed,
-    RetryExhausted,
     RetryPolicy,
     default_retry_policy,
     with_retry,
@@ -57,8 +61,17 @@ from padrino.llm.retry import (
 from padrino.llm.secrets import resolve_secret
 from padrino.observability.metrics import record_llm_call
 from padrino.openrouter.routing_metadata import OpenRouterCallAudit, extract_openrouter_call_audit
+from padrino.settings import get_settings
 
 _logger = structlog.get_logger("padrino.llm")
+
+# Share of ``timeout_s`` the adapter budgets for itself; the rest is slack so the runner's
+# outer hard deadline never races the adapter's own last attempt.
+_BUDGET_FRACTION: Final[float] = 0.9
+_MIN_ATTEMPT_S: Final[float] = 0.01
+_REASK_INSTRUCTION: Final[str] = (
+    "Your previous reply was not usable. Reply with only the JSON object matching the schema."
+)
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are a player in a hidden-role social-deduction game. "
@@ -87,8 +100,28 @@ def build_messages(
     ]
 
 
+@dataclass(frozen=True, slots=True)
+class _Hop:
+    """One routing target: the primary, a same-model host, or the different-model fallback."""
+
+    model_id: str
+    ok_status: AdapterStatus
+    api_base: str | None = None
+    auth_secret: str | None = None
+    extra_headers: Mapping[str, str] | None = None
+
+
 class LiteLlmAdapter:
-    """LiteLLM-backed adapter with primary→fallback routing."""
+    """LiteLLM-backed adapter with primary→fallback routing.
+
+    ``timeout_s`` is the TOTAL budget for one :meth:`complete` call (the runner's
+    phase deadline). The adapter spends ~90% of it: each hop gets an equal share, each
+    retry attempt inside a hop gets ``remaining / attempts_left``, and a re-ask uses what
+    is left, so retries always fit inside the deadline the runner enforces on the outside.
+
+    ponytail: no per-gateway concurrency semaphore; add one when 429s from a shared
+    gateway are observed under a parallel batch.
+    """
 
     __slots__ = (
         "_api_base",
@@ -96,13 +129,13 @@ class LiteLlmAdapter:
         "_build",
         "_extra_headers",
         "_policy",
+        "_reask_invalid",
         "_retry_policy",
         "_same_model_hosts",
         "_sleeper",
         "_system_prompt",
         "_system_prompts_by_role",
         "_timeout_s",
-        "last_attempts",
     )
 
     def __init__(
@@ -119,6 +152,7 @@ class LiteLlmAdapter:
         system_prompts_by_role: Mapping[Role, str] | None = None,
         retry_policy: RetryPolicy | None = None,
         sleeper: Callable[[float], Awaitable[None]] | None = None,
+        reask_invalid: int | None = None,
     ) -> None:
         # Resolve deployment references once at construction so a misconfigured
         # provider fails loudly at boot instead of silently 401-ing on first
@@ -163,208 +197,245 @@ class LiteLlmAdapter:
         self._sleeper: Callable[[float], Awaitable[None]] = (
             sleeper if sleeper is not None else asyncio.sleep
         )
-        self.last_attempts: tuple[AdapterResult, ...] = ()
+        self._reask_invalid = (
+            reask_invalid if reask_invalid is not None else get_settings().padrino_llm_reask_invalid
+        )
 
     async def complete(self, observation: Observation) -> AdapterResult:
-        attempts: list[AdapterResult] = []
-        any_exhausted = False
-
-        primary = await self._call_model(
-            observation,
-            self._policy.primary_model,
-            extra_headers=self._extra_headers,
-            api_base=self._api_base,
-            auth_secret=(
-                self._auth_secret
-                if self._api_base is not None or self._policy.openrouter is not None
-                else None
+        hops = [
+            _Hop(
+                self._policy.primary_model,
+                "ok",
+                api_base=self._api_base,
+                auth_secret=(
+                    self._auth_secret
+                    if self._api_base is not None or self._policy.openrouter is not None
+                    else None
+                ),
+                extra_headers=self._extra_headers,
             ),
-        )
-        attempts.append(primary)
-
-        if primary.error is None:
-            self.last_attempts = tuple(attempts)
-            return primary
-
-        any_exhausted = any_exhausted or primary.failure is not None
-        # Demote the primary attempt to ``primary_failed`` so per-attempt rows
-        # record the routing decision. The terminal status below may overwrite
-        # the LAST attempt only.
-        attempts[-1] = primary.model_copy(update={"status": "primary_failed"})
-
-        # Iterate same-model alternate hosts (US-079). Each host gets its own
-        # retry budget (see ``_call_model``); same-host retries do not consume
-        # cross-host attempts. The leaderboard still credits the AgentBuild's
-        # canonical model identity, so a successful alternate-host call
-        # produces ``same_model_fallback_ok`` rather than ``fallback_ok``.
-        last_same_model: AdapterResult | None = None
-        for host, secret in self._same_model_hosts:
-            attempt = await self._call_model(
-                observation,
-                host.litellm_model_id,
-                api_base=host.api_base,
-                auth_secret=secret,
+            # Same-model alternate hosts (US-079) serve the SAME weights, so the
+            # leaderboard still credits the AgentBuild's canonical model identity.
+            *(
+                _Hop(
+                    host.litellm_model_id,
+                    "same_model_fallback_ok",
+                    api_base=host.api_base,
+                    auth_secret=secret,
+                )
+                for host, secret in self._same_model_hosts
+            ),
+        ]
+        if self._policy.fallback_model is not None:
+            hops.append(
+                _Hop(
+                    self._policy.fallback_model,
+                    "fallback_ok",
+                    api_base=self._api_base if self._policy.openrouter is not None else None,
+                    auth_secret=self._auth_secret if self._policy.openrouter is not None else None,
+                )
             )
-            if attempt.error is None:
-                promoted = attempt.model_copy(update={"status": "same_model_fallback_ok"})
-                attempts.append(promoted)
-                self.last_attempts = tuple(attempts)
-                return promoted
-            any_exhausted = any_exhausted or attempt.failure is not None
-            attempts.append(attempt.model_copy(update={"status": "primary_failed"}))
-            last_same_model = attempt
 
-        if self._policy.fallback_model is None:
-            # No different-model fallback configured. Synthesize a terminal
-            # result from whichever host attempted last (primary or final
-            # same-model host) and coerce to a safe response.
-            terminal_source = last_same_model if last_same_model is not None else primary
-            terminal_status: AdapterStatus = "exhausted" if any_exhausted else "primary_failed"
-            failed = terminal_source.model_copy(update={"status": terminal_status})
-            attempts[-1] = failed
-            self.last_attempts = tuple(attempts)
-            return _with_coerced_response(failed, observation)
+        deadline = time.monotonic() + self._timeout_s * _BUDGET_FRACTION
+        rows: list[AdapterResult] = []  # every provider attempt before the final result
+        failed_outcome: AdapterResult | None = None
+        for index, hop in enumerate(hops):
+            now = time.monotonic()
+            hop_deadline = now + max(deadline - now, 0.0) / (len(hops) - index)
+            hop_rows, outcome = await self._call_hop(observation, hop, hop_deadline, deadline)
+            if outcome.failure_reason is None:
+                # A reply came back (even an unparseable one): parse failures are the
+                # runner's to coerce, never a reason to hop to another model.
+                final = outcome
+                if hop.ok_status != "ok":
+                    final = outcome.model_copy(update={"status": hop.ok_status})
+                rows.extend(row for row in hop_rows if row is not outcome)
+                return final.model_copy(update={"attempts": tuple(rows)})
+            # Provider failure: the hop's outcome is its last attempt. Demote it so the
+            # per-attempt rows record the routing decision.
+            rows.extend(hop_rows[:-1])
+            failed_outcome = outcome
+            if index < len(hops) - 1:
+                rows.append(outcome.model_copy(update={"status": "primary_failed"}))
 
-        fallback = await self._call_model(
-            observation,
-            self._policy.fallback_model,
-            api_base=self._api_base if self._policy.openrouter is not None else None,
-            auth_secret=self._auth_secret if self._policy.openrouter is not None else None,
+        assert failed_outcome is not None
+        terminal = _with_coerced_response(
+            failed_outcome.model_copy(update={"status": "exhausted"}), observation
         )
-        if fallback.error is None:
-            promoted = fallback.model_copy(update={"status": "fallback_ok"})
-            attempts.append(promoted)
-            self.last_attempts = tuple(attempts)
-            return promoted
-
-        # Either path exhausting retries promotes the final status to
-        # ``exhausted`` so ``tick.py`` emits a single ``ActionTimedOut`` with
-        # ``reason='llm_exhausted'``. Non-retryable failures keep the legacy
-        # ``both_failed`` shape (parsed_response is coerced to a safe action).
-        any_exhausted = any_exhausted or fallback.failure is not None
-        synthesized_status: AdapterStatus = "exhausted" if any_exhausted else "both_failed"
-        synthesized = _with_coerced_response(
-            fallback.model_copy(update={"status": synthesized_status}),
-            observation,
-        )
-        attempts.append(synthesized)
-        self.last_attempts = tuple(attempts)
-        return synthesized
+        return terminal.model_copy(update={"attempts": tuple(rows)})
 
     def _system_prompt_for(self, observation: Observation) -> str:
         if self._system_prompts_by_role is None:
             return self._system_prompt
         return self._system_prompts_by_role.get(observation.you.role, self._system_prompt)
 
+    async def _call_hop(
+        self,
+        observation: Observation,
+        hop: _Hop,
+        hop_deadline: float,
+        deadline: float,
+    ) -> tuple[list[AdapterResult], AdapterResult]:
+        """Call one target (with transient retries) and, if the reply is unusable, re-ask.
+
+        Returns every attempt made and the one that represents the hop's outcome: the last
+        reply, or the last failure when no reply ever came back.
+        """
+        messages = build_messages(observation, system_prompt=self._system_prompt_for(observation))
+        rows = await self._call_model(observation, hop, messages, hop_deadline)
+        outcome = rows[-1]
+        for _ in range(self._reask_invalid):
+            if (
+                outcome.failure_reason is not None
+                or outcome.error == ERROR_TRUNCATED
+                or isinstance(outcome.parsed_response, AgentResponse)
+                or time.monotonic() >= deadline
+            ):
+                break
+            messages = [
+                *messages,
+                {"role": "assistant", "content": outcome.raw_response},
+                {"role": "user", "content": _REASK_INSTRUCTION},
+            ]
+            more = await self._call_model(observation, hop, messages, deadline)
+            rows.extend(more)
+            if more[-1].failure_reason is not None:
+                break  # the unusable first reply stays the outcome; the re-ask just failed
+            outcome = more[-1]
+        return rows, outcome
+
     async def _call_model(
         self,
         observation: Observation,
-        model_id: str,
-        *,
-        extra_headers: Mapping[str, str] | None = None,
-        api_base: str | None = None,
-        auth_secret: str | None = None,
-    ) -> AdapterResult:
-        messages = build_messages(observation, system_prompt=self._system_prompt_for(observation))
+        hop: _Hop,
+        messages: list[dict[str, str]],
+        deadline: float,
+    ) -> list[AdapterResult]:
+        """Issue one logical call; return every provider attempt, the last being the outcome.
+
+        Failed transient attempts precede the final row, so the recording layer can persist
+        one ``llm_calls`` row per real request.
+        """
+        model_id = hop.model_id
         kwargs: dict[str, Any] = {
             "model": model_id,
             "messages": messages,
-            "timeout": self._timeout_s,
             **self._build.inference_params,
         }
         # Per-host overrides (US-079 / US-082): same-model alternate hosts and
         # OpenAI-compatible primary providers may supply ``api_base`` plus an
         # explicit credential. Primary calls without ``api_base`` keep using
         # LiteLLM's provider-specific env var defaults.
-        if api_base is not None:
-            kwargs["api_base"] = api_base
-        if auth_secret is not None:
-            kwargs["api_key"] = auth_secret
+        if hop.api_base is not None:
+            kwargs["api_base"] = hop.api_base
+        if hop.auth_secret is not None:
+            kwargs["api_key"] = hop.auth_secret
         if self._policy.openrouter is not None:
             kwargs["custom_llm_provider"] = "openrouter"
             kwargs["extra_headers"] = self._policy.openrouter.request_headers()
             kwargs["extra_body"] = {
                 "provider": self._policy.openrouter.provider.as_request_dict(),
             }
-        if extra_headers:
-            kwargs["extra_headers"] = {**kwargs.get("extra_headers", {}), **extra_headers}
-        start = time.monotonic()
+        if hop.extra_headers:
+            kwargs["extra_headers"] = {**kwargs.get("extra_headers", {}), **hop.extra_headers}
         # Deterministic jitter seed: bind to the observation contents so a
         # replay of the same observation produces an identical backoff schedule.
         rng = SeededRng(f"{observation.phase}:{observation.you.player_id}:{model_id}")
+        max_attempts = self._retry_policy.max_attempts
+        failed: list[AdapterResult] = []
 
-        async def _call() -> Any:
-            return await litellm.acompletion(**kwargs)
+        async def _call() -> tuple[Any, int]:
+            attempts_left = max_attempts - len(failed)
+            per_attempt = max((deadline - time.monotonic()) / attempts_left, _MIN_ATTEMPT_S)
+            start = time.monotonic()
+            try:
+                response = await asyncio.wait_for(
+                    litellm.acompletion(**kwargs, timeout=per_attempt), timeout=per_attempt
+                )
+                return response, _elapsed_ms(start)
+            except Exception as exc:
+                failed.append(
+                    self._failure_row(
+                        exc,
+                        model_id=model_id,
+                        latency_ms=_elapsed_ms(start),
+                        auth_secret=hop.auth_secret,
+                        attempts=len(failed) + 1,
+                    )
+                )
+                raise
 
         try:
-            response, _attempt_history = await with_retry(
+            (response, latency_ms), _attempt_history = await with_retry(
                 _call,
                 self._retry_policy,
                 sleeper=self._sleeper,
                 rng=rng,
             )
-        except RetryExhausted as exc:
-            latency_ms = _elapsed_ms(start)
-            error_message = _redact_error_message(exc.error_message, auth_secret)
-            failure = LlmCallFailed(
-                error_kind=exc.error_kind,
-                error_message=error_message,
-                attempts=exc.attempts,
-            )
-            _log_provider_failure(
-                model_id=model_id,
-                error_kind=exc.error_kind,
-                error_message=error_message,
-            )
-            record_llm_call(model_id=model_id, status="provider_error", latency_ms=latency_ms)
-            return AdapterResult(
-                raw_response="",
-                parsed_response=ResponseError(
-                    reason="SCHEMA_VIOLATION",
-                    details=f"{exc.error_kind}: {error_message}",
-                ),
-                latency_ms=latency_ms,
-                model_id=model_id,
-                status="provider_error",
-                error=f"{exc.error_kind}: {error_message}",
-                failure=failure,
-                openrouter_audit=self._openrouter_audit(None, requested_model_slug=model_id),
-            )
-        except Exception as exc:
-            latency_ms = _elapsed_ms(start)
-            error_kind = type(exc).__name__
-            error_message = _redact_error_message(str(exc), auth_secret)
-            _log_provider_failure(
-                model_id=model_id,
-                error_kind=error_kind,
-                error_message=error_message,
-            )
-            record_llm_call(model_id=model_id, status="provider_error", latency_ms=latency_ms)
-            return AdapterResult(
-                raw_response="",
-                parsed_response=ResponseError(
-                    reason="SCHEMA_VIOLATION",
-                    details=f"{error_kind}: {error_message}",
-                ),
-                latency_ms=latency_ms,
-                model_id=model_id,
-                status="provider_error",
-                error=f"{error_kind}: {error_message}",
-                openrouter_audit=self._openrouter_audit(None, requested_model_slug=model_id),
-            )
+        except Exception:
+            # The failed attempts (the last one terminal) are already recorded in ``failed``.
+            return failed
 
-        latency_ms = _elapsed_ms(start)
+        return [*failed, self._reply_row(response, model_id=model_id, latency_ms=latency_ms)]
+
+    def _failure_row(
+        self,
+        exc: BaseException,
+        *,
+        model_id: str,
+        latency_ms: int,
+        auth_secret: str | None,
+        attempts: int,
+    ) -> AdapterResult:
+        error_kind = type(exc).__name__
+        error_message = _redact_error_message(str(exc), auth_secret)
+        _log_provider_failure(model_id=model_id, error_kind=error_kind, error_message=error_message)
+        record_llm_call(model_id=model_id, status="provider_error", latency_ms=latency_ms)
+        return AdapterResult(
+            raw_response="",
+            parsed_response=ResponseError(
+                reason="SCHEMA_VIOLATION",
+                details=f"{error_kind}: {error_message}",
+            ),
+            latency_ms=latency_ms,
+            model_id=model_id,
+            status="provider_error",
+            error=f"{error_kind}: {error_message}",
+            failure=LlmCallFailed(
+                error_kind=error_kind, error_message=error_message, attempts=attempts
+            ),
+            failure_reason="TIMEOUT" if _is_timeout(exc) else "PROVIDER_ERROR",
+            openrouter_audit=self._openrouter_audit(None, requested_model_slug=model_id),
+        )
+
+    def _reply_row(self, response: Any, *, model_id: str, latency_ms: int) -> AdapterResult:
+        # ``raw_response`` is the model's original text; the contract parser itself
+        # tolerates think blocks, code fences and prose around the JSON object.
         text = _extract_text(response)
         parsed = parse_agent_response(text)
         status: AdapterStatus
+        error: str | None = None
         if isinstance(parsed, AgentResponse):
             status = "ok"
-        elif parsed.reason == "INVALID_JSON":
-            status = "invalid_json"
         else:
-            status = "schema_violation"
+            status = "invalid_json" if parsed.reason == "INVALID_JSON" else "schema_violation"
+            finish_reason = _extract_finish_reason(response)
+            if _is_truncated(text, finish_reason):
+                # Reasoning models can spend all of max_tokens thinking; say so instead
+                # of reporting a generic parse failure. ``reasoning_content`` is never
+                # used as the answer.
+                status, error = "invalid_json", ERROR_TRUNCATED
+                parsed = ResponseError(
+                    reason="INVALID_JSON", details=f"truncated (finish_reason={finish_reason})"
+                )
+            _log_unusable_reply(
+                model_id=model_id,
+                outcome=error or status,
+                finish_reason=finish_reason,
+                output_tokens=_extract_output_tokens(response),
+                reasoning_tokens=_extract_reasoning_tokens(response),
+            )
         record_llm_call(model_id=model_id, status=status, latency_ms=latency_ms)
-
         return AdapterResult(
             raw_response=text,
             parsed_response=parsed,
@@ -375,6 +446,7 @@ class LiteLlmAdapter:
             model_id=model_id,
             provider_response_id=_extract_response_id(response),
             status=status,
+            error=error,
             openrouter_audit=self._openrouter_audit(response, requested_model_slug=model_id),
         )
 
@@ -427,32 +499,52 @@ def _extract_text(response: Any) -> str:
     if message is None:
         return ""
     content = getattr(message, "content", None)
-    if isinstance(content, str):
-        return _strip_code_fence(content)
-    return ""
+    return content if isinstance(content, str) else ""
 
 
-def _strip_code_fence(text: str) -> str:
-    """Strip a leading/trailing markdown code fence around a JSON payload.
+def _extract_finish_reason(response: Any) -> str | None:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None
+    value = getattr(choices[0], "finish_reason", None)
+    return value if isinstance(value, str) else None
 
-    Many chat-tuned models wrap JSON output in ```json ... ``` (or plain
-    ``` ... ```). The pure parser expects raw JSON, so the impure adapter
-    layer normalizes here before handing text on. If no fence is present
-    the input is returned unchanged.
-    """
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return text
-    # Drop opening fence (``` or ```json / ```JSON etc.) up to the first newline.
-    newline = stripped.find("\n")
-    if newline == -1:
-        return text
-    body = stripped[newline + 1 :]
-    # Drop trailing fence.
-    end = body.rfind("```")
-    if end == -1:
-        return text
-    return body[:end].strip()
+
+def _is_truncated(text: str, finish_reason: str | None) -> bool:
+    """Unparseable reply that was cut off, or left empty once reasoning is stripped."""
+    # ponytail: reuses the contract's private think-stripper so both layers agree on
+    # what counts as reasoning; promote it to a public name if a third caller appears.
+    return finish_reason == "length" or not _strip_think(text).strip()
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, TimeoutError | LiteLlmTimeout)
+
+
+def _extract_reasoning_tokens(response: Any) -> int | None:
+    usage = getattr(response, "usage", None)
+    details = getattr(usage, "completion_tokens_details", None)
+    value = getattr(details, "reasoning_tokens", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _log_unusable_reply(
+    *,
+    model_id: str,
+    outcome: str,
+    finish_reason: str | None,
+    output_tokens: int | None,
+    reasoning_tokens: int | None,
+) -> None:
+    fields: dict[str, Any] = {
+        "model_id": model_id,
+        "outcome": outcome,
+        "finish_reason": finish_reason,
+        "output_tokens": output_tokens,
+    }
+    if reasoning_tokens is not None:
+        fields["reasoning_tokens"] = reasoning_tokens
+    _logger.warning("llm.unusable_reply", **fields)
 
 
 def _extract_input_tokens(response: Any) -> int | None:

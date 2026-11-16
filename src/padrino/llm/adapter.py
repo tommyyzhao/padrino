@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -47,6 +47,10 @@ AdapterStatus = Literal[
     "exhausted",
 ]
 
+
+#: ``AdapterResult.error`` marker: the reply was cut off (``finish_reason == "length"``) or
+#: empty after reasoning was stripped. Not a transport failure, so never routed to a fallback.
+ERROR_TRUNCATED: Final = "truncated"
 
 _OPENROUTER_PROVIDER_SLUG = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 _OPENROUTER_MODEL_SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._:/-]*$")
@@ -164,21 +168,31 @@ class AdapterResult(BaseModel):
     status: AdapterStatus = "ok"
     error: str | None = None
     failure: LlmCallFailed | None = None
+    # Set only for provider-side failures (never parse failures): the runner turns
+    # it into a failure event and counts it toward the per-seat circuit breaker.
+    failure_reason: Literal["TIMEOUT", "PROVIDER_ERROR"] | None = None
+    # Every provider attempt that preceded this result (transient retries, hops,
+    # re-asks); this result is the final one. Empty for single-shot adapters.
+    attempts: tuple[AdapterResult, ...] = ()
 
 
 class ProviderNoContestError(RuntimeError):
     """Abort a funded game after a persisted provider failure.
 
-    ``result`` remains in impure memory only until the recording layer stores
-    the normal call audit.  The exception text is a stable safe reason token,
+    ``result`` (absent when the abort is not tied to one call, e.g. a seat that stopped
+    responding; ``seat`` then names it) remains in impure memory only until the
+    recording layer stores the normal call audit.  The exception text is a stable safe reason token,
     never a provider diagnostic or credential value.
     """
 
-    __slots__ = ("reason", "result")
+    __slots__ = ("reason", "result", "seat")
 
-    def __init__(self, *, reason: str, result: AdapterResult) -> None:
+    def __init__(
+        self, *, reason: str, result: AdapterResult | None = None, seat: str | None = None
+    ) -> None:
         self.reason = reason
         self.result = result
+        self.seat = seat
         super().__init__(reason)
 
 
@@ -258,6 +272,7 @@ class LlmAdapter(Protocol):
 
 
 __all__ = [
+    "ERROR_TRUNCATED",
     "AdapterResult",
     "AdapterStatus",
     "AgentBuild",

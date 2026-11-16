@@ -8,6 +8,7 @@ privacy filter invocation, and event-order determinism.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -28,6 +29,7 @@ from padrino.core.observation_privacy import RankedPrivacyViolation
 from padrino.core.observations import Observation
 from padrino.core.rulesets import mini7_v1
 from padrino.llm.adapter import AdapterResult
+from padrino.llm.retry import LlmCallFailed
 from padrino.runner.tick import run_tick
 
 
@@ -445,3 +447,88 @@ async def test_empty_eligible_seats_returns_empty_mapping() -> None:
     out = await run_tick(state, log, [], adapter, timeout_s=1.0, ruleset=mini7_v1)
     assert out == {}
     assert log.events == ()
+
+
+# --- provider failures are recognized failures, never a silent AFK seat ------
+
+
+def _provider_failure_result(
+    reason: str, *, error: str, model: str = "secret-vendor/secret-model"
+) -> AdapterResult:
+    return AdapterResult(
+        raw_response="",
+        parsed_response=_ok(ActionType.ABSTAIN),
+        latency_ms=5,
+        model_id=model,
+        status="exhausted",
+        error=error,
+        failure=LlmCallFailed(
+            error_kind="APIConnectionError",
+            error_message=f"{model} refused connection at https://secret-vendor.example",
+            attempts=3,
+        ),
+        failure_reason=reason,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.parametrize("reason", ["TIMEOUT", "PROVIDER_ERROR"])
+async def test_provider_failure_emits_failure_event_with_reason_and_no_provider_leak(
+    reason: str,
+) -> None:
+    state = _state(Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    log = EventLog()
+    adapter = _ScriptedAdapter({"P01": _provider_failure_result(reason, error="boom")})
+
+    out = await run_tick(state, log, [SEATS[0]], adapter, timeout_s=1.0, ruleset=mini7_v1)
+
+    assert out["P01"].action.type is ActionType.ABSTAIN
+    assert out.provider_failures == {"P01": reason}
+    body = log.events[0].body
+    assert body["event_type"] == "ActionTimedOut"
+    assert body["payload"]["reason"] == reason
+    assert body["payload"]["attempts"] == 3
+    # SYSTEM events can reach exports: no model/provider names, hosts or messages.
+    assert "secret" not in json.dumps(body)
+
+
+async def test_outer_deadline_timeout_carries_reason_timeout() -> None:
+    state = _state(Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    log = EventLog()
+    adapter = _ScriptedAdapter({"P01": _ok_result(ActionType.VOTE, "P02")}, delays={"P01": 0.2})
+    out = await run_tick(state, log, [SEATS[0]], adapter, timeout_s=0.05, ruleset=mini7_v1)
+    assert out.provider_failures == {"P01": "TIMEOUT"}
+    assert log.events[0].body["payload"]["reason"] == "TIMEOUT"
+
+
+async def test_parse_failures_are_not_provider_failures_but_truncation_is() -> None:
+    state = _state(Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    log = EventLog()
+    truncated = _err_result(REASON_INVALID_JSON, "truncated").model_copy(
+        update={"error": "truncated"}
+    )
+    adapter = _ScriptedAdapter(
+        {
+            "P01": _err_result(REASON_SCHEMA_VIOLATION, "bad"),
+            "P02": truncated,
+            "P03": _ok_result(ActionType.VOTE, "P01"),
+        }
+    )
+    out = await run_tick(state, log, list(SEATS[:3]), adapter, timeout_s=1.0, ruleset=mini7_v1)
+    assert out.provider_failures == {"P02": "TRUNCATED"}
+    assert [e.body["event_type"] for e in log.events] == ["OutputInvalid", "OutputInvalid"]
+
+
+async def test_provider_unfunded_is_not_counted_as_seat_failure() -> None:
+    state = _state(Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    log = EventLog()
+    unfunded = _provider_failure_result("PROVIDER_ERROR", error="provider_unfunded")
+    out = await run_tick(
+        state,
+        log,
+        [SEATS[0]],
+        _ScriptedAdapter({"P01": unfunded}),
+        timeout_s=1.0,
+        ruleset=mini7_v1,
+    )
+    assert out.provider_failures == {}
+    assert log.events[0].body["payload"]["reason"] == "provider_unfunded"

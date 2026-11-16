@@ -125,6 +125,70 @@ def test_retry_policy_defaults_cover_litellm_classes() -> None:
     assert AuthenticationError not in policy.retry_on
 
 
+def _litellm_exc(cls: type[Exception]) -> Exception:
+    """Build any litellm exception class with its (varying) constructor signature."""
+    from httpx import Request, Response
+
+    response = Response(500, request=Request("POST", "https://x.invalid"))
+    for kwargs in (
+        {"message": "m", "model": "m", "llm_provider": "p", "response": response},
+        {"message": "m", "model": "m", "llm_provider": "p"},
+        {"message": "m", "llm_provider": "p", "model": "m", "response": response},
+        {"current_cost": 1.0, "max_budget": 1.0},
+    ):
+        try:
+            return cls(**kwargs)
+        except TypeError:
+            continue
+    raise AssertionError(cls)
+
+
+# Every litellm exception class the adapter can see -> is a retry worthwhile?
+_RETRY_TABLE: dict[str, bool] = {
+    "Timeout": True,
+    "APIConnectionError": True,
+    "RateLimitError": True,
+    "InternalServerError": True,
+    "ServiceUnavailableError": True,
+    "BadGatewayError": True,
+    "NotFoundError": False,
+    "AuthenticationError": False,
+    "PermissionDeniedError": False,
+    "BadRequestError": False,
+    "UnprocessableEntityError": False,
+    "ContextWindowExceededError": False,
+    "ContentPolicyViolationError": False,
+    "UnsupportedParamsError": False,
+    "BudgetExceededError": False,
+}
+
+
+@pytest.mark.parametrize(("name", "retryable"), sorted(_RETRY_TABLE.items()))
+def test_litellm_exception_retry_classification(name: str, retryable: bool) -> None:
+    import litellm.exceptions as lx
+
+    exc = _litellm_exc(getattr(lx, name))
+    assert isinstance(exc, DEFAULT_RETRY_ON) is retryable
+
+
+def test_retry_table_covers_every_status_exception_class() -> None:
+    """A newly-added litellm status error must be classified here, not silently defaulted."""
+    import inspect
+
+    import litellm.exceptions as lx
+
+    status_classes = {
+        n
+        for n, c in vars(lx).items()
+        if inspect.isclass(c)
+        and issubclass(c, lx.APIError)
+        and n not in {"APIError", "MockException", "MidStreamFallbackError"}
+        and not n.startswith(("APIResponse", "JSONSchema", "Invalid", "ImageFetch", "Rejected"))
+        and not n.startswith("LiteLLMUnknown")
+    }
+    assert status_classes <= set(_RETRY_TABLE), sorted(status_classes - set(_RETRY_TABLE))
+
+
 def test_retry_on_default_export_is_authoritative_tuple() -> None:
     assert isinstance(DEFAULT_RETRY_ON, tuple)
     assert AuthenticationError not in DEFAULT_RETRY_ON
@@ -304,7 +368,9 @@ def test_llm_call_failed_carries_error_chain() -> None:
 # --- LiteLlmAdapter integration --------------------------------------------
 
 
-def _build_adapter(*, retry_policy: RetryPolicy | None = None) -> LiteLlmAdapter:
+def _build_adapter(
+    *, retry_policy: RetryPolicy | None = None, timeout_s: float = 5.0
+) -> LiteLlmAdapter:
     policy = RoutingPolicy(
         primary_model="cerebras/zai-glm-4.7",
         fallback_model=None,
@@ -319,7 +385,7 @@ def _build_adapter(*, retry_policy: RetryPolicy | None = None) -> LiteLlmAdapter
     return LiteLlmAdapter(
         routing_policy=policy,
         agent_build=build,
-        timeout_s=5.0,
+        timeout_s=timeout_s,
         auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
         retry_policy=retry_policy
         if retry_policy is not None
@@ -372,9 +438,50 @@ def test_adapter_non_retryable_skips_retry() -> None:
         adapter = _build_adapter()
         result = asyncio.run(adapter.complete(obs))
     assert mock.call_count == 1
-    # Non-retryable but no fallback: status is primary_failed and a coerced
-    # safe response stands in for the parsed payload.
-    assert result.status == "primary_failed"
+    # Non-retryable and no fallback: the call is exhausted (a recognized provider
+    # failure) and a coerced safe response stands in for the parsed payload.
+    assert result.status == "exhausted"
+    assert result.failure_reason == "PROVIDER_ERROR"
+    assert result.failure is not None
+    assert result.failure.attempts == 1
+
+
+def test_timeout_on_first_attempt_then_success_fits_inside_the_deadline() -> None:
+    """The adapter splits the phase deadline across attempts, so a retry can still finish."""
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    good = _fake_completion(_valid_response_json(Action(type=ActionType.ABSTAIN)))
+    calls = {"n": 0}
+
+    async def flaky(**kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await asyncio.sleep(60)  # hangs until the per-attempt timeout cancels it
+        return good
+
+    async def scenario() -> Any:
+        adapter = _build_adapter(
+            retry_policy=RetryPolicy(
+                max_attempts=3,
+                base_delay_s=0.0,
+                max_delay_s=0.0,
+                retry_on=DEFAULT_RETRY_ON,
+            ),
+            timeout_s=0.9,
+        )
+        started = asyncio.get_running_loop().time()
+        # The runner's outer deadline equals the adapter's budget: must not fire first.
+        result = await asyncio.wait_for(adapter.complete(obs), timeout=0.9)
+        return result, asyncio.get_running_loop().time() - started
+
+    with patch(ACOMPLETION_PATH, new=flaky):
+        result, elapsed = asyncio.run(scenario())
+
+    assert calls["n"] == 2
+    assert result.status == "ok"
+    assert elapsed < 0.9
+    # The timed-out attempt is kept as its own row.
+    assert [a.status for a in result.attempts] == ["provider_error"]
+    assert result.attempts[0].failure_reason == "TIMEOUT"
 
 
 # --- tick.py ActionTimedOut once per exhausted call ------------------------
@@ -408,9 +515,10 @@ def test_tick_records_exactly_one_action_timed_out_per_exhausted_call() -> None:
     timed_out_events = [e for e in log.events if e.body.get("event_type") == "ActionTimedOut"]
     assert len(timed_out_events) == 1
     payload = timed_out_events[0].body["payload"]
-    assert payload["reason"] == "llm_exhausted"
+    assert payload["reason"] == "TIMEOUT"
     assert payload["error_kind"] == "TimeoutError"
     assert payload["attempts"] == 3
+    assert "error_message" not in payload  # provider diagnostics never enter the log
     # And the coerced response was returned to the runner.
     assert seat.public_player_id in responses
     _ = obs

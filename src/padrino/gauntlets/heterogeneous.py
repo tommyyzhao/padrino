@@ -98,6 +98,7 @@ def build_heterogeneous_adapter(
                 api_base=api_base,
                 extra_headers=extra_headers,
                 system_prompts_by_role=prompts,
+                reask_invalid=settings.padrino_llm_reask_invalid,
             )
         except SecretResolutionError:
             raise ValueError(

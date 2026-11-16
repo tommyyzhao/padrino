@@ -25,10 +25,11 @@ from padrino.db.base import create_engine, create_session_factory
 from padrino.db.game_status import GAME_STATUS_RUNNING
 from padrino.db.models import AgentBuild, LlmCall, ModelConfig, ModelProvider, PromptVersion
 from padrino.db.repositories import games as games_repo
+from padrino.economics.human_cost_governance import PRICE_BASIS_UNPRICED
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
 from padrino.llm.adapter import AgentBuild as RuntimeBuild
-from padrino.llm.adapter import LlmAdapter
+from padrino.llm.adapter import LlmAdapter, ProviderNoContestError
 from padrino.llm.prompts import (
     CANONICAL_RESPONSE_SCHEMA,
     canonical_prompts_by_role,
@@ -60,7 +61,10 @@ class ShowcaseSummary(TypedDict):
     game_id: str
     winner: str | None
     calls: int
+    # Sum of real (provider-reported or listed-price) costs only; never an estimate.
     cost: float | None
+    # Calls with tokens but no known price; ``cost`` excludes them.
+    unpriced_calls: int
 
 
 def _validate(models: Sequence[str], db_url: str, base_url: str, key_ref: str) -> None:
@@ -362,11 +366,13 @@ async def run_showcase(
         )
         async with session_factory() as session, session.begin():
             await mark_recent(session, game_id)
-            calls, cost = (
+            calls, cost, unpriced = (
                 await session.execute(
-                    select(func.count(LlmCall.id), func.sum(LlmCall.cost_usd)).where(
-                        LlmCall.game_id == game_id
-                    )
+                    select(
+                        func.count(LlmCall.id),
+                        func.sum(LlmCall.cost_usd),
+                        func.count(LlmCall.id).filter(LlmCall.price_basis == PRICE_BASIS_UNPRICED),
+                    ).where(LlmCall.game_id == game_id)
                 )
             ).one()
         summary: ShowcaseSummary = {
@@ -374,25 +380,33 @@ async def run_showcase(
             "winner": outcome.final_state.terminal_result,
             "calls": calls,
             "cost": cost,
+            "unpriced_calls": unpriced,
         }
         print(f"{watch_url}?narrated=1", flush=True)
         print(json.dumps(summary, sort_keys=True), flush=True)
         return summary
-    except Exception:
+    except Exception as exc:
+        # Name the unresponsive seat number only; never the model or provider behind it.
+        unresponsive = exc.seat if isinstance(exc, ProviderNoContestError) else None
+        detail = (
+            f"seat {unresponsive} stopped responding"
+            if unresponsive is not None
+            else "Showcase execution failed"
+        )
         if game_id is not None:
             async with session_factory() as session, session.begin():
                 failed_game = await games_repo.mark_failed(
                     session,
                     game_id,
                     completed_at=datetime.now(UTC),
-                    last_error="Showcase execution failed",
-                    last_error_kind="showcase_failed",
+                    last_error=detail,
+                    last_error_kind="seat_unresponsive"
+                    if unresponsive is not None
+                    else "showcase_failed",
                 )
                 if failed_game is not None:
                     failed_game.is_broadcastable = False
                     await mark_hidden(session, game_id)
-        raise ShowcaseError(
-            "Showcase execution failed; committed events retained in the local database"
-        ) from None
+        raise ShowcaseError(f"{detail}; committed events retained in the local database") from None
     finally:
         await engine.dispose()

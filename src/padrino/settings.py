@@ -43,6 +43,12 @@ class Settings(BaseSettings):
 
     # LLM inference
     padrino_llm_timeout_seconds: int = 45
+    # Extra asks (same observation + the invalid reply) when a model's reply is not
+    # parseable JSON / schema-valid. 0 disables the re-ask.
+    padrino_llm_reask_invalid: int = Field(default=1, ge=0)
+    # Consecutive provider-failure coercions (timeout / provider error / truncated
+    # reply) for one AI seat before the game ends as a no-contest. 0 disables.
+    padrino_llm_seat_failure_limit: int = Field(default=3, ge=0)
     padrino_temperature: float = 0.7
     padrino_top_p: float = 1.0
 

@@ -199,6 +199,7 @@ async def test_default_factory_routes_through_9router(
     assert all("in English" in prompt for prompt in systems)
     assert result["winner"] == "TOWN"
     assert result["cost"] == pytest.approx(result["calls"] * 0.01)
+    assert result["unpriced_calls"] == 0
     assert "test-key-never-persist" not in capsys.readouterr().out
 
 
@@ -347,3 +348,64 @@ async def test_real_9router_game(tmp_path: Path) -> None:
     assert uuid.UUID(result["game_id"])
     assert result["winner"] in {"TOWN", "MAFIA", "DRAW"}
     assert result["calls"] > 0
+
+
+async def test_summary_reports_priced_cost_and_unpriced_call_count(tmp_path: Path) -> None:
+    """Unknown models without a provider cost are counted, never summed as a made-up total."""
+    scripted = _scripted_factory({})
+
+    class TokensNoCost:
+        async def complete(self, observation: Observation) -> AdapterResult:
+            result = await scripted.complete(observation)
+            return result.model_copy(
+                update={"input_tokens": 10, "output_tokens": 5, "model_id": "openai/mystery"}
+            )
+
+    summary = await run_showcase(
+        ROSTER,
+        db_url=f"sqlite+aiosqlite:///{tmp_path / 'unpriced.db'}",
+        seed=SEED,
+        adapter_factory=lambda _: TokensNoCost(),
+    )
+    assert summary["calls"] > 0
+    assert summary["unpriced_calls"] == summary["calls"]
+    assert summary["cost"] is None
+
+
+async def test_unresponsive_seat_fails_the_game_naming_only_the_seat_number(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'afk.db'}"
+    scripted = _scripted_factory({})
+
+    class SeatThreeNeverAnswers:
+        async def complete(self, observation: Observation) -> AdapterResult:
+            result = await scripted.complete(observation)
+            if observation.you.player_id != "P03":
+                return result
+            return result.model_copy(
+                update={
+                    "status": "exhausted",
+                    "failure_reason": "TIMEOUT",
+                    "error": "Timeout: gemini/gemini-3.8-flash took too long",
+                }
+            )
+
+    with pytest.raises(ShowcaseError) as error:
+        await run_showcase(
+            ROSTER, db_url=db_url, seed=SEED, adapter_factory=lambda _: SeatThreeNeverAnswers()
+        )
+    message = str(error.value) + capsys.readouterr().out
+    assert "seat P03 stopped responding" in message
+    assert "gemini" not in message
+    engine = create_engine(db_url)
+    try:
+        async with create_session_factory(engine)() as session:
+            game = (await session.execute(select(Game))).scalar_one()
+            assert game.status == GAME_STATUS_FAILED
+            assert game.terminal_result is None
+            assert game.last_error == "seat P03 stopped responding"
+            assert game.last_error_kind == "seat_unresponsive"
+            assert not game.is_broadcastable
+    finally:
+        await engine.dispose()

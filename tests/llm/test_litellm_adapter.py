@@ -129,6 +129,11 @@ def _fake_completion(
 _SAME_MODEL_HOST_ENV = "PADRINO_TEST_ZAI_KEY"
 
 
+def _all_attempts(result: AdapterResult) -> list[AdapterResult]:
+    """Every provider attempt behind ``result`` in order, ending with ``result`` itself."""
+    return [*result.attempts, result]
+
+
 def _build_adapter(
     *,
     fallback: str | None = "deepinfra/deepseek-ai/DeepSeek-V4-Flash",
@@ -398,7 +403,7 @@ def test_openrouter_402_403_errors_do_not_retry_and_stamp_fallback_metadata(
         "openai/gpt-4o-mini",
     ]
     assert result.status == "fallback_ok"
-    assert [attempt.status for attempt in adapter.last_attempts] == [
+    assert [attempt.status for attempt in _all_attempts(result)] == [
         "primary_failed",
         "fallback_ok",
     ]
@@ -481,7 +486,8 @@ def test_openrouter_provider_failure_redacts_resolved_key_from_result_and_log(
         structlog.configure(**original_config)
 
     rendered = f"{result.error}\n{result.parsed_response}\n{capture.entries}"
-    assert result.status == "primary_failed"
+    assert result.status == "exhausted"
+    assert result.failure_reason == "PROVIDER_ERROR"
     assert sentinel not in rendered
     assert "Authorization:" not in rendered
     assert "[credential header redacted]" in rendered
@@ -509,10 +515,9 @@ def test_success_path_records_single_attempt() -> None:
 
     with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
         adapter = _build_adapter()
-        asyncio.run(adapter.complete(obs))
+        result = asyncio.run(adapter.complete(obs))
 
-    assert len(adapter.last_attempts) == 1
-    assert adapter.last_attempts[0].status == "ok"
+    assert [attempt.status for attempt in _all_attempts(result)] == ["ok"]
 
 
 def test_primary_failure_falls_back_to_secondary() -> None:
@@ -540,11 +545,10 @@ def test_primary_failure_falls_back_to_secondary() -> None:
     assert result.input_tokens == 80
     assert result.cost_usd == 0.00005
     assert result.model_id == "deepinfra/deepseek-ai/DeepSeek-V4-Flash"
-    assert len(adapter.last_attempts) == 2
-    assert adapter.last_attempts[0].status == "primary_failed"
-    assert adapter.last_attempts[0].error is not None
-    assert "primary boom" in adapter.last_attempts[0].error
-    assert adapter.last_attempts[1].status == "fallback_ok"
+    attempts = _all_attempts(result)
+    assert [a.status for a in attempts] == ["primary_failed", "fallback_ok"]
+    assert attempts[0].error is not None
+    assert "primary boom" in attempts[0].error
 
 
 def test_both_failures_yield_coerced_safe_response_in_vote_phase() -> None:
@@ -563,7 +567,8 @@ def test_both_failures_yield_coerced_safe_response_in_vote_phase() -> None:
         result = asyncio.run(adapter.complete(obs))
 
     assert mock.call_count == 2
-    assert result.status == "both_failed"
+    assert result.status == "exhausted"
+    assert result.failure_reason == "PROVIDER_ERROR"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.parsed_response.action.type is ActionType.ABSTAIN
     assert result.parsed_response.public_message is None
@@ -571,9 +576,7 @@ def test_both_failures_yield_coerced_safe_response_in_vote_phase() -> None:
     assert result.parsed_response.memory_update == ""
     assert result.error is not None
     assert "fallback down" in result.error
-    assert len(adapter.last_attempts) == 2
-    assert adapter.last_attempts[0].status == "primary_failed"
-    assert adapter.last_attempts[1].status == "both_failed"
+    assert [a.status for a in _all_attempts(result)] == ["primary_failed", "exhausted"]
 
 
 def test_both_failures_in_night_phase_returns_noop() -> None:
@@ -583,7 +586,7 @@ def test_both_failures_in_night_phase_returns_noop() -> None:
         adapter = _build_adapter()
         result = asyncio.run(adapter.complete(obs))
 
-    assert result.status == "both_failed"
+    assert result.status == "exhausted"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.parsed_response.action.type is ActionType.NOOP
     assert result.parsed_response.action.target is None
@@ -597,7 +600,8 @@ def test_no_fallback_configured_does_not_make_second_call() -> None:
         result = asyncio.run(adapter.complete(obs))
 
     assert mock.call_count == 1
-    assert result.status == "primary_failed"
+    assert result.status == "exhausted"
+    assert result.failure_reason == "PROVIDER_ERROR"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.parsed_response.action.type is ActionType.ABSTAIN
     assert result.error is not None
@@ -613,53 +617,42 @@ def test_invalid_json_does_not_trigger_fallback() -> None:
         adapter = _build_adapter()
         result = asyncio.run(adapter.complete(obs))
 
-    assert mock.call_count == 1
+    # Default settings re-ask once on an unusable reply; never a different model.
+    assert mock.call_count == 2
+    assert {c.kwargs["model"] for c in mock.call_args_list} == {"cerebras/zai-glm-4.7"}
     assert result.status == "invalid_json"
+    assert result.failure_reason is None
     assert isinstance(result.parsed_response, ResponseError)
     assert result.parsed_response.reason == "INVALID_JSON"
     assert result.raw_response == "this is not JSON"
 
 
 @pytest.mark.parametrize(
-    "fenced_prefix,fenced_suffix",
+    "wrap",
     [
-        ("```json\n", "\n```"),
-        ("```JSON\n", "\n```"),
-        ("```\n", "\n```"),
-        ("  ```json\n", "\n```  "),  # surrounding whitespace
+        "```json\n{}\n```",
+        "```\n{}\n```",
+        "  ```json\n{}\n```  ",
+        "<think>let me reason {about} this</think>{}",
+        "Sure, here is my move: {}",
     ],
 )
-def test_markdown_code_fence_is_stripped_before_parse(
-    fenced_prefix: str, fenced_suffix: str
-) -> None:
+def test_wrapped_json_parses_and_raw_response_stays_original(wrap: str) -> None:
+    """Fences/think/prose are tolerated by the contract parser; the adapter keeps the raw text."""
     canned_action = Action(type=ActionType.NOOP)
-    inner = _valid_response_json(canned_action)
-    fenced = f"{fenced_prefix}{inner}{fenced_suffix}"
-    response = _fake_completion(content=fenced)
+    wrapped = wrap.replace("{}", _valid_response_json(canned_action))
+    response = _fake_completion(content=wrapped)
     obs = _observation(SEATS[0], Phase(kind=PhaseKind.NIGHT_0_MAFIA_INTRO, day=0, round=0))
 
-    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
-        adapter = _build_adapter()
-        result = asyncio.run(adapter.complete(obs))
+    mock = AsyncMock(return_value=response)
+    with patch(ACOMPLETION_PATH, new=mock):
+        result = asyncio.run(_build_adapter().complete(obs))
 
-    assert result.status == "ok", (
-        f"expected fenced JSON to parse cleanly; got status={result.status} "
-        f"raw={result.raw_response!r}"
-    )
+    assert mock.call_count == 1
+    assert result.status == "ok"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.parsed_response.action == canned_action
-
-
-def test_unfenced_text_is_passed_through_unchanged() -> None:
-    response = _fake_completion(content="this is not JSON")
-    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
-
-    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
-        adapter = _build_adapter()
-        result = asyncio.run(adapter.complete(obs))
-
-    assert result.status == "invalid_json"
-    assert result.raw_response == "this is not JSON"
+    assert result.raw_response == wrapped
 
 
 def test_schema_violation_does_not_trigger_fallback() -> None:
@@ -672,7 +665,7 @@ def test_schema_violation_does_not_trigger_fallback() -> None:
         adapter = _build_adapter()
         result = asyncio.run(adapter.complete(obs))
 
-    assert mock.call_count == 1
+    assert mock.call_count == 2  # one re-ask, same model
     assert result.status == "schema_violation"
     assert isinstance(result.parsed_response, ResponseError)
     assert result.parsed_response.reason == "SCHEMA_VIOLATION"
@@ -690,7 +683,8 @@ def test_inference_params_forwarded_to_litellm() -> None:
     kwargs = mock.call_args.kwargs
     assert kwargs["temperature"] == 0.7
     assert kwargs["top_p"] == 1.0
-    assert kwargs["timeout"] == 5.0
+    # The per-attempt timeout is a share of the call's total budget (5s), never more.
+    assert 0 < kwargs["timeout"] <= 5.0
     messages = kwargs["messages"]
     assert isinstance(messages, list)
     assert messages[0]["role"] == "system"
@@ -846,11 +840,11 @@ def test_complete_propagates_attempts_through_repeated_calls() -> None:
         adapter = _build_adapter()
         first, second = asyncio.run(run_two(adapter))
 
-    # After the second call, last_attempts should reflect the second call only.
+    # Attempts belong to the call that produced them; nothing leaks across calls.
     assert first.status == "fallback_ok"
+    assert [a.status for a in _all_attempts(first)] == ["primary_failed", "fallback_ok"]
     assert second.status == "ok"
-    assert len(adapter.last_attempts) == 1
-    assert adapter.last_attempts[0].status == "ok"
+    assert _all_attempts(second) == [second]
 
 
 @pytest.mark.parametrize(
@@ -867,7 +861,7 @@ def test_non_vote_phases_coerce_to_noop_on_both_failures(phase: Phase) -> None:
     with patch(ACOMPLETION_PATH, new=mock):
         adapter = _build_adapter()
         result = asyncio.run(adapter.complete(obs))
-    assert result.status == "both_failed"
+    assert result.status == "exhausted"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.parsed_response.action.type is ActionType.NOOP
 
@@ -936,11 +930,14 @@ def test_same_model_fallback_routes_to_alternate_host(
     assert result.status == "same_model_fallback_ok"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.provider_response_id == "resp-zai"
-    # last_attempts: primary attempt (demoted to primary_failed) + the
+    # Three failed primary attempts (the last demoted to primary_failed) + the
     # successful same-model attempt.
-    assert len(adapter.last_attempts) == 2
-    assert adapter.last_attempts[0].status == "primary_failed"
-    assert adapter.last_attempts[1].status == "same_model_fallback_ok"
+    assert [a.status for a in _all_attempts(result)] == [
+        "provider_error",
+        "provider_error",
+        "primary_failed",
+        "same_model_fallback_ok",
+    ]
 
 
 def test_same_model_exhaustion_still_triggers_different_model_fallback(
@@ -972,8 +969,13 @@ def test_same_model_exhaustion_still_triggers_different_model_fallback(
     assert result.status == "fallback_ok"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.provider_response_id == "resp-deepinfra"
-    statuses = [a.status for a in adapter.last_attempts]
-    assert statuses == ["primary_failed", "primary_failed", "fallback_ok"]
+    statuses = [a.status for a in _all_attempts(result)]
+    assert statuses == (
+        ["provider_error"] * 2
+        + ["primary_failed"]
+        + ["provider_error"] * 2
+        + ["primary_failed", "fallback_ok"]
+    )
 
 
 def test_same_model_host_resolves_secret_at_construction(
@@ -1005,3 +1007,118 @@ def test_same_model_fallback_without_different_model_fallback_coerces(
     assert result.status == "exhausted"
     assert isinstance(result.parsed_response, AgentResponse)
     assert result.parsed_response.action.type is ActionType.ABSTAIN
+
+
+# ---------------------------------------------------------------------------
+# Re-ask on unusable output, truncation diagnosis, deadline-derived attempt timeouts
+# ---------------------------------------------------------------------------
+
+
+def _vote_obs() -> Observation:
+    return _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+
+def test_reask_turns_an_invalid_first_reply_into_a_valid_action() -> None:
+    bad = _fake_completion(content="I vote for P02 because reasons", cost=0.0002)
+    good = _fake_completion(
+        content=_valid_response_json(Action(type=ActionType.ABSTAIN)), response_id="resp-2"
+    )
+    mock = AsyncMock(side_effect=[bad, good])
+    with patch(ACOMPLETION_PATH, new=mock):
+        result = asyncio.run(_build_adapter().complete(_vote_obs()))
+
+    assert mock.call_count == 2
+    assert result.status == "ok"
+    assert isinstance(result.parsed_response, AgentResponse)
+    assert result.provider_response_id == "resp-2"
+    # Both attempts are visible: the invalid one first, the final action last.
+    assert [a.status for a in _all_attempts(result)] == ["invalid_json", "ok"]
+    # Re-ask = same observation, then the invalid reply, then the short instruction.
+    first, second = (c.kwargs["messages"] for c in mock.call_args_list)
+    assert second[:2] == first
+    assert second[2] == {"role": "assistant", "content": "I vote for P02 because reasons"}
+    assert second[3]["role"] == "user"
+    assert "only the JSON object" in second[3]["content"]
+
+
+def test_reask_is_disabled_by_setting_zero() -> None:
+    mock = AsyncMock(return_value=_fake_completion(content="nope"))
+    adapter = _build_adapter()
+    adapter_no_reask = LiteLlmAdapter(
+        routing_policy=RoutingPolicy(primary_model="cerebras/zai-glm-4.7"),
+        agent_build=adapter._build,
+        timeout_s=5.0,
+        auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
+        reask_invalid=0,
+    )
+    with patch(ACOMPLETION_PATH, new=mock):
+        result = asyncio.run(adapter_no_reask.complete(_vote_obs()))
+    assert mock.call_count == 1
+    assert result.status == "invalid_json"
+    assert result.attempts == ()
+
+
+def test_reask_happens_at_most_once() -> None:
+    mock = AsyncMock(return_value=_fake_completion(content="still not json"))
+    with patch(ACOMPLETION_PATH, new=mock):
+        result = asyncio.run(_build_adapter().complete(_vote_obs()))
+    assert mock.call_count == 2
+    assert result.status == "invalid_json"
+    assert len(result.attempts) == 1
+
+
+def test_finish_reason_length_is_recorded_as_truncated_and_not_reasked() -> None:
+    response = _fake_completion(content='<think>hmm, first I should consider {"a"', cost=None)
+    response.choices[0].finish_reason = "length"
+    response.usage.completion_tokens_details = SimpleNamespace(reasoning_tokens=4090)
+    capture = LogCapture()
+    original_config = structlog.get_config()
+    structlog.reset_defaults()
+    structlog.configure(processors=[capture], cache_logger_on_first_use=False)
+    mock = AsyncMock(return_value=response)
+    try:
+        with patch(ACOMPLETION_PATH, new=mock):
+            result = asyncio.run(_build_adapter().complete(_vote_obs()))
+    finally:
+        structlog.reset_defaults()
+        structlog.configure(**original_config)
+
+    assert mock.call_count == 1  # more tokens cannot be bought by asking again
+    assert result.error == "truncated"
+    assert isinstance(result.parsed_response, ResponseError)
+    entry = next(e for e in capture.entries if e["event"] == "llm.unusable_reply")
+    assert entry["reasoning_tokens"] == 4090
+    assert entry["outcome"] == "truncated"
+
+
+def test_empty_content_after_think_strip_is_truncated() -> None:
+    response = _fake_completion(content="<think>all my budget went here</think>")
+    mock = AsyncMock(return_value=response)
+    with patch(ACOMPLETION_PATH, new=mock):
+        result = asyncio.run(_build_adapter().complete(_vote_obs()))
+    assert result.error == "truncated"
+    assert mock.call_count == 1
+
+
+def test_reasoning_content_is_never_used_as_the_answer() -> None:
+    response = _fake_completion(content="")
+    response.choices[0].message.reasoning_content = _valid_response_json(
+        Action(type=ActionType.ABSTAIN)
+    )
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)):
+        result = asyncio.run(_build_adapter().complete(_vote_obs()))
+    assert isinstance(result.parsed_response, ResponseError)
+    assert result.error == "truncated"
+
+
+def test_timeout_error_is_flagged_as_timeout_and_other_errors_as_provider_error() -> None:
+    from litellm.exceptions import AuthenticationError, Timeout
+
+    timeout = Timeout(message="slow", model="m", llm_provider="p")
+    auth = AuthenticationError(message="bad key", model="m", llm_provider="p")
+    results = []
+    for exc in (timeout, auth):
+        with patch(ACOMPLETION_PATH, new=AsyncMock(side_effect=exc)):
+            results.append(asyncio.run(_build_adapter(fallback=None).complete(_vote_obs())))
+    assert [r.failure_reason for r in results] == ["TIMEOUT", "PROVIDER_ERROR"]
+    assert all(r.status == "exhausted" for r in results)

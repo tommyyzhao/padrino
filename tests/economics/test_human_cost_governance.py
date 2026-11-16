@@ -47,6 +47,7 @@ from padrino.economics.human_cost_governance import (
     bind_admission_slots,
     global_breaker_open,
     global_human_lane_spend_usd,
+    has_listed_price,
     human_eligible_pool,
     lobby_breaker_open,
     price_turn_usd,
@@ -1013,3 +1014,16 @@ async def test_aborted_join_releases_slot_for_reuse(
     async with session_factory() as session, session.begin():
         reused = await admit_human(session, s, principal_id=pid, action=ACTION_JOIN, now=_NOW)
         assert reused.allowed is True
+
+
+def test_default_entry_is_a_reservation_estimate_not_a_listed_price() -> None:
+    s = Settings(
+        padrino_human_fallback_token_price_per_1k={"default": (1.0, 1.0), "a/b": (2.0, 2.0)}
+    )
+    assert has_listed_price(s, "a/b")
+    assert not has_listed_price(s, "unknown/model")
+    assert not has_listed_price(s, "default")
+    # Reservation estimates still fall back to ``default`` for unknown models.
+    assert price_turn_usd(
+        s, response_cost=None, model="unknown/model", input_tokens=1000, output_tokens=0
+    ) == pytest.approx(1.0)

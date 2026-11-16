@@ -155,5 +155,6 @@ async def test_no_contest_policy_uses_existing_terminal_provider_failure_path(
     with pytest.raises(ProviderNoContestError, match="provider_unfunded") as raised:
         await adapter.complete(_observation())
 
+    assert raised.value.result is not None
     assert raised.value.result.model_id == "openai/frozen-model"
     assert raised.value.result.error == "provider_unfunded"

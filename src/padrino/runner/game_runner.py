@@ -26,6 +26,7 @@ Impure runner module; pure-core code does not import it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -79,10 +80,13 @@ from padrino.economics.completion_reserve import CompletionReserveUnfundedPolicy
 from padrino.economics.human_cost_governance import (
     PRICE_BASIS_FALLBACK_TABLE,
     PRICE_BASIS_PROVIDER_RESPONSE_COST,
+    PRICE_BASIS_UNPRICED,
     fallback_price_table_version,
+    has_listed_price,
     price_turn_usd,
 )
 from padrino.llm.adapter import AdapterResult, LlmAdapter, ProviderNoContestError
+from padrino.llm.retry import LlmCallFailed
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
     EVENT_GAME_STARTED,
@@ -117,7 +121,7 @@ from padrino.ratings.solo_rate_service import (
     SoloRateGameResult,
     update_solo_rate_ratings_for_game,
 )
-from padrino.runner.tick import run_tick
+from padrino.runner.tick import TickResponses, run_tick
 from padrino.settings import Settings, get_settings
 
 _logger = structlog.get_logger("padrino.runner")
@@ -288,26 +292,61 @@ class _RecordingAdapter:
         self._persistence = persistence
 
     async def complete(self, observation: Observation) -> AdapterResult:
+        started = asyncio.get_running_loop().time()
         try:
             result = await self._inner.complete(observation)
         except ProviderNoContestError as exc:
             persisted_result = exc.result
-            if self._persistence is not None:
-                persisted_result, _ = await _persist_llm_call(
-                    self._persistence,
-                    observation,
-                    persisted_result,
-                )
-            self._sink.append(persisted_result)
-            raise ProviderNoContestError(reason=exc.reason, result=persisted_result) from exc
-        if self._persistence is not None:
-            result, no_contest = await _persist_llm_call(self._persistence, observation, result)
-            self._sink.append(result)
-            if no_contest:
-                raise ProviderNoContestError(reason="provider_unfunded", result=result)
-            return result
-        self._sink.append(result)
+            if persisted_result is not None:
+                persisted_result, _ = await self._record(observation, persisted_result)
+            raise ProviderNoContestError(
+                reason=exc.reason, result=persisted_result, seat=exc.seat
+            ) from exc
+        except asyncio.CancelledError:
+            # The tick's hard deadline cancelled the call: still leave an audit row.
+            elapsed_ms = int((asyncio.get_running_loop().time() - started) * 1000)
+            with contextlib.suppress(Exception):
+                await self._record(observation, _cancelled_result(elapsed_ms))
+            raise
+        result, no_contest = await self._record(observation, result)
+        if no_contest:
+            raise ProviderNoContestError(reason="provider_unfunded", result=result)
         return result
+
+    async def _record(
+        self, observation: Observation, result: AdapterResult
+    ) -> tuple[AdapterResult, bool]:
+        """Persist and capture one row per provider attempt, then the final result."""
+        no_contest = False
+        for attempt in result.attempts:
+            row = attempt
+            if self._persistence is not None:
+                row, attempt_no_contest = await _persist_llm_call(
+                    self._persistence, observation, attempt
+                )
+                no_contest = no_contest or attempt_no_contest
+            self._sink.append(row)
+        if self._persistence is not None:
+            result, final_no_contest = await _persist_llm_call(
+                self._persistence, observation, result
+            )
+            no_contest = no_contest or final_no_contest
+        self._sink.append(result)
+        return result, no_contest
+
+
+def _cancelled_result(latency_ms: int) -> AdapterResult:
+    """Audit row for a call the runner's deadline cancelled before it returned."""
+    reason = "Cancelled: phase deadline exceeded"
+    return AdapterResult(
+        raw_response="",
+        parsed_response=ResponseError(reason="SCHEMA_VIOLATION", details=reason),
+        latency_ms=latency_ms,
+        status="provider_error",
+        error=reason,
+        failure=LlmCallFailed(error_kind="CancelledError", error_message=reason, attempts=1),
+        failure_reason="TIMEOUT",
+    )
 
 
 def _emit(
@@ -837,15 +876,21 @@ def _pricing_stamp(persistence: GamePersistence, result: AdapterResult) -> _Pric
         ):
             return _PricingStamp(None, None, None)
     settings = persistence.settings or get_settings()
+    if result.cost_usd is not None:
+        return _PricingStamp(result.cost_usd, PRICE_BASIS_PROVIDER_RESPONSE_COST, None)
+    if result.input_tokens is None and result.output_tokens is None:
+        return _PricingStamp(None, None, None)
+    model = result.model_id or "default"
+    if not has_listed_price(settings, model):
+        # Never invent a cost from the catch-all price: keep the tokens, record "unpriced".
+        return _PricingStamp(None, PRICE_BASIS_UNPRICED, None)
     cost_usd = price_turn_usd(
         settings,
-        response_cost=result.cost_usd,
-        model=result.model_id or "default",
+        response_cost=None,
+        model=model,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
     )
-    if result.cost_usd is not None:
-        return _PricingStamp(cost_usd, PRICE_BASIS_PROVIDER_RESPONSE_COST, None)
     return _PricingStamp(
         cost_usd,
         PRICE_BASIS_FALLBACK_TABLE,
@@ -1330,6 +1375,12 @@ async def drive_game_loop(
     recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls, persistence)
     state = resume.state if resume is not None else initial_state()
     run_phase_tick = tick_runner or _default_tick_runner
+    seat_failure_limit = (
+        persistence.settings if persistence is not None and persistence.settings else get_settings()
+    ).padrino_llm_seat_failure_limit
+    # Consecutive provider-failure coercions per seat (benchmark ticks only: the human
+    # lane's tick returns plain dicts, so human seats are never counted).
+    seat_failure_streaks: dict[str, int] = {}
 
     game_ctx_keys = ("game_id", "ruleset_id")
     structlog.contextvars.bind_contextvars(
@@ -1482,6 +1533,24 @@ async def drive_game_loop(
                     # mirror them to the DB now so the persisted chain stays complete.
                     await persist_pending_events(log_before)
                     await snapshot_phase(state, phase_id)
+                    if isinstance(responses, TickResponses) and seat_failure_limit > 0:
+                        for seat in eligible:
+                            seat_id = seat.public_player_id
+                            if seat_id in responses.provider_failures:
+                                seat_failure_streaks[seat_id] = (
+                                    seat_failure_streaks.get(seat_id, 0) + 1
+                                )
+                            else:
+                                seat_failure_streaks.pop(seat_id, None)
+                            if seat_failure_streaks.get(seat_id, 0) >= seat_failure_limit:
+                                _logger.error(
+                                    "game.seat_unresponsive",
+                                    seat=seat_id,
+                                    consecutive_failures=seat_failure_streaks[seat_id],
+                                )
+                                raise ProviderNoContestError(
+                                    reason="seat_unresponsive", seat=seat_id
+                                )
 
                 for seat in eligible:
                     response = responses.get(seat.public_player_id)
