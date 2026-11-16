@@ -1600,6 +1600,10 @@ async def drive_game_loop(
                                     reason="seat_unresponsive", seat=seat_id
                                 )
 
+                # Resolve against the pre-submission state: folding ProtectSubmitted
+                # sets ``last_protected_target`` to tonight's target, which would
+                # make the resolver reject every Doctor protect as a repeat.
+                resolution_state = state
                 for seat in eligible:
                     response = responses.get(seat.public_player_id)
                     if response is None:
@@ -1617,7 +1621,7 @@ async def drive_game_loop(
                     for body in _resolve_day_vote_events(state, responses, phase_id):
                         state = await emit_and_persist(body, state)
                 elif current_phase.kind is PhaseKind.NIGHT_ACTIONS:
-                    for body in _resolve_night_events(state, responses, phase_id):
+                    for body in _resolve_night_events(resolution_state, responses, phase_id):
                         state = await emit_and_persist(body, state)
 
                 state = await emit_and_persist(

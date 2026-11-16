@@ -179,6 +179,7 @@ class GameMachine(RuleBasedStateMachine):
                 rationale_summary=None,
             )
 
+        resolution_state = self.state
         for seat in eligible:
             response = responses[seat.public_player_id]
             for body in _submission_events_for(
@@ -194,7 +195,7 @@ class GameMachine(RuleBasedStateMachine):
             for body in _resolve_day_vote_events(self.state, responses, phase_id):
                 self._emit(body)
         elif candidate.kind is PhaseKind.NIGHT_ACTIONS:
-            for body in _resolve_night_events(self.state, responses, phase_id):
+            for body in _resolve_night_events(resolution_state, responses, phase_id):
                 self._emit(body)
 
         self._emit(
