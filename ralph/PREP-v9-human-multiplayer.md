@@ -63,7 +63,7 @@ The loop pipes `ralph/prompt.md` to `claude` every iteration and treats `AGENTS.
 `ralph.sh` auto-archives when `branchName` changes vs `.last-branch` — but if you simply `cp prd-v9.json prd.json` first, the script copies the **new v9** file into the **v8** archive folder and resets `progress.txt` (the exact v3→v4 incident its own comments warn about). Do this instead:
 
 ```bash
-cd /Users/admin/Projects/opensource/padrino
+cd padrino
 DATE=$(date +%Y-%m-%d)
 
 # 1. Preserve Wave 8 final state manually

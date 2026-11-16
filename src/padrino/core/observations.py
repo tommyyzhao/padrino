@@ -1,7 +1,7 @@
 """Observation builder — assembles the JSON observation given to a seat.
 
 `build_observation(state, seat, event_log, ruleset)` returns a frozen Pydantic
-:class:`Observation` matching ``prd.md`` §6.1, including all public events (up
+:class:`Observation` matching ``docs/prd/v1-benchmark.md`` §6.1, including all public events (up
 to the recent-transcript cap), private events the seat is entitled to see, and
 role-conditional fields (``mafia_teammates`` for mafia, ``previous_protected_target``
 for the doctor, ``inspection_history`` for the detective).

@@ -6,7 +6,7 @@ gives it a side-channel advantage over other competitors. This module exposes
 :class:`~padrino.core.observations.Observation` immediately before dispatching
 to the LLM adapter in ranked mode.
 
-Forbidden information surfaces (per ``prd.md`` §6.1):
+Forbidden information surfaces (per ``docs/prd/v1-benchmark.md`` §6.1):
 
 * Agent build identifiers (``agent_build_id``).
 * Model or provider names (``model_id``, ``model_name``, ``provider``,

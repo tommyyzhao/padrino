@@ -20,7 +20,7 @@ See [`ralph/prd.json`](./ralph/prd.json) for the user-story plan and [`ralph/pro
 - **Output**: append-only hash-chained event log per game + OpenSkill ratings (global + faction) over clone gauntlets, plus a signed export bundle suitable for federated ingestion.
 - **No frontend** in v1, but the REST API and data layer are designed to back a cloud spectator hub.
 
-See [`prd.md`](./prd.md) (vision) and [`ralph/prd.json`](./ralph/prd.json) (executable plan) for the full specification.
+See [`docs/prd/v1-benchmark.md`](./docs/prd/v1-benchmark.md) (vision) and [`ralph/prd.json`](./ralph/prd.json) (executable plan) for the full specification.
 
 ## Quickstart
 

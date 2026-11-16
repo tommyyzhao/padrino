@@ -5,7 +5,7 @@ description = "Deterministic LLM benchmark and league engine for Mafia-style soc
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
-authors = [{ name = "Tommy Zhao", email = "dev@myascend.ai" }]
+authors = [{ name = "Tommy Zhao", email = "tommy@surreal.so" }]
 keywords = ["mafia", "werewolf", "llm", "benchmark", "social-deduction", "openskill"]
 classifiers = [
     "Development Status :: 3 - Alpha",

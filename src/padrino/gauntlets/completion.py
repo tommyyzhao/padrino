@@ -6,7 +6,7 @@ successful child games satisfy the faction-balance gate,
 stamps ``completed_at``, and returns aggregate diagnostics plus the provisional
 flag for each agent build that played in the gauntlet.
 
-Provisional thresholds (per ``prd.md`` §10):
+Provisional thresholds (per ``docs/prd/v1-benchmark.md`` §10):
 
 * ``total_games >= 30``
 * ``mafia_games >= 5``

@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.x ORM models for Padrino's core schema (prd.md §12).
+"""SQLAlchemy 2.x ORM models for Padrino's core schema (docs/prd/v1-benchmark.md §12).
 
 Tables covered: ``model_providers``, ``model_configs``, ``prompt_versions``,
 ``agent_builds``, ``leagues``, ``campaigns``, ``campaign_pairings``,

@@ -249,3 +249,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
+
+# Claude Code local settings and locks
+.claude/settings.local.json
+.claude/*.lock

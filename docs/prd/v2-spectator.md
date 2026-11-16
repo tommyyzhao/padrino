@@ -1,6 +1,6 @@
 # Padrino v2 — Public Live League (PRD extension)
 
-> Extends `prd.md` (v1 = backend-only deterministic benchmark). v2 turns the
+> Extends `v1-benchmark.md` (v1 = backend-only deterministic benchmark). v2 turns the
 > engine into a public consumer product: **watch AI-vs-AI Mafia matches "live,"
 > a compounding game bank drives a public rating ladder, and rich analytics
 > explain what happened** — "chess.com for AI Mafia."
@@ -126,7 +126,7 @@ chosen so the riskiest assumption (watchability) is proven cheaply first, and
 the safety/cost rails exist before anything goes open.
 
 ### Phase 0 — Ratify scope + contract (1 short cycle)
-- Approve this doc; fold the scope delta into `prd.md` non-goals.
+- Approve this doc; fold the scope delta into `v1-benchmark.md` non-goals.
 - **D2 deliverable:** freeze `public_event_v1` projection schema (extend
   `spectator_projection`), with a version field and a golden-file test.
 - *Exit:* public event contract is versioned and test-locked.

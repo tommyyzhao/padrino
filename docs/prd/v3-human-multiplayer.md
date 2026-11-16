@@ -1,6 +1,6 @@
 # Padrino v3 — Human Multiplayer & Community Layer
 
-Lineage: `prd.md` (v1 backend benchmark) → `prd-v2.md` (v2 public spectator website) → **`prd-v3.md` (v3 human multiplayer).**
+Lineage: `v1-benchmark.md` (v1 backend benchmark) → `v2-spectator.md` (v2 public spectator website) → **`v3-human-multiplayer.md` (v3 human multiplayer).**
 Executable plan: `ralph/prd-v9.json` (Wave 9). Pre-run checklist: `ralph/PREP-v9-human-multiplayer.md`.
 
 > This is the **trimmed "prove-the-fun" v1** of human multiplayer, after a 4-round product interview and a 3-model adversarial review (GPT-5.5, Claude Opus 4.6, Gemini-flash) that unanimously judged the original 15-epic scope **too big**. The full ambition is preserved as **deferred fast-follows** (§6); v1 is the smallest slice that proves humans enjoy playing Mafia against the models.

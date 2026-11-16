@@ -35,7 +35,8 @@ export const meta = {
 }
 
 const A = args || {}
-const REPO = '/Users/admin/Projects/opensource/padrino'
+// Portable: the Workflow runtime cwd is the repo root; falls back to '.' if process is absent.
+const REPO = typeof process !== 'undefined' && process.cwd ? process.cwd() : '.'
 const STOP_AT = typeof A.stopAtPriority === 'number' ? A.stopAtPriority : Infinity
 const MAX_RETRIES = typeof A.maxRetries === 'number' ? A.maxRetries : 2
 
@@ -118,7 +119,7 @@ function implementPrompt(storyId, attempt, feedback) {
 
 ## Boot — read these FIRST every time; they are LAW, never re-derive
 - AGENTS.md / CLAUDE.md — the project's hard rules and quality gates. This is the single source of truth for what is and isn't allowed. Re-read it; it may have grown since you last saw it.
-- The wave's vision doc(s) that AGENTS.md points to (prd.md / prd-v2.md / prd-v3.md as applicable to the current wave).
+- The wave's vision doc(s) that AGENTS.md points to (docs/prd/v1-benchmark.md / docs/prd/v2-spectator.md / docs/prd/v3-human-multiplayer.md as applicable to the current wave).
 - ralph/progress.txt — read the '## Codebase Patterns' section at the TOP first, then skim the most recent entries.
 - ralph/prd.json — the active plan. Read the FULL spec (title, description, EVERY acceptanceCriteria, notes) for ${storyId}.
 

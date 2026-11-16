@@ -5,7 +5,7 @@ ruleset and ranking mode, and provide the per-league cohort used by the
 leaderboard.
 
 ``GET /leagues/{id}/leaderboard`` returns the per-agent_build leaderboard
-contract from ``prd.md §10.4`` — sorted by conservative_score desc with a
+contract from ``docs/prd/v1-benchmark.md §10.4`` — sorted by conservative_score desc with a
 provisional flag computed from the same thresholds the gauntlet completion
 service uses.
 """

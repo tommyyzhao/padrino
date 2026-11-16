@@ -5,7 +5,7 @@ the next phase. It never reads state — terminal transitions driven by win
 conditions are the resolver's responsibility; this FSM only enforces the
 turn-order skeleton up to `MAX_DAYS`.
 
-Sequence (per `prd.md` §5.3):
+Sequence (per `docs/prd/v1-benchmark.md` §5.3):
     SETUP
       -> NIGHT_0_MAFIA_INTRO
       -> DAY_1_DISCUSSION_ROUND_1 .. ROUND_3

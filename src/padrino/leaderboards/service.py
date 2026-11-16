@@ -1,4 +1,4 @@
-"""Per-league leaderboard aggregation (US-045 / prd.md §10.4).
+"""Per-league leaderboard aggregation (US-045 / docs/prd/v1-benchmark.md §10.4).
 
 Reads ``game_seats``, ``game_events``, ``ratings``, and ``agent_builds`` to
 build the response contract for ``GET /leagues/{id}/leaderboard``. The

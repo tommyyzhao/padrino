@@ -2,7 +2,7 @@
 
 Validates ``GET /leagues/{id}/leaderboard``:
 
-* Returns the JSON contract from prd.md §10.4 (leaderboard_id, ruleset_id,
+* Returns the JSON contract from docs/prd/v1-benchmark.md §10.4 (leaderboard_id, ruleset_id,
   prompt_version, rating_model, entries[]).
 * Entries are sorted by conservative_score desc and include the required
   per-agent_build counters + provisional flag.

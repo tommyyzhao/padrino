@@ -8,9 +8,9 @@ This file is read by autonomous coding agents (Ralph / Claude Code / Codex / Cur
 
 A **deterministic, event-sourced league engine** for benchmarking LLM agents in Mafia-style hidden-information social deduction games. Every game is replayable bit-for-bit from its archived event log. Since Wave 7 it also has a **SvelteKit spectator frontend** under `web/dashboard/`.
 
-Padrino now also has a **human-multiplayer layer** (`prd-v3.md`): humans play with/against models in **private friend lobbies**, default **anonymous**, always **casual**, and **strictly segregated** from the scientific benchmark.
+Padrino now also has a **human-multiplayer layer** (`docs/prd/v3-human-multiplayer.md`): humans play with/against models in **private friend lobbies**, default **anonymous**, always **casual**, and **strictly segregated** from the scientific benchmark.
 
-Vision docs: `prd.md` (v1 backend), `prd-v2.md` (v2 spectator site), `prd-v3.md` (v3 human multiplayer), and `prd-v4.md` (Waves 15–16 playable OpenRouter game + ranked platform). The executable plan lives in `ralph/prd.json`.
+Vision docs: `docs/prd/v1-benchmark.md` (v1 backend), `docs/prd/v2-spectator.md` (v2 spectator site), `docs/prd/v3-human-multiplayer.md` (v3 human multiplayer), and `docs/prd/v4-ranked-platform.md` (Waves 15–16 playable OpenRouter game + ranked platform). The executable plan lives in `ralph/prd.json`.
 
 ---
 
@@ -143,19 +143,36 @@ Frontend stories additionally run: `pnpm -C web/dashboard lint`, `pnpm -C web/da
 padrino/
 ├── src/padrino/
 │   ├── core/              # PURE deterministic engine (no I/O)
-│   │   ├── rulesets/      # ruleset modules (mini7_v1, bench10_v1) + get_ruleset resolver
+│   │   ├── rulesets/      # ruleset modules + get_ruleset resolver
 │   │   ├── engine/        # state, events, reducer, resolver, replay, rng, hashing
 │   │   ├── agents/        # contract, sanitizer, response schema (pure validation)
 │   │   └── observations.py
-│   ├── llm/               # provider adapters (LiteLLM, mock, scripted)
-│   ├── ratings/           # openskill service
-│   ├── gauntlets/         # scheduler, role assignment, seed derivation
-│   ├── db/                # SQLAlchemy 2.x async models, repositories, alembic
+│   ├── analytics/         # deterministic + sampled LLM-judge game analytics
 │   ├── api/               # FastAPI routes
-│   ├── runner/            # GameRunner async orchestration (tick barrier)
-│   ├── settings.py        # pydantic-settings .env loader
+│   ├── assets/            # bundled static assets (sprite library), read via importlib.resources
+│   ├── bootstrap.py       # one-command deployment bootstrap
+│   ├── cli.py             # typer CLI entry point
+│   ├── db/                # SQLAlchemy 2.x async models, repositories, alembic
+│   ├── demo_gauntlet.py   # fresh-checkout quickstart (SQLite) runner
+│   ├── diagnostics/       # read-side diagnostic helpers
+│   ├── economics/         # spend governor + cost accounting
+│   ├── export/            # signed game-export bundles
+│   ├── gauntlets/         # scheduler, role assignment, seed derivation, finalization
+│   ├── leaderboards/      # per-league leaderboard aggregation
+│   ├── legal/             # versioned legal document registry
+│   ├── llm/               # provider adapters (LiteLLM, mock, scripted)
 │   ├── logging.py         # structlog setup
-│   └── cli.py             # typer CLI entry point
+│   ├── matchmaking/       # curated-roster matchmaker
+│   ├── observability/     # structlog contextvars, event names, metrics
+│   ├── openrouter/        # OpenRouter catalog + management-plane integration
+│   ├── ops/               # deployment + recovery helpers (backup/restore)
+│   ├── public/            # spoiler-safe public broadcast index, live tail, moderation
+│   ├── ratings/           # OpenSkill rating updates
+│   ├── runner/            # GameRunner async orchestration (tick barrier)
+│   ├── scheduler/         # in-process recurring jobs
+│   ├── settings.py        # pydantic-settings .env loader
+│   ├── showcase.py        # unranked localhost AI games via 9router
+│   └── smoke.py           # localhost end-to-end QA smoke harness
 ├── web/dashboard/         # SvelteKit spectator frontend (pnpm + Playwright e2e)
 ├── tests/
 │   ├── core/              # pure-engine unit tests
@@ -165,15 +182,15 @@ padrino/
 │   ├── integration/       # end-to-end scripted games
 │   ├── api/               # FastAPI route tests
 │   └── llm/               # adapter tests (real provider marked `@pytest.mark.integration`)
-├── ralph/                 # autonomous-loop plan + progress log
-└── prd.md                 # human-readable v1 vision
+├── docs/prd/              # vision docs (v1–v4 PRDs)
+└── ralph/                 # autonomous-loop plan + progress log
 ```
 
 ---
 
 ## Dependencies (v1)
 
-Runtime: `pydantic>=2.7`, `pydantic-settings`, `fastapi`, `uvicorn[standard]`, `sqlalchemy[asyncio]>=2`, `aiosqlite`, `alembic`, `litellm`, `openskill>=6`, `structlog`, `httpx`, `typer`.
+Runtime: `pydantic>=2.7`, `pydantic-settings`, `fastapi`, `uvicorn[standard]`, `sqlalchemy[asyncio]>=2`, `aiosqlite`, `asyncpg`, `alembic`, `litellm`, `openskill>=6`, `structlog`, `httpx`, `typer`, `pyyaml`, `prometheus-client`, `cryptography`, `authlib`.
 
 Dev: `pytest`, `pytest-asyncio`, `pytest-cov`, `hypothesis`, `mypy`, `ruff`.
 
