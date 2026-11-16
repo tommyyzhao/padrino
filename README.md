@@ -163,6 +163,7 @@ CI also enforces at least 85% coverage on `src/padrino/core/`. Tests marked `int
 |---|---|
 | [docs/architecture.md](./docs/architecture.md) | Component map, data flow of one game, persistence, public broadcast path, measured stats |
 | [docs/design-decisions.md](./docs/design-decisions.md) | Short ADRs for the choices that make the benchmark trustworthy |
+| [docs/findings.md](./docs/findings.md) | What the first real-model games exposed: silent-failure engineering findings, anecdotal model behaviour, reproduction steps |
 | [docs/deployment/self-host.md](./docs/deployment/self-host.md) | Run on a laptop or single VM with `docker compose` or bare `uv run` |
 | [docs/deployment/central-backend.md](./docs/deployment/central-backend.md) | Host a shared leaderboard that other deployments submit to |
 | [docs/deployment/ingestion-threat-model.md](./docs/deployment/ingestion-threat-model.md) | What ingestion verifies and what it does not |
