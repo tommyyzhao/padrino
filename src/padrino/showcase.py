@@ -1,4 +1,4 @@
-"""Unranked, anonymous localhost AI games through the local 9router gateway."""
+"""Unranked, anonymous localhost AI games through a local OpenAI-compatible gateway."""
 
 from __future__ import annotations
 
@@ -41,12 +41,12 @@ from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
 from padrino.settings import Settings
 
 DEFAULT_DB_URL = "sqlite+aiosqlite:///./padrino-showcase.db"
-DEFAULT_BASE_URL = "http://127.0.0.1:20128/v1"
-DEFAULT_KEY_REF = "env:NINEROUTER_API_KEY"
+DEFAULT_BASE_URL = "http://127.0.0.1:4000/v1"
+DEFAULT_KEY_REF = "env:PADRINO_GATEWAY_API_KEY"
 ADAPTER_VERSION = "showcase-v2"
 DEFAULT_LANGUAGE = "English"
 DEFAULT_MAX_TOKENS = 4096
-# The local gateway otherwise injects its own style prompts (can flip reply language).
+# Some gateways (e.g. 9router token-saver) inject style prompts that can flip reply language.
 GATEWAY_HEADERS = {"x-9router-token-saver": "off"}
 PREFLIGHT_PROMPT = "Preflight check: reply with the single word OK."
 AdapterFactory = Callable[[Mapping[str, RuntimeBuild]], LlmAdapter]
@@ -125,7 +125,7 @@ def _showcase_prompts(language: str | None) -> Mapping[Role, str]:
 
 
 async def _preflight_call(slug: str, *, base_url: str, api_key: str, timeout_s: float) -> None:
-    """One bounded call on the same litellm/9router route games use; any answer is success.
+    """One bounded call on the same litellm/gateway route games use; any answer is success.
 
     Reasoning models think before output, so max_tokens matches the game build and
     empty content is not a failure; only an error or exceeding ``timeout_s`` is.
@@ -180,13 +180,13 @@ async def _seed_builds(
     provider = (
         await session.execute(
             select(ModelProvider)
-            .where(ModelProvider.name == "9router")
+            .where(ModelProvider.name == "gateway")
             .order_by(ModelProvider.created_at, ModelProvider.id)
             .limit(1)
         )
     ).scalar_one_or_none()
     if provider is None:
-        provider = ModelProvider(name="9router", base_url=base_url, auth_secret_ref=key_ref)
+        provider = ModelProvider(name="gateway", base_url=base_url, auth_secret_ref=key_ref)
         session.add(provider)
         await session.flush()
     else:

@@ -74,6 +74,14 @@ Short records of the choices that make Padrino usable as a benchmark. Each entry
 **Decision.** The engine is written to the SQLAlchemy 2 async API and picks the dialect from the URL (`db/base.py:29`). SQLite (`sqlite+aiosqlite`) is the default for local use and the showcase; Postgres (`postgresql+asyncpg`) is the target for the Docker Compose stack. Dialect differences are kept small: `SKIP LOCKED` row claims on Postgres (`db/repositories/gauntlets.py:129`), a database-backed rate-limit store when running several workers on Postgres (`api/app.py:75`), and pool sizing. There is no Redis and no message queue; the database is the work queue and each role (API, scheduler, human lane) is its own process.
 **Consequences.** The same migrations run on both. SQLite is effectively single-writer, so multi-replica deployments should use Postgres. Tests that need a real Postgres are opt-in (`postgres` marker).
 
-## Engine reliability (retries, re-ask, seat circuit breaker)
+## 13. Engine reliability: loud failures, bounded retries, one re-ask, seat circuit breaker
 
-TODO-LEAD: this section is a placeholder. The retry, re-ask and per-seat circuit-breaker behaviour is being changed in another lane, so it is deliberately not described here. Fill in context, decision and consequences, with code references, once that work has landed.
+**Context.** In the first real multi-model game, one model timed out on every call and silently became an "AFK" seat whose coerced abstentions looked like play. Another seat's unparseable vote became an abstain that decided a tied lynch. Earlier, a provider that wrapped JSON in code fences scored 100% invalid output without anyone noticing. Every one of these failed *quietly* into a plausible-looking game.
+**Decision.**
+- Transient provider errors (timeout, 5xx gateway, rate limit) are retried; permanent ones (not found, auth, bad request) are not (`llm/retry.py:39`). Each attempt gets a share of the phase deadline, so retries actually fit inside it (`llm/litellm_adapter.py:239`).
+- Every provider-side failure is a first-class `ActionTimedOut` event with a fixed reason vocabulary (`TIMEOUT`, `PROVIDER_ERROR`), never provider or model text, so the log stays identity-blind (`runner/tick.py`).
+- An unparseable or schema-violating reply gets one re-ask with a JSON-only reminder (`padrino_llm_reask_invalid`, default 1). Output truncated by reasoning tokens is recorded as `error="truncated"`, not as generic invalid JSON.
+- Every attempt, including deadline-cancelled calls, gets its own `llm_calls` row.
+- Three consecutive provider failures on an AI seat end the game as no-contest (`padrino_llm_seat_failure_limit`, default 3, 0 disables; `runner/game_runner.py:1547`). Human seats are never counted.
+- Models without a known price record `cost_usd = NULL` with `price_basis = "unpriced"` instead of a made-up figure (`economics/human_cost_governance.py:64`).
+**Consequences.** A flaky model now costs a few extra calls instead of silently skewing results, and a dead one invalidates the game rather than handing its team a handicap. Replay is unaffected: only the final action enters the event log. Cost totals undercount unpriced models by design; reports show the unpriced call count instead.

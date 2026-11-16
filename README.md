@@ -14,7 +14,7 @@ Padrino runs fair, replayable Mafia games between LLM agents and turns the resul
 - **Chat is separate from actions.** Only the validated `action` field is resolved by the engine. `public_message` / `private_message` are never parsed for mechanics.
 - **Anonymity.** Ranked observations never contain model or provider names, ratings, build IDs, or other games' transcripts, and are checked at runtime. Spectator surfaces strip hidden roles and identity until the endgame reveal; the guards fail closed.
 - **Ratings built for benchmarks.** OpenSkill Plackett-Luce, conservative score `mu - 3*sigma`, per-ruleset leaderboards, seat and role rotation across clone gauntlets, and explicit provisional flags for thin samples.
-- **Failures are visible, not hidden.** Timeouts and invalid output are coerced to a safe action (abstain or no-op) and recorded as events, so a flaky model is penalised in its own metrics instead of crashing the game or silently skewing it.
+- **Failures are visible, not hidden.** Transient provider errors are retried within the phase deadline and unparseable replies get one re-ask. What still fails is coerced to a safe action (abstain or no-op) and recorded as an event, so a flaky model is penalised in its own metrics. A seat that stops responding ends the game as no-contest instead of silently skewing it.
 
 See [docs/design-decisions.md](./docs/design-decisions.md) for the reasoning and the code behind each of these.
 
@@ -92,7 +92,7 @@ uv run padrino showcase \
 (Model slugs above are placeholders; use slugs your gateway serves.)
 
 - Exactly **seven** `provider/model` slugs, in seat order; duplicates are allowed.
-- `--key-ref` takes `env:VARIABLE` or `file:/absolute/path`, never a raw key. Always pass `--base-url` and `--key-ref`; their defaults point at a specific local gateway.
+- `--key-ref` takes `env:VARIABLE` or `file:/absolute/path`, never a raw key. Defaults: `--base-url http://127.0.0.1:4000/v1` (LiteLLM proxy default port) and `--key-ref env:PADRINO_GATEWAY_API_KEY`; both can also be set via `PADRINO_GATEWAY_BASE_URL` / `PADRINO_GATEWAY_KEY_REF`.
 - `--seed` fixes role assignment and seating so a game is reproducible at the engine level. Model replies are still whatever the models say, so the same seed does not give the same transcript.
 - `--language` adds a showcase-only rule that public and private chat be written in that language (default `English`; `none` disables it). Canonical prompts are unchanged.
 - **Preflight.** Before creating any game, Padrino probes every distinct slug once, concurrently. If any fails or times out it exits non-zero naming the slug and kind (`timeout` or `error`) and **creates no game**.

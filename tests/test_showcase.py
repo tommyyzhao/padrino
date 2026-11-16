@@ -116,8 +116,8 @@ async def test_showcase_lifecycle_and_idempotence(
 
     def factory(assignments: Mapping[str, RuntimeBuild]) -> LlmAdapter:
         assert [b.model_id for b in assignments.values()] == ["openai/" + slug for slug in ROSTER]
-        assert all(b.base_url == "http://127.0.0.1:20128/v1" for b in assignments.values())
-        assert all(b.auth_secret_ref == "env:NINEROUTER_API_KEY" for b in assignments.values())
+        assert all(b.base_url == "http://127.0.0.1:4000/v1" for b in assignments.values())
+        assert all(b.auth_secret_ref == "env:PADRINO_GATEWAY_API_KEY" for b in assignments.values())
         return WatchingAdapter()
 
     scripted = _scripted_factory({})
@@ -159,17 +159,17 @@ async def test_showcase_lifecycle_and_idempotence(
         await engine.dispose()
 
 
-async def test_default_factory_routes_through_9router(
+async def test_default_factory_routes_through_gateway(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("NINEROUTER_API_KEY", "test-key-never-persist")
+    monkeypatch.setenv("PADRINO_GATEWAY_API_KEY", "test-key-never-persist")
     scripted = _scripted_factory({})
     requested: set[str] = set()
     preflighted: list[str] = []
     systems: set[str] = set()
 
     async def completion(**kwargs: Any) -> Any:
-        assert kwargs["api_base"] == "http://127.0.0.1:20128/v1"
+        assert kwargs["api_base"] == "http://127.0.0.1:4000/v1"
         assert kwargs["api_key"] == "test-key-never-persist"
         assert kwargs["extra_headers"] == {"x-9router-token-saver": "off"}
         requested.add(kwargs["model"])
@@ -293,7 +293,7 @@ async def test_preflight_failure_refuses_before_game_creation(
 async def test_default_preflight_error_exits_nonzero_without_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("NINEROUTER_API_KEY", "sk-never-print-me")
+    monkeypatch.setenv("PADRINO_GATEWAY_API_KEY", "sk-never-print-me")
 
     async def completion(**kwargs: Any) -> Any:
         if kwargs["model"].endswith(SLUGS[2]):
@@ -340,10 +340,15 @@ def test_cli_language_option(
 
 @pytest.mark.integration
 @pytest.mark.live_llm
-@pytest.mark.skipif(not os.environ.get("NINEROUTER_API_KEY"), reason="NINEROUTER_API_KEY is unset")
-async def test_real_9router_game(tmp_path: Path) -> None:
+@pytest.mark.skipif(
+    not os.environ.get("PADRINO_GATEWAY_API_KEY"), reason="PADRINO_GATEWAY_API_KEY is unset"
+)
+async def test_real_gateway_game(tmp_path: Path) -> None:
     result = await run_showcase(
-        ROSTER, db_url=f"sqlite+aiosqlite:///{tmp_path / 'live.db'}", seed=SEED
+        ROSTER,
+        db_url=f"sqlite+aiosqlite:///{tmp_path / 'live.db'}",
+        base_url=os.environ.get("PADRINO_GATEWAY_BASE_URL", "http://127.0.0.1:4000/v1"),
+        seed=SEED,
     )
     assert uuid.UUID(result["game_id"])
     assert result["winner"] in {"TOWN", "MAFIA", "DRAW"}
