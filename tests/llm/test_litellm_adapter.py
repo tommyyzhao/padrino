@@ -275,6 +275,32 @@ def test_openrouter_request_uses_canonical_slug_headers_and_provider_preferences
     }
 
 
+def test_extra_headers_reach_primary_call_and_keep_openrouter_headers() -> None:
+    response = _fake_completion(content=_valid_response_json(Action(type=ActionType.ABSTAIN)))
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+
+    with patch(ACOMPLETION_PATH, new=AsyncMock(return_value=response)) as mock_acomp:
+        plain = _build_adapter(api_base="http://gw/v1")
+        asyncio.run(plain.complete(obs))
+        assert "extra_headers" not in mock_acomp.call_args.kwargs
+        opted = LiteLlmAdapter(
+            routing_policy=RoutingPolicy(primary_model="openai/x", fallback_model=None),
+            agent_build=plain._build,
+            timeout_s=5.0,
+            auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
+            api_base="http://gw/v1",
+            extra_headers={"x-test": "off"},
+        )
+        asyncio.run(opted.complete(obs))
+        assert mock_acomp.call_args.kwargs["extra_headers"] == {"x-test": "off"}
+        merged = _build_openrouter_adapter()
+        merged._extra_headers = {"x-test": "off"}
+        asyncio.run(merged.complete(obs))
+        headers = mock_acomp.call_args.kwargs["extra_headers"]
+        assert headers["x-test"] == "off"
+        assert headers["X-OpenRouter-Title"] == "Padrino Test"
+
+
 def test_openrouter_forwards_structured_response_format() -> None:
     response = _fake_completion(content=_valid_response_json(Action(type=ActionType.ABSTAIN)))
     obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))

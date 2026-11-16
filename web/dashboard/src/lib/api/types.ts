@@ -214,6 +214,12 @@ export interface PublicLadderResponse {
   total_estimate: number;
 }
 
+export interface PublicGameSeatsResponse {
+  game_id: string;
+  player_count: number;
+  seats: string[];
+}
+
 export interface PublicRulesetEntry {
   ruleset_id: string;
   label: string;

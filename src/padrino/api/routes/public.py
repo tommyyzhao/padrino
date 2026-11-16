@@ -1359,6 +1359,46 @@ async def public_game_live_sse(
     )
 
 
+class PublicGameSeatsResponse(BaseModel):
+    """Identity-blind seat roster: public seat ids only, never model/role/faction."""
+
+    game_id: uuid.UUID
+    player_count: int
+    seats: list[str]
+
+
+@router.get(
+    "/public/games/{game_id}/seats",
+    response_model=PublicGameSeatsResponse,
+)
+async def public_game_seats(
+    game_id: uuid.UUID,
+    _ctx: ApiKeyContext = Depends(require_public_read),
+    session: AsyncSession = Depends(get_session),
+) -> PublicGameSeatsResponse:
+    """Public seat ids (``P01``..) of a LIVE/RECENT game, available before any seat acts.
+
+    Derived from the ruleset's ``PLAYER_COUNT`` (seats are always ``P{n:02d}``),
+    so it leaks nothing beyond what the live frames already imply.
+    """
+    game = await session.get(Game, game_id)
+    if (
+        game is None
+        or not game.is_broadcastable
+        or game.broadcast_state not in (BroadcastState.LIVE.value, BroadcastState.RECENT.value)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="game_not_found_or_not_live",
+        )
+    count = get_ruleset(game.ruleset_id).PLAYER_COUNT
+    return PublicGameSeatsResponse(
+        game_id=game.id,
+        player_count=count,
+        seats=[f"P{i + 1:02d}" for i in range(count)],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Live/recent index endpoints (US-090)
 # ---------------------------------------------------------------------------

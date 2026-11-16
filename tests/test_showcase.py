@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
@@ -36,7 +37,8 @@ from padrino.db.models import (
 from padrino.llm.adapter import AdapterResult, LlmAdapter
 from padrino.llm.adapter import AgentBuild as RuntimeBuild
 from padrino.llm.mock import DeterministicMockAdapter
-from padrino.showcase import ShowcaseError, run_showcase
+from padrino.llm.prompts import canonical_prompts_by_role
+from padrino.showcase import PREFLIGHT_PROMPT, ShowcaseError, _showcase_prompts, run_showcase
 from tests.conftest import make_town_win_script
 
 SLUGS = ["gemini/gemini-3.8-flash", "cx/gpt-6-luna", "minimax/MiniMax-M3", "cc/claude-sonnet-5-5"]
@@ -163,11 +165,18 @@ async def test_default_factory_routes_through_9router(
     monkeypatch.setenv("NINEROUTER_API_KEY", "test-key-never-persist")
     scripted = _scripted_factory({})
     requested: set[str] = set()
+    preflighted: list[str] = []
+    systems: set[str] = set()
 
     async def completion(**kwargs: Any) -> Any:
         assert kwargs["api_base"] == "http://127.0.0.1:20128/v1"
         assert kwargs["api_key"] == "test-key-never-persist"
+        assert kwargs["extra_headers"] == {"x-9router-token-saver": "off"}
         requested.add(kwargs["model"])
+        if kwargs["messages"][1]["content"] == PREFLIGHT_PROMPT:
+            preflighted.append(kwargs["model"])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=""))])
+        systems.add(kwargs["messages"][0]["content"])
         observation = Observation.model_validate_json(kwargs["messages"][1]["content"])
         result = await scripted.complete(observation)
         return SimpleNamespace(
@@ -185,6 +194,9 @@ async def test_default_factory_routes_through_9router(
         ROSTER, db_url=f"sqlite+aiosqlite:///{tmp_path / 'routing.db'}", seed=SEED
     )
     assert requested == {"openai/" + slug for slug in ROSTER}
+    assert sorted(preflighted) == sorted("openai/" + slug for slug in set(ROSTER))
+    assert systems
+    assert all("in English" in prompt for prompt in systems)
     assert result["winner"] == "TOWN"
     assert result["cost"] == pytest.approx(result["calls"] * 0.01)
     assert "test-key-never-persist" not in capsys.readouterr().out
@@ -220,6 +232,109 @@ async def test_adapter_exception_fails_closed(
             assert await session.scalar(select(func.count()).select_from(RatingEvent)) == 0
     finally:
         await engine.dispose()
+
+
+async def test_preflight_probes_each_distinct_slug_concurrently(tmp_path: Path) -> None:
+    seen: list[str] = []
+    gate = asyncio.Event()
+
+    async def preflight(slug: str) -> None:
+        seen.append(slug)
+        if len(seen) == len(set(ROSTER)):
+            gate.set()
+        await asyncio.wait_for(gate.wait(), 1)  # deadlocks unless calls overlap
+
+    await run_showcase(
+        ROSTER,
+        db_url=f"sqlite+aiosqlite:///{tmp_path / 'ok.db'}",
+        seed=SEED,
+        adapter_factory=_scripted_factory,
+        preflight=preflight,
+    )
+    assert sorted(seen) == sorted(set(ROSTER))
+
+
+@pytest.mark.parametrize("failure", ["error", "timeout"])
+async def test_preflight_failure_refuses_before_game_creation(
+    failure: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "refused.db"
+    bad = SLUGS[0]
+
+    async def preflight(slug: str) -> None:
+        if slug != bad:
+            return
+        if failure == "timeout":
+            await asyncio.sleep(10)
+        raise RuntimeError("Bearer secret-must-never-be-printed")
+
+    def never(_: Mapping[str, RuntimeBuild]) -> LlmAdapter:
+        raise AssertionError("game must not start")
+
+    async def fast_timeout(slug: str) -> None:
+        await asyncio.wait_for(preflight(slug), 0.05)
+
+    with pytest.raises(ShowcaseError) as error:
+        await run_showcase(
+            ROSTER,
+            db_url=f"sqlite+aiosqlite:///{path}",
+            seed=SEED,
+            adapter_factory=never,
+            preflight=fast_timeout if failure == "timeout" else preflight,
+        )
+    message = str(error.value)
+    assert bad in message
+    assert SLUGS[1] not in message
+    assert "secret-must-never-be-printed" not in message + capsys.readouterr().out
+    assert not path.exists()
+
+
+async def test_default_preflight_error_exits_nonzero_without_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NINEROUTER_API_KEY", "sk-never-print-me")
+
+    async def completion(**kwargs: Any) -> Any:
+        if kwargs["model"].endswith(SLUGS[2]):
+            raise RuntimeError("401 sk-never-print-me")
+        return SimpleNamespace(choices=[])
+
+    monkeypatch.setattr(litellm, "acompletion", completion)
+    path = tmp_path / "cli.db"
+    result = await asyncio.to_thread(
+        CliRunner().invoke, app, ["showcase", *ROSTER, "--db-url", f"sqlite+aiosqlite:///{path}"]
+    )
+    assert result.exit_code == 1
+    assert SLUGS[2] in result.output
+    assert "sk-never-print-me" not in result.output
+    assert not path.exists()
+
+
+def test_language_rule_is_showcase_only() -> None:
+    canonical = canonical_prompts_by_role("mini7_v1")
+    english = _showcase_prompts("English")
+    assert all(
+        english[r].startswith(canonical[r]) and "in English" in english[r] for r in canonical
+    )
+    assert _showcase_prompts(None) == canonical
+    assert "in Spanish" in _showcase_prompts("Spanish")[Role.VILLAGER]
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"), [(None, "English"), ("none", None), ("French", "French")]
+)
+def test_cli_language_option(
+    flag: str | None, expected: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    got: dict[str, Any] = {}
+
+    async def fake(*args: Any, **kwargs: Any) -> None:
+        got.update(kwargs)
+
+    monkeypatch.setattr("padrino.showcase.run_showcase", fake)
+    result = CliRunner().invoke(app, ["showcase", *ROSTER, *(["--language", flag] if flag else [])])
+    assert result.exit_code == 0
+    assert got["language"] == expected
 
 
 @pytest.mark.integration

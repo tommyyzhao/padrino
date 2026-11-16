@@ -99,6 +99,16 @@ describe('PadrinoClient', () => {
     expect(parsed.pathname).toBe('/public/gauntlets/g1/report');
   });
 
+  it('reads the identity-blind public seat list', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ game_id: 'g1', player_count: 2, seats: ['P01', 'P02'] }));
+    const client = new PadrinoClient({ baseUrl: 'http://api', fetchImpl });
+    const response = await client.publicGameSeats('g1');
+    expect(response.seats).toEqual(['P01', 'P02']);
+    expect(new URL(fetchImpl.mock.calls[0][0]).pathname).toBe('/public/games/g1/seats');
+  });
+
   it('reads public ruleset metadata for selectors', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       jsonResponse({

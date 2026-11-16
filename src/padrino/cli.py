@@ -295,13 +295,25 @@ def showcase(
     key_ref: str = typer.Option(
         "env:NINEROUTER_API_KEY", "--key-ref", help="Bearer credential reference, never a raw key."
     ),
+    language: str = typer.Option(
+        "English",
+        "--language",
+        help="Public chat language rule for showcase prompts only; 'none' disables it.",
+    ),
 ) -> None:
     """Run one anonymous, unranked AI showcase for localhost viewing."""
     from padrino.showcase import ShowcaseError, run_showcase
 
     try:
         asyncio.run(
-            run_showcase(models, db_url=db_url, base_url=base_url, seed=seed, key_ref=key_ref)
+            run_showcase(
+                models,
+                db_url=db_url,
+                base_url=base_url,
+                seed=seed,
+                key_ref=key_ref,
+                language=None if language.lower() == "none" else language,
+            )
         )
     except ShowcaseError as exc:
         typer.echo(str(exc), err=True)

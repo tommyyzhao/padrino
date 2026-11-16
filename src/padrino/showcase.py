@@ -6,19 +6,20 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 from urllib.parse import urlsplit
 
+import litellm
 from sqlalchemy import event, func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from padrino.bootstrap import _run_migrations
-from padrino.core.enums import IdentityMode
+from padrino.core.enums import IdentityMode, Role
 from padrino.core.rulesets import get_ruleset
 from padrino.db.base import create_engine, create_session_factory
 from padrino.db.game_status import GAME_STATUS_RUNNING
@@ -28,7 +29,12 @@ from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
 from padrino.llm.adapter import AgentBuild as RuntimeBuild
 from padrino.llm.adapter import LlmAdapter
-from padrino.llm.prompts import CANONICAL_RESPONSE_SCHEMA, iter_canonical_prompts
+from padrino.llm.prompts import (
+    CANONICAL_RESPONSE_SCHEMA,
+    canonical_prompts_by_role,
+    iter_canonical_prompts,
+)
+from padrino.llm.secrets import SecretResolutionError, resolve_secret
 from padrino.public.broadcast_index import mark_hidden, mark_live, mark_recent
 from padrino.runner.game_runner import GameConfig, GamePersistence, run_game
 from padrino.settings import Settings
@@ -36,8 +42,14 @@ from padrino.settings import Settings
 DEFAULT_DB_URL = "sqlite+aiosqlite:///./padrino-showcase.db"
 DEFAULT_BASE_URL = "http://127.0.0.1:20128/v1"
 DEFAULT_KEY_REF = "env:NINEROUTER_API_KEY"
-ADAPTER_VERSION = "showcase-v1"
+ADAPTER_VERSION = "showcase-v2"
+DEFAULT_LANGUAGE = "English"
+DEFAULT_MAX_TOKENS = 4096
+# The local gateway otherwise injects its own style prompts (can flip reply language).
+GATEWAY_HEADERS = {"x-9router-token-saver": "off"}
+PREFLIGHT_PROMPT = "Preflight check: reply with the single word OK."
 AdapterFactory = Callable[[Mapping[str, RuntimeBuild]], LlmAdapter]
+Preflight = Callable[[str], Awaitable[None]]
 
 
 class ShowcaseError(RuntimeError):
@@ -92,6 +104,58 @@ def _validate(models: Sequence[str], db_url: str, base_url: str, key_ref: str) -
         )
 
 
+def _language_instruction(language: str) -> str:
+    return (
+        f"\n\nShowcase language rule: write every public_message and private_message "
+        f"in {language}, regardless of the language of other players or of this prompt."
+    )
+
+
+def _showcase_prompts(language: str | None) -> Mapping[Role, str]:
+    """Canonical prompts plus an optional showcase-only language rule (hashes untouched)."""
+    prompts = canonical_prompts_by_role("mini7_v1")
+    if language is None:
+        return prompts
+    suffix = _language_instruction(language)
+    return {role: text + suffix for role, text in prompts.items()}
+
+
+async def _preflight_call(slug: str, *, base_url: str, api_key: str, timeout_s: float) -> None:
+    """One bounded call on the same litellm/9router route games use; any answer is success.
+
+    Reasoning models think before output, so max_tokens matches the game build and
+    empty content is not a failure; only an error or exceeding ``timeout_s`` is.
+    """
+    await asyncio.wait_for(
+        litellm.acompletion(
+            model="openai/" + slug,
+            messages=[
+                {"role": "system", "content": "You are a connectivity check."},
+                {"role": "user", "content": PREFLIGHT_PROMPT},
+            ],
+            max_tokens=DEFAULT_MAX_TOKENS,
+            timeout=timeout_s,
+            api_base=base_url,
+            api_key=api_key,
+            extra_headers=GATEWAY_HEADERS,
+        ),
+        timeout_s,
+    )
+
+
+async def _preflight(models: Sequence[str], call: Preflight) -> None:
+    """Probe each distinct slug concurrently; name every failing slug, never the cause text."""
+    slugs = list(dict.fromkeys(models))
+    results = await asyncio.gather(*(call(slug) for slug in slugs), return_exceptions=True)
+    failed = [
+        f"{slug} ({'timeout' if isinstance(r, TimeoutError | litellm.exceptions.Timeout) else 'error'})"
+        for slug, r in zip(slugs, results, strict=True)
+        if isinstance(r, BaseException)
+    ]
+    if failed:
+        raise ShowcaseError(f"Preflight failed for {', '.join(failed)}; no game was created")
+
+
 def _sqlite_pragmas(connection: Any, _record: Any) -> None:
     cursor = connection.cursor()
     try:
@@ -102,7 +166,12 @@ def _sqlite_pragmas(connection: Any, _record: Any) -> None:
 
 
 async def _seed_builds(
-    session: AsyncSession, models: Sequence[str], *, base_url: str, key_ref: str
+    session: AsyncSession,
+    models: Sequence[str],
+    *,
+    base_url: str,
+    key_ref: str,
+    adapter_version: str = ADAPTER_VERSION,
 ) -> dict[str, uuid.UUID]:
     provider = (
         await session.execute(
@@ -162,7 +231,7 @@ async def _seed_builds(
                 litellm_model_id="openai/" + slug,
                 default_temperature=ruleset.TEMPERATURE,
                 default_top_p=ruleset.TOP_P,
-                default_max_output_tokens=4096,
+                default_max_output_tokens=DEFAULT_MAX_TOKENS,
                 supports_structured_outputs=True,
             )
             session.add(model)
@@ -173,7 +242,7 @@ async def _seed_builds(
                 .where(
                     AgentBuild.model_config_id == model.id,
                     AgentBuild.prompt_version_id == prompt.id,
-                    AgentBuild.adapter_version == ADAPTER_VERSION,
+                    AgentBuild.adapter_version == adapter_version,
                 )
                 .order_by(AgentBuild.created_at, AgentBuild.id)
                 .limit(1)
@@ -184,7 +253,7 @@ async def _seed_builds(
                 display_name=slug,
                 model_config_id=model.id,
                 prompt_version_id=prompt.id,
-                adapter_version=ADAPTER_VERSION,
+                adapter_version=adapter_version,
                 inference_params={"max_tokens": model.default_max_output_tokens},
                 active=True,
             )
@@ -202,10 +271,32 @@ async def run_showcase(
     seed: str | None = None,
     key_ref: str = DEFAULT_KEY_REF,
     adapter_factory: AdapterFactory | None = None,
+    language: str | None = DEFAULT_LANGUAGE,
+    preflight: Preflight | None = None,
 ) -> ShowcaseSummary:
-    """Seed idempotently, publish before inference, persist one casual game."""
+    """Preflight models, seed idempotently, publish before inference, persist one game.
+
+    ``language`` adds a showcase-only chat-language rule to the system prompts (None
+    disables it); canonical prompt rows/hashes are untouched. ``preflight`` defaults to a
+    real bounded call per slug unless ``adapter_factory`` is injected (tests).
+    """
     _validate(models, db_url, base_url, key_ref)
+    if language is not None and not re.fullmatch(r"[A-Za-z][A-Za-z -]{0,31}", language):
+        raise ShowcaseError("--language must be a plain language name such as English")
     settings = Settings()
+    if preflight is None and adapter_factory is None:
+        try:
+            api_key = resolve_secret(key_ref)
+        except SecretResolutionError:
+            raise ShowcaseError("Could not resolve the --key-ref credential") from None
+        timeout_s = float(settings.padrino_llm_timeout_seconds)
+
+        async def preflight(slug: str) -> None:
+            await _preflight_call(slug, base_url=base_url, api_key=api_key, timeout_s=timeout_s)
+
+    if preflight is not None:
+        await _preflight(models, preflight)
+    adapter_version = ADAPTER_VERSION if language is None else f"{ADAPTER_VERSION}+lang={language}"
     game_seed = seed if seed is not None else uuid.uuid4().hex
     try:
         await asyncio.to_thread(_run_migrations, db_url)
@@ -217,7 +308,13 @@ async def run_showcase(
     game_id: uuid.UUID | None = None
     try:
         async with session_factory() as session, session.begin():
-            builds = await _seed_builds(session, models, base_url=base_url, key_ref=key_ref)
+            builds = await _seed_builds(
+                session,
+                models,
+                base_url=base_url,
+                key_ref=key_ref,
+                adapter_version=adapter_version,
+            )
             game = await games_repo.create(
                 session, ruleset_id="mini7_v1", game_seed=game_seed, status=GAME_STATUS_RUNNING
             )
@@ -235,7 +332,12 @@ async def run_showcase(
         adapter = (
             adapter_factory(assignments)
             if adapter_factory is not None
-            else build_heterogeneous_adapter(assignments, settings=settings)
+            else build_heterogeneous_adapter(
+                assignments,
+                settings=settings,
+                system_prompts_by_role=_showcase_prompts(language),
+                extra_headers=GATEWAY_HEADERS,
+            )
         )
         # ponytail: no spend cap for the local showcase; add admission here and
         # a per-call budget guard when bounded recording spend is required.

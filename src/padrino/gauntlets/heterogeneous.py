@@ -40,6 +40,7 @@ def build_heterogeneous_adapter(
     timeout_s: float | None = None,
     system_prompts_by_role: Mapping[Role, str] | None = None,
     auth_secrets_by_seat: Mapping[str, str] | None = None,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> SeatMultiplexAdapter:
     """Build a per-seat multiplex adapter from a seat -> ``AgentBuild`` mapping.
 
@@ -95,6 +96,7 @@ def build_heterogeneous_adapter(
                 auth_secret_ref=auth_secret_ref,
                 api_key=runtime_secret,
                 api_base=api_base,
+                extra_headers=extra_headers,
                 system_prompts_by_role=prompts,
             )
         except SecretResolutionError:

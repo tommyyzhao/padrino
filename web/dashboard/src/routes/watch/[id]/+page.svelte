@@ -37,6 +37,8 @@
   let currentPhase = $state<string>('—');
   // player_id -> alive
   let playerAlive = $state<Record<string, boolean>>({});
+  // Public seat ids from /public/games/{id}/seats (identity-blind); known before any seat acts.
+  let seatIds = $state<string[]>([]);
   let chatEntries = $state<ChatEntry[]>([]);
   let nightOutcomeEntries = $state<NightOutcomeEntry[]>([]);
   // voter_id -> target_id
@@ -277,7 +279,20 @@
     if (audio) audio.muted = muted;
   }
 
+  async function loadSeats(): Promise<void> {
+    if (!gameId) return;
+    try {
+      const res = await padrino.client.publicGameSeats(gameId);
+      if (alive && Array.isArray(res.seats)) {
+        seatIds = res.seats.filter((id): id is string => typeof id === 'string');
+      }
+    } catch {
+      // Best effort: fall back to seats discovered from frames.
+    }
+  }
+
   onMount(() => {
+    void loadSeats();
     connect();
     if (narrated) void presentLoop();
   });
@@ -302,8 +317,11 @@
     })()
   );
 
+  // Every roster seat is alive until a PlayerEliminated frame says otherwise.
   const seats = $derived(
-    Object.entries(playerAlive).map(([id, alive]) => ({ id, alive }))
+    [...new Set([...seatIds, ...Object.keys(playerAlive)])]
+      .sort()
+      .map((id) => ({ id, alive: playerAlive[id] ?? true }))
   );
 
   const shownChat = $derived(record ? chatEntries.slice(-6) : chatEntries);

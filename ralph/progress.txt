@@ -7597,3 +7597,26 @@ HANDOFF GATES: green on ralph/padrino-v9 (backend 2115 / frontend e2e 20); tree 
   (else /public 401s), `PADRINO_TTS_PROVIDER=say`, CORS for the dashboard
   origin, same `--db-url` as the runner; dashboard needs
   `VITE_PADRINO_API_BASE_URL`.
+
+## 2026-11-15 PDT - US-410
+- Watch page seats: new identity-blind `GET /public/games/{id}/seats`
+  (`{game_id, player_count, seats:["P01".."P07"]}`, LIVE/RECENT only, derived from
+  ruleset PLAYER_COUNT, no model/role/faction). Page merges it with frame-seen
+  seats, default alive until PlayerEliminated, so "7 alive" shows before anyone
+  speaks. Best-effort fetch; frames still work if it fails.
+- `padrino showcase` preflights each distinct slug concurrently (one litellm
+  call via the same openai/<slug> + api_base route, max_tokens as game builds,
+  empty content OK) before any DB/game creation; error or per-call timeout ->
+  exit 1 naming only the slug(s), never the key or provider text.
+- English-only chat: showcase-only suffix appended to the system prompts passed
+  to the adapter (`--language`, default English, `none` disables). Canonical
+  prompt rows/hashes untouched; adapter_version carries `+lang=` so builds differ.
+- 9router injects its own style prompts ("caveman"/"ponytail" token-saver);
+  `x-9router-token-saver: off` fixes it (gemini-3.5-flash-lite answered in
+  Vietnamese without it). `LiteLlmAdapter(extra_headers=...)` (primary call,
+  merged over OpenRouter headers) + `build_heterogeneous_adapter(extra_headers=)`;
+  showcase sends it on game and preflight calls.
+- Learnings: gateways can inject prompts; benchmark traffic must opt out.
+  Playwright uses `vite preview` of `build/` -> run `pnpm build` after svelte
+  edits or the e2e hits a stale bundle. Port 8288 is held by a local `inngest
+  dev`; use another API port for e2e (global-setup smoke 401s otherwise).

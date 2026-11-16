@@ -300,3 +300,29 @@ async def test_recent_index_last_page_has_no_cursor(
     data = r.json()
     assert len(data["items"]) == 2
     assert data["next_cursor"] is None
+
+
+async def test_public_game_seats_lists_roster_before_any_seat_acts(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """US-410: identity-blind roster (public seat ids only) for LIVE/RECENT games."""
+    raw = await _seed_key(session_factory, scopes=[SCOPE_SPECTATOR], label="viewer")
+    async with session_factory() as session, session.begin():
+        live = await _make_game(session)
+        hidden = await _make_game(session, broadcast_state=BroadcastState.HIDDEN.value)
+
+    r = await client.get(f"/public/games/{live.id}/seats", headers=_auth(raw))
+    assert r.status_code == 200
+    assert r.json() == {
+        "game_id": str(live.id),
+        "player_count": 7,
+        "seats": [f"P0{i}" for i in range(1, 8)],
+    }
+    assert (
+        await client.get(f"/public/games/{hidden.id}/seats", headers=_auth(raw))
+    ).status_code == 404
+    unknown = uuid.uuid4()
+    assert (
+        await client.get(f"/public/games/{unknown}/seats", headers=_auth(raw))
+    ).status_code == 404

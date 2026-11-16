@@ -94,6 +94,7 @@ class LiteLlmAdapter:
         "_api_base",
         "_auth_secret",
         "_build",
+        "_extra_headers",
         "_policy",
         "_retry_policy",
         "_same_model_hosts",
@@ -113,6 +114,7 @@ class LiteLlmAdapter:
         auth_secret_ref: str | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         system_prompts_by_role: Mapping[Role, str] | None = None,
         retry_policy: RetryPolicy | None = None,
@@ -132,6 +134,9 @@ class LiteLlmAdapter:
             assert auth_secret_ref is not None
             self._auth_secret = resolve_secret(auth_secret_ref)
         self._api_base = api_base
+        # Extra request headers for the PRIMARY call only (e.g. opting a local gateway out of
+        # prompt injection); merged over, never replacing, OpenRouter headers.
+        self._extra_headers = dict(extra_headers) if extra_headers else None
         self._policy = routing_policy
         self._build = agent_build
         if routing_policy.openrouter is not None and api_base is None:
@@ -167,6 +172,7 @@ class LiteLlmAdapter:
         primary = await self._call_model(
             observation,
             self._policy.primary_model,
+            extra_headers=self._extra_headers,
             api_base=self._api_base,
             auth_secret=(
                 self._auth_secret
@@ -255,6 +261,7 @@ class LiteLlmAdapter:
         observation: Observation,
         model_id: str,
         *,
+        extra_headers: Mapping[str, str] | None = None,
         api_base: str | None = None,
         auth_secret: str | None = None,
     ) -> AdapterResult:
@@ -279,6 +286,8 @@ class LiteLlmAdapter:
             kwargs["extra_body"] = {
                 "provider": self._policy.openrouter.provider.as_request_dict(),
             }
+        if extra_headers:
+            kwargs["extra_headers"] = {**kwargs.get("extra_headers", {}), **extra_headers}
         start = time.monotonic()
         # Deterministic jitter seed: bind to the observation contents so a
         # replay of the same observation produces an identical backoff schedule.

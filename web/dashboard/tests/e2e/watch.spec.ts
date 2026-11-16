@@ -148,6 +148,47 @@ test.describe('watch', () => {
     await expectIdentityBlind(page.getByTestId('watch-shell'), ROLE_AND_FACTION_TOKENS);
   });
 
+  test('shows every roster seat from the first frame (US-410)', async ({ page }) => {
+    const seatIds = Array.from({ length: 7 }, (_, i) => `P0${i + 1}`);
+    await page.route(`**/public/games/${GAME_ID}/seats`, (route) =>
+      // The API is cross-origin: answer CORS preflight and allow the origin.
+      route.fulfill({
+        status: route.request().method() === 'OPTIONS' ? 204 : 200,
+        contentType: 'application/json',
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': '*'
+        },
+        body:
+          route.request().method() === 'OPTIONS'
+            ? ''
+            : JSON.stringify({ game_id: GAME_ID, player_count: 7, seats: seatIds })
+      })
+    );
+    let firstRequest = true;
+    await page.route(`**/public/games/${GAME_ID}/live*`, async (route) => {
+      if (firstRequest) {
+        firstRequest = false;
+        // Only P01 has acted: seat list must still be the full roster.
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          body: buildSseBody([
+            mkFrame(1, 'PublicMessageSubmitted', 'DAY_1', 'P01', { text: 'Hi.' })
+          ])
+        });
+      } else {
+        await route.abort('failed');
+      }
+    });
+
+    await page.goto(`/watch/${GAME_ID}`);
+    await expect(page.getByTestId('watch-chat-entry')).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.getByTestId('watch-seat-row')).toHaveCount(7);
+    await expect(page.getByTestId('watch-alive-count')).toContainText('7 alive');
+    await expectIdentityBlind(page.getByTestId('watch-shell'));
+  });
+
   test('shows outcome banner after terminal frame streams', async ({ page }) => {
     let firstRequest = true;
     await page.route(`**/public/games/${GAME_ID}/live*`, async (route) => {

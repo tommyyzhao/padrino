@@ -37,7 +37,8 @@ import type {
   PublicRulesetsResponse,
   PlayerModelCatalogPage,
   SeatGuess,
-  TuringGuessResult
+  TuringGuessResult,
+  PublicGameSeatsResponse
 } from './types';
 
 export const DEFAULT_BASE_URL = 'http://localhost:8000';
@@ -238,6 +239,11 @@ export class PadrinoClient {
     cursor?: string | null;
   }): Promise<PublicLadderResponse> {
     return this.request('/public/ladder', params);
+  }
+
+  /** Identity-blind public seat ids of a LIVE/RECENT game, known before any seat acts. */
+  publicGameSeats(gameId: string): Promise<PublicGameSeatsResponse> {
+    return this.request(`/public/games/${encodeURIComponent(gameId)}/seats`);
   }
 
   publicRulesets(): Promise<PublicRulesetsResponse> {

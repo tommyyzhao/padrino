@@ -1016,7 +1016,7 @@
         "Deterministic tests only; no real LLM/TTS calls in the default run."
       ],
       "notes": "Observed: gemini/gemini-3.8-flash timed out on every call (45s) leaving P01 silent; watch page showed '4 alive' in a 7-seat game; one seat answered in Chinese.",
-      "passes": false
+      "passes": true
     },
     {
       "id": "US-371",
