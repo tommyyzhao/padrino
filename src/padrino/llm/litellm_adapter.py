@@ -320,6 +320,9 @@ class LiteLlmAdapter:
         kwargs: dict[str, Any] = {
             "model": model_id,
             "messages": messages,
+            # Our retry policy owns retries; SDK-internal ones (e.g. a 30s Retry-After
+            # sleep) would silently eat the phase deadline.
+            "max_retries": 0,
             **self._build.inference_params,
         }
         # Per-host overrides (US-079 / US-082): same-model alternate hosts and
@@ -345,8 +348,11 @@ class LiteLlmAdapter:
         failed: list[AdapterResult] = []
 
         async def _call() -> tuple[Any, int]:
-            attempts_left = max_attempts - len(failed)
-            per_attempt = max((deadline - time.monotonic()) / attempts_left, _MIN_ATTEMPT_S)
+            # Slow-but-healthy models are the common case: the first attempts get two
+            # thirds of what is left (a hang still leaves room to retry), the last all of it.
+            remaining = deadline - time.monotonic()
+            share = 1.0 if max_attempts - len(failed) <= 1 else 2 / 3
+            per_attempt = max(remaining * share, _MIN_ATTEMPT_S)
             start = time.monotonic()
             try:
                 response = await asyncio.wait_for(
