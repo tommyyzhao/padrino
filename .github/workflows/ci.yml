@@ -123,7 +123,8 @@ jobs:
     # (US-068), builds + previews the static dashboard SPA, and runs the
     # functional specs (leaderboard / games / home) against a real
     # Chromium. Visual-regression checks are opt-in via PADRINO_E2E_VISUAL.
-    runs-on: ubuntu-latest
+    # Pinned: Playwright 1.60 has no Chromium build for Ubuntu 26 (ubuntu-latest).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
