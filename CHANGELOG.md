@@ -89,6 +89,16 @@ versioned tag whose `## [Unreleased]
 - Agent JSON extraction tolerates `<think>` blocks, Markdown code fences and
   surrounding prose instead of failing the turn.
 - Narration phase cues and captions now match the server's speech templates.
+- Doctor protects were always rejected as a consecutive repeat, so no save
+  ever landed: the night is now resolved against the pre-submission state.
+- Provider failures are recorded as `ActionTimedOut` events with a fixed
+  reason vocabulary; transient errors are retried within one shared phase
+  deadline; unparseable replies get one re-ask; a seat failing three turns in
+  a row ends the game as no-contest.
+- Unpriced models record a conservative `DEFAULT_ESTIMATE` cost instead of
+  NULL, so spend caps fail closed.
+- The tolerant JSON parser is bounded (input caps, linear scanning) and never
+  raises on deeply nested output.
 
 ## [0.1.0] - 2026-05-18
 

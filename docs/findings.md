@@ -8,8 +8,8 @@ See [design-decisions.md](./design-decisions.md) (entry 13) for the reliability 
 
 Read these before any number below.
 
-- **The datasets are tiny.** One exploratory game, a 4-game shakedown ("batch 001"), and a 10-game batch ("batch 002", section 5).
-- **Setup.** Seven models, one per seat, seat-rotated between games, ruleset `mini7_v1`, unranked showcase mode, all calls through one OpenAI-compatible gateway. The batch lineup is `claude-sonnet-5-5`, `claude-haiku-5-5`, `gpt-6-luna`, `grok-4.7`, `MiniMax-M3`, `MiniMax-M3.1-Flash` and `muse-spark-1.3-contributor`. The exploratory game used a different lineup (section 3.3).
+- **The datasets are tiny.** The play statistics in this document come from one 10-game batch ("batch 005", section 3) on the fully fixed engine. Earlier runs (an exploratory game, a 4-game shakedown "batch 001", and a first 10-game attempt "batch 002") are used only for the engineering findings in section 2: they ran without a working Doctor (finding 11), so **their play statistics are invalid** and are not reported.
+- **Setup.** Seven seats, seat order rotated by one position per game, ruleset `mini7_v1`, unranked showcase mode, all calls through one OpenAI-compatible gateway. The lineup is the cheapest current model from each provider we had access to, plus `claude-sonnet-5-5`: `claude-sonnet-5-5`, `claude-haiku-5-5` (two seats, to fill seven), `gpt-6-luna`, `grok-4.7`, `MiniMax-M3.1-Flash` and `muse-ember-1.0`. Because `claude-haiku-5-5` has two seats, some games had two haiku seats on the same team; results are aggregated per model, not per seat.
 - **Model names are as stored in `llm_calls`.** Gateway provider prefixes (`cc/`, `cx/`, `minimax/`, ...) are routing details of one particular gateway and are dropped in prose.
 - **Nothing here is a ranking.** n < 30 is anecdotal. Latency, timeout and 5xx rates measure model plus provider plus gateway plus time of day, not the model alone.
 - **The shakedown ran across engine versions.** The engine was being fixed between and during batch-001 games (findings 5 to 8). Its failure rates describe the pre-fix engine for part of the traffic and must not be read as current behaviour.
@@ -91,66 +91,78 @@ Each item is symptom, root cause, fix, lesson. Commit hashes are in this reposit
 - **Fix.** `709f73b`: 1 MiB raw and 64 KiB scan caps, 32 candidate start positions, linear think-tag stripping, `RecursionError` caught.
 - **Lesson.** The more forgiving the parser, the more it must assume hostile input. Model output is untrusted input.
 
+### 11. The Doctor never saved anyone, and 3,500 tests agreed
+
+- **Symptom.** Mafia won all 6 completed games across the shakedown and the first 10-game attempt. Reading the night events: on Night 1 of one game the Doctor protected the player both Mafia targeted, yet that player died and the night result recorded `protected: null`. Across all 15 recorded nights, `protected` was never set.
+- **Cause.** The game loop folded each `ProtectSubmitted` event through the reducer, which records `last_protected_target`, *before* resolving the night. The resolver then saw tonight's protect as a repeat of "last night's" and rejected it under the no-consecutive-protect rule. Every protect was invalid, in every ruleset with a Doctor.
+- **Why the tests missed it.** Resolver unit tests built state by hand with the correct `last_protected_target`, so the ordering bug only existed in the integrated loop. Full-game tests scripted a Doctor save but asserted only the winner and pinned event-log hashes, so the golden hashes froze the buggy outcome as truth. One test even asserted `protected` was `None`.
+- **Fix.** `b026cc1`: resolve the night against the pre-submission state (5 lines). Recorded logs still verify, because `NightResolved` is a recorded payload and replay never re-resolves. Golden hashes were re-pinned to the corrected outcomes, and new full-game tests assert that a save prevents a death.
+- **Consequence.** Four recorded nights were mis-resolved (the Doctor protected the actual kill target and the victim died). All play statistics from the shakedown and the first batch attempt are discarded; their availability and latency data stand.
+- **Lesson.** The data caught what the tests didn't. A 100% win rate for one faction is a bug signal before it is a finding. Snapshot tests pin whatever the code does today; pair them with semantic invariants ("a successful save prevents a death") checked through the real loop.
+
 ### The pattern
 
-All ten share a shape: a failure is absorbed by a default, the default looks like normal play, and the game completes. The remedy was the same each time: make failure a first-class, countable event; bound every loop by one deadline; prefer no-contest over a misleading result.
+The first ten share a shape: a failure is absorbed by a default, the default looks like normal play, and the game completes. The remedy was the same each time: make failure a first-class, countable event; bound every loop by one deadline; prefer no-contest over a misleading result. The eleventh is the same shape one level down: a rule silently rejected every action, and the game still looked like Mafia.
 
 ## 3. Model behaviour (anecdotal)
 
-n = 4 games in batch-001 (2 completed, 2 no-contest) plus one earlier game. Roles differ per seat per game, so none of this separates model skill from role luck. Fewer than 30 games, no confidence intervals, no ranking.
+Source: batch 005, run after every fix in section 2. <!-- B005-COUNTS -->10 completed games and 3 no-contests<!-- /B005-COUNTS -->, ruleset `mini7_v1`, seat order rotated per game. Roles differ per seat per game, so none of this separates model skill from role luck. Fewer than 30 games, no confidence intervals, no ranking.
 
-### 3.1 Per-model call profile, batch-001
+### 3.1 Outcomes and availability
 
-Source: batch-001 database, 4 games, 251 seat-attributed calls from `llm_calls`. `ok%` is the share of calls with status `ok`. Latencies are successful calls only. The engine changed during this batch, so MiniMax failure rates in particular are pre-fix.
+<!-- B005-OUTCOMES -->Town won 7 of 10 completed games and Mafia 3.<!-- /B005-OUTCOMES --> With the Doctor working, Town wins mostly by eliminating both Mafia by Day 3 (`ALL_MAFIA_ELIMINATED`); Mafia wins were on parity. The earlier "Mafia wins everything" pattern was the Doctor bug (finding 11), not model behaviour.
 
-| Model | Calls | ok% | Timeout% | Invalid JSON% | Schema viol.% | p50 ms | p95 ms |
-|---|---|---|---|---|---|---|---|
-| `claude-sonnet-5-5` | 38 | 100.0 | 0.0 | 0.0 | 0.0 | 4274 | 10004 |
-| `gpt-6-luna` | 32 | 100.0 | 0.0 | 0.0 | 0.0 | 5223 | 9046 |
-| `claude-haiku-5-5` | 34 | 91.2 | 0.0 | 0.0 | 8.8 | 5010 | 9544 |
-| `grok-4.7` | 29 | 86.2 | 13.8 | 0.0 | 0.0 | 15781 | 50880 |
-| `muse-spark-1.3-contributor` | 25 | 88.0 | 12.0 | 0.0 | 0.0 | 13937 | 27505 |
-| `MiniMax-M3.1-Flash` | 50 | 52.0 | 16.0 | 2.0 | 0.0 | 17580 | 50801 |
-| `MiniMax-M3` | 43 | 37.2 | 20.9 | 7.0 | 0.0 | 26906 | 43599 |
+Every no-contest was a seat that stopped answering three turns in a row (finding 1's circuit breaker): `grok-4.7` once (overload errors) and `MiniMax-M3.1-Flash` twice (180-second hangs). The breaker voided those games rather than letting a silent seat skew them, so **availability is reported separately from play**: a model that is often unavailable costs games, which is a property of the model's serving, not its Mafia skill.
 
-Three models were fast and clean; two were slower with some timeouts; the MiniMax pair mostly failed on overload errors (finding 6), timeouts and truncation (finding 7) under the earlier engine. `claude-haiku-5-5` had 3 schema violations followed by 3 re-asks. Provider-error rates mix model, provider capacity and time of day; do not compare them as model quality.
+### 3.2 Per-model call profile
 
-### 3.2 Day-vote accuracy
+From `llm_calls`, all attempts in batch 005 including no-contest games. `ok%` is the share of calls with status `ok`; latency is successful calls only; re-asks are second attempts after an unparseable or schema-violating reply.
 
-Votes cast on Days 1 to 2 in the four games, as Town, and whether the target was actually Mafia.
+<!-- B005-CALLS -->
+| Model | Calls | ok% | Provider error% | Schema viol.% | Re-asks | p50 ms | p95 ms | Mean output tokens |
+|---|---|---|---|---|---|---|---|---|
+| `gpt-6-luna` | 130 | 100.0 | 0.0 | 0.0 | 0 | 5782 | 10971 | 268 |
+| `muse-ember-1.0` | 168 | 100.0 | 0.0 | 0.0 | 0 | 4215 | 12739 | 1819 |
+| `claude-haiku-5-5` (2 seats) | 356 | 97.2 | 0.0 | 2.8 | 10 | 5840 | 11938 | 932 |
+| `claude-sonnet-5-5` | 154 | 96.8 | 0.0 | 3.2 | 4 | 5060 | 14848 | 725 |
+| `grok-4.7` | 136 | 93.4 | 6.6 | 0.0 | 0 | 21276 | 99554 | 1924 |
+| `MiniMax-M3.1-Flash` | 143 | 72.7 | 27.3 | 0.0 | 0 | 27173 | 149364 | 2021 |
+<!-- /B005-CALLS -->
 
-| Model | Town day votes | Landed on a Mafia seat |
-|---|---|---|
-| `claude-haiku-5-5` | 5 | 2 |
-| `gpt-6-luna` | 5 | 1 |
-| `muse-spark-1.3-contributor` | 4 | 1 |
-| `grok-4.7` | 4 | 0 (3 of 4 were abstains) |
-| `MiniMax-M3` | 3 | 0 |
-| `MiniMax-M3.1-Flash` | 1 | 0 |
+No model produced invalid JSON once think blocks and fences were tolerated (finding 3), and no reply was truncated at the 16384-token budget (finding 7). The two Claude models' occasional schema violations triggered a re-ask (14 re-asks for 15 violations). Provider-error rates mix model, provider capacity, gateway and time of day; read them as "how this serving path behaved that night".
 
-This says very little: counts are 0 to 5, and abstains (including coerced ones) count as misses. As Mafia, `claude-sonnet-5-5` voted for a Town seat 5 of 5 times and `MiniMax-M3.1-Flash` 3 of 4, which mostly reflects that Mafia win by getting Town to eliminate Town.
+### 3.3 Play
 
-### 3.3 What one game showed (first 7-model game, 2026-11-15)
+Small counts; read as descriptive, not comparative.
 
-Seed `smoke-001`, 51 calls, Mafia won on parity after Night 2. The lineup differed from the batch (it included `gemini-3.8-flash`, `kimi-k3`, `glm-5.3` and `deepseek-v4.1-flash` alongside `gpt-6-luna`, `MiniMax-M3` and `claude-haiku-5-5`). The raw database was lost to a temp-directory cleanup; these notes were taken before that and cannot be re-checked.
+<!-- B005-PLAY -->
+| Model | Town day votes | …on an actual Mafia seat | Abstain % (all votes) | Detective checks hitting Mafia | Doctor saves (kills prevented / protects) |
+|---|---|---|---|---|---|
+| `gpt-6-luna` | 20 | 55.0% | 0.0% | 2 of 3 | – |
+| `muse-ember-1.0` | 24 | 54.2% | 28.1% | 0 of 1 | 2 / 4 |
+| `claude-sonnet-5-5` | 23 | 43.5% | 17.9% | 4 of 8 | 3 / 4 |
+| `claude-haiku-5-5` (2 seats) | 36 | 41.7% | 23.8% | – | 2 / 5 |
+| `grok-4.7` | 20 | 35.0% | 23.1% | – | 3 / 7 |
+| `MiniMax-M3.1-Flash` | 15 | 26.7% | 18.2% | 2 of 3 | 0 / 3 |
+<!-- /B005-PLAY -->
 
-- **Mafia coordination with an AFK partner.** `kimi-k3` carried the Mafia team alone: its partner was the dead seat from finding 1. It steered Town into mislynching a Villager on Day 1, killed the loudest Town voice on Night 1, framed a Town player with true information on Day 2, and on Night 2 correctly inferred the Doctor was guarding the self-claimed Detective, so it killed the Doctor.
-- **Mislynch steering.** Town's own early leader (`deepseek-v4.1-flash`) drove the Day-1 mislynch while two other Town seats correctly suspected the silent Mafia seat. The silent seat survived because it could not defend itself, not because it hid.
-- **Detective tempo.** The Detective's Night-1 check went to a player who died that same night, and its Day-2 vote was the invalid-JSON abstain from finding 2.
+A random Town vote lands on Mafia roughly a third of the time (2 Mafia among the 5 or 6 other living players), so most models are only modestly above chance and none is clearly separated at this n. Mafia night kills went to Villagers 65% of the time, Detectives 22% and Doctors 13%; 10 of 26 nights ended with a save.
 
-### 3.4 Public-chat samples
+### 3.4 Moments worth reading
 
-Public events only, 160 characters or fewer, identified by game seed and event sequence in `game_events`.
+All quotes are public chat, identified by game seed and event sequence in `game_events`.
 
-| Model | Seed | Seq | Quote |
-|---|---|---|---|
-| `gpt-6-luna` | `b001-g04` | 10 | "Let's hear everyone's initial thoughts before settling on a vote. Share any specific suspicions and the reasons behind them." |
-
-Day-1 openers were similar across models: mostly some version of "no info yet, let's hear reads".
+- **A fabricated Detective claim that worked** (`b005-g04-a1`). Under pressure on Day 3, `claude-sonnet-5-5`, playing Mafia, fake-claimed Detective with invented results: "I'm the investigator. Night 1 I checked P03 and got town. Night 2 I checked P01 and got MAFIA." (seq 125). The accused, `muse-ember-1.0` and actually a Villager, objected: "I know my own alignment, so P05's claimed Night 2 'MAFIA' result on me is impossible" (seq 129). Three Town players voted with the claim as "the only power information on the table", and the Villager was eliminated 4 to 1. The game was later voided as no-contest when another seat's provider went unavailable on Day 4, so the batch's best deception is in a game that does not count.
+- **Openers converge.** Nearly every Day-1 opener was a variant of "no information yet, share reads with reasons, don't vote on vibes", e.g. `gpt-6-luna`: "With no information yet, let's avoid locking onto arbitrary suspects." (`b005-g02-a1`, seq 12).
+- **Pressure on non-committal players** is the main Day-1 Mafia tool: Mafia seats repeatedly targeted Town players who asked for claims or gave only meta-commentary, and several of those players were later voted out.
 
 ### 3.5 Style and language drift are not model findings
 
-The first game's terse forum-slang dialogue ("scum", "wagon", "soft-claim") and one model switching to Chinese from its second message are **confounded** by the gateway prompt injection found afterwards (finding 4). We do not attribute them to the models. In batch-001, with the opt-out header and English rule on, a crude non-English heuristic (more than 20% non-ASCII letters) flagged 0 of 138 public messages.
+The first exploratory game's terse forum-slang dialogue ("scum", "wagon") and one model switching to Chinese are **confounded** by the gateway prompt injection found afterwards (finding 4). With the opt-out header and English rule on, a crude non-English heuristic (more than 20% non-ASCII letters) flagged 0 of 801 public messages in batch 005, and messages averaged 314 to 475 characters per model.
+
+### 3.6 The first exploratory game (pre-fix, invalid for play statistics)
+
+Kept for its story, not its numbers. A different lineup, the gateway injection active, and no working Doctor. One Mafia model (`kimi-k3`) carried its team alone because its partner's provider timed out on every call (finding 1): it steered a Day-1 mislynch, killed the loudest Town voice, and framed a Town player with true information. The raw database was lost to a temp-directory cleanup, so these notes cannot be re-checked.
 
 ## 4. How to reproduce
 
@@ -175,11 +187,27 @@ sqlite3 padrino-showcase.db \
   "select status, count(*), round(avg(latency_ms)) from llm_calls group by status"
 ```
 
-## 5. Batch 002 results
+## 5. Batch 005 games
 
-<!-- BATCH-002 RESULTS: lead fills in -->
+<!-- B005-GAMES -->
+| Seed | Status | Winner | Reason | Days | Events | Calls | No-contest cause |
+|---|---|---|---|---|---|---|---|
+| `b005-g01-a1` | COMPLETED | MAFIA | PARITY_REACHED | 3 | 141 | 92 | - |
+| `b005-g02-a1` | COMPLETED | TOWN | ALL_MAFIA_ELIMINATED | 3 | 140 | 83 | - |
+| `b005-g03-a1` | COMPLETED | TOWN | ALL_MAFIA_ELIMINATED | 3 | 136 | 80 | - |
+| `b005-g04-a1` | FAILED | - | - | 4 | 163 | 110 | seat_unresponsive: seat P03 stopped responding |
+| `b005-g04-a2` | COMPLETED | TOWN | ALL_MAFIA_ELIMINATED | 3 | 132 | 75 | - |
+| `b005-g05-a1` | COMPLETED | MAFIA | PARITY_REACHED | 2 | 113 | 72 | - |
+| `b005-g06-a1` | COMPLETED | TOWN | ALL_MAFIA_ELIMINATED | 3 | 149 | 88 | - |
+| `b005-g07-a1` | COMPLETED | TOWN | ALL_MAFIA_ELIMINATED | 3 | 135 | 79 | - |
+| `b005-g08-a1` | COMPLETED | TOWN | ALL_MAFIA_ELIMINATED | 3 | 154 | 96 | - |
+| `b005-g09-a1` | COMPLETED | TOWN | ALL_MAFIA_ELIMINATED | 3 | 139 | 82 | - |
+| `b005-g10-a1` | FAILED | - | - | 3 | 134 | 99 | seat_unresponsive: seat P01 stopped responding |
+| `b005-g10-a2` | FAILED | - | - | 2 | 78 | 59 | seat_unresponsive: seat P01 stopped responding |
+| `b005-g10-a3` | COMPLETED | MAFIA | PARITY_REACHED | 2 | 116 | 72 | - |
+<!-- /B005-GAMES -->
 
-Pending: the 10-game batch on the fixed engine is still running.
+Earlier batches (001 shakedown, 002 first attempt, and short 003/004 lineup wrap-ups) are kept in the raw data for availability and latency analysis only.
 
 ## 6. Open questions and next experiments
 
