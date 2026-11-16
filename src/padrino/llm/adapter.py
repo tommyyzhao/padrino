@@ -258,6 +258,23 @@ class AgentBuild(BaseModel):
     catalog_snapshot_id: uuid.UUID | None = None
 
 
+def adapter_budget_s(adapter: object) -> float | None:
+    """Longest time one ``complete`` call may spend, or None when the adapter has no budget.
+
+    Adapters that bound themselves expose ``budget_s``; thin wrappers expose ``_inner``.
+    The runner's outer deadline must never be shorter than this.
+    """
+    node: object | None = adapter
+    for _ in range(8):  # bounded wrapper chain
+        if node is None:
+            return None
+        budget = getattr(node, "budget_s", None)
+        if isinstance(budget, (int, float)) and not isinstance(budget, bool):
+            return float(budget)
+        node = getattr(node, "_inner", None)
+    return None
+
+
 @runtime_checkable
 class LlmAdapter(Protocol):
     """Structural Protocol every adapter (mock or real) must satisfy.
@@ -283,4 +300,5 @@ __all__ = [
     "ProviderNoContestError",
     "RoutingPolicy",
     "SameModelHost",
+    "adapter_budget_s",
 ]

@@ -365,3 +365,27 @@ async def test_disabled_schedule_is_not_run(
         adapter_factory=lambda _a: NoopMockAdapter(),
     )
     assert runs == []
+
+
+async def test_failed_run_still_advances_next_run_at(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def boom(**_: Any) -> tuple[uuid.UUID, TournamentResult]:
+        raise RuntimeError("tournament exploded")
+
+    monkeypatch.setattr(gauntlet_job, "run_tournament_from_roster", boom)
+    fire_at = _NOW - timedelta(minutes=5)
+    sched_id = await _seed_schedule(session_factory, cost_cap_usd=10.0, next_run_at=fire_at)
+    runs = await run_due_scheduled_gauntlets(
+        session_factory,
+        now=_NOW,
+        settings=Settings(),
+        adapter_factory=lambda _a: NoopMockAdapter(),
+    )
+    assert runs == []
+    async with session_factory() as session:
+        sched = await session.get(ScheduledGauntlet, sched_id)
+        assert sched is not None and sched.next_run_at is not None
+        assert _aware(sched.next_run_at) > _NOW
+        assert sched.last_run_at is None

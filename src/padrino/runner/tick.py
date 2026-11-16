@@ -47,7 +47,7 @@ from padrino.core.engine.state import GameState, Seat
 from padrino.core.enums import ActionType
 from padrino.core.observation_privacy import assert_ranked_observation_safe
 from padrino.core.observations import Ruleset, build_observation, format_phase_id
-from padrino.llm.adapter import ERROR_TRUNCATED, LlmAdapter
+from padrino.llm.adapter import LlmAdapter
 from padrino.observability.events import (
     EVENT_LLM_CALL_COMPLETED,
     EVENT_LLM_CALL_EXHAUSTED,
@@ -63,11 +63,42 @@ _REASON_ILLEGAL_ACTION = "ILLEGAL_ACTION"
 _logger = structlog.get_logger("padrino.llm")
 
 
+_ERROR_KIND_BY_CLASS: dict[str, str] = {
+    "Timeout": "TIMEOUT",
+    "TimeoutError": "TIMEOUT",
+    "APITimeoutError": "TIMEOUT",
+    "CancelledError": "TIMEOUT",
+    "RateLimitError": "RATE_LIMITED",
+    "ServiceUnavailableError": "UNAVAILABLE",
+    "BadGatewayError": "UNAVAILABLE",
+    "InternalServerError": "UNAVAILABLE",
+    "APIConnectionError": "CONNECTION",
+    "ConnectionError": "CONNECTION",
+    "AuthenticationError": "AUTH",
+    "PermissionDeniedError": "AUTH",
+    "NotFoundError": "NOT_FOUND",
+    "BadRequestError": "BAD_REQUEST",
+    "UnprocessableEntityError": "BAD_REQUEST",
+    "ContextWindowExceededError": "BAD_REQUEST",
+    "ContentPolicyViolationError": "BAD_REQUEST",
+}
+
+
+def error_kind_vocabulary(raw_class_name: str) -> str:
+    """Map a raw exception class name to the fixed, provider-neutral event vocabulary.
+
+    The raw class stays in ``llm_calls``; the hash-chained log and exports only carry
+    ``TIMEOUT`` / ``RATE_LIMITED`` / ``UNAVAILABLE`` / ``CONNECTION`` / ``AUTH`` /
+    ``NOT_FOUND`` / ``BAD_REQUEST`` / ``OTHER``.
+    """
+    return _ERROR_KIND_BY_CLASS.get(raw_class_name, "OTHER")
+
+
 class TickResponses(dict[str, AgentResponse]):
     """Seat id -> response, plus which seats were coerced because the provider failed.
 
-    ``provider_failures`` maps a seat to ``TIMEOUT`` / ``PROVIDER_ERROR`` / ``TRUNCATED``;
-    seats whose reply merely failed to parse or was illegal are not listed.
+    ``provider_failures`` maps a seat to ``TIMEOUT`` / ``PROVIDER_ERROR``; seats whose reply
+    failed to parse, was truncated, or was illegal are not listed.
     """
 
     provider_failures: dict[str, str]
@@ -199,18 +230,19 @@ async def _call_one_seat(
                 if unfunded
                 else (result.failure_reason or _REASON_PROVIDER_ERROR)
             )
-            error_kind = failure.error_kind if failure is not None else "Unknown"
+            raw_error_kind = failure.error_kind if failure is not None else "Unknown"
+            error_kind = error_kind_vocabulary(raw_error_kind)
             attempts_made = failure.attempts if failure is not None else 0
             _logger.info(
                 EVENT_LLM_CALL_EXHAUSTED,
                 phase=phase_id,
                 reason=reason,
-                error_kind=error_kind,
+                error_kind=raw_error_kind,
                 attempts=attempts_made,
             )
-            # The payload carries only a fixed reason vocabulary and the exception class
-            # name: provider/model diagnostics (``error_message``) stay in ``llm_calls``
-            # so no log consumer can learn which model a seat runs.
+            # The payload carries only fixed vocabularies for reason and error kind (never
+            # the raw exception class): provider/model diagnostics stay in ``llm_calls`` so
+            # no log consumer can learn which model a seat runs.
             return _build_failure_outcome(
                 state=state,
                 seat=seat,
@@ -239,7 +271,8 @@ async def _call_one_seat(
                     "reason": parsed.reason,
                     "validation_errors": (parsed.details,) if parsed.details else (),
                 },
-                provider_failure="TRUNCATED" if result.error == ERROR_TRUNCATED else None,
+                # Truncation (finish_reason=length) is an output problem, not an
+                # unresponsive seat: visible as OutputInvalid, never fed to the breaker.
             )
 
         illegal_reason = _illegal_action_reason(state, seat, parsed.action, phase_id)
@@ -315,4 +348,4 @@ def _illegal_action_reason(
     return None
 
 
-__all__ = ["TickResponses", "run_tick"]
+__all__ = ["TickResponses", "error_kind_vocabulary", "run_tick"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,9 +20,12 @@ from padrino.llm.adapter import AdapterResult, ProviderNoContestError
 from padrino.llm.mock import DeterministicMockAdapter
 from padrino.llm.retry import LlmCallFailed
 from padrino.runner.game_runner import (
+    PERSISTENCE_SLACK_S,
     GameConfig,
     GamePersistence,
     _RecordingAdapter,
+    drive_game_loop,
+    effective_phase_timeout_s,
     run_game,
 )
 from padrino.settings import Settings
@@ -151,6 +155,92 @@ async def test_unparseable_replies_never_trip_the_breaker(
 
     outcome = await run_game(_config(), _Garbage("P01", lambda _n: False), ranked=False)
     assert outcome.final_state.terminal_result is not None
+
+
+async def test_truncated_replies_never_trip_the_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """finish_reason=length is an output problem, not an unresponsive seat."""
+    _limit(monkeypatch, 1)
+
+    class _Truncated(_FlakySeatAdapter):
+        async def complete(self, observation: Observation) -> AdapterResult:
+            result = await super().complete(observation)
+            if observation.you.player_id == "P01":
+                return AdapterResult(
+                    raw_response="",
+                    parsed_response=ResponseError(reason="INVALID_JSON", details="truncated"),
+                    latency_ms=1,
+                    status="invalid_json",
+                    error="truncated",
+                )
+            return result
+
+    outcome = await run_game(_config(), _Truncated("P01", lambda _n: False), ranked=False)
+    assert outcome.final_state.terminal_result is not None
+    invalid = [
+        e.body
+        for e in outcome.event_log.events
+        if e.body["event_type"] == "OutputInvalid" and e.body["actor_player_id"] == "P01"
+    ]
+    assert invalid  # still visible as OutputInvalid
+
+
+async def test_reply_is_recorded_even_if_deadline_cancels_during_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink: list[AdapterResult] = []
+    good = _result(model_id="openai/glm-4.7", input_tokens=1, output_tokens=1, cost_usd=0.1)
+
+    class _Inner:
+        async def complete(self, observation: Observation) -> AdapterResult:
+            return good
+
+    async def slow_record(
+        self: _RecordingAdapter, observation: Observation, result: AdapterResult
+    ) -> tuple[AdapterResult, bool]:
+        await asyncio.sleep(0.2)
+        sink.append(result)
+        return result, False
+
+    monkeypatch.setattr(_RecordingAdapter, "_record", slow_record)
+    recording = _RecordingAdapter(_Inner(), [], None)
+    got = await asyncio.wait_for(recording.complete(_observation()), timeout=0.05)
+    assert got is good
+    assert sink == [good]  # persistence ran to completion despite the 0.05s deadline
+
+
+def test_effective_phase_timeout_never_shorter_than_adapter_budget() -> None:
+    class _Budgeted:
+        budget_s = 100.0
+
+    class _Wrapper:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+    assert effective_phase_timeout_s(45.0, _Budgeted()) == 100.0 + PERSISTENCE_SLACK_S
+    assert effective_phase_timeout_s(45.0, _Wrapper(_Budgeted())) == 100.0 + PERSISTENCE_SLACK_S
+    assert effective_phase_timeout_s(300.0, _Budgeted()) == 300.0  # config may only raise it
+    assert effective_phase_timeout_s(45.0, object()) == 45.0
+
+
+async def test_game_loop_outer_deadline_follows_adapter_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[float] = []
+
+    async def spy_tick(*args: Any) -> dict[str, AgentResponse]:
+        seen.append(args[-1])
+        raise RuntimeError("stop after first tick")
+
+    class _Budgeted(_FlakySeatAdapter):
+        budget_s = 20.0
+
+    with pytest.raises(RuntimeError, match="stop after first tick"):
+        await drive_game_loop(
+            _config(), _Budgeted("P01", lambda _n: False), False, tick_runner=spy_tick
+        )
+    assert seen == [20.0 + PERSISTENCE_SLACK_S]  # config says 1.0s; the adapter needs more
 
 
 async def _game_id(session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:

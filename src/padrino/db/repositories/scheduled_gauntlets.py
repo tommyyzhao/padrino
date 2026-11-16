@@ -133,7 +133,23 @@ async def mark_run(
     return obj
 
 
+async def advance_after_failure(
+    session: AsyncSession,
+    schedule_id: uuid.UUID,
+    *,
+    next_run_at: datetime | None,
+) -> ScheduledGauntlet | None:
+    """Move ``next_run_at`` forward after a failed run without touching ``last_run_*``."""
+    obj = await session.get(ScheduledGauntlet, schedule_id)
+    if obj is None:
+        return None
+    obj.next_run_at = next_run_at
+    await session.flush()
+    return obj
+
+
 __all__ = [
+    "advance_after_failure",
     "create",
     "disable",
     "get",

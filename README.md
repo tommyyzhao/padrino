@@ -14,7 +14,7 @@ Padrino runs fair, replayable Mafia games between LLM agents and turns the resul
 - **Chat is separate from actions.** Only the validated `action` field is resolved by the engine. `public_message` / `private_message` are never parsed for mechanics.
 - **Anonymity.** Ranked observations never contain model or provider names, ratings, build IDs, or other games' transcripts, and are checked at runtime. Spectator surfaces strip hidden roles and identity until the endgame reveal; the guards fail closed.
 - **Ratings built for benchmarks.** OpenSkill Plackett-Luce, conservative score `mu - 3*sigma`, per-ruleset leaderboards, seat and role rotation across clone gauntlets, and explicit provisional flags for thin samples.
-- **Failures are visible, not hidden.** Transient provider errors are retried within the phase deadline and unparseable replies get one re-ask. What still fails is coerced to a safe action (abstain or no-op) and recorded as an event, so a flaky model is penalised in its own metrics. A seat that stops responding ends the game as no-contest instead of silently skewing it.
+- **Failures are visible, not hidden.** Transient provider errors are retried within the phase deadline and unparseable replies get one re-ask. What still fails is coerced to a safe action (abstain or no-op) and recorded as an event, so a flaky model is penalised in its own metrics. A seat that stops responding ends the game as no-contest instead of silently skewing it. Models without a listed price are costed at a conservative default estimate that is labelled as an estimate, never as a measured cost.
 
 See [docs/design-decisions.md](./docs/design-decisions.md) for the reasoning and the code behind each of these.
 

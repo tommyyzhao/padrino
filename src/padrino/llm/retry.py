@@ -47,6 +47,15 @@ DEFAULT_RETRY_ON: Final[tuple[type[BaseException], ...]] = (
 )
 
 
+# Overload-type errors back off from a longer base: a gateway that answers 503 in a few
+# milliseconds would otherwise burn every attempt inside one second.
+OVERLOAD_ERRORS: Final[tuple[type[BaseException], ...]] = (
+    RateLimitError,
+    ServiceUnavailableError,
+    BadGatewayError,
+)
+DEFAULT_OVERLOAD_BASE_DELAY_S: Final[float] = 2.0
+
 _logger = structlog.get_logger("padrino.llm")
 
 
@@ -103,12 +112,15 @@ class RetryPolicy(BaseModel):
     base_delay_s: float = Field(ge=0.0)
     max_delay_s: float = Field(ge=0.0)
     retry_on: tuple[type[BaseException], ...]
+    # Backoff base for ``OVERLOAD_ERRORS``; 0 means "use ``base_delay_s``".
+    overload_base_delay_s: float = Field(default=0.0, ge=0.0)
 
 
 def default_retry_policy() -> RetryPolicy:
     """Return the canonical Padrino retry policy.
 
-    Three attempts (one initial + two retries), 0.5s base delay, capped at 16s,
+    Three attempts (one initial + two retries), 0.5s base delay (2s for overload errors:
+    503/502/429), capped at 16s,
     retrying on rate-limits, connection errors, 5xx/502/503, and provider or asyncio
     timeouts. 4xx client errors (auth, not-found, bad request) are never retried.
     """
@@ -117,6 +129,7 @@ def default_retry_policy() -> RetryPolicy:
         base_delay_s=0.5,
         max_delay_s=16.0,
         retry_on=DEFAULT_RETRY_ON,
+        overload_base_delay_s=DEFAULT_OVERLOAD_BASE_DELAY_S,
     )
 
 
@@ -124,19 +137,41 @@ def _is_retryable(exc: BaseException, retry_on: tuple[type[BaseException], ...])
     return any(isinstance(exc, klass) for klass in retry_on)
 
 
-def _compute_delay(*, attempt_idx: int, policy: RetryPolicy, rng: SeededRng) -> float:
+def retry_after_s(exc: BaseException) -> float | None:
+    """Seconds from a numeric ``Retry-After`` header on the error's HTTP response, if any."""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = float(headers.get("retry-after"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return value if value >= 0.0 else None
+
+
+def _compute_delay(
+    *, attempt_idx: int, policy: RetryPolicy, rng: SeededRng, exc: BaseException | None = None
+) -> float:
     """Return the delay before the (attempt_idx+1)th attempt.
 
-    Exponential growth (``base * 2 ** attempt_idx``) capped at
-    ``max_delay_s``, then multiplied by ``[0.5, 1.0]`` decorrelated jitter
-    drawn from the supplied :class:`SeededRng`.
+    Exponential growth (``base * 2 ** attempt_idx``) capped at ``max_delay_s``, then
+    multiplied by ``[0.5, 1.0]`` decorrelated jitter drawn from the supplied
+    :class:`SeededRng`. Overload errors use ``overload_base_delay_s`` as the base, and a
+    numeric ``Retry-After`` header (itself capped at ``max_delay_s``) is a lower bound.
     """
-    base = policy.base_delay_s * (2**attempt_idx)
+    base_delay = policy.base_delay_s
+    if exc is not None and policy.overload_base_delay_s > 0 and isinstance(exc, OVERLOAD_ERRORS):
+        base_delay = max(base_delay, policy.overload_base_delay_s)
+    base = base_delay * (2**attempt_idx)
     capped = min(base, policy.max_delay_s)
     # Jitter is a uniformly-random fraction in [0.5, 1.0]; the integer draw
     # is 0..1000 so two calls with the same seed produce identical schedules.
     jitter = 0.5 + (rng.randbelow(1001) / 2000.0)
-    return float(capped * jitter)
+    delay = float(capped * jitter)
+    hinted = retry_after_s(exc) if exc is not None else None
+    if hinted is not None:
+        delay = max(delay, min(hinted, policy.max_delay_s))
+    return delay
 
 
 async def with_retry(
@@ -145,6 +180,8 @@ async def with_retry(
     *,
     sleeper: Callable[[float], Awaitable[None]],
     rng: SeededRng,
+    remaining_s: Callable[[], float] | None = None,
+    min_remaining_s: float = 0.0,
 ) -> tuple[T, list[RetryAttempt]]:
     """Invoke ``call`` with bounded retries; sleep between attempts via ``sleeper``.
 
@@ -152,6 +189,11 @@ async def with_retry(
     attempt that preceded the eventual success. Raises :class:`RetryExhausted`
     if ``max_attempts`` is consumed without success; raises the original
     exception unchanged if the failure is not in ``policy.retry_on``.
+
+    ``remaining_s`` (seconds left in the caller's deadline) makes the loop deadline-aware:
+    a sleep is clamped so at least ``min_remaining_s`` is still left afterwards, and when
+    that is impossible the loop gives up now (:class:`RetryExhausted`) instead of sleeping
+    past the deadline or starting a billed attempt that cannot finish.
     """
     attempts: list[RetryAttempt] = []
     last_error: BaseException | None = None
@@ -165,7 +207,11 @@ async def with_retry(
             attempt_number = idx + 1
             if attempt_number >= policy.max_attempts:
                 raise RetryExhausted(attempts=attempt_number, last_error=exc) from exc
-            delay_s = _compute_delay(attempt_idx=idx, policy=policy, rng=rng)
+            delay_s = _compute_delay(attempt_idx=idx, policy=policy, rng=rng, exc=exc)
+            if remaining_s is not None:
+                delay_s = min(delay_s, remaining_s() - min_remaining_s)
+                if delay_s < 0.0:
+                    raise RetryExhausted(attempts=attempt_number, last_error=exc) from exc
             delay_ms = int(delay_s * 1000)
             attempts.append(
                 RetryAttempt(
@@ -191,11 +237,14 @@ async def with_retry(
 
 
 __all__ = [
+    "DEFAULT_OVERLOAD_BASE_DELAY_S",
     "DEFAULT_RETRY_ON",
+    "OVERLOAD_ERRORS",
     "LlmCallFailed",
     "RetryAttempt",
     "RetryExhausted",
     "RetryPolicy",
     "default_retry_policy",
+    "retry_after_s",
     "with_retry",
 ]

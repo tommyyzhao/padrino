@@ -36,6 +36,7 @@ from padrino.db.models import (
 )
 from padrino.db.repositories import campaigns as campaigns_repo
 from padrino.economics.human_cost_governance import (
+    PRICE_BASIS_DEFAULT_ESTIMATE,
     PRICE_BASIS_FALLBACK_TABLE,
     PRICE_BASIS_PROVIDER_RESPONSE_COST,
 )
@@ -397,7 +398,10 @@ async def _cost_stamp_blockers(
                 )
             )
             continue
-        if call.price_basis == PRICE_BASIS_FALLBACK_TABLE and not call.price_table_version:
+        if (
+            call.price_basis in (PRICE_BASIS_FALLBACK_TABLE, PRICE_BASIS_DEFAULT_ESTIMATE)
+            and not call.price_table_version
+        ):
             blockers.append(
                 _blocker(
                     "cost_stamp_missing",
@@ -409,6 +413,7 @@ async def _cost_stamp_blockers(
                 )
             )
         elif call.price_basis not in (
+            PRICE_BASIS_DEFAULT_ESTIMATE,
             PRICE_BASIS_FALLBACK_TABLE,
             PRICE_BASIS_PROVIDER_RESPONSE_COST,
         ):

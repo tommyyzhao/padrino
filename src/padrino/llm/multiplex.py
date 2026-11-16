@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from padrino.core.observations import Observation
-from padrino.llm.adapter import AdapterResult, LlmAdapter
+from padrino.llm.adapter import AdapterResult, LlmAdapter, adapter_budget_s
 
 
 class SeatMultiplexAdapter:
@@ -85,6 +85,12 @@ class SeatMultiplexAdapter:
         previous = self._adapters.get(seat)
         self._adapters[seat] = adapter
         return previous
+
+    @property
+    def budget_s(self) -> float | None:
+        """Largest budget among the seat adapters (None if none of them is bounded)."""
+        budgets = [b for b in map(adapter_budget_s, self._adapters.values()) if b is not None]
+        return max(budgets) if budgets else None
 
     async def complete(self, observation: Observation) -> AdapterResult:
         seat = observation.you.player_id

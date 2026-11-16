@@ -23,11 +23,13 @@ from dataclasses import dataclass
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.clock import utcnow
 from padrino.core.rulesets import get_ruleset
 from padrino.core.seating import seat_permutation
+from padrino.db.repositories import games as games_repo
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.scheduler import create_gauntlet, derive_game_seed
-from padrino.llm.adapter import AgentBuild, LlmAdapter
+from padrino.llm.adapter import AgentBuild, LlmAdapter, ProviderNoContestError
 from padrino.runner.game_runner import GameConfig, GameOutcome, GamePersistence, run_game
 from padrino.settings import Settings
 
@@ -44,6 +46,25 @@ class TournamentResult:
     games_run: int
     total_cost_usd: float
     cost_capped: bool
+    # Games ended no-contest by the provider circuit breaker (marked failed, not rated).
+    games_failed: int = 0
+
+
+async def mark_game_no_contest(
+    session_factory: async_sessionmaker[AsyncSession],
+    game_id: uuid.UUID,
+    exc: ProviderNoContestError,
+) -> None:
+    """Terminally fail a game ended by the provider breaker; text is a safe seat/reason token."""
+    detail = f"seat {exc.seat} stopped responding" if exc.seat else f"no contest: {exc.reason}"
+    async with session_factory() as session, session.begin():
+        await games_repo.mark_failed(
+            session,
+            game_id,
+            completed_at=utcnow(),
+            last_error=detail,
+            last_error_kind="provider_no_contest",
+        )
 
 
 def _seat_ids(player_count: int) -> list[str]:
@@ -88,6 +109,7 @@ async def run_heterogeneous_tournament(
     outcomes: list[GameOutcome] = []
     total_cost = 0.0
     cost_capped = False
+    games_failed = 0
     for game_index, game_id in enumerate(game_ids):
         perm = seat_permutation(f"{gauntlet_seed}:{game_index}", player_count)
         permuted_builds = {
@@ -110,7 +132,20 @@ async def run_heterogeneous_tournament(
             agent_builds=permuted_builds,
             league_id=league_id,
         )
-        outcome = await run_game(config, adapter, ranked=True, persistence=persistence)
+        try:
+            outcome = await run_game(config, adapter, ranked=True, persistence=persistence)
+        except ProviderNoContestError as exc:
+            # ponytail: a failed game's partial spend is not added to total_cost (no outcome);
+            # the DB-backed global spend governor still sees it.
+            await mark_game_no_contest(session_factory, game_id, exc)
+            games_failed += 1
+            _logger.error(
+                "tournament.game.no_contest",
+                game_index=game_index,
+                reason=exc.reason,
+                seat=exc.seat,
+            )
+            continue
         outcomes.append(outcome)
         total_cost += sum((c.cost_usd or 0.0) for c in outcome.llm_calls)
         _logger.info(
@@ -133,6 +168,7 @@ async def run_heterogeneous_tournament(
         games_run=len(outcomes),
         total_cost_usd=total_cost,
         cost_capped=cost_capped,
+        games_failed=games_failed,
     )
 
 

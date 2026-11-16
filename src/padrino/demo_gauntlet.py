@@ -36,9 +36,10 @@ from padrino.db.repositories import (
     providers as providers_repo,
 )
 from padrino.gauntlets.scheduler import create_gauntlet, derive_game_seed
+from padrino.gauntlets.tournament import mark_game_no_contest
 from padrino.leaderboards.service import compute_leaderboard, entry_to_response
 from padrino.llm.adapter import AgentBuild as LlmAgentBuild
-from padrino.llm.adapter import LlmAdapter, RoutingPolicy
+from padrino.llm.adapter import LlmAdapter, ProviderNoContestError, RoutingPolicy
 from padrino.llm.litellm_adapter import LiteLlmAdapter
 from padrino.llm.mock import NoopMockAdapter
 from padrino.llm.prompts import (
@@ -206,7 +207,10 @@ async def run_demo_gauntlet(
                     agent_builds=agent_builds_by_seat,
                     league_id=league_id,
                 )
-                await run_game(config, adapter, ranked=True, persistence=persistence)
+                try:
+                    await run_game(config, adapter, ranked=True, persistence=persistence)
+                except ProviderNoContestError as exc:
+                    await mark_game_no_contest(session_factory, game_id, exc)
         finally:
             structlog.contextvars.reset_contextvars(**gauntlet_tokens)
 

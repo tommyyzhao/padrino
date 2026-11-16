@@ -78,14 +78,19 @@ from padrino.economics.call_settlement import (
 )
 from padrino.economics.completion_reserve import CompletionReserveUnfundedPolicy
 from padrino.economics.human_cost_governance import (
+    PRICE_BASIS_DEFAULT_ESTIMATE,
     PRICE_BASIS_FALLBACK_TABLE,
     PRICE_BASIS_PROVIDER_RESPONSE_COST,
-    PRICE_BASIS_UNPRICED,
     fallback_price_table_version,
     has_listed_price,
     price_turn_usd,
 )
-from padrino.llm.adapter import AdapterResult, LlmAdapter, ProviderNoContestError
+from padrino.llm.adapter import (
+    AdapterResult,
+    LlmAdapter,
+    ProviderNoContestError,
+    adapter_budget_s,
+)
 from padrino.llm.retry import LlmCallFailed
 from padrino.observability.events import (
     EVENT_GAME_COMPLETED,
@@ -298,7 +303,9 @@ class _RecordingAdapter:
         except ProviderNoContestError as exc:
             persisted_result = exc.result
             if persisted_result is not None:
-                persisted_result, _ = await self._record(observation, persisted_result)
+                persisted_result, _ = await self._record_uncancellable(
+                    observation, persisted_result
+                )
             raise ProviderNoContestError(
                 reason=exc.reason, result=persisted_result, seat=exc.seat
             ) from exc
@@ -306,12 +313,28 @@ class _RecordingAdapter:
             # The tick's hard deadline cancelled the call: still leave an audit row.
             elapsed_ms = int((asyncio.get_running_loop().time() - started) * 1000)
             with contextlib.suppress(Exception):
-                await self._record(observation, _cancelled_result(elapsed_ms))
+                await self._record_uncancellable(observation, _cancelled_result(elapsed_ms))
             raise
-        result, no_contest = await self._record(observation, result)
+        result, no_contest = await self._record_uncancellable(observation, result)
         if no_contest:
             raise ProviderNoContestError(reason="provider_unfunded", result=result)
         return result
+
+    async def _record_uncancellable(
+        self, observation: Observation, result: AdapterResult
+    ) -> tuple[AdapterResult, bool]:
+        """Run :meth:`_record` to completion even if a deadline cancel lands meanwhile.
+
+        A reply that came back was already billed. Cancelling mid-persist would drop it and
+        leave half its attempt rows behind, so the cancel is absorbed here and the finished
+        result is returned; the outer deadline already had its chance while the model call
+        ran. (A genuine task cancel still propagates through the caller's own await.)
+        """
+        task = asyncio.ensure_future(self._record(observation, result))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            return await task
 
     async def _record(
         self, observation: Observation, result: AdapterResult
@@ -881,9 +904,6 @@ def _pricing_stamp(persistence: GamePersistence, result: AdapterResult) -> _Pric
     if result.input_tokens is None and result.output_tokens is None:
         return _PricingStamp(None, None, None)
     model = result.model_id or "default"
-    if not has_listed_price(settings, model):
-        # Never invent a cost from the catch-all price: keep the tokens, record "unpriced".
-        return _PricingStamp(None, PRICE_BASIS_UNPRICED, None)
     cost_usd = price_turn_usd(
         settings,
         response_cost=None,
@@ -891,11 +911,14 @@ def _pricing_stamp(persistence: GamePersistence, result: AdapterResult) -> _Pric
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
     )
-    return _PricingStamp(
-        cost_usd,
-        PRICE_BASIS_FALLBACK_TABLE,
-        fallback_price_table_version(settings),
+    # Unlisted model: the catch-all estimate keeps spend caps fail-closed, but is stamped
+    # distinctly so reports never present it as a real cost.
+    basis = (
+        PRICE_BASIS_FALLBACK_TABLE
+        if has_listed_price(settings, model)
+        else PRICE_BASIS_DEFAULT_ESTIMATE
     )
+    return _PricingStamp(cost_usd, basis, fallback_price_table_version(settings))
 
 
 def _priced_cost_usd(persistence: GamePersistence, result: AdapterResult) -> float | None:
@@ -1349,6 +1372,24 @@ def _resolve_night_events(
     return events
 
 
+# Time the runner's outer deadline must keep beyond the adapter's own budget so persisting
+# the attempt rows of a reply that just came back never races the cancel.
+PERSISTENCE_SLACK_S: Final[float] = 2.0
+
+
+def effective_phase_timeout_s(config_timeout_s: float, adapter: object) -> float:
+    """Outer per-call deadline: never shorter than the adapter's budget plus persistence slack.
+
+    The adapter's budget is the source of truth; ``config.timeout_s`` (ruleset default 45s)
+    only ever raises it, so a configured ``padrino_llm_timeout_seconds`` above the ruleset
+    value cannot cause the outer ``wait_for`` to cancel a call the adapter still budgets for.
+    """
+    budget = adapter_budget_s(adapter)
+    if budget is None:
+        return config_timeout_s
+    return max(config_timeout_s, budget + PERSISTENCE_SLACK_S)
+
+
 async def drive_game_loop(
     config: GameConfig,
     adapter: LlmAdapter,
@@ -1370,6 +1411,13 @@ async def drive_game_loop(
     the same deterministic game loop but supplies a human-aware tick wrapper.
     """
     ruleset = _ruleset_for_config(config)
+    phase_timeout_s = effective_phase_timeout_s(config.timeout_s, adapter)
+    if phase_timeout_s != config.timeout_s:
+        _logger.warning(
+            "game.timeout_raised_to_adapter_budget",
+            configured_timeout_s=config.timeout_s,
+            effective_timeout_s=phase_timeout_s,
+        )
     event_log = resume.event_log if resume is not None else EventLog()
     llm_calls: list[AdapterResult] = []
     recording: LlmAdapter = _RecordingAdapter(adapter, llm_calls, persistence)
@@ -1390,7 +1438,7 @@ async def drive_game_loop(
     _logger.info(
         EVENT_GAME_STARTED,
         ranked=ranked,
-        timeout_s=config.timeout_s,
+        timeout_s=phase_timeout_s,
     )
 
     async def emit_and_persist(
@@ -1526,7 +1574,7 @@ async def drive_game_loop(
                         recording,
                         ruleset,
                         ranked,
-                        config.timeout_s,
+                        phase_timeout_s,
                     )
                     # run_tick appends failure events (ActionTimedOut / OutputInvalid)
                     # directly to event_log without folding through emit_and_persist;
@@ -1664,6 +1712,7 @@ __all__ = [
     "CAUSE_DAY_VOTE",
     "CAUSE_NIGHT_KILL",
     "MAFIA_CHANNEL_ID",
+    "PERSISTENCE_SLACK_S",
     "GameConfig",
     "GameOutcome",
     "GamePersistence",
@@ -1672,5 +1721,6 @@ __all__ = [
     "RulesSnapshotMismatchError",
     "TickRunner",
     "drive_game_loop",
+    "effective_phase_timeout_s",
     "run_game",
 ]

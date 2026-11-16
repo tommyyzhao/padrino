@@ -198,8 +198,9 @@ async def test_default_factory_routes_through_gateway(
     assert systems
     assert all("in English" in prompt for prompt in systems)
     assert result["winner"] == "TOWN"
-    assert result["cost"] == pytest.approx(result["calls"] * 0.01)
-    assert result["unpriced_calls"] == 0
+    assert result["cost_reported"] == pytest.approx(result["calls"] * 0.01)
+    assert result["cost_estimated"] is None
+    assert result["estimated_calls"] == 0
     assert "test-key-never-persist" not in capsys.readouterr().out
 
 
@@ -355,8 +356,8 @@ async def test_real_gateway_game(tmp_path: Path) -> None:
     assert result["calls"] > 0
 
 
-async def test_summary_reports_priced_cost_and_unpriced_call_count(tmp_path: Path) -> None:
-    """Unknown models without a provider cost are counted, never summed as a made-up total."""
+async def test_summary_reports_estimated_cost_separately_from_reported(tmp_path: Path) -> None:
+    """Unlisted models without a provider cost are estimated; reported and estimated stay apart."""
     scripted = _scripted_factory({})
 
     class TokensNoCost:
@@ -373,8 +374,10 @@ async def test_summary_reports_priced_cost_and_unpriced_call_count(tmp_path: Pat
         adapter_factory=lambda _: TokensNoCost(),
     )
     assert summary["calls"] > 0
-    assert summary["unpriced_calls"] == summary["calls"]
-    assert summary["cost"] is None
+    assert summary["estimated_calls"] == summary["calls"]
+    assert summary["cost_reported"] is None
+    assert summary["cost_estimated"] is not None
+    assert summary["cost_estimated"] > 0
 
 
 async def test_unresponsive_seat_fails_the_game_naming_only_the_seat_number(

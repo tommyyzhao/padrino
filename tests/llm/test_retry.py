@@ -25,6 +25,7 @@ from litellm.exceptions import (
     BadRequestError,
     InternalServerError,
     RateLimitError,
+    ServiceUnavailableError,
 )
 from structlog.testing import LogCapture
 
@@ -45,6 +46,7 @@ from padrino.llm.retry import (
     RetryExhausted,
     RetryPolicy,
     default_retry_policy,
+    retry_after_s,
     with_retry,
 )
 
@@ -516,7 +518,7 @@ def test_tick_records_exactly_one_action_timed_out_per_exhausted_call() -> None:
     assert len(timed_out_events) == 1
     payload = timed_out_events[0].body["payload"]
     assert payload["reason"] == "TIMEOUT"
-    assert payload["error_kind"] == "TimeoutError"
+    assert payload["error_kind"] == "TIMEOUT"  # fixed vocabulary, not the raw class
     assert payload["attempts"] == 3
     assert "error_message" not in payload  # provider diagnostics never enter the log
     # And the coerced response was returned to the runner.
@@ -548,3 +550,91 @@ def test_retry_attempt_is_frozen() -> None:
     a = RetryAttempt(attempt_number=1, delay_ms=10, error_kind="X", error_message="y")
     with pytest.raises(AttributeError):
         a.attempt_number = 2  # type: ignore[misc]
+
+
+# --- overload backoff, Retry-After, deadline clamping -------------------------------
+
+
+def _unavailable() -> Exception:
+    return ServiceUnavailableError(message="overloaded", model="m", llm_provider="p")
+
+
+def _delays(exc: Exception, **kwargs: Any) -> tuple[list[float], int]:
+    call = AsyncMock(side_effect=exc)
+    sleeper = AsyncMock()
+    with contextlib.suppress(RetryExhausted):
+        asyncio.run(
+            with_retry(
+                call, default_retry_policy(), sleeper=sleeper, rng=SeededRng("burst"), **kwargs
+            )
+        )
+    return [a.args[0] for a in sleeper.await_args_list], call.call_count
+
+
+def test_overload_errors_back_off_from_a_longer_base_than_timeouts() -> None:
+    overload, _ = _delays(_unavailable())
+    timeouts, _ = _delays(TimeoutError("slow"))
+    assert overload[0] >= 1.0  # 2s base * jitter in [0.5, 1.0]
+    assert timeouts[0] <= 0.5
+    assert all(o > t for o, t in zip(overload, timeouts, strict=True))
+
+
+def test_retry_after_header_is_a_lower_bound_and_capped() -> None:
+    err = RateLimitError(
+        message="slow down",
+        model="m",
+        llm_provider="p",
+        response=SimpleNamespace(headers={"retry-after": "7"}),  # type: ignore[arg-type]
+    )
+    assert retry_after_s(err) == 7.0
+    delays, _ = _delays(err)
+    assert delays[0] >= 7.0
+    assert max(delays) <= default_retry_policy().max_delay_s
+    assert retry_after_s(TimeoutError("x")) is None
+    junk = SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "Wed, 21 Oct"}))
+    assert retry_after_s(junk) is None  # type: ignore[arg-type]
+
+
+def test_sleep_is_clamped_to_remaining_deadline_minus_floor() -> None:
+    delays, calls = _delays(_unavailable(), remaining_s=lambda: 1.2, min_remaining_s=0.5)
+    assert delays and all(d <= 0.7 + 1e-9 for d in delays)
+    assert calls >= 2
+
+
+def test_no_new_attempt_when_remaining_budget_is_below_floor() -> None:
+    delays, calls = _delays(_unavailable(), remaining_s=lambda: 0.3, min_remaining_s=0.5)
+    assert delays == []  # never sleeps past the deadline
+    assert calls == 1  # and never starts a billed attempt that cannot finish
+
+
+def test_adapter_clamps_backoff_to_its_budget_on_fast_503_burst() -> None:
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    sleeper = AsyncMock()
+    adapter = _build_adapter(retry_policy=default_retry_policy(), timeout_s=1.0)
+    adapter._sleeper = sleeper
+    mock = AsyncMock(side_effect=_unavailable())
+    with patch(ACOMPLETION_PATH, new=mock):
+        result = asyncio.run(adapter.complete(obs))
+    assert result.status == "exhausted"
+    assert result.failure_reason == "PROVIDER_ERROR"
+    budget = adapter.budget_s
+    assert all(c.args[0] <= budget for c in sleeper.await_args_list)
+
+
+def test_reask_not_started_below_budget_floor() -> None:
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
+    calls = {"n": 0}
+
+    async def slow_garbage(**kwargs: Any) -> Any:
+        calls["n"] += 1
+        await asyncio.sleep(0.75)  # leaves ~0.15s of a 0.9s budget: below the 0.225s floor
+        return _fake_completion("not json at all")
+
+    single_attempt = RetryPolicy(
+        max_attempts=1, base_delay_s=0.0, max_delay_s=0.0, retry_on=DEFAULT_RETRY_ON
+    )
+    adapter = _build_adapter(retry_policy=single_attempt, timeout_s=1.0)
+    with patch(ACOMPLETION_PATH, new=slow_garbage):
+        result = asyncio.run(adapter.complete(obs))
+    assert calls["n"] == 1
+    assert result.status == "invalid_json"

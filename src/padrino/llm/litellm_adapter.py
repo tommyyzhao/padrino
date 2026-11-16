@@ -69,6 +69,16 @@ _logger = structlog.get_logger("padrino.llm")
 # outer hard deadline never races the adapter's own last attempt.
 _BUDGET_FRACTION: Final[float] = 0.9
 _MIN_ATTEMPT_S: Final[float] = 0.01
+# Below this much remaining budget a new attempt or re-ask cannot finish: it would be a
+# wasted billed call. Floor = max(2s, 10% of the budget), capped at 25% of the budget so
+# tiny budgets (tests, short phases) still get their attempts.
+_MIN_START_S: Final[float] = 2.0
+_MIN_START_FRACTION: Final[float] = 0.1
+_MAX_START_FRACTION: Final[float] = 0.25
+# Inference params the adapter owns; a build may not override them.
+_RESERVED_PARAMS: Final[frozenset[str]] = frozenset(
+    {"model", "messages", "timeout", "num_retries", "max_retries"}
+)
 _REASK_INSTRUCTION: Final[str] = (
     "Your previous reply was not usable. Reply with only the JSON object matching the schema."
 )
@@ -201,6 +211,20 @@ class LiteLlmAdapter:
             reask_invalid if reask_invalid is not None else get_settings().padrino_llm_reask_invalid
         )
 
+    @property
+    def timeout_s(self) -> float:
+        """Configured total budget for one ``complete`` call (the runner's phase deadline)."""
+        return self._timeout_s
+
+    @property
+    def budget_s(self) -> float:
+        """Time one ``complete`` call may actually spend; the outer deadline must exceed it."""
+        return self._timeout_s * _BUDGET_FRACTION
+
+    def _start_floor_s(self) -> float:
+        budget = self.budget_s
+        return min(max(_MIN_START_S, budget * _MIN_START_FRACTION), budget * _MAX_START_FRACTION)
+
     async def complete(self, observation: Observation) -> AdapterResult:
         hops = [
             _Hop(
@@ -236,7 +260,7 @@ class LiteLlmAdapter:
                 )
             )
 
-        deadline = time.monotonic() + self._timeout_s * _BUDGET_FRACTION
+        deadline = time.monotonic() + self.budget_s
         rows: list[AdapterResult] = []  # every provider attempt before the final result
         failed_outcome: AdapterResult | None = None
         for index, hop in enumerate(hops):
@@ -289,7 +313,7 @@ class LiteLlmAdapter:
                 outcome.failure_reason is not None
                 or outcome.error == ERROR_TRUNCATED
                 or isinstance(outcome.parsed_response, AgentResponse)
-                or time.monotonic() >= deadline
+                or deadline - time.monotonic() < self._start_floor_s()
             ):
                 break
             messages = [
@@ -318,12 +342,12 @@ class LiteLlmAdapter:
         """
         model_id = hop.model_id
         kwargs: dict[str, Any] = {
+            **{k: v for k, v in self._build.inference_params.items() if k not in _RESERVED_PARAMS},
             "model": model_id,
             "messages": messages,
             # Our retry policy owns retries; SDK-internal ones (e.g. a 30s Retry-After
-            # sleep) would silently eat the phase deadline.
+            # sleep) would silently eat the phase deadline. Set last so params cannot undo it.
             "max_retries": 0,
-            **self._build.inference_params,
         }
         # Per-host overrides (US-079 / US-082): same-model alternate hosts and
         # OpenAI-compatible primary providers may supply ``api_base`` plus an
@@ -346,6 +370,7 @@ class LiteLlmAdapter:
         rng = SeededRng(f"{observation.phase}:{observation.you.player_id}:{model_id}")
         max_attempts = self._retry_policy.max_attempts
         failed: list[AdapterResult] = []
+        start_floor_s = self._start_floor_s()
 
         async def _call() -> tuple[Any, int]:
             # Slow-but-healthy models are the common case: the first attempts get two
@@ -377,6 +402,8 @@ class LiteLlmAdapter:
                 self._retry_policy,
                 sleeper=self._sleeper,
                 rng=rng,
+                remaining_s=lambda: deadline - time.monotonic(),
+                min_remaining_s=start_floor_s,
             )
         except Exception:
             # The failed attempts (the last one terminal) are already recorded in ``failed``.

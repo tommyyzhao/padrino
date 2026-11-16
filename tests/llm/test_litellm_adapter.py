@@ -139,6 +139,7 @@ def _build_adapter(
     fallback: str | None = "deepinfra/deepseek-ai/DeepSeek-V4-Flash",
     same_model_hosts: tuple[SameModelHost, ...] = (),
     api_base: str | None = None,
+    timeout_s: float = 5.0,
 ) -> LiteLlmAdapter:
     policy = RoutingPolicy(
         primary_model="cerebras/zai-glm-4.7",
@@ -155,9 +156,10 @@ def _build_adapter(
     return LiteLlmAdapter(
         routing_policy=policy,
         agent_build=build,
-        timeout_s=5.0,
+        timeout_s=timeout_s,
         auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
         api_base=api_base,
+        sleeper=AsyncMock(),  # no real backoff sleeps in unit tests
     )
 
 
@@ -689,6 +691,41 @@ def test_inference_params_forwarded_to_litellm() -> None:
     assert isinstance(messages, list)
     assert messages[0]["role"] == "system"
     assert messages[-1]["role"] == "user"
+
+
+def test_inference_params_cannot_reenable_sdk_retries_or_collide_on_timeout() -> None:
+    response = _fake_completion(content=_valid_response_json(Action(type=ActionType.NOOP)))
+    obs = _observation(SEATS[0], Phase(kind=PhaseKind.NIGHT_0_MAFIA_INTRO, day=0, round=0))
+    policy = RoutingPolicy(primary_model="cerebras/zai-glm-4.7", fallback_model=None)
+    build = AgentBuild(
+        provider="cerebras",
+        model_id="zai-glm-4.7",
+        prompt_version="pv",
+        inference_params={
+            "temperature": 0.3,
+            "max_retries": 7,
+            "num_retries": 4,
+            "timeout": 999,
+            "model": "evil/override",
+        },
+        adapter_version="a",
+    )
+    adapter = LiteLlmAdapter(
+        routing_policy=policy,
+        agent_build=build,
+        timeout_s=5.0,
+        auth_secret_ref=f"env:{_AUTH_SECRET_ENV}",
+    )
+    mock = AsyncMock(return_value=response)
+    with patch(ACOMPLETION_PATH, new=mock):
+        asyncio.run(adapter.complete(obs))
+
+    kwargs = mock.call_args.kwargs
+    assert kwargs["max_retries"] == 0
+    assert "num_retries" not in kwargs
+    assert kwargs["timeout"] <= 5.0
+    assert kwargs["model"] == "cerebras/zai-glm-4.7"
+    assert kwargs["temperature"] == 0.3
 
 
 def test_build_messages_serializes_observation_as_user_payload() -> None:

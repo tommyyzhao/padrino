@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from padrino.core.agents.contract import (
+    MAX_CANDIDATE_STARTS,
+    MAX_RAW_CHARS,
     REASON_INVALID_JSON,
     AgentResponse,
     ResponseError,
@@ -137,3 +140,59 @@ def test_canonical_response_recovered_from_brace_free_prose(
 
 def test_stray_open_brace_before_object_is_skipped() -> None:
     assert extract_json_object(f"use {{ to start: {OBJ_JSON}") == OBJ_JSON
+
+
+_BOUND_S = 0.5
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("{" * 20000, id="many-open-braces"),
+        pytest.param('{"' * 20000, id="many-open-brace-quote"),
+        pytest.param("<think>" * 40000, id="many-think-open"),
+        pytest.param("<thinking>" * 20000 + "{" * 20000, id="think-then-braces"),
+        pytest.param("[" * 100000, id="deep-array"),
+        pytest.param('{"a":' * 50000, id="deep-object"),
+        pytest.param("x" * 2_000_000, id="oversize"),
+        pytest.param("{" * 2_000_000, id="oversize-braces"),
+        pytest.param("</think" + " " * 60000, id="close-tag-whitespace"),
+    ],
+)
+def test_pathological_input_is_bounded_and_never_raises(raw: str) -> None:
+    start = time.perf_counter()
+    result = parse_agent_response(raw)
+    extract_json_object(raw)
+    assert time.perf_counter() - start < _BOUND_S
+    assert isinstance(result, ResponseError)
+    assert result.reason == REASON_INVALID_JSON
+
+
+def test_oversize_input_reports_clear_detail() -> None:
+    result = parse_agent_response("x" * (MAX_RAW_CHARS + 1))
+    assert isinstance(result, ResponseError)
+    assert result.details is not None
+    assert "too large" in result.details
+
+
+@pytest.mark.parametrize("prefix", ["", "pre "])
+def test_deeply_nested_object_never_raises_recursion_error(prefix: str) -> None:
+    depth = 12000  # under MAX_PARSE_CHARS, far past the interpreter recursion limit
+    raw = prefix + '{"a":' * depth + "1" + "}" * depth
+    result = parse_agent_response(raw)
+    assert isinstance(result, ResponseError)
+
+
+def test_object_after_many_stray_braces_beyond_cap_is_not_found() -> None:
+    raw = "{ " * (MAX_CANDIDATE_STARTS + 5) + OBJ_JSON
+    assert extract_json_object(raw) is None
+
+
+def test_few_stray_braces_still_recovered() -> None:
+    raw = "{ " * 5 + OBJ_JSON
+    assert extract_json_object(raw) == OBJ_JSON
+
+
+def test_think_block_linear_cases() -> None:
+    assert extract_json_object("<think>a</think><think>b</think>" + OBJ_JSON) == OBJ_JSON
+    assert extract_json_object("<think>a</thinking>" + OBJ_JSON) == OBJ_JSON

@@ -85,7 +85,7 @@ from padrino.economics.benchmark_admission import (
     campaign_scope_key,
     game_binding_key,
 )
-from padrino.llm.adapter import LlmAdapter
+from padrino.llm.adapter import LlmAdapter, ProviderNoContestError
 from padrino.llm.mock import DeterministicMockAdapter, NoopMockAdapter
 from padrino.llm.retry import RetryExhausted
 from padrino.runner import scheduler as scheduler_module
@@ -823,6 +823,11 @@ def test_scheduler_exception_classification_maps_retryable_and_poison_errors() -
     assert validation.last_error_kind == "validation_error"
     assert unknown.disposition is scheduler_module.GameExceptionDisposition.RETRYABLE
     assert unknown.last_error_kind == "unknown_retryable"
+    no_contest = scheduler_module.classify_game_exception(
+        ProviderNoContestError(reason="seat_unresponsive", seat="P03")
+    )
+    assert no_contest.disposition is scheduler_module.GameExceptionDisposition.POISON
+    assert no_contest.last_error_kind == "provider_no_contest"
 
 
 async def test_poison_child_game_failure_stops_after_one_attempt_and_stamps_row(

@@ -60,8 +60,9 @@ _logger = structlog.get_logger("padrino.economics.human_cost_governance")
 
 PRICE_BASIS_PROVIDER_RESPONSE_COST: Final = "PROVIDER_RESPONSE_COST"
 PRICE_BASIS_FALLBACK_TABLE: Final = "FALLBACK_TABLE"
-# No provider cost and no listed price for the model: tokens are kept, cost is NULL.
-PRICE_BASIS_UNPRICED: Final = "unpriced"
+# No provider cost and no listed price: cost_usd holds the conservative catch-all estimate
+# (fail-closed for spend caps). Never reported as a real/measured cost.
+PRICE_BASIS_DEFAULT_ESTIMATE: Final = "DEFAULT_ESTIMATE"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -115,8 +116,8 @@ def price_turn_usd(
     table, looking up ``model`` and finally the ``default`` entry. Missing token
     counts coerce to zero (an unpriceable turn costs zero rather than crashing).
 
-    This is an ESTIMATE (budget reservation, admission). Recorded actual cost must not use
-    the ``default`` entry: see :func:`has_listed_price` and ``PRICE_BASIS_UNPRICED``.
+    This is an ESTIMATE (budget reservation, admission). Recorded cost from the
+    ``default`` entry is stamped distinctly: see :func:`has_listed_price` and ``PRICE_BASIS_DEFAULT_ESTIMATE``.
     """
     if response_cost is not None:
         return float(response_cost)

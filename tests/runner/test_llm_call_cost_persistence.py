@@ -17,9 +17,9 @@ from padrino.db.models import GameSeat, LlmCall
 from padrino.db.repositories import games as games_repo
 from padrino.db.repositories import llm_calls as llm_calls_repo
 from padrino.economics.human_cost_governance import (
+    PRICE_BASIS_DEFAULT_ESTIMATE,
     PRICE_BASIS_FALLBACK_TABLE,
     PRICE_BASIS_PROVIDER_RESPONSE_COST,
-    PRICE_BASIS_UNPRICED,
     fallback_price_table_version,
     global_human_lane_spend_usd,
 )
@@ -403,10 +403,10 @@ async def test_global_human_lane_spend_includes_fallback_priced_turn(
     assert spend == pytest.approx(0.004)
 
 
-async def test_unknown_model_without_provider_cost_is_unpriced_not_fabricated(
+async def test_unknown_model_without_provider_cost_is_default_estimate_not_listed_price(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The ``default`` catch-all is a reservation estimate; it never becomes recorded cost."""
+    """The ``default`` catch-all is recorded (fail-closed) but stamped DEFAULT_ESTIMATE."""
     settings = Settings(
         padrino_human_fallback_token_price_per_1k={"default": (0.5, 1.5)},
     )
@@ -417,8 +417,9 @@ async def test_unknown_model_without_provider_cost_is_unpriced_not_fabricated(
         settings=settings,
     )
 
-    assert row.cost_usd is None
-    assert row.price_basis == PRICE_BASIS_UNPRICED
-    assert row.price_table_version is None
+    assert row.cost_usd == pytest.approx(1.0 * 0.5 + 2.0 * 1.5)
+    assert row.price_basis == PRICE_BASIS_DEFAULT_ESTIMATE
+    assert row.price_basis != PRICE_BASIS_FALLBACK_TABLE
+    assert row.price_table_version
     assert row.input_tokens == 1000
     assert row.output_tokens == 2000

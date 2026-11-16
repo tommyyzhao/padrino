@@ -156,6 +156,19 @@ async def run_due_scheduled_gauntlets(
                 "scheduler.gauntlet_job.failed",
                 schedule_id=str(schedule_id),
             )
+            # Advance anyway, or the schedule is due again (and re-spawns) every tick.
+            try:
+                async with session_factory() as session, session.begin():
+                    await scheduled_gauntlets_repo.advance_after_failure(
+                        session,
+                        schedule_id,
+                        next_run_at=next_run_at(row.schedule_cron, after=now),
+                    )
+            except Exception:
+                _logger.exception(
+                    "scheduler.gauntlet_job.advance_failed",
+                    schedule_id=str(schedule_id),
+                )
     return runs
 
 

@@ -487,6 +487,7 @@ async def test_provider_failure_emits_failure_event_with_reason_and_no_provider_
     assert body["event_type"] == "ActionTimedOut"
     assert body["payload"]["reason"] == reason
     assert body["payload"]["attempts"] == 3
+    assert body["payload"]["error_kind"] == "CONNECTION"  # fixed vocabulary, not the class
     # SYSTEM events can reach exports: no model/provider names, hosts or messages.
     assert "secret" not in json.dumps(body)
 
@@ -500,7 +501,7 @@ async def test_outer_deadline_timeout_carries_reason_timeout() -> None:
     assert log.events[0].body["payload"]["reason"] == "TIMEOUT"
 
 
-async def test_parse_failures_are_not_provider_failures_but_truncation_is() -> None:
+async def test_parse_failures_and_truncation_are_not_provider_failures() -> None:
     state = _state(Phase(kind=PhaseKind.DAY_VOTE, day=1, round=0))
     log = EventLog()
     truncated = _err_result(REASON_INVALID_JSON, "truncated").model_copy(
@@ -514,7 +515,7 @@ async def test_parse_failures_are_not_provider_failures_but_truncation_is() -> N
         }
     )
     out = await run_tick(state, log, list(SEATS[:3]), adapter, timeout_s=1.0, ruleset=mini7_v1)
-    assert out.provider_failures == {"P02": "TRUNCATED"}
+    assert out.provider_failures == {}
     assert [e.body["event_type"] for e in log.events] == ["OutputInvalid", "OutputInvalid"]
 
 
@@ -532,3 +533,25 @@ async def test_provider_unfunded_is_not_counted_as_seat_failure() -> None:
     )
     assert out.provider_failures == {}
     assert log.events[0].body["payload"]["reason"] == "provider_unfunded"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Timeout", "TIMEOUT"),
+        ("TimeoutError", "TIMEOUT"),
+        ("RateLimitError", "RATE_LIMITED"),
+        ("ServiceUnavailableError", "UNAVAILABLE"),
+        ("BadGatewayError", "UNAVAILABLE"),
+        ("APIConnectionError", "CONNECTION"),
+        ("AuthenticationError", "AUTH"),
+        ("NotFoundError", "NOT_FOUND"),
+        ("BadRequestError", "BAD_REQUEST"),
+        ("MiniMaxSpecificWeirdError", "OTHER"),
+        ("Unknown", "OTHER"),
+    ],
+)
+def test_error_kind_vocabulary_is_fixed(raw: str, expected: str) -> None:
+    from padrino.runner.tick import error_kind_vocabulary
+
+    assert error_kind_vocabulary(raw) == expected

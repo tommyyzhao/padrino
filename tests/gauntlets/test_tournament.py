@@ -18,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from padrino.core.observations import Observation
 from padrino.core.rulesets import mini7_v1
 from padrino.db.base import Base, create_engine, create_session_factory
-from padrino.db.models import GameSeat
+from padrino.db.game_status import GAME_STATUS_COMPLETED, GAME_STATUS_FAILED
+from padrino.db.models import Game, GameSeat
 from padrino.db.repositories import agent_builds as agent_builds_repo
 from padrino.db.repositories import leagues as leagues_repo
 from padrino.db.repositories import model_configs as model_configs_repo
@@ -32,7 +33,7 @@ from padrino.gauntlets.tournament import (
     run_heterogeneous_tournament,
     run_tournament_from_roster,
 )
-from padrino.llm.adapter import AdapterResult, AgentBuild
+from padrino.llm.adapter import AdapterResult, AgentBuild, ProviderNoContestError
 from padrino.llm.mock import NoopMockAdapter
 from padrino.llm.prompts import (
     CANONICAL_RESPONSE_SCHEMA,
@@ -307,5 +308,60 @@ async def test_run_tournament_from_roster_rejects_wrong_seats(tmp_path: Path) ->
                 settings=Settings(),
                 adapter_factory=lambda _assign: NoopMockAdapter(),
             )
+    finally:
+        await engine.dispose()
+
+
+class _DeadSeatAdapter:
+    async def complete(self, observation: Observation) -> AdapterResult:
+        raise ProviderNoContestError(reason="seat_unresponsive", seat="P03")
+
+
+async def test_breaker_trip_fails_that_game_and_tournament_continues(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'breaker.sqlite'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = create_session_factory(engine)
+        league_id, pv_id, builds_by_seat, assignments = await _seed(session_factory)
+        seed = "tournament-breaker-001"
+        async with session_factory() as session:
+            created = await create_gauntlet(
+                session,
+                league_id=league_id,
+                ruleset_id=mini7_v1.RULESET_ID,
+                prompt_version_id=pv_id,
+                clone_count=2,
+                gauntlet_seed=seed,
+                roster=[builds_by_seat[s] for s in _SEATS],
+            )
+        calls = 0
+
+        def factory(_assign: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            return _DeadSeatAdapter() if calls == 1 else NoopMockAdapter()
+
+        result = await run_heterogeneous_tournament(
+            session_factory=session_factory,
+            league_id=league_id,
+            ruleset_id=mini7_v1.RULESET_ID,
+            gauntlet_seed=seed,
+            game_ids=created.game_ids,
+            base_agent_builds_by_seat=builds_by_seat,
+            base_agent_build_assignments=assignments,
+            settings=Settings(),
+            adapter_factory=factory,
+        )
+        assert result.games_failed == 1
+        assert result.games_run == 1
+        async with session_factory() as session:
+            first = await session.get(Game, created.game_ids[0])
+            second = await session.get(Game, created.game_ids[1])
+        assert first is not None and second is not None
+        assert first.status == GAME_STATUS_FAILED
+        assert first.last_error_kind == "provider_no_contest"
+        assert first.last_error == "seat P03 stopped responding"
+        assert second.status == GAME_STATUS_COMPLETED
     finally:
         await engine.dispose()

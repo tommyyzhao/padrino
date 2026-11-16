@@ -50,15 +50,43 @@ class ResponseError(BaseModel):
     details: str | None = None
 
 
-_THINK_BLOCK = re.compile(r"<(think|thinking)>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
-_THINK_UNCLOSED = re.compile(r"<(?:think|thinking)>[^{]*", re.IGNORECASE)
+# Bounds keep the tolerant parser linear-ish on hostile or degenerate model output.
+MAX_RAW_CHARS = 1 << 20  # beyond this the reply is rejected without any scan
+MAX_PARSE_CHARS = 64 * 1024  # post-think-strip size the brace scan will accept
+MAX_CANDIDATE_STARTS = 32  # "{" positions tried per extraction
+
+_THINK_OPEN = re.compile(r"<(think|thinking)>", re.IGNORECASE)
+_THINK_CLOSE = {
+    "think": re.compile(r"</think\s*>", re.IGNORECASE),
+    "thinking": re.compile(r"</thinking\s*>", re.IGNORECASE),
+}
 
 
 def _strip_think(text: str) -> str:
-    # ponytail: an unclosed think block is dropped up to the first "{". Reasoning text
-    # containing "{" is not removed; it is skipped by the balanced-span scan when invalid.
-    text = _THINK_BLOCK.sub("", text)
-    return _THINK_UNCLOSED.sub("", text)
+    """Drop ``<think>``/``<thinking>`` blocks in one linear pass.
+
+    A closed block is removed whole. An unclosed block is dropped up to the next ``{``.
+    """
+    # ponytail: reasoning text containing "{" after an unclosed tag is not removed; the
+    # balanced-span scan skips it when it is not valid JSON.
+    out: list[str] = []
+    pos = 0
+    no_close: set[str] = set()  # tags already known to have no closer ahead
+    while True:
+        opened = _THINK_OPEN.search(text, pos)
+        if opened is None:
+            break
+        out.append(text[pos : opened.start()])
+        name = opened.group(1).lower()
+        closed = None if name in no_close else _THINK_CLOSE[name].search(text, opened.end())
+        if closed is not None:
+            pos = closed.end()
+            continue
+        no_close.add(name)
+        brace = text.find("{", opened.end())
+        pos = len(text) if brace == -1 else brace
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _balanced_end(text: str, start: int) -> int | None:
@@ -86,18 +114,13 @@ def _balanced_end(text: str, start: int) -> int | None:
     return None
 
 
-def extract_json_object(text: str) -> str | None:
-    """Return the first top-level JSON object embedded in model output, or None.
-
-    Removes ``<think>``/``<thinking>`` blocks (closed, or unclosed up to the next ``{``),
-    then scans for balanced ``{...}`` spans honoring JSON string literals and escapes.
-    Code fence markers and prose are ignored because only braces delimit candidates.
-    A balanced span that does not decode to a JSON object is skipped whole; an
-    unbalanced ``{`` (stray prose brace or truncated output) is skipped by one char.
-    """
-    cleaned = _strip_think(text)
+def _extract_from_cleaned(cleaned: str) -> str | None:
+    if len(cleaned) > MAX_PARSE_CHARS:
+        return None
     pos = cleaned.find("{")
-    while pos != -1:
+    tried = 0
+    while pos != -1 and tried < MAX_CANDIDATE_STARTS:
+        tried += 1
         end = _balanced_end(cleaned, pos)
         if end is None:
             # A stray "{" in prose never closes; retry from the next one.
@@ -107,10 +130,26 @@ def extract_json_object(text: str) -> str | None:
         try:
             if isinstance(json.loads(candidate), dict):
                 return candidate
-        except ValueError:
+        except (ValueError, RecursionError):
             pass
         pos = cleaned.find("{", end)
     return None
+
+
+def extract_json_object(text: str) -> str | None:
+    """Return the first top-level JSON object embedded in model output, or None.
+
+    Removes ``<think>``/``<thinking>`` blocks (closed, or unclosed up to the next ``{``),
+    then scans for balanced ``{...}`` spans honoring JSON string literals and escapes.
+    Code fence markers and prose are ignored because only braces delimit candidates.
+    A balanced span that does not decode to a JSON object is skipped whole; an
+    unbalanced ``{`` (stray prose brace or truncated output) is skipped by one char.
+    Bounded: input over ``MAX_PARSE_CHARS`` after stripping yields None, and at most
+    ``MAX_CANDIDATE_STARTS`` ``{`` positions are tried.
+    """
+    if len(text) > MAX_RAW_CHARS:
+        return None
+    return _extract_from_cleaned(_strip_think(text))
 
 
 def parse_agent_response(raw_text: str) -> AgentResponse | ResponseError:
@@ -123,13 +162,28 @@ def parse_agent_response(raw_text: str) -> AgentResponse | ResponseError:
     Over-limit messages are NOT truncated — the sanitizer (US-022) handles that.
     """
 
+    if len(raw_text) > MAX_RAW_CHARS:
+        return ResponseError(
+            reason=REASON_INVALID_JSON,
+            details=f"response too large ({len(raw_text)} chars > {MAX_RAW_CHARS})",
+        )
+    decoded: Any
     try:
-        decoded: Any = json.loads(raw_text)
-    except (json.JSONDecodeError, ValueError) as exc:
-        extracted = extract_json_object(raw_text)
+        decoded = json.loads(raw_text)
+    except (ValueError, RecursionError) as exc:
+        cleaned = _strip_think(raw_text)
+        if len(cleaned) > MAX_PARSE_CHARS:
+            return ResponseError(
+                reason=REASON_INVALID_JSON,
+                details=f"response too large to scan ({len(cleaned)} chars > {MAX_PARSE_CHARS})",
+            )
+        extracted = _extract_from_cleaned(cleaned)
         if extracted is None:
             return ResponseError(reason=REASON_INVALID_JSON, details=str(exc))
-        decoded = json.loads(extracted)
+        try:
+            decoded = json.loads(extracted)
+        except (ValueError, RecursionError) as exc2:  # pragma: no cover - verified above
+            return ResponseError(reason=REASON_INVALID_JSON, details=str(exc2))
 
     if not isinstance(decoded, dict):
         return ResponseError(

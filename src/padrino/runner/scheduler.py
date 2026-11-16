@@ -53,7 +53,7 @@ from padrino.gauntlets.completion import (
     DEFAULT_BALANCE_TOLERANCE_SEATS,
     finalize_gauntlet_if_done,
 )
-from padrino.llm.adapter import LlmAdapter
+from padrino.llm.adapter import LlmAdapter, ProviderNoContestError
 from padrino.llm.mock import NoopMockAdapter
 from padrino.llm.retry import DEFAULT_RETRY_ON, RetryExhausted
 from padrino.observability.events import (
@@ -89,6 +89,7 @@ _FAILURE_KIND_REPLAY_HASH_MISMATCH: Final[str] = "replay_hash_mismatch"
 _FAILURE_KIND_VALIDATION_ERROR: Final[str] = "validation_error"
 _FAILURE_KIND_CONTRACT_ERROR: Final[str] = "contract_error"
 _FAILURE_KIND_UNKNOWN_RETRYABLE: Final[str] = "unknown_retryable"
+FAILURE_KIND_PROVIDER_NO_CONTEST: Final[str] = "provider_no_contest"
 _RETRYABLE_TRANSPORT_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
     *DEFAULT_RETRY_ON,
     ConnectionError,
@@ -121,6 +122,13 @@ class GameExceptionClassification:
 
 def classify_game_exception(exc: Exception) -> GameExceptionClassification:
     """Classify a child-game exception for scheduler retry/dead-letter handling."""
+    if isinstance(exc, ProviderNoContestError):
+        # A tripped seat breaker (or unfunded/BYOK abort) invalidates the game; a retry
+        # would restart the streaks and re-bill the same dead seat.
+        return GameExceptionClassification(
+            disposition=GameExceptionDisposition.POISON,
+            last_error_kind=FAILURE_KIND_PROVIDER_NO_CONTEST,
+        )
     if isinstance(exc, ReplayHashMismatchError):
         return GameExceptionClassification(
             disposition=GameExceptionDisposition.POISON,

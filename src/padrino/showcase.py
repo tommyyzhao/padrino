@@ -25,7 +25,7 @@ from padrino.db.base import create_engine, create_session_factory
 from padrino.db.game_status import GAME_STATUS_RUNNING
 from padrino.db.models import AgentBuild, LlmCall, ModelConfig, ModelProvider, PromptVersion
 from padrino.db.repositories import games as games_repo
-from padrino.economics.human_cost_governance import PRICE_BASIS_UNPRICED
+from padrino.economics.human_cost_governance import PRICE_BASIS_DEFAULT_ESTIMATE
 from padrino.gauntlets.heterogeneous import build_heterogeneous_adapter
 from padrino.gauntlets.tournament import project_agent_build
 from padrino.llm.adapter import AgentBuild as RuntimeBuild
@@ -43,9 +43,10 @@ from padrino.settings import Settings
 DEFAULT_DB_URL = "sqlite+aiosqlite:///./padrino-showcase.db"
 DEFAULT_BASE_URL = "http://127.0.0.1:4000/v1"
 DEFAULT_KEY_REF = "env:PADRINO_GATEWAY_API_KEY"
-ADAPTER_VERSION = "showcase-v2"
+ADAPTER_VERSION = "showcase-v3"
 DEFAULT_LANGUAGE = "English"
-DEFAULT_MAX_TOKENS = 4096
+# Reasoning models spend output tokens thinking; 4096 left MiniMax-M3 with no answer.
+DEFAULT_MAX_TOKENS = 16384
 # Some gateways (e.g. 9router token-saver) inject style prompts that can flip reply language.
 GATEWAY_HEADERS = {"x-9router-token-saver": "off"}
 PREFLIGHT_PROMPT = "Preflight check: reply with the single word OK."
@@ -61,10 +62,12 @@ class ShowcaseSummary(TypedDict):
     game_id: str
     winner: str | None
     calls: int
-    # Sum of real (provider-reported or listed-price) costs only; never an estimate.
-    cost: float | None
-    # Calls with tokens but no known price; ``cost`` excludes them.
-    unpriced_calls: int
+    # Provider-reported or listed-price cost only; never includes an estimate.
+    cost_reported: float | None
+    # Catch-all default-price ESTIMATE for models with no listed price and no provider cost.
+    cost_estimated: float | None
+    # Calls whose cost is the default estimate. No combined total is offered on purpose.
+    estimated_calls: int
 
 
 def _validate(models: Sequence[str], db_url: str, base_url: str, key_ref: str) -> None:
@@ -366,12 +369,16 @@ async def run_showcase(
         )
         async with session_factory() as session, session.begin():
             await mark_recent(session, game_id)
-            calls, cost, unpriced = (
+            estimated = LlmCall.price_basis == PRICE_BASIS_DEFAULT_ESTIMATE
+            calls, reported, est_cost, est_calls = (
                 await session.execute(
                     select(
                         func.count(LlmCall.id),
-                        func.sum(LlmCall.cost_usd),
-                        func.count(LlmCall.id).filter(LlmCall.price_basis == PRICE_BASIS_UNPRICED),
+                        func.sum(LlmCall.cost_usd).filter(
+                            LlmCall.price_basis.is_distinct_from(PRICE_BASIS_DEFAULT_ESTIMATE)
+                        ),
+                        func.sum(LlmCall.cost_usd).filter(estimated),
+                        func.count(LlmCall.id).filter(estimated),
                     ).where(LlmCall.game_id == game_id)
                 )
             ).one()
@@ -379,8 +386,9 @@ async def run_showcase(
             "game_id": str(game_id),
             "winner": outcome.final_state.terminal_result,
             "calls": calls,
-            "cost": cost,
-            "unpriced_calls": unpriced,
+            "cost_reported": reported,
+            "cost_estimated": est_cost,
+            "estimated_calls": est_calls,
         }
         print(f"{watch_url}?narrated=1", flush=True)
         print(json.dumps(summary, sort_keys=True), flush=True)
