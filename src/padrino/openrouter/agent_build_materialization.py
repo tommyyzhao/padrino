@@ -9,7 +9,6 @@ result reusable across concurrent lobby requests.
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 import uuid
@@ -25,6 +24,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Executable
 
+from padrino.clock import canonical_json as _canonical_json
 from padrino.core.model_qualification import (
     CompatibilityFacts,
     ModelQualificationPolicy,
@@ -129,10 +129,6 @@ class MaterializedOpenRouterAgentBuild:
     model_config: ModelConfig
     catalog_snapshot: CatalogSnapshot
     qualification_tier: QualificationTier
-
-
-def _canonical_json(value: Mapping[str, object]) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _sha256(value: Mapping[str, object]) -> str:

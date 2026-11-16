@@ -33,6 +33,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.clock import utcnow as _utcnow
 from padrino.core.engine.replay import ReplayHashMismatchError
 from padrino.db.game_status import GAME_STATUS_CREATED, is_terminal_game_status
 from padrino.db.models import Game, GauntletRosterSlot
@@ -96,10 +97,6 @@ _RETRYABLE_SCHEDULER_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
     RetryExhausted,
     *_RETRYABLE_TRANSPORT_EXCEPTIONS,
 )
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def default_worker_id() -> str:

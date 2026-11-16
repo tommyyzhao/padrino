@@ -40,6 +40,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.clock import utcnow as _utcnow
 from padrino.core.agents.contract import AgentResponse
 from padrino.core.cadence import PLAYER_SELECTABLE_CADENCE_IDS, CadenceProfile, cadence_profile
 from padrino.core.disconnect import SeatPresence, seats_past_grace
@@ -134,10 +135,6 @@ class HumanLaneRuntime:
 
     adapter: SeatMultiplexAdapter
     llm_call_attributions: Mapping[str, LlmCallAttribution]
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def default_human_lane_worker_id() -> str:

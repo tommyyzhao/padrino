@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Protocol
@@ -27,6 +26,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from padrino.api.rate_limit_store import DatabaseRateLimitStore
+from padrino.clock import as_utc as _as_utc
+from padrino.clock import canonical_json as _canonical_json
 from padrino.core.agents.contract import AgentResponse, parse_agent_response
 from padrino.core.engine.actions import Action
 from padrino.core.engine.legal_actions import LegalActions
@@ -140,16 +141,6 @@ class ProbeRunResult:
             "latency_ms": payload["latency_ms"],
             "cost_micros": payload["cost_micros"],
         }
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def _canonical_json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _hash(value: object) -> str:

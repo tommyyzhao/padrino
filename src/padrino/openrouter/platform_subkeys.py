@@ -15,13 +15,14 @@ import json
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Final
 
 import httpx
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.clock import as_utc as _as_utc
 from padrino.db.models import OpenRouterPlatformSubkey
 from padrino.db.repositories import openrouter_platform_subkeys as subkeys_repo
 from padrino.llm.secrets import SecretResolutionError, resolve_secret
@@ -571,10 +572,6 @@ def _matches(row: OpenRouterPlatformSubkey, request: PlatformSubkeyRequest) -> b
 def _default_key_name(request: PlatformSubkeyRequest) -> str:
     """Use an opaque deterministic label so reconciliation does not expose an account id."""
     return f"padrino-promo-{request.request_hash[:24]}"
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _utc_iso(value: datetime) -> str:

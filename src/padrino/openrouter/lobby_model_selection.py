@@ -8,7 +8,6 @@ Credentials and raw catalog metadata never enter the selection snapshot.
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.clock import canonical_json as _canonical_json
 from padrino.core.lobby.model_selection import (
     ModelAutoFillCandidate,
     ModelAutoFillPolicy,
@@ -106,10 +106,6 @@ class ResolvedLobbyModelSelections:
 
     catalog_snapshot_id: uuid.UUID
     selections_by_seat: dict[int, FrozenLobbyModelSelection]
-
-
-def _canonical_json(value: Mapping[str, object]) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _schema_hash(response_schema: Mapping[str, object]) -> str:

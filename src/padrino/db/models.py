@@ -17,7 +17,7 @@ advisory flags.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -40,11 +40,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from padrino.clock import utcnow as _utcnow
 from padrino.db.base import Base
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class ModelProvider(Base):

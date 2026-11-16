@@ -10,7 +10,6 @@ explicit maximum-spend confirmation without touching promotional credit.
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,6 +19,7 @@ from typing import cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from padrino.clock import canonical_json as _canonical_json
 from padrino.core.cost_estimator import (
     AiSeatSelection,
     CatalogTokenPrices,
@@ -120,11 +120,6 @@ class _FrozenSeatFundingFact:
     selection: FrozenLobbyModelSelection
     entry: ModelCatalogEntry
     snapshot: CatalogSnapshot
-
-
-def _canonical_json(value: object) -> str:
-    """Return deterministic JSON for non-core quote binding material."""
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def _hash(value: object) -> str:

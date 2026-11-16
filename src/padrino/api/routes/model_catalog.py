@@ -17,7 +17,7 @@ import json
 import re
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -28,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from padrino.api.auth import _get_auth_settings, _get_rate_limiter
 from padrino.api.deps import get_session
 from padrino.api.human_auth import HumanPrincipalContext, get_human_context
+from padrino.clock import as_utc as _as_utc
+from padrino.clock import utcnow as _now_utc
 from padrino.core.model_qualification import (
     CompatibilityFacts,
     ModelQualificationPolicy,
@@ -115,17 +117,6 @@ class PlayerModelCatalogPage(BaseModel):
 
 class _ModelCursorError(ValueError):
     """Raised for a malformed or stale model-selector cursor."""
-
-
-def _now_utc() -> datetime:
-    """Return the API-shell clock in UTC (kept injectable in route tests)."""
-    return datetime.now(UTC)
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def _b64encode(value: bytes) -> str:

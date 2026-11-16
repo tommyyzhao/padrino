@@ -26,6 +26,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from padrino.clock import as_utc as _as_utc
+from padrino.clock import utcnow as _now_utc
 from padrino.db.models import CatalogSnapshot, ModelCatalogEntry
 from padrino.db.repositories.model_catalog_snapshots import (
     CatalogEntryInput,
@@ -132,16 +134,6 @@ def _format_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
     return _as_utc(value).isoformat().replace("+00:00", "Z")
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def _now_utc() -> datetime:
-    return datetime.now(UTC)
 
 
 def _normalized_key(value: object) -> str:
